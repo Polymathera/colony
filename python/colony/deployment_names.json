@@ -1,0 +1,12 @@
+{
+  "_comment": "Deployment names configuration for polymathera.colony services",
+  "_note": "Copy this file to deployment_names.json and customize as needed",
+  "_usage": "Set POLYMATHERA_DEPLOYMENT_NAMES_FILE=/path/to/deployment_names.json",
+
+  "vcm": "vcm",
+  "llm_cluster": "llm_cluster",
+  "agent_system": "agent_system",
+  "tool_manager": "tool_manager",
+  "standalone_agents": "standalone_agents",
+  "embedding": "embedding"
+}

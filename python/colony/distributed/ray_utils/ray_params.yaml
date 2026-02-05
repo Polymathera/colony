@@ -1,0 +1,105 @@
+# ray_params.yaml
+
+# VMR executive agent configuration
+ray_vmr_exec_config:
+  type: "WorkerDeploymentOptions"
+  num_cpus: 1
+  num_gpus: 0.5  # Will be adjusted based on available resources
+  memory: 4294967296  # 4GB
+  # object_store_memory: 2147483648  # 2 GB - DEPRECATED, use object spilling instead
+  max_concurrency: 2
+  # resources:
+  #   custom_disk_space: 10
+  #   network_bandwidth: 1
+  max_restarts: 3
+  max_task_retries: 3
+  # max_retries: 3
+  # max_retries_delay: 10
+  # max_retries_delay_factor: 2
+  # retry_exceptions: [Exception]
+  # max_concurrency_per_second: 10
+  # enable_bundling: true
+  # max_bundle_size: 10
+  # max_bundle_delay_s: 10
+  # max_concurrent_running_tasks: 10
+  # max_concurrent_running_actors: 10
+  # max_task_size: 1073741824  # 1 GB
+  # max_object_size: 1073741824  # 1 GB
+  # max_num_objects: 1000000
+  # max_num_tasks: 1000000
+  # max_num_actors: 1000000
+  # enable_logging: true
+  # logging_level: INFO
+  # logging_format: "%(message)s"
+  # logging_date_format: "[%X]"
+  # logging_rich_tracebacks: true
+  # logging_rotation: "1 day"
+  # logging_retention: "1 week"
+  # enable_profiling: true
+  # enable_metrics: true
+  # metrics_export_port: 8080
+  # metrics_endpoint: "/metrics"
+  # metrics_export_format: "prometheus"
+  # metrics_export_interval: 10
+  # enable_event_tracing: true
+  # enable_task_events: true
+  # enable_actor_events: true
+  # enable_object_events: true
+
+
+
+
+
+# Repository stats collector configuration
+ray_repo_stats_collector_config:
+  type: "WorkerDeploymentOptions"
+  num_cpus: 0.25
+  num_gpus: 0
+  memory: 2147483648 # 2GB
+  # object_store_memory: 1073741824  # 1GB - DEPRECATED, use object spilling instead
+  #runtime_env:
+  #  pip: ["git+https://github.com/org/repo.git"]
+  resources:
+    custom_cpu: 0.001  # Schedule on CPU-only nodes: fractional tag ensures affinity to CPU nodes but allows many actors per node, as the custom resource won't be the bottleneck
+  max_concurrency: 4
+  # Ray Serve-specific configuration
+  max_ongoing_requests: 1
+  # Ray Serve autoscaling configuration
+  autoscaling_config:
+    min_replicas: 1
+    max_replicas: 10
+    target_num_ongoing_requests_per_replica: 1
+    downscale_delay_s: 300.0  # 5 minutes - longer delay for expensive repo stats operations
+    upscale_delay_s: 30.0     # 30 seconds - faster upscale for responsiveness
+
+
+
+# Ray cluster configuration
+ray_params:
+  ray_config:
+    #address: "ray://ray-head:10001"
+    runtime_env:
+      working_dir: "${APP_MOUNT_PATH}"
+      pip: ["torch", "transformers", "accelerate", "bitsandbytes", "optimum"]
+    _system_config:
+      health_check_timeout_ms: 5000
+
+# Global code analysis configuration
+ray_global_code_analysis_config:
+  type: "WorkerDeploymentOptions"
+  num_cpus: 1
+  num_gpus: 1
+  memory: 8589934592  # 8GB
+  # object_store_memory: 4294967296  # 4GB - DEPRECATED, use object spilling instead
+  max_concurrency: 1
+
+# Local code analysis configuration
+ray_local_code_analysis_config:
+  type: "WorkerDeploymentOptions"
+  num_cpus: 1
+  num_gpus: 0.5
+  memory: 4294967296  # 4GB
+  # object_store_memory: 2147483648  # 2GB - DEPRECATED, use object spilling instead
+  max_concurrency: 2
+
+# You can add other configurations here if needed

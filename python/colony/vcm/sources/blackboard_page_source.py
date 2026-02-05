@@ -1,0 +1,1084 @@
+"""Blackboard → VCM page source: event-driven ingestion of blackboard scopes into VCM pages.
+
+This module implements the BlackboardContextPageSource, which runs inside the VCM
+deployment and pages any EnhancedBlackboard scope into VirtualContextPages via a
+pluggable IngestionPolicy.
+
+Analogous to FileGrouperContextPageSource (which pages git repo files), this pages
+blackboard/memory scope contents. The key difference:
+- FileGrouperContextPageSource: static content (files), loaded once
+- BlackboardContextPageSource: dynamic content (live writes), event-driven
+
+Architecture:
+- Subscribes to EnhancedBlackboard.stream_events_to_queue() for live events
+- On initialization, backfills existing entries (full scope scan)
+- Delegates ALL record-to-page transformation to IngestionPolicy
+- Tokenizes via TokenizerProtocol (from cluster/tokenization.py)
+- Stores pages via PageStorage (VCM's existing instance — EFS/S3 + PostgreSQL)
+
+All policies (IngestionPolicy, FlushPolicy, LocalityPolicy, etc.) are defined
+here to keep the VCM integration self-contained.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field as dataclass_field
+from typing import Any, AsyncIterator, TYPE_CHECKING
+from uuid import uuid4
+
+import networkx as nx
+from overrides import override
+
+from .context_page_source import (
+    ContextPageSource,
+    PageCluster,
+)
+from ..models import VirtualContextPage
+from ...distributed.ray_utils import serving
+
+if TYPE_CHECKING:
+    from ..agents.blackboard.types import BlackboardEvent, BlackboardScope
+    from ..agents.blackboard.blackboard import EnhancedBlackboard
+    from ..cluster.tokenization import TokenizerProtocol
+    from ..page_storage import PageStorage
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Data Model
+# =============================================================================
+
+
+@dataclass
+class PendingRecord:
+    """A record waiting to be grouped into a VCM page."""
+
+    key: str  # Blackboard key
+    value: dict[str, Any]  # Serialized record value
+    tags: set[str] = dataclass_field(default_factory=set)  # Tags for grouping and metadata
+    timestamp: float = 0.0  # When the record was written
+
+
+@dataclass
+class MappedScope:
+    """Tracks a materialized scope mapping on a VCM replica.
+
+    Each VCM replica maintains a dict of MappedScope objects for scopes
+    it has materialized locally. This is distinct from the shared
+    MappedScopeConfig in VirtualPageTableState.
+    """
+
+    source: "BlackboardContextPageSource"
+    config: Any  # MmapConfig
+    tenant_id: str | None = None
+
+
+# =============================================================================
+# SimpleTokenizer — Fallback when VCM has no real tokenizer
+# =============================================================================
+
+
+class SimpleTokenizer:
+    """Word-count-based tokenizer fallback.
+
+    Used when the VCM hasn't acquired a real tokenizer from the LLM cluster.
+    Implements the same interface as TokenizerProtocol (encode, decode,
+    count_tokens) using a simple word-splitting heuristic.
+
+    Approximation: ~1.3 tokens per whitespace-separated word (for English).
+    """
+
+    TOKENS_PER_WORD = 1.3
+
+    def encode(self, text: str) -> list[int]:
+        """Encode text to fake token IDs (one per word)."""
+        words = text.split()
+        # Generate deterministic fake token IDs from word hashes
+        return [hash(w) % 100000 for w in words]
+
+    def decode(self, token_ids: list[int]) -> str:
+        """Decode is not reversible with this tokenizer."""
+        return f"<SimpleTokenizer: {len(token_ids)} tokens>"
+
+    def count_tokens(self, text: str) -> int:
+        """Estimate token count from word count."""
+        word_count = len(text.split())
+        return int(word_count * self.TOKENS_PER_WORD)
+
+
+# =============================================================================
+# Locality Policy — HOW to group records into pages
+# =============================================================================
+
+
+class LocalityPolicy(ABC):
+    """Assigns records to locality groups.
+
+    Determines which records should be co-located in the same VCM page.
+    This is the paging equivalent of FileGrouper's sharding strategy.
+    """
+
+    @abstractmethod
+    def assign_group(self, value: dict[str, Any], tags: set[str] | None) -> str:
+        """Assign a record to a locality group.
+
+        Args:
+            value: The record's serialized value (dict from blackboard entry)
+            tags: The record's tags
+
+        Returns:
+            A locality key string. Records with the same key are
+            grouped into the same page.
+        """
+        ...
+
+
+class TagLocalityPolicy(LocalityPolicy):
+    """Group records by their primary tags (most specific tags).
+
+    Records tagged {"security", "auth", "critical"} and
+    {"security", "auth", "medium"} share locality key "auth:security".
+    """
+
+    def assign_group(self, value: dict[str, Any], tags: set[str] | None) -> str:
+        if not tags:
+            return "untagged"
+        # Use sorted tags (excluding meta-tags) as locality key
+        content_tags = sorted(
+            t for t in tags
+            if not t.startswith("type:") and not t.startswith("from:")
+        )
+        return ":".join(content_tags[:3]) if content_tags else "untagged"
+
+
+class TemporalLocalityPolicy(LocalityPolicy):
+    """Group records by time window (e.g., all records within 5 minutes)."""
+
+    def __init__(self, window_seconds: float = 300.0):
+        self.window_seconds = window_seconds
+
+    def assign_group(self, value: dict[str, Any], tags: set[str] | None) -> str:
+        bucket = int(time.time() / self.window_seconds)
+        return f"time_bucket:{bucket}"
+
+
+# =============================================================================
+# Flush Policy — WHEN to create a VCM page from pending records
+# =============================================================================
+
+
+class FlushPolicy(ABC):
+    """Decides when a pending group should be flushed to a VCM page.
+
+    Controls the trade-off between locality (grouping more records per
+    page) and latency (how long until a record is visible in the VCM).
+    """
+
+    @abstractmethod
+    def should_flush(
+        self,
+        group: list[PendingRecord],
+        tokenizer: "TokenizerProtocol",
+    ) -> bool:
+        """Return True if the group should be flushed now."""
+        ...
+
+
+class ThresholdFlushPolicy(FlushPolicy):
+    """Flush when record count OR token budget is reached. Default policy.
+
+    Good locality when traffic is high. Unbounded latency for slow scopes
+    (pair with PeriodicFlushPolicy for bounded latency).
+    """
+
+    def __init__(self, record_threshold: int = 20, token_budget: int = 4096):
+        self.record_threshold = record_threshold
+        self.token_budget = token_budget
+
+    def should_flush(self, group: list[PendingRecord], tokenizer: "TokenizerProtocol") -> bool:
+        if len(group) >= self.record_threshold:
+            return True
+        estimated_tokens = sum(
+            tokenizer.count_tokens(json.dumps(r.value, default=str))
+            for r in group
+        )
+        return estimated_tokens >= self.token_budget
+
+
+class PeriodicFlushPolicy(FlushPolicy):
+    """Flush when the oldest pending record exceeds an age threshold.
+
+    Guarantees bounded latency: a record becomes visible in the VCM
+    within at most ``interval_seconds`` of being written.
+    """
+
+    def __init__(self, interval_seconds: float = 60.0):
+        self.interval_seconds = interval_seconds
+
+    def should_flush(self, group: list[PendingRecord], tokenizer: "TokenizerProtocol") -> bool:
+        if not group:
+            return False
+        oldest = min(r.timestamp for r in group)
+        return (time.time() - oldest) >= self.interval_seconds
+
+
+class ImmediateFlushPolicy(FlushPolicy):
+    """Flush every record immediately (one page per record).
+
+    Use sparingly — trades locality for zero latency. Appropriate
+    for critical results that must be visible immediately.
+    """
+
+    def should_flush(self, group: list[PendingRecord], tokenizer: "TokenizerProtocol") -> bool:
+        return len(group) >= 1
+
+
+# =============================================================================
+# Serialization Policy — HOW to render records into page content
+# =============================================================================
+
+
+class SerializationPolicy(ABC):
+    """Controls how records are serialized into VCM page text content.
+
+    The output text is then tokenized by TokenizerProtocol and stored
+    as a VirtualContextPage. Different serialization strategies affect
+    how LLMs "read" the page content.
+    """
+
+    @abstractmethod
+    def serialize_group(
+        self,
+        locality_key: str,
+        records: list[PendingRecord],
+    ) -> str:
+        """Serialize a group of records into page text content."""
+        ...
+
+
+class JsonSerializationPolicy(SerializationPolicy):
+    """Serialize records as structured JSON with headers. Default policy."""
+
+    def serialize_group(self, locality_key: str, records: list[PendingRecord]) -> str:
+        parts = []
+        all_tags: set[str] = set()
+        for r in records:
+            parts.append(json.dumps(r.value, indent=2, default=str))
+            all_tags |= r.tags
+        return (
+            f"# Page: {locality_key}\n"
+            f"# Records: {len(records)} | Tags: {', '.join(sorted(all_tags))}\n\n"
+            + "\n\n---\n\n".join(parts)
+        )
+
+
+# =============================================================================
+# Page Update Policy — HOW to handle updates to already-paged records
+# =============================================================================
+
+
+class PageUpdatePolicy(ABC):
+    """Handles updates to records that are already in a VCM page.
+
+    When a blackboard key is overwritten, the page source receives a
+    write event with old_value set. This policy decides what to do.
+    """
+
+    @abstractmethod
+    async def handle_update(
+        self,
+        event: "BlackboardEvent",
+        record_to_page: dict[str, str],
+        ingestion_policy: "GroupAndFlushIngestionPolicy",
+    ) -> None:
+        ...
+
+
+class AppendOnlyUpdatePolicy(PageUpdatePolicy):
+    """Treat updates as new records. Default policy.
+
+    The old version remains in its existing page; the new version
+    enters the pending buffer. Consumers see both versions until
+    the old page is rebuilt during maintenance.
+    Simple and low-overhead. Best for append-heavy workloads.
+    """
+
+    async def handle_update(
+        self,
+        event: "BlackboardEvent",
+        record_to_page: dict[str, str],
+        ingestion_policy: "GroupAndFlushIngestionPolicy",
+    ) -> None:
+        # Treat as a new record
+        record = PendingRecord(
+            key=event.key,
+            value=event.value or {},
+            tags=event.tags or set(),
+            timestamp=event.timestamp or time.time(),
+        )
+        await ingestion_policy.ingest_record(record)
+
+
+class RebuildPageUpdatePolicy(PageUpdatePolicy):
+    """Mark the page containing the old record as stale and schedule
+    a rebuild. The updated record enters the pending buffer.
+
+    More consistent (consumers see freshness indicator on stale pages)
+    but higher overhead.
+    """
+
+    async def handle_update(
+        self,
+        event: "BlackboardEvent",
+        record_to_page: dict[str, str],
+        ingestion_policy: "GroupAndFlushIngestionPolicy",
+    ) -> None:
+        old_page_id = record_to_page.get(event.key)
+        if old_page_id:
+            await ingestion_policy._mark_page_stale(old_page_id)
+            del record_to_page[event.key]
+        # Re-ingest as new record
+        record = PendingRecord(
+            key=event.key,
+            value=event.value or {},
+            tags=event.tags or set(),
+            timestamp=event.timestamp or time.time(),
+        )
+        await ingestion_policy.ingest_record(record)
+
+
+# =============================================================================
+# Page Eviction Policy — HOW to handle deletions
+# =============================================================================
+
+
+class PageEvictionPolicy(ABC):
+    """Handles deletion of records that are already in a VCM page.
+
+    When a blackboard key is deleted, the page source receives a
+    delete event. This policy decides how to handle the stale page.
+    """
+
+    @abstractmethod
+    async def handle_delete(
+        self,
+        event: "BlackboardEvent",
+        record_to_page: dict[str, str],
+        ingestion_policy: "GroupAndFlushIngestionPolicy",
+    ) -> None:
+        ...
+
+
+class LazyEvictionPolicy(PageEvictionPolicy):
+    """Do nothing on deletion. Default policy.
+
+    Pages become stale naturally and are cleaned up during periodic
+    VCM maintenance. Lowest overhead.
+    """
+
+    async def handle_delete(
+        self,
+        event: "BlackboardEvent",
+        record_to_page: dict[str, str],
+        ingestion_policy: "GroupAndFlushIngestionPolicy",
+    ) -> None:
+        record_to_page.pop(event.key, None)
+
+
+class MarkStaleEvictionPolicy(PageEvictionPolicy):
+    """Mark the page containing the deleted record as stale.
+
+    Consumers can check the 'stale' flag in page metadata before
+    relying on content. More responsive than Lazy but no rebuild.
+    """
+
+    async def handle_delete(
+        self,
+        event: "BlackboardEvent",
+        record_to_page: dict[str, str],
+        ingestion_policy: "GroupAndFlushIngestionPolicy",
+    ) -> None:
+        page_id = record_to_page.pop(event.key, None)
+        if page_id:
+            await ingestion_policy._mark_page_stale(page_id)
+
+
+# =============================================================================
+# IngestionPolicy ABC + GroupAndFlushIngestionPolicy
+# =============================================================================
+
+
+class IngestionPolicy(ABC):
+    """Controls how blackboard records are organized into VCM pages.
+
+    This is the core extension point for BlackboardContextPageSource.
+    Different implementations can use entirely different backends and
+    organization strategies:
+
+    - GroupAndFlushIngestionPolicy (default): Groups records by locality
+      tags, buffers until record count or token budget is reached, then
+      flushes to a VCM page.
+    - KnowledgeGraphIngestionPolicy: Ingests records into a knowledge
+      graph (e.g., Neo4j), creates pages from graph neighborhoods.
+    - SemanticClusterIngestionPolicy: Uses vector embeddings to cluster
+      records into semantically coherent pages.
+    - Custom: Any backend (vector DB, relational DB, etc.) that can
+      produce VCM pages from blackboard records.
+
+    The policy receives VCM's PageStorage and TokenizerProtocol during
+    initialization, so it can create and store pages directly.
+    """
+
+    @abstractmethod
+    async def initialize(
+        self,
+        scope_id: str,
+        page_storage: "PageStorage",
+        tokenizer: "TokenizerProtocol",
+        record_to_page: dict[str, str],
+    ) -> None:
+        """Initialize the policy with VCM resources.
+
+        Called once when the BlackboardContextPageSource is initialized.
+        Implementations can use this to set up backend connections,
+        load existing state, etc.
+
+        Args:
+            scope_id: The scope being paged.
+            page_storage: VCM's PageStorage for storing pages.
+            tokenizer: Tokenizer for token counting/encoding.
+            record_to_page: Shared mutable dict mapping record keys to page IDs.
+        """
+        ...
+
+    @abstractmethod
+    async def ingest_record(self, record: PendingRecord) -> list[str]:
+        """Ingest a new record.
+
+        Returns:
+            List of page_ids of any VCM pages created (empty if record
+            was buffered and no flush occurred).
+        """
+        ...
+
+    @abstractmethod
+    async def handle_update(
+        self,
+        event: "BlackboardEvent",
+        record_to_page: dict[str, str],
+    ) -> None:
+        """Handle an update to an already-ingested record."""
+        ...
+
+    @abstractmethod
+    async def handle_delete(
+        self,
+        event: "BlackboardEvent",
+        record_to_page: dict[str, str],
+    ) -> None:
+        """Handle deletion of an already-ingested record."""
+        ...
+
+    @abstractmethod
+    async def flush_all(self) -> list[str]:
+        """Flush all pending records. Returns page_ids of pages created."""
+        ...
+
+
+class GroupAndFlushIngestionPolicy(IngestionPolicy):
+    """Default IngestionPolicy: group-by-locality -> buffer -> flush -> serialize.
+
+    Composes sub-policies for fine-grained control:
+    - LocalityPolicy: How to group records (by tags, time, etc.)
+    - FlushPolicy: When to flush a group (record count, token budget, time)
+    - SerializationPolicy: How to serialize records into page text
+    - PageUpdatePolicy: How to handle updates to already-paged records
+    - PageEvictionPolicy: How to handle deletions
+
+    This is the right policy for most use cases. For fundamentally different
+    backends (knowledge graphs, vector DBs), implement IngestionPolicy directly.
+    """
+
+    def __init__(
+        self,
+        locality_policy: LocalityPolicy | None = None,
+        flush_policy: FlushPolicy | None = None,
+        serialization_policy: SerializationPolicy | None = None,
+        update_policy: PageUpdatePolicy | None = None,
+        eviction_policy: PageEvictionPolicy | None = None,
+    ):
+        self.locality_policy = locality_policy or TagLocalityPolicy()
+        self.flush_policy = flush_policy or ThresholdFlushPolicy()
+        self.serialization_policy = serialization_policy or JsonSerializationPolicy()
+        self.update_policy = update_policy or AppendOnlyUpdatePolicy()
+        self.eviction_policy = eviction_policy or LazyEvictionPolicy()
+
+        # Set during initialize()
+        self._scope_id: str = ""
+        self._page_storage: PageStorage | None = None
+        self._tokenizer: TokenizerProtocol | None = None
+        self._record_to_page: dict[str, str] = {}
+        self._pending_groups: dict[str, list[PendingRecord]] = {}
+        # Page graph reference — set by BlackboardContextPageSource after init
+        self._page_graph: nx.DiGraph | None = None
+
+    async def initialize(
+        self,
+        scope_id: str,
+        page_storage: "PageStorage",
+        tokenizer: "TokenizerProtocol",
+        record_to_page: dict[str, str],
+    ) -> None:
+        self._scope_id = scope_id
+        self._page_storage = page_storage
+        self._tokenizer = tokenizer
+        self._record_to_page = record_to_page
+
+    async def ingest_record(self, record: PendingRecord) -> list[str]:
+        locality_key = self.locality_policy.assign_group(record.value, record.tags)
+        group = self._pending_groups.setdefault(locality_key, [])
+        group.append(record)
+
+        if self.flush_policy.should_flush(group, self._tokenizer):
+            page_id = await self._flush_group(locality_key)
+            return [page_id] if page_id else []
+        return []
+
+    async def handle_update(
+        self,
+        event: "BlackboardEvent",
+        record_to_page: dict[str, str],
+    ) -> None:
+        await self.update_policy.handle_update(event, record_to_page, self)
+
+    async def handle_delete(
+        self,
+        event: "BlackboardEvent",
+        record_to_page: dict[str, str],
+    ) -> None:
+        await self.eviction_policy.handle_delete(event, record_to_page, self)
+
+    async def flush_all(self) -> list[str]:
+        page_ids = []
+        for locality_key in list(self._pending_groups.keys()):
+            pid = await self._flush_group(locality_key)
+            if pid:
+                page_ids.append(pid)
+        return page_ids
+
+    async def _flush_group(self, locality_key: str) -> str:
+        """Create a VCM page from all pending records in a locality group.
+
+        Steps:
+        1. Serialize all records via SerializationPolicy
+        2. Tokenize via TokenizerProtocol
+        3. Create VirtualContextPage
+        4. Store via PageStorage
+        5. Track record->page mapping for update/delete handling
+        6. Update page graph if available
+
+        Returns:
+            page_id of the created page, or empty string if group was empty.
+        """
+        group = self._pending_groups.pop(locality_key, [])
+        if not group:
+            return ""
+
+        # 1. Serialize using pluggable policy
+        content_text = self.serialization_policy.serialize_group(
+            locality_key=locality_key,
+            records=group,
+        )
+
+        # 2. Tokenize using framework tokenizer
+        tokens = self._tokenizer.encode(content_text)
+
+        # 3. Create page
+        page_id = f"bb:{self._scope_id}:{locality_key}:{uuid4().hex[:8]}"
+        all_tags = set().union(*(r.tags for r in group))
+
+        # Extract tenant_id from scope_id if it follows convention "tenant:{id}:..."
+        tenant_id = self._extract_tenant_id()
+
+        page = VirtualContextPage(
+            page_id=page_id,
+            tokens=tokens,
+            size=len(tokens),
+            group_id=f"bb:{self._scope_id}:{locality_key}",
+            metadata={
+                "source": f"bb:{self._scope_id}",
+                "scope_id": self._scope_id,
+                "locality_key": locality_key,
+                "record_count": len(group),
+                "record_keys": [r.key for r in group],
+                "tags": list(all_tags),
+                "created_at": time.time(),
+            },
+            tenant_id=tenant_id,
+            created_by="blackboard_page_source",
+            isolation_level="shared",
+        )
+
+        # 4. Store via PageStorage
+        await self._page_storage.store_page(page)
+
+        # 5. Track record->page mapping
+        for record in group:
+            self._record_to_page[record.key] = page_id
+
+        # 6. Update page graph if available
+        if self._page_graph is not None:
+            self._page_graph.add_node(page_id, **page.metadata)
+
+        logger.info(
+            f"GroupAndFlushIngestionPolicy[{self._scope_id}]: created page "
+            f"{page_id} ({len(group)} records, {len(tokens)} tokens, "
+            f"locality={locality_key})"
+        )
+        return page_id
+
+    async def _mark_page_stale(self, page_id: str) -> None:
+        """Mark a page as stale (used by update/eviction policies)."""
+        if self._page_graph is not None and page_id in self._page_graph:
+            self._page_graph.nodes[page_id]["stale"] = True
+        logger.debug(
+            f"GroupAndFlushIngestionPolicy[{self._scope_id}]: "
+            f"marked page {page_id} as stale"
+        )
+
+    def _extract_tenant_id(self) -> str:
+        """Extract tenant_id from scope_id if it follows convention.
+
+        Convention: scope_id may be "tenant:{tenant_id}:..." or just a plain ID.
+        """
+        parts = self._scope_id.split(":")
+        if len(parts) >= 2 and parts[0] == "tenant":
+            return parts[1]
+        return "default"
+
+
+# =============================================================================
+# BlackboardContextPageSource — Main class
+# =============================================================================
+
+
+class BlackboardContextPageSource(ContextPageSource):
+    """Pages any EnhancedBlackboard scope into VCM pages via IngestionPolicy.
+
+    Runs inside the VirtualContextManager deployment. Created by
+    ``mmap_blackboard_scope()`` — never instantiated directly by agents.
+
+    Analogous to FileGrouperContextPageSource (which pages git repo files),
+    this pages blackboard/memory scope contents. The key difference:
+    - FileGrouperContextPageSource: static content (files), loaded once
+    - BlackboardContextPageSource: dynamic content (live writes), event-driven
+
+    Architecture:
+    - Subscribes to EnhancedBlackboard.stream_events_to_queue() for live events
+    - On initialization, backfills existing entries (full scope scan)
+    - Delegates ALL record-to-page transformation to IngestionPolicy
+    - Tokenizes via TokenizerProtocol (from cluster/tokenization.py)
+    - Stores pages via PageStorage (VCM's existing instance — EFS/S3 + PostgreSQL)
+
+    This class does NOT create a VCM page per record. The IngestionPolicy
+    controls buffering and flushing behavior.
+    """
+
+    def __init__(
+        self,
+        scope_id: str,
+        tokenizer: "TokenizerProtocol",
+        page_storage: "PageStorage",
+        *,
+        ingestion_policy: IngestionPolicy | None = None,
+    ):
+        """Initialize page source for a storage scope.
+
+        Called by VCM's mmap_blackboard_scope() — not by agents directly.
+
+        Args:
+            scope_id: The scope being paged (e.g., "tenant:acme:discoveries")
+            tokenizer: Tokenizer (VCM's existing instance)
+            page_storage: VCM's existing PageStorage instance
+            ingestion_policy: How records are organized into pages.
+                Default: GroupAndFlushIngestionPolicy (tag-based locality,
+                threshold-based flushing, JSON serialization).
+        """
+        self.scope_id = scope_id
+        self.tokenizer = tokenizer
+        self._page_storage = page_storage
+
+        # Pluggable ingestion policy (controls the entire record->page pipeline)
+        self.ingestion_policy = ingestion_policy or GroupAndFlushIngestionPolicy()
+
+        # Create blackboard for the scope (SHARED scope, distributed backend)
+        self.app_name = serving.get_my_app_name()
+        self.blackboard = EnhancedBlackboard(
+            app_name=self.app_name,
+            scope=BlackboardScope.SHARED,
+            scope_id=scope_id,
+            enable_events=True,
+        )
+
+        # Internal state
+        self._page_graph: nx.DiGraph = nx.DiGraph()
+        self._event_queue: asyncio.Queue[BlackboardEvent] | None = None
+        self._event_loop_task: asyncio.Task | None = None
+        # Track which records are in which pages (for update/delete handling)
+        self._record_to_page: dict[str, str] = {}  # record_key -> page_id
+
+    @override
+    async def initialize(
+        self,
+        consumer_group: str | None = None,
+        consumer_name: str | None = None,
+    ) -> None:
+        """Initialize the page source.
+
+        1. Initialize the IngestionPolicy with VCM resources
+        2. Backfill existing entries from the scope (full scan)
+        3. Start event subscription loop for live writes
+
+        Args:
+            consumer_group: Redis Streams consumer group name for event
+                deduplication across VCM replicas. When set, each event is
+                delivered to exactly one replica in the group. If None,
+                uses regular pub-sub (all replicas see all events).
+            consumer_name: This replica's name within the consumer group.
+                Typically serving.get_my_replica_id().
+        """
+        await self.blackboard.initialize()
+
+        # Initialize the ingestion policy with shared record_to_page dict
+        await self.ingestion_policy.initialize(
+            scope_id=self.scope_id,
+            page_storage=self._page_storage,
+            tokenizer=self.tokenizer,
+            record_to_page=self._record_to_page,
+        )
+
+        # Share the page graph reference with the ingestion policy
+        # (so _flush_group can update nodes directly)
+        if isinstance(self.ingestion_policy, GroupAndFlushIngestionPolicy):
+            self.ingestion_policy._page_graph = self._page_graph
+
+        # Backfill: query all existing entries in the scope
+        existing = await self.blackboard.query(namespace=f"{self.scope_id}:*")
+        for entry in existing:
+            record = PendingRecord(
+                key=entry.key,
+                value=entry.value,
+                tags=entry.tags or set(),
+                timestamp=entry.metadata.get("created_at", time.time())
+                if entry.metadata else time.time(),
+            )
+            page_ids = await self.ingestion_policy.ingest_record(record)
+            for pid in page_ids:
+                self._page_graph.add_node(pid)
+
+        # Flush any remaining buffered records from backfill
+        flush_ids = await self.ingestion_policy.flush_all()
+        for pid in flush_ids:
+            self._page_graph.add_node(pid)
+
+        logger.info(
+            f"BlackboardContextPageSource[{self.scope_id}]: backfilled "
+            f"{len(existing)} entries, {len(self._page_graph.nodes)} pages"
+        )
+
+        # Start listening for new events
+        self._event_queue = asyncio.Queue()
+        if consumer_group is not None:
+            await self.blackboard.stream_events_via_consumer_group(
+                self._event_queue,
+                consumer_group,
+                consumer_name,
+            )
+        else:
+            await self.blackboard.stream_events_to_queue(
+                self._event_queue,
+                pattern=f"{self.scope_id}:*",
+            )
+
+        self._event_loop_task = asyncio.create_task(self._event_loop())
+
+    async def shutdown(self) -> None:
+        """Shutdown the page source (called by VCM's munmap_blackboard_scope).
+
+        Flushes all pending records and stops the event loop.
+        """
+        # Flush all pending records via the ingestion policy
+        page_ids = await self.ingestion_policy.flush_all()
+        for pid in page_ids:
+            self._page_graph.add_node(pid)
+
+        # Stop event loop
+        if self._event_loop_task:
+            self._event_loop_task.cancel()
+            try:
+                await self._event_loop_task
+            except asyncio.CancelledError:
+                pass
+            self._event_loop_task = None
+
+        logger.info(
+            f"BlackboardContextPageSource[{self.scope_id}]: shutdown complete"
+        )
+
+    async def claim_orphaned_events(self) -> None:
+        """Claim orphaned events from crashed replicas via XAUTOCLAIM.
+
+        Events that were delivered to a consumer but not acknowledged
+        (because the replica crashed) are claimed by this replica and
+        re-enqueued into the page source's event queue.
+        """
+        claimed_messages = await self.blackboard.event_bus.claim_orphaned_events()
+        for msg_id, msg_data in claimed_messages:
+            await self.re_enqueue_event(msg_id, msg_data)
+
+    async def re_enqueue_event(self, msg_id: bytes, msg_data: dict) -> None:
+        """Re-enqueue an orphaned event from XAUTOCLAIM into the event queue.
+
+        Called by VCM's reconciliation loop when it claims orphaned messages
+        from crashed replicas via XAUTOCLAIM. The message data is parsed
+        into a BlackboardEvent and put into the local event queue for
+        processing by the ingestion policy.
+
+        Args:
+            msg_id: Redis Stream message ID.
+            msg_data: Raw message data dict from XAUTOCLAIM.
+        """
+        from ..agents.blackboard.types import BlackboardEvent
+
+        if self._event_queue is None:
+            logger.warning(
+                f"BlackboardContextPageSource[{self.scope_id}]: "
+                f"cannot re-enqueue event {msg_id}, event queue not initialized"
+            )
+            return
+
+        try:
+            event_data = {
+                k.decode() if isinstance(k, bytes) else k:
+                v.decode() if isinstance(v, bytes) else v
+                for k, v in msg_data.items()
+            }
+            event = BlackboardEvent(
+                event_type=event_data.get("event_type", "write"),
+                key=event_data.get("key", ""),
+                value=json.loads(event_data.get("value", "{}")),
+                old_value=(
+                    json.loads(event_data["old_value"])
+                    if event_data.get("old_value")
+                    else None
+                ),
+                timestamp=float(event_data.get("timestamp", 0)),
+                agent_id=event_data.get("agent_id") or None,
+                tags=(
+                    set(json.loads(event_data["tags"]))
+                    if event_data.get("tags")
+                    else None
+                ),
+                metadata=(
+                    json.loads(event_data["metadata"])
+                    if event_data.get("metadata")
+                    else None
+                ),
+            )
+            await self._event_queue.put(event)
+        except Exception as e:
+            logger.warning(
+                f"BlackboardContextPageSource[{self.scope_id}]: "
+                f"failed to re-enqueue event {msg_id}: {e}"
+            )
+
+    # -------------------------------------------------------------------------
+    # Event loop
+    # -------------------------------------------------------------------------
+
+    async def _event_loop(self) -> None:
+        """Process events from the EnhancedBlackboard.
+
+        Dispatches to the IngestionPolicy based on event type:
+        - write (no old_value): new record -> ingest_record()
+        - write (with old_value): update -> handle_update()
+        - delete: removal -> handle_delete()
+        """
+        while True:
+            try:
+                event = await self._event_queue.get()
+
+                if event.event_type == "write":
+                    if event.old_value is not None:
+                        # UPDATE: old_value present means this key was overwritten
+                        await self.ingestion_policy.handle_update(
+                            event=event,
+                            record_to_page=self._record_to_page,
+                        )
+                    else:
+                        # NEW WRITE
+                        record = PendingRecord(
+                            key=event.key,
+                            value=event.value or {},
+                            tags=event.tags or set(),
+                            timestamp=event.timestamp or time.time(),
+                        )
+                        page_ids = await self.ingestion_policy.ingest_record(record)
+                        for pid in page_ids:
+                            self._page_graph.add_node(pid)
+
+                elif event.event_type == "delete":
+                    await self.ingestion_policy.handle_delete(
+                        event=event,
+                        record_to_page=self._record_to_page,
+                    )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(
+                    f"BlackboardContextPageSource[{self.scope_id}]: "
+                    f"error processing event: {e}",
+                    exc_info=True,
+                )
+
+    # -------------------------------------------------------------------------
+    # ContextPageSource ABC implementation
+    # -------------------------------------------------------------------------
+
+    @override
+    async def get_page_storage(self) -> "PageStorage":
+        """Get the page storage instance."""
+        return self._page_storage
+
+    @override
+    async def load_page_graph(self) -> nx.DiGraph:
+        """Load the page graph."""
+        return self._page_graph
+
+    @override
+    async def get_page_cluster(
+        self,
+        cluster_size: int = 10,
+        cluster_type: str | None = None,
+    ) -> PageCluster:
+        """Get a cluster of related pages."""
+        if not self._page_graph or len(self._page_graph.nodes) == 0:
+            raise RuntimeError(
+                f"BlackboardContextPageSource[{self.scope_id}]: "
+                f"page graph is empty"
+            )
+
+        # Group by locality_key from page metadata
+        groups: dict[str, list[str]] = {}
+        for node in self._page_graph.nodes:
+            data = self._page_graph.nodes[node]
+            locality = data.get("locality_key", "unknown")
+            groups.setdefault(locality, []).append(node)
+
+        # Return the largest cluster that fits
+        for group_key, page_ids in sorted(
+            groups.items(), key=lambda x: len(x[1]), reverse=True
+        ):
+            if len(page_ids) <= cluster_size:
+                return PageCluster(
+                    cluster_id=f"bb:{self.scope_id}:{group_key}",
+                    page_ids=page_ids,
+                    relationship_score=0.8,
+                    cluster_type=cluster_type or "locality_group",
+                    metadata={"locality_key": group_key},
+                )
+
+        # Fallback: take first N pages
+        all_pages = list(self._page_graph.nodes)[:cluster_size]
+        return PageCluster(
+            cluster_id=f"bb:{self.scope_id}:fallback",
+            page_ids=all_pages,
+            relationship_score=0.5,
+            cluster_type="fallback",
+            metadata={},
+        )
+
+    @override
+    async def get_all_clusters(
+        self,
+        max_cluster_size: int = 10,
+        min_cluster_size: int = 2,
+    ) -> AsyncIterator[PageCluster]:
+        """Iterate over all page clusters grouped by locality key."""
+        groups: dict[str, list[str]] = {}
+        for node in self._page_graph.nodes:
+            data = self._page_graph.nodes[node]
+            locality = data.get("locality_key", "unknown")
+            groups.setdefault(locality, []).append(node)
+
+        for group_key, page_ids in groups.items():
+            if min_cluster_size <= len(page_ids) <= max_cluster_size:
+                yield PageCluster(
+                    cluster_id=f"bb:{self.scope_id}:{group_key}",
+                    page_ids=page_ids,
+                    relationship_score=0.8,
+                    cluster_type="locality_group",
+                    metadata={"locality_key": group_key},
+                )
+
+    @override
+    async def update_page_graph(
+        self,
+        page_relationships: dict[tuple[str, str], dict[str, Any]],
+    ) -> None:
+        """Update page graph with new relationships."""
+        for (src, tgt), rel_info in page_relationships.items():
+            if self._page_graph.has_edge(src, tgt):
+                edge_data = self._page_graph.get_edge_data(src, tgt)
+                edge_data.update(rel_info)
+            else:
+                self._page_graph.add_edge(src, tgt, **rel_info)
+
+    @override
+    async def get_page_neighbors(
+        self,
+        page_id: str,
+        max_neighbors: int = 5,
+        relationship_types: list[str] | None = None,
+    ) -> list[tuple[str, float]]:
+        """Get nearest neighbor pages."""
+        if page_id not in self._page_graph:
+            return []
+
+        neighbors = []
+        for neighbor in self._page_graph.successors(page_id):
+            edge_data = self._page_graph.get_edge_data(page_id, neighbor)
+            weight = edge_data.get("weight", 0.5)
+            neighbors.append((neighbor, weight))
+
+        neighbors.sort(key=lambda x: x[1], reverse=True)
+        return neighbors[:max_neighbors]
+
+    @override
+    def get_config(self) -> dict[str, Any]:
+        """Get configuration for recreating this source."""
+        return {
+            "type": "blackboard",
+            "scope_id": self.scope_id,
+        }
+
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _keyword_relevance(query: str, text: str) -> float:
+        """Compute keyword-based relevance score."""
+        query_words = set(query.lower().split())
+        text_words = set(text.lower().split())
+        if not query_words:
+            return 0.0
+        overlap = len(query_words & text_words)
+        return overlap / len(query_words)
