@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import time
+import pickle
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, AsyncIterator, TYPE_CHECKING
@@ -34,18 +35,19 @@ from uuid import uuid4
 import networkx as nx
 from overrides import override
 
-from .context_page_source import (
+from ....vcm.sources import (
     ContextPageSource,
+    ContextPageSourceFactory,
     PageCluster,
 )
-from ..models import VirtualContextPage
-from ...distributed.ray_utils import serving
+from ....vcm.models import VirtualContextPage
+from ....distributed.ray_utils import serving
 
 if TYPE_CHECKING:
-    from ..agents.blackboard.types import BlackboardEvent, BlackboardScope
-    from ..agents.blackboard.blackboard import EnhancedBlackboard
-    from ..cluster.tokenization import TokenizerProtocol
-    from ..page_storage import PageStorage
+    from ..types import BlackboardEvent, BlackboardScope
+    from ..blackboard import EnhancedBlackboard
+    from ....cluster.tokenization import TokenizerProtocol
+    from ....vcm.page_storage import PageStorage
 
 logger = logging.getLogger(__name__)
 
@@ -668,6 +670,7 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
 # =============================================================================
 
 
+@ContextPageSourceFactory.register_new_source_type("blackboard")
 class BlackboardContextPageSource(ContextPageSource):
     """Pages any EnhancedBlackboard scope into VCM pages via IngestionPolicy.
 
@@ -692,10 +695,11 @@ class BlackboardContextPageSource(ContextPageSource):
 
     def __init__(
         self,
-        scope_id: str,
-        tokenizer: "TokenizerProtocol",
-        page_storage: "PageStorage",
         *,
+        tenant_id: str,
+        scope_id: str,
+        tokenizer: TokenizerProtocol,
+        page_storage: PageStorage,
         ingestion_policy: IngestionPolicy | None = None,
     ):
         """Initialize page source for a storage scope.
@@ -703,6 +707,7 @@ class BlackboardContextPageSource(ContextPageSource):
         Called by VCM's mmap_blackboard_scope() — not by agents directly.
 
         Args:
+            tenant_id: The tenant ID for the scope
             scope_id: The scope being paged (e.g., "tenant:acme:discoveries")
             tokenizer: Tokenizer (VCM's existing instance)
             page_storage: VCM's existing PageStorage instance
@@ -711,6 +716,7 @@ class BlackboardContextPageSource(ContextPageSource):
                 threshold-based flushing, JSON serialization).
         """
         self.scope_id = scope_id
+        self.tenant_id = tenant_id
         self.tokenizer = tokenizer
         self._page_storage = page_storage
 
@@ -727,7 +733,7 @@ class BlackboardContextPageSource(ContextPageSource):
         )
 
         # Internal state
-        self._page_graph: nx.DiGraph = nx.DiGraph()
+        self._page_graph: nx.DiGraph = nx.DiGraph()  # TODO: This should be loaded from PageStorage dynamically
         self._event_queue: asyncio.Queue[BlackboardEvent] | None = None
         self._event_loop_task: asyncio.Task | None = None
         # Track which records are in which pages (for update/delete handling)
@@ -787,6 +793,10 @@ class BlackboardContextPageSource(ContextPageSource):
         for pid in flush_ids:
             self._page_graph.add_node(pid)
 
+        # TODO: This does not update the edges in the page graph or store the updated graph in PageStorage
+        # Consider adding logic to update edges based on relationships between pages
+        # and persist the updated graph to PageStorage.
+
         logger.info(
             f"BlackboardContextPageSource[{self.scope_id}]: backfilled "
             f"{len(existing)} entries, {len(self._page_graph.nodes)} pages"
@@ -817,6 +827,8 @@ class BlackboardContextPageSource(ContextPageSource):
         page_ids = await self.ingestion_policy.flush_all()
         for pid in page_ids:
             self._page_graph.add_node(pid)
+
+        # TODO: This does not update the edges in the page graph or store the updated graph in PageStorage
 
         # Stop event loop
         if self._event_loop_task:
@@ -854,7 +866,7 @@ class BlackboardContextPageSource(ContextPageSource):
             msg_id: Redis Stream message ID.
             msg_data: Raw message data dict from XAUTOCLAIM.
         """
-        from ..agents.blackboard.types import BlackboardEvent
+        from ..types import BlackboardEvent
 
         if self._event_queue is None:
             logger.warning(
@@ -933,6 +945,8 @@ class BlackboardContextPageSource(ContextPageSource):
                         for pid in page_ids:
                             self._page_graph.add_node(pid)
 
+                        # TODO: This does not update the edges in the page graph or store the updated graph in PageStorage
+
                 elif event.event_type == "delete":
                     await self.ingestion_policy.handle_delete(
                         event=event,
@@ -960,6 +974,16 @@ class BlackboardContextPageSource(ContextPageSource):
     @override
     async def load_page_graph(self) -> nx.DiGraph:
         """Load the page graph."""
+        # TODO: This should be loaded from PageStorage dynamically
+        if not self._page_graph or len(self._page_graph.nodes) == 0:
+            await self._page_storage.initialize()
+            graph_data = await self._page_storage.retrieve_page_graph(
+                group_id=self.scope_id,
+                tenant_id=self.tenant_id
+            )
+            if graph_data:
+                graph_dict = pickle.loads(graph_data)
+                self._page_graph = graph_dict["graph"]
         return self._page_graph
 
     @override

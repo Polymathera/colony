@@ -302,3 +302,4 @@ def validate_tokenizer_model_compatibility(
         return True
 
     return True
+

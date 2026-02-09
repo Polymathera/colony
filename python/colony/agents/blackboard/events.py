@@ -3,8 +3,12 @@ import asyncio
 from typing import Any, Awaitable, Callable
 
 from ...distributed import get_polymathera
-from ...distributed.redis_utils.client import RedisClient
-from ...distributed.redis_utils.redis_om import RedisOM, DistributedStateSubscriber, DistributedStateUpdate
+from ...distributed.redis_utils import (
+    RedisClient,
+    RedisOM,
+    DistributedStateSubscriber,
+    DistributedStateUpdate
+)
 from ...utils import setup_logger
 from .types import BlackboardEvent, EventFilter
 

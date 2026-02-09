@@ -356,7 +356,7 @@ class VLLMDeployment(AgentManagerBase):
             self.redis_client = await polymathera.get_redis_client()
             self.event_namespace = f"vllm_events:{deployment_name}"
 
-            from ..distributed.redis_utils.redis_om import RedisOM
+            from ..distributed.redis_utils import RedisOM
             self.redis_om = RedisOM(
                 redis_client=self.redis_client,
                 namespace=self.event_namespace,

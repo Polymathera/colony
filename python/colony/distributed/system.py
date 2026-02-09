@@ -6,18 +6,16 @@ import os
 import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable, Awaitable
 import weakref
 
 import ray
 from pydantic import BaseModel
 
-from ..caching.simple import CacheConfig, DistributedSimpleCache
-
-# from .orchestrator import Orchestrator, ResourceManager, VmrExecutionResourceAllocator
-from ..config.manager import ConfigurationManager, EnvironmentType
+from .caching.simple import CacheConfig, DistributedSimpleCache
+from .config.manager import ConfigurationManager, EnvironmentType
 from .ray_utils import serving
-from .redis_utils.client import RedisClient
+from .redis_utils import RedisClient
 from .configs import (
     StorageConfig,
     SystemConfig,
@@ -29,10 +27,16 @@ from ..utils import setup_logger
 logger = setup_logger(__name__)
 
 
-class _PolymatheraApiStub:
+class PolymatheraApp:
     """
     This class provides a common interface for all Polymathera agents to access shared resources
     and interact with the Polymathera system.
+
+    This class only provides support for distributed configuration, storage and
+    state management. Any other functionality (e.g., inference, vector stores, security,
+    observability, messaging, chat, authentication, databases, ETL, etc.) can be added separately based on
+    these core capabilities (configuration, storage, and state management).
+
     This class forms the basis for self-awareness and self-modeling in Polymathera agents, since
     it allows the agent to observe its own embodiment in the execution environment (e.g., its
     file system, network access, process, memory, etc.).
@@ -49,13 +53,16 @@ class _PolymatheraApiStub:
         self._redis_client = None
 
         # Registry to track all created cache instances for cleanup
-        self._cache_registry: set[DistributedSimpleCache] = set()
+        self._cache_registry: dict[str, DistributedSimpleCache] = set()
+        self._shared_simple_cache = None
+        # Cache for StateManager instances (keyed by state_key)
+        self._state_managers: dict[str, StateManager] = {}
 
         # Initialize configuration manager
         self._config_manager = ConfigurationManager(
             config_path=config_path,
             environment=environment,
-            distributed=True,  # Enable distributed configuration
+            distributed=False,  # Disable distributed configuration
         )
 
         # Initialize core attributes
@@ -66,69 +73,13 @@ class _PolymatheraApiStub:
         self.architecture = None
         self.sys_info = {}
 
-        # Initialize services with configuration
-        self._service_registry = None
-        self._observability = None
-        self._security_manager = None
-        self._messaging = None
         self._storage = None
-        self._auth_service = None
-        self._lb_registry = None
-        self._chat_service = None
-        self._distributed_config_manager = None
-        self._object_registry = None
-        self._embedding_client = None
-        self._vector_store = None
-        self._vector_etl_client = None
-        # self.resource_manager = ResourceManager(self.config)
-        # self.orchestrator = Orchestrator(self.config)
-        self._knowledge_system = None
-        self._shared_simple_cache = None
 
-        # self.resource_allocator = VmrExecutionResourceAllocator(dist_config_manager=self._config_manager)
         self._initialized = False
-
-        # Cache for StateManager instances (keyed by state_key)
-        self._state_managers: dict[str, StateManager] = {}
 
     async def get_config_manager(self) -> ConfigurationManager:
         await self.initialize()
         return self._config_manager
-
-    def get_knowledge_system_name(self):
-        return "PolymatheraKnowledgeSystem"
-
-    async def get_github_client(self):
-        await self.initialize()
-        from ..gitutils.clients import GitHubClient
-        gh = GitHubClient()
-        await gh.initialize()
-        return gh
-
-    async def get_gitlab_client(self):
-        await self.initialize()
-        from ..gitutils.clients import GitLabClient
-        gl = GitLabClient()
-        await gl.initialize()
-        return gl
-
-    async def get_knowledge_system(self) -> ray.actor.ActorHandle | None:
-        # TODO: Make this return a local object instead of an actor handle
-        await self.initialize()
-        from ..memory.system import AgentMemorySystem
-
-        knowledge_system = await polymathera_ray_cluster.create_or_discover_actor(
-            AgentMemorySystem,
-            name=self.get_knowledge_system_name(),
-            create_if_not_found=self._head,
-            # Constructor keyword arguments
-            config=self.sys_config.memory,
-        )
-        if self._knowledge_system is None:
-            if self._head:
-                await knowledge_system.initialize.remote()
-            self._knowledge_system = knowledge_system
-        return knowledge_system
 
     async def get_storage(self):
         await self.initialize()
@@ -139,88 +90,6 @@ class _PolymatheraApiStub:
             self._storage = Storage(config)
             await self._storage.initialize()
         return self._storage
-
-    async def get_service_registry(self):
-        await self.initialize()
-        if self._service_registry is None:
-            from .registries import ServiceRegistry
-
-            config = await ServiceRegistryConfig.check_or_get_component(
-                self.sys_config.service_registry
-            )
-            self._service_registry = ServiceRegistry(config)
-            await self._service_registry.initialize()
-        return self._service_registry
-
-    async def get_messaging(self):
-        await self.initialize()
-        if self._messaging is None:
-            from .messaging import SystemMessaging
-
-            config = await SystemMessagingConfig.check_or_get_component(
-                self.sys_config.messaging
-            )
-            self._messaging = SystemMessaging(config)
-            await self._messaging.initialize()
-        return self._messaging
-
-    async def get_security_manager(self):
-        await self.initialize()
-        if self._security_manager is None:
-            from .security import SecurityManager
-
-            config = await SecurityManagerConfig.check_or_get_component(
-                self.sys_config.security
-            )
-            self._security_manager = SecurityManager(config)
-            await self._security_manager.initialize()
-        return self._security_manager
-
-    async def get_auth_service(self):
-        await self.initialize()
-        if self._auth_service is None:
-            from .security import AuthService
-
-            config = await AuthServiceConfig.check_or_get_component(
-                self.sys_config.auth_service
-            )
-            self._auth_service = AuthService(config)
-            await self._auth_service.initialize()
-        return self._auth_service
-
-    async def get_observability(self):
-        await self.initialize()
-        if self._observability is None:
-            from .observe import Observability
-
-            config = await ObservabilityConfig.check_or_get_component(
-                self.sys_config.observability
-            )
-            self._observability = Observability(config)
-            await self._observability.initialize()
-        return self._observability
-
-    async def get_load_balancer_registry(self):
-        await self.initialize()
-        if self._lb_registry is None:
-            from .load import LoadBalancerRegistry
-
-            self._lb_registry = LoadBalancerRegistry(
-                self.sys_config.load_balancer_domain
-            )
-            await self._lb_registry.initialize()
-        return self._lb_registry
-
-    async def get_chat_service(self):
-        await self.initialize()
-        if self._chat_service is None:
-            from .chat import UserChatService
-
-            config = await UserChatServiceConfig.check_or_get_component(self.sys_config.chat)
-            self._chat_service = UserChatService(config)
-            await self._chat_service.initialize()
-            await self._chat_service.start()
-        return self._chat_service
 
     async def get_state_manager(
         self, state_type: type[BaseModel], state_key: str
@@ -279,26 +148,12 @@ class _PolymatheraApiStub:
         await cache.initialize()
 
         # Register the cache for cleanup using weak reference to avoid circular references
-        self._cache_registry.add(cache)
+        self._cache_registry[id(cache)] = cache
 
         # Use weak reference callback to remove from registry when cache is garbage collected
-        weakref.finalize(cache, self._cache_registry.discard, cache)
+        weakref.finalize(cache, self._cache_registry.pop, id(cache))
 
         return cache
-
-    async def create_distributed_work_queue(
-        self, queue_prefix: str, worker_id: str | None = None
-    ):
-        """Create a distributed work queue"""
-        from .distributed_work_queue import DistributedQueueStore
-
-        dqs = DistributedQueueStore(
-            await self.get_redis_client(),
-            namespace=queue_prefix,
-            worker_id=worker_id
-        )
-        await dqs.initialize()
-        return dqs
 
     async def get_or_create_ray_service(
         self,
@@ -398,67 +253,6 @@ class _PolymatheraApiStub:
         """
         return await serving.Application.stop_by_name_if_exists(service_name)
 
-    async def get_embedding_client(self):
-        await self.initialize()
-        if self._embedding_client is None:
-            from ..llms.inference.cluster.embedding import EmbeddingClient
-            self._embedding_client = EmbeddingClient(self.sys_config.embedding)
-            await self._embedding_client.initialize()
-        return self._embedding_client
-
-    async def get_vector_store(self):
-        await self.initialize()
-        if self._vector_store is None:
-            from ..vectors.stores import VectorSearchBackendFactory
-            self._vector_store = await VectorSearchBackendFactory.create_backend(self.sys_config.vector_store)
-        return self._vector_store
-
-    async def get_vector_etl_client(self):
-        await self.initialize()
-        if self._vector_etl_client is None:
-            from ..vectors.etl import VectorStoreETLClient, VectorStoreETLConfig
-            config = await VectorStoreETLConfig.check_or_get_component(self.sys_config.vector_etl)
-            self._vector_etl_client = VectorStoreETLClient(config)
-            await self._vector_etl_client.initialize()
-        return self._vector_etl_client
-
-    async def get_llm_client(self, **kwargs) -> ray.actor.ActorHandle:
-        """Get an LLM client"""
-        inference_manager = await self.get_inference_manager()
-        cluster = await inference_manager.get_llm_cluster.remote()
-        return await cluster.get_llm_client.remote(**kwargs)
-
-    async def get_inference_manager(self) -> ray.actor.ActorHandle:
-        await self.initialize()
-
-        # Localize imports to break import cycle and isolate during unit testing
-        from ..llms.inference.manager import MultiTenantInferenceManager
-
-        inference_manager_name = self.get_multi_tenant_inference_manager_actor_name()
-        remote_manager = await polymathera_ray_cluster.create_or_discover_actor(
-            MultiTenantInferenceManager,
-            name=inference_manager_name,
-            create_if_not_found=True,
-            # Constructor keyword arguments
-            config=self.sys_config.inference_manager,
-        )
-        await remote_manager.initialize.remote()
-        return remote_manager
-
-    def get_multi_tenant_inference_manager_actor_name(
-        self, vmr_id: str | None = None
-    ) -> str:
-        # if vmr_id:
-        #     return f"multi_tenant_inference_manager:{vmr_id}"
-        # TODO: Get it from the config manager
-        return "multi_tenant_inference_manager"
-
-    async def get_repo_ids(
-        self, vmr_id: str, origin_url: str, branch: str = "main"
-    ) -> list[str]:
-        # TODO: Implement this
-        pass
-
     async def get_git_file_storage_prefix(self):
         storage = await self.get_storage()
         return await storage.git_storage.get_root_path()
@@ -482,62 +276,9 @@ class _PolymatheraApiStub:
         fpath = str(prefix / clean_normalized_path)
         return fpath
 
-    def connect(self, *args, **kwargs: Any):
-        pass
-
-    def disconnect(self, *args, **kwargs: Any):
-        pass
-
-    def init(self, *args, **kwargs: Any):
-        pass
-
-    def shutdown(self, *args, **kwargs: Any):
-        pass
-
     @property
     def id(self):
         return self._id  # Read-only property
-
-    async def register(self):
-        from .registries import ServiceInfo
-
-        # Register this microservice with the service registry
-        self.sys_info = await get_sys_info()
-        service_info = ServiceInfo(
-            id=self.id,
-            name=self.__class__.__name__,
-            host=await self.get_host(),
-            port=await self.get_port(),
-            health_check_endpoint="/health",
-            version=await self.get_version(),
-            capabilities=await self.get_capabilities(),
-            node_address=await self.get_node_address(),
-            container_id=await self.get_container_id(),
-            image=await self.get_image(),
-            environment=await self.get_environment(),
-            last_heartbeat=datetime.now().timestamp(),
-            status="active",
-            resource_usage=await self.get_resource_usage(),
-            dependencies=await self.get_dependencies(),
-            api_endpoints=await self.get_api_endpoints(),
-            metrics_endpoint=await self.get_metrics_endpoint(),
-            logs_endpoint=await self.get_logs_endpoint(),
-            tracing_endpoint=await self.get_tracing_endpoint(),
-            config=await self.get_config(),  # TODO: Remove this
-            tags=await self.get_tags(),  # TODO: Remove this
-        )
-        try:
-            await self._service_registry.register_service(
-                self.__class__.__name__, service_info
-            )
-            logger.info(
-                f"Successfully registered {self.__class__.__name__} with the service registry"
-            )
-        except Exception as e:
-            logger.error(
-                f"Failed to register {self.__class__.__name__} with the service registry: {e!s}"
-            )
-            raise
 
     async def initialize(self) -> None:
         """Initialize all subsystems"""
@@ -549,10 +290,10 @@ class _PolymatheraApiStub:
         logger.info(f"Stack trace: {traceback.format_exc()}")
 
         # Initialize configuration manager first
-        await self._config_manager.initialize()
+        config_manager = await self.get_config_manager()
 
         # Initialize core attributes
-        self.sys_config = await self._config_manager.check_or_get_component(
+        self.sys_config = await config_manager.check_or_get_component(
             SystemConfig.CONFIG_PATH,
             SystemConfig,
         )
@@ -564,26 +305,7 @@ class _PolymatheraApiStub:
         self.version = self.sys_config.version
         self.architecture = self.sys_config.architecture
 
-        # # Initialize all other subsystems
-        # await self._service_registry.initialize()
-        # await self._messaging.initialize()
-        # await self._storage.initialize()
-
-        # load_balancer_address = await self.load_balancer.get_address()
-        # await self.lb_registry.register_load_balancer(load_balancer_address)
-
-        # await self.register()
-        # await asyncio.gather(self._start_heartbeat(), self._process_system_messages())
-
         self._initialized = True
-
-    async def _process_system_messages(self):
-        async for message in self.system_messaging.receive_system_messages():
-            await self.handle_system_message(message)
-
-    async def handle_system_message(self, message: str):
-        # Handle system messages
-        logger.info(f"Received system message: {message}")
 
     async def stop(self):
         """Stop the Polymathera system"""
@@ -593,7 +315,7 @@ class _PolymatheraApiStub:
         if self._cache_registry:
             logger.info(f"Cleaning up {len(self._cache_registry)} cache instances...")
             cleanup_tasks = []
-            for cache in list(self._cache_registry):  # Create copy to avoid modification during iteration
+            for cache in list(self._cache_registry.values()):  # Create copy to avoid modification during iteration
                 try:
                     cleanup_tasks.append(cache.cleanup())
                 except Exception as e:
@@ -609,8 +331,6 @@ class _PolymatheraApiStub:
             self._cache_registry.clear()
 
         await self._config_manager.cleanup()  # Cleanup config manager resources
-        if self._chat_service is not None:
-            await self._chat_service.stop()
 
         logger.info("Polymathera system stopped successfully")
 
@@ -625,7 +345,7 @@ class _PolymatheraApiStub:
 is_head = os.getenv("POLYMATHERA_HEAD", "false").lower() == "true"
 logger.info(f"Initializing Polymathera {'head' if is_head else 'worker'} node")
 
-polymathera = _PolymatheraApiStub(
+polymathera = PolymatheraApp(
     config_path=os.getenv("POLYMATHERA_CONFIG"),
     environment=EnvironmentType(
         os.getenv("POLYMATHERA_ENV", EnvironmentType.DEVELOPMENT)

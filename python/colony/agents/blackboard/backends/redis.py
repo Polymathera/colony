@@ -4,8 +4,12 @@ from datetime import timedelta
 from typing import Any
 
 from ....distributed import get_polymathera
-from ....distributed.redis_utils.client import RedisClient
-from ....distributed.redis_utils.redis_om import IndexType, RedisIndex, RedisOM
+from ....distributed.redis_utils import (
+    RedisClient,
+    IndexType,
+    RedisIndex,
+    RedisOM
+)
 from ..backend import BlackboardBackend, ConcurrentModificationError
 from ..types import BlackboardEntry
 

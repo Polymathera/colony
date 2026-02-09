@@ -105,6 +105,7 @@ from .backends import (
 
 # Event bus
 from .events import EventBus
+from .paging import BlackboardContextPageSource
 
 __all__ = [
     # Main interface
@@ -154,4 +155,6 @@ __all__ = [
     "RedisBackend",
     # Event bus
     "EventBus",
+    # Context page sources
+    "BlackboardContextPageSource",
 ]

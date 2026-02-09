@@ -1846,7 +1846,7 @@ class Agent(BaseModel):
             raise ValueError("Missing context_page_source_config in metadata")
 
         self.context_page_source = ContextPageSourceFactory.create(
-            source_type="file_grouper",  # TODO: Make source_type configurable
+            source_type="file_grouper",  # TODO: Make source_type configurable in AgentMetadata
             group_id = self.metadata.group_id,
             tenant_id = self.metadata.tenant_id,
             **config

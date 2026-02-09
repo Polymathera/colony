@@ -105,7 +105,7 @@ import uuid
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine, PoolingParams, PoolingOutput
 
-from ...gpus import GPUMetricsCollector
+from .gpus import GPUMetricsCollector
 from ..distributed.ray_utils import serving
 from .circuit_breakers import inference_circuit
 from .model_loader import S3ModelLoader

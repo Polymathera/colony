@@ -4,19 +4,18 @@ import logging
 import pickle
 from overrides import override
 from typing import Any, AsyncIterator, Literal
-
 import networkx as nx
 
-from .context_page_source import ContextPageSource, PageCluster
-from ..page_storage import PageStorage
+from ...vcm.sources import ContextPageSource, ContextPageSourceFactory, PageCluster
+from ...vcm.page_storage import PageStorage
 from ...distributed import get_polymathera
-from ...llms.sharding.file_grouping_wrapper import FileGrouperWithGraph
-from ...llms.sharding.strategy_wrapper import GitRepoShardingWithMapping
+from .sharding.file_grouping_wrapper import FileGrouperWithGraph
+from .sharding.strategy_wrapper import GitRepoShardingWithMapping
 
 
 logger = logging.getLogger(__name__)
 
-
+@ContextPageSourceFactory.register_new_source_type("file_grouper")
 class FileGrouperContextPageSource(ContextPageSource):
     """ContextPageSource backed by EFS/S3 storage using `FileGrouper`.
 
@@ -122,6 +121,7 @@ class FileGrouperContextPageSource(ContextPageSource):
         the page graph when needed, rather than
         passing the entire graph in metadata.
         """
+        # TODO: Move this method to ContextPageSource base class
         try:
             await self.initialize()
 
@@ -172,6 +172,7 @@ class FileGrouperContextPageSource(ContextPageSource):
         cluster_type: str | None = None
     ) -> PageCluster:
         """Get a cluster of related pages."""
+        # TODO: Move this method to ContextPageSource base class
         # Simple implementation: use community detection or just take connected component
         if not self.page_graph or len(self.page_graph.nodes) == 0:
             raise RuntimeError("Page graph not initialized or empty")
@@ -208,6 +209,7 @@ class FileGrouperContextPageSource(ContextPageSource):
         min_cluster_size: int = 2
     ) -> AsyncIterator[PageCluster]:
         """Iterate over all page clusters."""
+        # TODO: Move this method to ContextPageSource base class
         if not self.page_graph or len(self.page_graph.nodes) == 0:
             return
 
@@ -231,6 +233,7 @@ class FileGrouperContextPageSource(ContextPageSource):
         page_relationships: dict[tuple[str, str], dict[str, Any]]
     ) -> None:
         """Update page graph and persist to storage."""
+        # TODO: Move this method to ContextPageSource base class
         # Update graph in memory
         for (src, tgt), rel_info in page_relationships.items():
             if self.page_graph.has_edge(src, tgt):
@@ -250,6 +253,7 @@ class FileGrouperContextPageSource(ContextPageSource):
         relationship_types: list[str] | None = None
     ) -> list[tuple[str, float]]:
         """Get nearest neighbor pages."""
+        # TODO: Move this method to ContextPageSource base class
         if not self.page_graph or page_id not in self.page_graph:
             return []
 
@@ -288,6 +292,7 @@ class FileGrouperContextPageSource(ContextPageSource):
 
     async def _persist_graph(self) -> None:
         """Persist page graph to storage."""
+        # TODO: Move this method to ContextPageSource base class
         graph_dict = {
             "graph": self.page_graph,
             "file_to_page": self.file_to_page,
@@ -320,6 +325,7 @@ class FileGrouperContextPageSource(ContextPageSource):
                 importers = list(graph.predecessors("src/main.py"))
             ```
         """
+        # TODO: Why is this method not used anywhere?
         if self.file_grouper:
             return self.file_grouper.get_relationship_graph()
         return self._file_relationship_graph
@@ -352,6 +358,7 @@ class FileGrouperContextPageSource(ContextPageSource):
                 print(f"{rel['target']}: {rel['weight']:.2f}")
             ```
         """
+        # TODO: Why is this method not used anywhere?
         if self.file_grouper:
             return self.file_grouper.query_file_relationships(
                 file_path, relationship_types, min_weight

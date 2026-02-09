@@ -177,6 +177,7 @@ class CacheAwareCoordinationPolicy(ABC):
             resolution_success: Whether query found relevant content
             metadata: Additional info (relevance score, query text, etc.)
         """
+        # TODO: Where is this method called and where will these updates be persisted?
         pass
 
 
@@ -308,6 +309,7 @@ class PageGraphCoordinationPolicy(CacheAwareCoordinationPolicy):
 
         Updates edge weight using exponential moving average.
         """
+        # TODO: Where is this method called and where will these updates be persisted?
         relevance_score = metadata.get("relevance_score", 1.0)
 
         if not resolution_success or relevance_score < 0.3:

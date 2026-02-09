@@ -898,8 +898,8 @@ class PageStorage:
     ) -> None:
         """Store a page relationship graph to persistent storage.
 
-        This supports context page source implementations that maintain
-        relationship graphs between pages (e.g., `FileGrouperContextPageSource`).
+        This supports ContextPageSource implementations that maintain
+        relationship graphs between pages.
 
         Args:
             `group_id`: Group identifier (e.g., repo ID)

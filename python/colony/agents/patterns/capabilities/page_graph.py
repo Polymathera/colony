@@ -74,6 +74,8 @@ class PageGraphCapability(AgentCapability):
     async def _persist_graph(self) -> None:
         """Persist graph changes via ContextPageSource."""
         if self._page_graph is not None:
+            # TODO: This call to update_page_graph with an empty dict is a workaround
+            # to call self.agent.context_page_source._persist_graph(). FIXME.
             await self.agent.context_page_source.update_page_graph({})
             # Note: update_page_graph persists via _persist_graph() internally
 

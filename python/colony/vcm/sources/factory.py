@@ -2,12 +2,21 @@
 from typing import Any
 
 from .context_page_source import ContextPageSource
-from .blackboard_page_source import BlackboardContextPageSource
-from .file_grouper_page_source import FileGrouperContextPageSource
-
 
 class ContextPageSourceFactory:
     """Factory for creating ContextPageSource instances."""
+
+    _registry: dict[str, type[ContextPageSource]] = {}
+
+    @staticmethod
+    def register_new_source_type(source_type: str):
+        """A decorator to register a new ContextPageSource type."""
+        def decorator(source_class: type[ContextPageSource]):
+            if not hasattr(ContextPageSourceFactory, "_registry"):
+                ContextPageSourceFactory._registry = {}
+            ContextPageSourceFactory._registry[source_type] = source_class
+            return source_class
+        return decorator
 
     @staticmethod
     def create(
@@ -25,10 +34,8 @@ class ContextPageSourceFactory:
         Returns:
             Initialized ContextPageSource instance
         """
-        if source_type == "file_grouper":
-            return FileGrouperContextPageSource(*args, **kwargs)
-        elif source_type == "blackboard":
-            return BlackboardContextPageSource(*args, **kwargs)
+        if source_type in ContextPageSourceFactory._registry:
+            return ContextPageSourceFactory._registry[source_type](*args, **kwargs)
         else:
             raise ValueError(f"Unknown ContextPageSource type: {source_type}")
 
