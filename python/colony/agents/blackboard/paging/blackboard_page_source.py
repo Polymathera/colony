@@ -30,15 +30,16 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, TYPE_CHECKING
 from uuid import uuid4
+from overrides import override
 
 import networkx as nx
-from overrides import override
 
 from ....vcm.sources import (
     ContextPageSource,
     ContextPageSourceFactory,
+    BuilInContextPageSourceType
 )
-from ....vcm.models import VirtualContextPage
+from ....vcm.models import VirtualContextPage, ContextPageId, MmapConfig
 from ....distributed.ray_utils import serving
 from ....system import get_vcm
 
@@ -65,19 +66,6 @@ class PendingRecord:
     tags: set[str] = dataclass_field(default_factory=set)  # Tags for grouping and metadata
     timestamp: float = 0.0  # When the record was written
 
-
-@dataclass
-class MappedScope:
-    """Tracks a materialized scope mapping on a VCM replica.
-
-    Each VCM replica maintains a dict of MappedScope objects for scopes
-    it has materialized locally. This is distinct from the shared
-    MappedScopeConfig in VirtualPageTableState.
-    """
-
-    source: "BlackboardContextPageSource"
-    config: Any  # MmapConfig
-    tenant_id: str | None = None
 
 
 # =============================================================================
@@ -669,17 +657,24 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
 # =============================================================================
 
 
-@ContextPageSourceFactory.register_new_source_type("blackboard")
+@ContextPageSourceFactory.register_new_source_type(BuilInContextPageSourceType.BLACKBOARD)
 class BlackboardContextPageSource(ContextPageSource):
     """Pages any EnhancedBlackboard scope into VCM pages via IngestionPolicy.
 
     Runs inside the VirtualContextManager deployment. Created by
-    ``mmap_blackboard_scope()`` — never instantiated directly by agents.
+    ``mmap_application_scope()`` — never instantiated directly by agents.
 
     Analogous to FileGrouperContextPageSource (which pages git repo files),
     this pages blackboard/memory scope contents. The key difference:
     - FileGrouperContextPageSource: static content (files), loaded once
     - BlackboardContextPageSource: dynamic content (live writes), event-driven
+
+    This creates the actual infrastructure needed to watch a blackboard
+    scope and page its contents into VCM:
+    1. Creates an EnhancedBlackboard for the scope
+    2. Wraps it in a BlackboardStorageBackend
+    3. Creates the configured IngestionPolicy
+    4. Initializes with consumer group for event deduplication
 
     Architecture:
     - Subscribes to EnhancedBlackboard.stream_events_to_queue() for live events
@@ -697,29 +692,26 @@ class BlackboardContextPageSource(ContextPageSource):
         *,
         tenant_id: str,
         scope_id: str,
-        tokenizer: TokenizerProtocol,
-        ingestion_policy: IngestionPolicy | None = None,
+        mmap_config: MmapConfig,
     ):
         """Initialize page source for a storage scope.
 
-        Called by VCM's mmap_blackboard_scope() — not by agents directly.
+        Called by VCM's mmap_application_scope() — not by agents directly.
 
         Args:
             tenant_id: The tenant ID for the scope
             scope_id: The scope being paged (e.g., "tenant:acme:discoveries")
-            tokenizer: Tokenizer (VCM's existing instance)
-            page_storage: VCM's existing PageStorage instance
-            ingestion_policy: How records are organized into pages.
-                Default: GroupAndFlushIngestionPolicy (tag-based locality,
-                threshold-based flushing, JSON serialization).
+            mmap_config: Configuration for the memory-mapped page source
         """
-        self.scope_id = scope_id
-        self.tenant_id = tenant_id
-        self.tokenizer = tokenizer
+        super().__init__(tenant_id=tenant_id, scope_id=scope_id, mmap_config=mmap_config)
+        #    ingestion_policy: How records are organized into pages.
+        #        Default: GroupAndFlushIngestionPolicy (tag-based locality,
+        #        threshold-based flushing, JSON serialization).
+        self.tokenizer: TokenizerProtocol | None = None
         self._page_storage: PageStorage | None = None
 
         # Pluggable ingestion policy (controls the entire record->page pipeline)
-        self.ingestion_policy = ingestion_policy or GroupAndFlushIngestionPolicy()
+        self.ingestion_policy: IngestionPolicy | None = None # ingestion_policy or GroupAndFlushIngestionPolicy()
 
         # Create blackboard for the scope (SHARED scope, distributed backend)
         self.app_name = serving.get_my_app_name()
@@ -738,26 +730,39 @@ class BlackboardContextPageSource(ContextPageSource):
         self._record_to_page: dict[str, str] = {}  # record_key -> page_id
 
     @override
-    async def initialize(
-        self,
-        consumer_group: str | None = None,
-        consumer_name: str | None = None,
-    ) -> None:
+    async def initialize(self) -> None:
         """Initialize the page source.
 
         1. Initialize the IngestionPolicy with VCM resources
         2. Backfill existing entries from the scope (full scan)
         3. Start event subscription loop for live writes
 
-        Args:
-            consumer_group: Redis Streams consumer group name for event
-                deduplication across VCM replicas. When set, each event is
-                delivered to exactly one replica in the group. If None,
-                uses regular pub-sub (all replicas see all events).
-            consumer_name: This replica's name within the consumer group.
-                Typically serving.get_my_replica_id().
         """
+
+        # Initialize with consumer group for cross-replica deduplication
+        # consumer_group: Redis Streams consumer group name for event
+        #     deduplication across VCM replicas. When set, each event is
+        #     delivered to exactly one replica in the group. If None,
+        #     uses regular pub-sub (all replicas see all events).
+        # consumer_name: This replica's name within the consumer group.
+        #     Typically serving.get_my_replica_id().
+        consumer_group = f"cg:mmap:{self.scope_id}"
+        consumer_name = serving.get_my_replica_id()
+
         await self.blackboard.initialize()
+
+        # Initialize tokenizer for scope-to-VCM mapping
+        # Try to get a real tokenizer from the LLM cluster; fall back to SimpleTokenizer
+        try:
+            if self.llm_cluster_handle:
+                self.tokenizer = await self.llm_cluster_handle.get_tokenizer()  # TODO - FIXME: This get_tokenizer method does not exist.
+                logger.info("Acquired tokenizer from LLM cluster for scope mapping")
+        except Exception as e:
+            logger.info(f"Could not acquire tokenizer from LLM cluster ({e}), using SimpleTokenizer fallback")
+
+        if self.tokenizer is None:
+            self.tokenizer = SimpleTokenizer()
+            logger.info("Using SimpleTokenizer fallback for scope mapping")
 
         vcm_handle = get_vcm()
         config: PageStorageConfig | None = vcm_handle.get_page_storage_config()
@@ -772,6 +777,9 @@ class BlackboardContextPageSource(ContextPageSource):
             s3_bucket=config.s3_bucket,
         )
         await self._page_storage.initialize()
+
+        # Resolve ingestion policy from config
+        self.ingestion_policy = self._resolve_ingestion_policy()
 
         # Initialize the ingestion policy with shared record_to_page dict
         await self.ingestion_policy.initialize(
@@ -830,8 +838,41 @@ class BlackboardContextPageSource(ContextPageSource):
 
         self._event_loop_task = asyncio.create_task(self._event_loop())
 
+    def _resolve_ingestion_policy(self) -> GroupAndFlushIngestionPolicy:
+        """Create an IngestionPolicy from MmapConfig.
+
+        Returns:
+            Configured IngestionPolicy instance
+        """
+        # Resolve locality policy
+        locality: LocalityPolicy
+        if self.mmap_config.locality_policy_type == "temporal":
+            locality = TemporalLocalityPolicy()
+        else:
+            locality = TagLocalityPolicy()
+
+        # Resolve flush policy
+        flush: FlushPolicy
+        if self.mmap_config.flush_policy_type == "periodic":
+            flush = PeriodicFlushPolicy(
+                interval_seconds=self.mmap_config.flush_interval_seconds,
+            )
+        elif self.mmap_config.flush_policy_type == "immediate":
+            flush = ImmediateFlushPolicy()
+        else:
+            flush = ThresholdFlushPolicy(
+                record_threshold=self.mmap_config.flush_threshold,
+                token_budget=self.mmap_config.flush_token_budget,
+            )
+
+        return GroupAndFlushIngestionPolicy(
+            locality_policy=locality,
+            flush_policy=flush,
+        )
+
+    @override
     async def shutdown(self) -> None:
-        """Shutdown the page source (called by VCM's munmap_blackboard_scope).
+        """Shutdown the page source (called by VCM's munmap_application_scope).
 
         Flushes all pending records and stops the event loop.
         """
@@ -855,6 +896,7 @@ class BlackboardContextPageSource(ContextPageSource):
             f"BlackboardContextPageSource[{self.scope_id}]: shutdown complete"
         )
 
+    @override
     async def claim_orphaned_events(self) -> None:
         """Claim orphaned events from crashed replicas via XAUTOCLAIM.
 
@@ -866,6 +908,7 @@ class BlackboardContextPageSource(ContextPageSource):
         for msg_id, msg_data in claimed_messages:
             await self.re_enqueue_event(msg_id, msg_data)
 
+    @override
     async def re_enqueue_event(self, msg_id: bytes, msg_data: dict) -> None:
         """Re-enqueue an orphaned event from XAUTOCLAIM into the event queue.
 
@@ -921,6 +964,29 @@ class BlackboardContextPageSource(ContextPageSource):
                 f"BlackboardContextPageSource[{self.scope_id}]: "
                 f"failed to re-enqueue event {msg_id}: {e}"
             )
+
+    @override
+    async def get_page_id_for_record(self, record_id: str) -> ContextPageId | None:
+        """Get the page ID associated with a specific record ID, if any."""
+        return self._record_to_page.get(record_id)
+
+    @override
+    async def get_record_ids_for_page(self, page_id: ContextPageId) -> list[str]:
+        """Get all record IDs associated with a specific page ID."""
+        return [record_id for record_id, pid in self._record_to_page.items() if pid == page_id]
+
+    @override
+    async def get_all_mapped_records(self) -> dict[str, ContextPageId]:
+        """Get a mapping of all record IDs to their associated page IDs."""
+        return dict(self._record_to_page)  # Return a copy to prevent external mutation
+
+    @override
+    async def get_all_mapped_pages(self) -> dict[ContextPageId, list[str]]:
+        """Get a mapping of all page IDs to their associated record IDs."""
+        return {
+            page_id: [record_id for record_id, pid in self._record_to_page.items() if pid == page_id]
+            for page_id in set(self._record_to_page.values())
+        }
 
     # -------------------------------------------------------------------------
     # Event loop

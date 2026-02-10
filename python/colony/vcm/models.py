@@ -511,7 +511,7 @@ class MmapConfig(BaseModel):
 
 
 class MmapResult(BaseModel):
-    """Result of mmap_blackboard_scope() or munmap_blackboard_scope() call.
+    """Result of mmap_application_scope() or munmap_application_scope() call.
 
     Attributes:
         status: One of ``"mapped"``, ``"already_mapped"``, ``"not_mapped"``,
@@ -533,15 +533,19 @@ class MappedScopeConfig(BaseModel):
 
     Attributes:
         scope_id: The blackboard/memory scope being mapped.
+        source_type: Type of the scope (e.g., "blackboard", "memory", "file", "kg").
         config: The MmapConfig used for this mapping.
         tenant_id: Tenant that owns this mapping (for multi-tenancy isolation).
         created_at: Timestamp when the mapping was created.
+        kwargs: Additional parameters for future extensibility (e.g., filters, initial load options).
     """
 
     scope_id: str
+    source_type: str  # e.g., "blackboard", "memory", "file", "kg"
     config: MmapConfig
     tenant_id: str | None = None
     created_at: float = Field(default_factory=time.time)
+    kwargs: dict[str, Any] = Field(default_factory=dict, description="Additional parameters for future extensibility")
 
 
 class VirtualPageTableState(SharedState):

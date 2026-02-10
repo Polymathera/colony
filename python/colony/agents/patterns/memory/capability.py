@@ -112,6 +112,7 @@ from pydantic import BaseModel
 from ...base import AgentCapability, CapabilityResultFuture
 from ...blackboard.types import BlackboardEntry, BlackboardEvent
 from ....vcm.models import MmapConfig
+from ....vcm.sources import BuilInContextPageSourceType
 from ..actions.policies import action_executor
 from ..hooks.types import HookContext, HookType, ErrorMode
 from .types import (
@@ -428,8 +429,10 @@ class MemoryCapability(AgentCapability):
 
                 vcm_handle = get_vcm()
                 # TODO: This only works if the memory storage backend is BlackboardStorageBackend. Generalize?
-                result = await vcm_handle.mmap_blackboard_scope(
+                result = await vcm_handle.mmap_application_scope(
                     scope_id=self.scope_id,
+                    source_type="blackboard",
+                    source_type=BuilInContextPageSourceType.BLACKBOARD.value,
                     config=self.vcm_config or MmapConfig(),
                     tenant_id=self._agent.tenant_id if self._agent else None,
                 )

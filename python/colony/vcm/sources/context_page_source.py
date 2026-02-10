@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from typing import Any
 from pydantic import BaseModel, Field
+from enum import Enum
 
-import networkx as nx
 
-from ..page_storage import PageStorage
+from ..models import ContextPageId
+from ...vcm.models import MmapConfig
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,8 @@ class PageCluster(BaseModel):
 
 class ContextPageSource(ABC):
     """Abstract interface for page clustering and retrieval.
+    This provides a mapping of application-level records to VCM pages.
+    Application-level records include files, blackboard entries, knowledge graphs, etc.
 
     Implementations can use different strategies:
     - File-based: Uses FileGrouper from sharding infrastructure
@@ -37,11 +40,58 @@ class ContextPageSource(ABC):
     - LLM-learned: Uses LLM to determine clusters
     """
 
+    def __init__(
+        self,
+        scope_id: str,
+        tenant_id: str,
+        mmap_config: MmapConfig,
+    ):
+        self.scope_id = scope_id
+        self.tenant_id = tenant_id
+        self.mmap_config = mmap_config
+
     @abstractmethod
     async def initialize(self) -> None:
         """Initialize the page source (load or build page graph)."""
         pass
 
+    @abstractmethod
+    async def claim_orphaned_events(self) -> None:
+        """Claim any orphaned events for this source (e.g., from previous instance)."""
+        pass
+
+    @abstractmethod
+    async def shutdown(self) -> None:
+        """Clean up resources and gracefully shut down the source."""
+        pass
+
+    @abstractmethod
+    async def get_page_id_for_record(self, record_id: str) -> ContextPageId | None:
+        """Get the page ID associated with a specific record ID, if any."""
+        pass
+
+    @abstractmethod
+    async def get_record_ids_for_page(self, page_id: ContextPageId) -> list[str]:
+        """Get all record IDs associated with a specific page ID."""
+        pass
+
+    @abstractmethod
+    async def get_all_mapped_records(self) -> dict[str, ContextPageId]:
+        """Get a mapping of all record IDs to their associated page IDs."""
+        pass
+
+    @abstractmethod
+    async def get_all_mapped_pages(self) -> dict[ContextPageId, list[str]]:
+        """Get a mapping of all page IDs to their associated record IDs."""
+        pass
+
+
+class BuilInContextPageSourceType(str, Enum):
+    """Built-in context page source types for easy reference.
+    Users can also register custom types via ContextPageSourceFactory.
+    """
+    FILE_GROUPER = "file_grouper"
+    BLACKBOARD = "blackboard"
 
 
 class ContextPageSourceFactory:
@@ -61,7 +111,10 @@ class ContextPageSourceFactory:
 
     @staticmethod
     def create(
-        source_type: str = "file_grouper",
+        source_type: str,
+        scope_id: str,
+        tenant_id: str,
+        mmap_config: MmapConfig,
         *args: Any,
         **kwargs: Any
     ) -> ContextPageSource:
@@ -76,7 +129,13 @@ class ContextPageSourceFactory:
             Initialized ContextPageSource instance
         """
         if source_type in ContextPageSourceFactory._registry:
-            return ContextPageSourceFactory._registry[source_type](*args, **kwargs)
+            return ContextPageSourceFactory._registry[source_type](
+                scope_id=scope_id,
+                tenant_id=tenant_id,
+                mmap_config=mmap_config,
+                *args,
+                **kwargs
+            )
         else:
             raise ValueError(f"Unknown ContextPageSource type: {source_type}")
 

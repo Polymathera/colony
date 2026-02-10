@@ -16,7 +16,7 @@ from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 if TYPE_CHECKING:
     from .registry import QuantizationMethod
 
-from ...gpus import GPUMetricsCollector, get_gpu_memory_info
+from .gpus import GPUMetricsCollector, get_gpu_memory_info
 from ..distributed.ray_utils import serving
 from ..agents.base import AgentManagerBase
 from .circuit_breakers import inference_circuit, page_loading_circuit

@@ -1,6 +1,7 @@
 from .context_page_source import (
     ContextPageSource,
     ContextPageSourceFactory,
+    BuilInContextPageSourceType,
     PageCluster,
 )
 
@@ -10,4 +11,5 @@ __all__ = [
     "PageCluster",
     "ContextPageSource",
     "ContextPageSourceFactory",
+    "BuilInContextPageSourceType",
 ]

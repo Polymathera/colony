@@ -9,6 +9,7 @@ import networkx as nx
 from colony.python.colony.system import get_vcm
 
 from ...vcm.sources import ContextPageSource, ContextPageSourceFactory
+from ...vcm.models import MmapConfig
 from ...vcm.page_storage import PageStorage, PageStorageConfig
 from ...distributed import get_polymathera
 from .sharding.file_grouping_wrapper import FileGrouperWithGraph
@@ -29,37 +30,29 @@ class FileGrouperContextPageSource(ContextPageSource):
     - File relationship graph → Page graph
     - File paths → Page IDs
     """
-
     def __init__(
         self,
-        group_id: str,  # Repo ID
-        repo_path: str,  # Path to cloned repo
+        *,
+        scope_id: str,  # Repo ID
         tenant_id: str = "default",
-        storage_backend_type: Literal["efs", "s3"] = "efs",
-        storage_path: str = "colony/context_page_sources",
-        file_grouper: FileGrouperWithGraph | None = None,
-        sharding_strategy: GitRepoShardingWithMapping | None = None,
+        mmap_config: MmapConfig,
+        repo_path: str,  # Path to cloned repo
     ):
         """Initialize file-grouper-based context page source.
 
         Args:
-            group_id: Repository or group identifier
-            repo_path: Local path to git repository
+            scope_id: Repository or group identifier
             tenant_id: Tenant identifier
-            storage_backend_type: Storage backend ("efs" or "s3")
-            storage_path: Storage path prefix
-            file_grouper: Optional FileGrouperWithGraph instance (created if None)
-            sharding_strategy: Optional GitRepoShardingWithMapping instance (created if None)
+            mmap_config: Configuration for memory-mapped page graph data
+            repo_path: Local path to git repository
         """
-        self.group_id = group_id
+        super().__init__(tenant_id=tenant_id, scope_id=scope_id, mmap_config=mmap_config)
+        self.scope_id = scope_id
         self.repo_path = repo_path
-        self.tenant_id = tenant_id
-        self.storage_backend_type = storage_backend_type
-        self.storage_path = storage_path
 
         # File grouping and sharding wrappers (expose graph and file-to-page mapping)
-        self.file_grouper = file_grouper
-        self.sharding_strategy = sharding_strategy
+        self.file_grouper: FileGrouperWithGraph | None = None
+        self.sharding_strategy: GitRepoShardingWithMapping | None = None
 
         # Initialized in initialize()
         self.page_storage: PageStorage | None = None
@@ -81,7 +74,7 @@ class FileGrouperContextPageSource(ContextPageSource):
             raise ValueError("Missing PageStorageConfig in VCM")
 
         self.page_storage = PageStorage(
-            group_id = self.group_id,
+            scope_id = self.scope_id,
             tenant_id = self.tenant_id,
             backend_type=config.backend_type,
             storage_path=config.storage_path,
@@ -95,17 +88,20 @@ class FileGrouperContextPageSource(ContextPageSource):
         if page_graph:
             self.page_graph = page_graph
             logger.info(
-                f"Loaded page graph for {self.group_id}: "
+                f"Loaded page graph for {self.scope_id}: "
                 f"{len(self.page_graph.nodes)} nodes, {len(self.page_graph.edges)} edges"
             )
         else:
             # Build new graph (requires FileGrouper - deferred to first usage)
-            logger.info(f"No existing page graph for {self.group_id}, will build on first use")
+            logger.info(f"No existing page graph for {self.scope_id}, will build on first use")
             self.page_graph = nx.DiGraph()
 
         self.file_to_page = await self.page_storage.retrieve_page_graph_level_data("file_to_page") or {}
         self.page_to_file = await self.page_storage.retrieve_page_graph_level_data("page_to_file") or {}
         self.page_keys = await self.page_storage.retrieve_page_graph_level_data("page_keys") or {}
+
+        # TODO: Create the file_grouper and sharding_strategy instances and
+        # use them to populate the page graph and mappings if they don't exist yet
 
     # === Helper Methods ===
 

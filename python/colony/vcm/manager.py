@@ -37,6 +37,7 @@ import asyncio
 import logging
 import time
 from typing import Any, Literal
+from dataclasses import dataclass
 
 from ..distributed.ray_utils import serving
 from .models import (
@@ -54,18 +55,28 @@ from .models import (
     VCMBranch,
     VirtualContextPage,
 )
-from .sources.blackboard_page_source import (
-    BlackboardContextPageSource,
-    GroupAndFlushIngestionPolicy,
-    MappedScope,
-    SimpleTokenizer,
-)
+from .sources import ContextPageSource, ContextPageSourceFactory
 from .page_storage import PageStorage, PageStorageConfig
 from .page_table import VirtualPageTable
 from .allocation import AllocationStrategy, DEFAULT_ALLOCATION_STRATEGY
 from ..deployment_names import get_deployment_names
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MappedScope:
+    """Tracks a materialized scope mapping on a VCM replica.
+
+    Each VCM replica maintains a dict of MappedScope objects for scopes
+    it has materialized locally. This is distinct from the shared
+    MappedScopeConfig in VirtualPageTableState.
+    """
+
+    source: ContextPageSource
+    config: MmapConfig
+    tenant_id: str | None = None
+
 
 
 @serving.deployment
@@ -125,9 +136,8 @@ class VirtualContextManager:
         self._reconciliation_task: asyncio.Task | None = None
         self._reconciliation_interval_s = reconciliation_interval_s
 
-        # Blackboard ↔ VCM integration (scope mappings)
+        # Application ↔ VCM integration (scope mappings)
         self._local_mapped_scopes: dict[str, MappedScope] = {}
-        self._tokenizer: Any = None  # TokenizerProtocol — set during initialize()
 
     @serving.initialize_deployment
     async def initialize(self):
@@ -181,18 +191,6 @@ class VirtualContextManager:
         except Exception as e:
             logger.warning(f"Failed to initialize Redis event subscriptions: {e}. Layer 2 reconciliation will rely on periodic scans only.")
             self.redis_client = None
-
-        # Initialize tokenizer for scope-to-VCM mapping (BlackboardContextPageSource)
-        # Try to get a real tokenizer from the LLM cluster; fall back to SimpleTokenizer
-        try:
-            if self.llm_cluster_handle:
-                self._tokenizer = await self.llm_cluster_handle.get_tokenizer()
-                logger.info("Acquired tokenizer from LLM cluster for scope mapping")
-        except Exception as e:
-            logger.info(f"Could not acquire tokenizer from LLM cluster ({e}), using SimpleTokenizer fallback")
-        if self._tokenizer is None:
-            self._tokenizer = SimpleTokenizer()
-            logger.info("Using SimpleTokenizer fallback for scope mapping")
 
         # Materialize any existing scope mappings from shared state
         try:
@@ -1551,19 +1549,21 @@ class VirtualContextManager:
             "conflicts": conflicts,
         }
 
-    # === Blackboard ↔ VCM Scope Mapping API ===
+    # === Application data ↔ VCM Scope Mapping API ===
 
     @serving.endpoint
-    async def mmap_blackboard_scope(
+    async def mmap_application_scope(
         self,
         scope_id: str,
+        source_type: str = "blackboard",
         config: MmapConfig | None = None,
         tenant_id: str | None = None,
+        **kwargs,
     ) -> MmapResult:
-        """Map a blackboard/memory scope into VCM pages.
+        """Map an application scope (blackboard entries, memories, files, knowledge graphs, etc.) into VCM pages.
 
-        This is the main entry point for the Blackboard ↔ VCM integration.
-        When a scope is mapped, a BlackboardContextPageSource is created to
+        This is the main entry point for application-level data ↔ VCM integration.
+        When a scope is mapped, a ContextPageSource is created to
         watch the scope for writes and automatically page them into VCM pages.
 
         The mapping is recorded in shared state so all VCM replicas can
@@ -1571,9 +1571,11 @@ class VirtualContextManager:
         Redis Streams consumer group for event deduplication.
 
         Args:
-            scope_id: The scope to map (e.g., "tenant:acme:discoveries")
+            scope_id: The scope to map (e.g., "tenant:acme:discoveries"). Unique identifier for the data source.
+            source_type: Type of the source (e.g., "blackboard", "memory", "file", "kg"). This controls the ContextPageSource to be created.
             config: Mapping configuration (controls flushing, locality, etc.)
             tenant_id: Tenant ID for multi-tenancy
+            **kwargs: Additional parameters for future extensibility (e.g., filters, initial load options)
 
         Returns:
             MmapResult with status and message
@@ -1594,6 +1596,9 @@ class VirtualContextManager:
             scope_id=scope_id,
             config=config,
             tenant_id=tenant_id,
+            source_type=source_type,
+            created_at=time.time(),
+            kwargs=kwargs,
         )
 
         async for state in self.page_table.state_manager.write_transaction():
@@ -1601,7 +1606,7 @@ class VirtualContextManager:
 
         # Materialize locally on this replica
         try:
-            await self._materialize_scope_mapping(scope_id, config, tenant_id)
+            await self._materialize_scope_mapping(scope_id, source_type, config, tenant_id, **kwargs)
         except Exception as e:
             logger.error(f"Failed to materialize scope mapping for {scope_id}: {e}", exc_info=True)
             return MmapResult(
@@ -1618,8 +1623,8 @@ class VirtualContextManager:
         )
 
     @serving.endpoint
-    async def munmap_blackboard_scope(self, scope_id: str) -> MmapResult:
-        """Unmap a blackboard/memory scope from VCM.
+    async def munmap_application_scope(self, scope_id: str) -> MmapResult:
+        """Unmap an application scope from VCM.
 
         Flushes any pending records, shuts down the page source, and
         removes the mapping from shared state.
@@ -1665,10 +1670,10 @@ class VirtualContextManager:
         scope_id: str,
         include_metadata: bool = False,
     ) -> list[dict]:
-        """List all VCM pages created from a blackboard scope.
+        """List all VCM pages created from an application scope.
 
         Uses PageStorage.query_pages_by_metadata() to find pages with
-        source=f"bb:{scope_id}".
+        source=f"{scope_id}".
 
         Args:
             scope_id: The scope to query
@@ -1693,8 +1698,8 @@ class VirtualContextManager:
         return result
 
     @serving.endpoint
-    async def is_blackboard_scope_mapped(self, scope_id: str) -> bool:
-        """Check if a blackboard scope is currently mapped into VCM.
+    async def is_application_scope_mapped(self, scope_id: str) -> bool:
+        """Check if an application scope is currently mapped into VCM.
 
         Args:
             scope_id: The scope to check
@@ -1707,8 +1712,8 @@ class VirtualContextManager:
         return False
 
     @serving.endpoint
-    async def get_blackboard_scope_mapping_status(self, scope_id: str) -> dict | None:
-        """Get detailed status of a blackboard scope mapping.
+    async def get_application_scope_mapping_status(self, scope_id: str) -> dict | None:
+        """Get detailed status of an application scope mapping.
 
         Args:
             scope_id: The scope to check
@@ -1730,30 +1735,27 @@ class VirtualContextManager:
             # Add page count if materialized
             if scope_id in self._local_mapped_scopes:
                 source = self._local_mapped_scopes[scope_id].source
-                result["page_count"] = len(source._page_graph.nodes)
-                result["tracked_records"] = len(source._record_to_page)
+                result["page_count"] = len(await source.get_all_mapped_pages())
+                result["tracked_records"] = len(await source.get_all_mapped_records())
             return result
         return None
 
     @serving.endpoint
-    async def get_blackboard_records_in_page(self, page_id: str) -> list[str]:
-        """Get the blackboard record keys that were ingested into a VCM page.
+    async def get_application_records_in_page(self, page_id: str) -> list[str]:
+        """Get the application record keys that were ingested into a VCM page.
 
         This is a provenance/debugging endpoint for understanding what
-        blackboard records are in a given page.
+        application records are in a given page.
 
         Args:
             page_id: VCM page ID
 
         Returns:
-            List of blackboard record keys in the page
+            List of application record keys in the page
         """
         # Search across all local mapped scopes for the record_to_page mapping
         for _scope_id, mapped in self._local_mapped_scopes.items():
-            records = [
-                key for key, pid in mapped.source._record_to_page.items()
-                if pid == page_id
-            ]
+            records = await mapped.source.get_record_ids_for_page(page_id)
             if records:
                 return records
 
@@ -1926,51 +1928,39 @@ class VirtualContextManager:
                 self._page_fault_events[fault_id].set()
                 logger.debug(f"Resolved page fault {fault_id} due to page {page_id} loaded")
 
-    # === Blackboard ↔ VCM Scope Mapping Internals ===
+    # === Application ↔ VCM Scope Mapping Internals ===
 
     async def _materialize_scope_mapping(
         self,
         scope_id: str,
+        source_type: str,
         config: MmapConfig,
         tenant_id: str | None = None,
+        **kwargs,
     ) -> None:
-        """Create a BlackboardContextPageSource for a scope on this replica.
-
-        This creates the actual infrastructure needed to watch a blackboard
-        scope and page its contents into VCM:
-        1. Creates an EnhancedBlackboard for the scope
-        2. Wraps it in a BlackboardStorageBackend
-        3. Creates a BlackboardContextPageSource with IngestionPolicy
-        4. Initializes with consumer group for event deduplication
-        5. Tracks in _local_mapped_scopes
+        """Create a ContextPageSource for a scope on this replica.
 
         Args:
             scope_id: The scope being mapped
+            source_type: Type of the source (e.g., "blackboard", "memory", "file", "kg")
             config: Mapping configuration
             tenant_id: Tenant ID for multi-tenancy
+            **kwargs: Additional parameters for context page source creation
         """
         if scope_id in self._local_mapped_scopes:
             logger.debug(f"Scope {scope_id} already materialized locally, skipping")
             return
 
-        # Resolve ingestion policy from config
-        ingestion_policy = self._resolve_ingestion_policy(config)
-
         # Create page source
-        source = BlackboardContextPageSource(
+        source = ContextPageSourceFactory.create(
+            source_type=source_type,
             scope_id=scope_id,
-            tokenizer=self._tokenizer,
-            page_storage=self.page_storage,
-            ingestion_policy=ingestion_policy,
+            tenant_id=tenant_id,
+            mmap_config=config,
+            **kwargs,
         )
 
-        # Initialize with consumer group for cross-replica deduplication
-        consumer_group = f"cg:mmap:{scope_id}"
-        consumer_name = serving.get_my_replica_id()
-        await source.initialize(
-            consumer_group=consumer_group,
-            consumer_name=consumer_name,
-        )
+        await source.initialize()
 
         # Track locally
         self._local_mapped_scopes[scope_id] = MappedScope(
@@ -1983,19 +1973,16 @@ class VirtualContextManager:
         if config.pinned:
             await self._pin_scope_pages(scope_id)
 
-        logger.info(
-            f"Materialized scope mapping: scope={scope_id}, "
-            f"consumer_group={consumer_group}, consumer={consumer_name}"
-        )
+        logger.info(f"Materialized scope mapping: scope={scope_id}")
 
     async def _reconcile_scope_mappings(self) -> None:
         """Synchronize local scope mappings with shared state.
 
         Called periodically (via _reconcile_page_state) and during init.
         - Materializes any new mappings that exist in shared state but
-          not locally (e.g., added by another replica's mmap_blackboard_scope call).
+          not locally (e.g., added by another replica's mmap_application_scope call).
         - Cleans up local mappings that no longer exist in shared state
-          (e.g., removed by another replica's munmap_blackboard_scope call).
+          (e.g., removed by another replica's munmap_application_scope call).
         - Claims orphaned events via XAUTOCLAIM for any mappings where
           a previous replica crashed mid-processing.
         """
@@ -2010,8 +1997,10 @@ class VirtualContextManager:
                 try:
                     await self._materialize_scope_mapping(
                         scope_id=scope_id,
+                        source_type=mapping.source_type,
                         config=mapping.config,
                         tenant_id=mapping.tenant_id,
+                        **mapping.kwargs,
                     )
                     logger.info(f"Reconciliation: materialized scope mapping {scope_id}")
                 except Exception as e:
@@ -2063,51 +2052,6 @@ class VirtualContextManager:
 
         if pages:
             logger.info(f"Pinned {len(pages)} pages for scope {scope_id}")
-
-    def _resolve_ingestion_policy(self, config: MmapConfig) -> GroupAndFlushIngestionPolicy:
-        """Create an IngestionPolicy from MmapConfig.
-
-        Args:
-            config: Mapping configuration
-
-        Returns:
-            Configured IngestionPolicy instance
-        """
-        from .blackboard_page_source import (
-            FlushPolicy,
-            ImmediateFlushPolicy,
-            LocalityPolicy,
-            PeriodicFlushPolicy,
-            TagLocalityPolicy,
-            TemporalLocalityPolicy,
-            ThresholdFlushPolicy,
-        )
-
-        # Resolve locality policy
-        locality: LocalityPolicy
-        if config.locality_policy_type == "temporal":
-            locality = TemporalLocalityPolicy()
-        else:
-            locality = TagLocalityPolicy()
-
-        # Resolve flush policy
-        flush: FlushPolicy
-        if config.flush_policy_type == "periodic":
-            flush = PeriodicFlushPolicy(
-                interval_seconds=config.flush_interval_seconds,
-            )
-        elif config.flush_policy_type == "immediate":
-            flush = ImmediateFlushPolicy()
-        else:
-            flush = ThresholdFlushPolicy(
-                record_threshold=config.flush_threshold,
-                token_budget=config.flush_token_budget,
-            )
-
-        return GroupAndFlushIngestionPolicy(
-            locality_policy=locality,
-            flush_policy=flush,
-        )
 
     async def _periodic_reconciliation_loop(self):
         """Periodically reconcile Layer 2 (VCM) with Layer 1 (Deployments).
@@ -2186,7 +2130,7 @@ class VirtualContextManager:
             else:
                 logger.debug("Reconciliation complete: no discrepancies found")
 
-            # Reconcile blackboard ↔ VCM scope mappings
+            # Reconcile application ↔ VCM scope mappings
             try:
                 await self._reconcile_scope_mappings()
             except Exception as e:

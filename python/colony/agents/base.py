@@ -53,7 +53,6 @@ from ..system import (
 from .routing import AgentAffinityRouter, SoftPageAffinityRouter
 from ..vcm.page_storage import PageStorage, PageStorageConfig
 from ..cluster.config import DeploymentConfig
-from ..vcm.sources import ContextPageSourceFactory
 from .patterns.hooks import AgentHookRegistry, Pointcut, HookType, ErrorMode, auto_register_hooks
 
 if TYPE_CHECKING:
@@ -325,7 +324,7 @@ class AgentCapability(ABC):
         The key is resolved automatically from the record (via
         ``BlackboardPublishable`` protocol or legacy ``get_blackboard_key``).
 
-        If this capability's scope is VCM-mapped (via ``mmap_blackboard_scope()``), the
+        If this capability's scope is VCM-mapped (via ``mmap_application_scope()``), the
         write event is automatically picked up by the ``BlackboardContextPageSource``
         running inside the VCM. The record will eventually appear in a VCM page
         and become discoverable via ``QueryAttentionCapability``. The producer

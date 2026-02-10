@@ -15,9 +15,10 @@ Prerequisites:
 import asyncio
 import logging
 
-from ....vcm.sources import ContextPageSourceFactory
+from ....vcm.sources import BuilInContextPageSourceType
+from ....vcm.models import MmapConfig, MmapResult
 from ....agents.models import AgentSpawnSpec
-from ....system import get_agent_system
+from ....system import get_agent_system, get_vcm
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,17 +44,19 @@ async def analyze_repository(
 
     # 1. Create ContextPageSource
     logger.info("Creating ContextPageSource...")
-    context_page_source = ContextPageSourceFactory.create(
-        source_type="file_grouper",
-        group_id=repo_id,
+    # Map the repository to VCM pages using the built-in file grouper source type
+    vcm_handle = get_vcm()
+    mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
+        scope_id="repo-123",
+        source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
+        config=MmapConfig(),
+        tenant_id="tenant-1",
         repo_path=repo_path,
-        tenant_id="default",
-        storage_backend_type="efs"
     )
-    await context_page_source.initialize()
-    logger.info("ContextPageSource initialized")
 
     # TODO: Build the page graph and persist it so the coordinator can load it (or let coordinator build it - needs repo access)
+
+    logger.info("ContextPageSource initialized")
 
     # 2. Get AgentSystemDeployment handle
     agent_system = get_agent_system()
