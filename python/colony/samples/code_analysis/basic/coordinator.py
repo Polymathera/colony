@@ -8,6 +8,7 @@ This agent demonstrates distributed orchestration:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 import logging
 from abc import ABC, abstractmethod
 from overrides import override
@@ -24,7 +25,7 @@ from ....agents.models import (
     PolicyREPL,
 )
 from ....system import get_agent_system
-from ....agents.context_page_source import PageCluster
+from ....vcm.sources import PageCluster
 from ....agents.patterns.capabilities.critique import (
     CriticCapability,
     CritiqueContext,
@@ -405,7 +406,8 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
             cluster_count = 0
             agent_specs = []
 
-            async for cluster in self.agent.context_page_source.get_all_clusters(
+            page_storage = await self.agent.get_page_storage()
+            async for cluster in page_storage.get_all_clusters(
                 max_cluster_size=10,  # TODO: Make configurable
                 min_cluster_size=2    # TODO: Make configurable
             ):
@@ -415,7 +417,6 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
                     metadata={
                         "parent_id": self.agent.agent_id,
                         "cluster": cluster.model_dump(),
-                        "context_page_source_config": self.agent.context_page_source.get_config()
                     },
                     bound_pages=cluster.page_ids,
                     resource_requirements=AgentResourceRequirements(
@@ -475,9 +476,9 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
 
         # Load page graph from storage
         # TODO: The page graph is dynamic. Should be loaded when needed.
-        # await self.load_page_graph()
+        # await self.agent.load_page_graph()
 
-        job_quota = self.metadata.get("job_quota", 50),  # Max pages in working set
+        job_quota = self.agent.metadata.get("job_quota", 50)  # Max pages in working set
 
         # Initialize working set manager
         self.working_set_cap: WorkingSetCapability = await self.agent.get_capability_by_type(WorkingSetCapability)
@@ -567,7 +568,8 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
         try:
             # Collect all clusters (but don't spawn yet)
             all_clusters: list[PageCluster] = []
-            async for cluster in self.agent.context_page_source.get_all_clusters(
+            page_storage = await self.agent.get_page_storage()
+            async for cluster in page_storage.get_all_clusters(
                 max_cluster_size=self.agent.metadata.get("max_cluster_size", 10),
                 min_cluster_size=self.agent.metadata.get("min_cluster_size", 2)
             ):
@@ -664,7 +666,6 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
                 metadata={
                     "parent_id": self.agent.agent_id,
                     "cluster": cluster.model_dump(),
-                    "context_page_source_config": self.agent.context_page_source.get_config(),
                     "query_router_type": "cache_aware",
                     "cache_boost_factor": self.agent.metadata.get("cache_boost_factor", 1.5),
                     "session_id": self.agent.metadata.get("session_id"),

@@ -295,32 +295,26 @@ class GlobalPageKeyRegistry:
 
     def _get_page_graph_group_id(self, page_id: str) -> str:
         """Get VCM page graph group ID for page key."""
-        return f"key:{self.agent.tenant_id}:{page_id}"
+        return f"page_key_{page_id}"
 
     async def _get_page_key_from_page_graph(self, page_id: str) -> PageKey | None:
         """Get cached key for page."""
         # Retrieve from VCM page storage
         try:
-            key_data = await self.page_storage.retrieve_page_graph(
-                group_id=self._get_page_graph_group_id(page_id),
-                tenant_id=self.tenant_id
+            return await self.page_storage.retrieve_page_graph_level_data(
+                data_key=self._get_page_graph_group_id(page_id),
             )
-            if key_data:
-                # Deserialize PageKey from bytes
-                return pickle.loads(key_data)
         except Exception as e:
             logger.warning(f"Failed to retrieve key from VCM for {page_id}: {e}")
         return None
 
-    async def _set_page_key_in_page_graph(self, page_id: str, key: PageKey, cluster_id: str) -> None:
+    async def _set_page_key_in_page_graph(self, page_id: str, page_key: PageKey, cluster_id: str) -> None:
         """Cache key for page."""
         # Store in VCM page storage
         try:
-            key_data = pickle.dumps(key)
-            await self.page_storage.store_page_graph(
-                group_id=self._get_page_graph_group_id(page_id),
-                graph_data=key_data,
-                tenant_id=self.tenant_id
+            await self.page_storage.store_page_graph_level_data(
+                data_key=self._get_page_graph_group_id(page_id),
+                graph_data=page_key,
             )
             logger.debug(f"Cached key for {page_id} in VCM")
         except Exception as e:

@@ -146,7 +146,6 @@ async def spawn_grounding_agent(
             # agent_type="polymathera.colony.agents.base.Agent",
             # action_policy="polymathera.colony.agents.patterns.meta_agents.grounding.GroundingAgentPolicy",
             tenant_id=owner.tenant_id,
-            context_page_source_config=owner.context_page_source.get_config(),
             capability_types=[GroundingCapability],
             bound_pages=[],  # Grounding agent doesn't need pages
         )],

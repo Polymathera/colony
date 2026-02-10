@@ -51,9 +51,9 @@ from ..system import (
     spawn_agents
 )
 from .routing import AgentAffinityRouter, SoftPageAffinityRouter
-from ..vcm.page_storage import PageStorage
+from ..vcm.page_storage import PageStorage, PageStorageConfig
 from ..cluster.config import DeploymentConfig
-from ..vcm.sources import ContextPageSourceFactory, ContextPageSource
+from ..vcm.sources import ContextPageSourceFactory
 from .patterns.hooks import AgentHookRegistry, Pointcut, HookType, ErrorMode, auto_register_hooks
 
 if TYPE_CHECKING:
@@ -1547,7 +1547,7 @@ class Agent(BaseModel):
 
     metadata: AgentMetadata = Field(default_factory=AgentMetadata)
 
-    context_page_source: ContextPageSource | None = Field(default=None)
+    page_storage: PageStorage | None = Field(default=None)
 
     # Resource requirements (for scheduling and capacity planning)
     resource_requirements: AgentResourceRequirements = Field(
@@ -1840,18 +1840,20 @@ class Agent(BaseModel):
             # TODO: How to restore this on resumption from suspension?
             self.child_agents: dict[str, str] = {}  # role -> agent_id
 
-        # Reconstruct or create ContextPageSource
-        config = self.metadata.context_page_source_config
+        # Reconstruct or create PageStorage
+        vcm_handle = get_vcm()
+        config: PageStorageConfig | None = vcm_handle.get_page_storage_config()
         if not config:
-            raise ValueError("Missing context_page_source_config in metadata")
+            raise ValueError("Missing PageStorageConfig in VCM")
 
-        self.context_page_source = ContextPageSourceFactory.create(
-            source_type="file_grouper",  # TODO: Make source_type configurable in AgentMetadata
+        self.page_storage = PageStorage(
             group_id = self.metadata.group_id,
             tenant_id = self.metadata.tenant_id,
-            **config
+            backend_type=config.backend_type,
+            storage_path=config.storage_path,
+            s3_bucket=config.s3_bucket,
         )
-        await self.context_page_source.initialize()
+        await self.page_storage.initialize()
 
         # Initialize memory hierarchy if enabled
         if self.enable_memory_hierarchy:
@@ -1953,20 +1955,18 @@ class Agent(BaseModel):
 
     async def get_page_storage(self) -> PageStorage | None:
         """Get page storage handle from context page source."""
-        if not self.context_page_source:
-            return None
-        return await self.context_page_source.get_page_storage()
+        return self.page_storage
 
     async def load_page_graph(self) -> nx.DiGraph:
         """Load page graph dynamically from PageStorage.
 
-        Uses context_page_source to access PageStorage.
+        Uses page_storage to access PageStorage.
         This allows the agent to load the page graph when needed, rather than
         passing the entire graph in metadata.
         """
-        if not self.context_page_source:
+        if not self.page_storage:
             return nx.DiGraph()
-        return await self.context_page_source.load_page_graph()
+        return await self.page_storage.load_page_graph()
 
     async def _restore_from_suspension(self) -> None:
         """Restore base agent state from suspension.

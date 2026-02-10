@@ -128,7 +128,6 @@ async def spawn_consistency_agent(
         )],
         run_id=run_id,
         session_id=session_id,
-        context_page_source_config=owner.context_page_source.get_config(),
         capability_types=[ConsistencyCapability],
         soft_affinity=False,
         return_handles=True,

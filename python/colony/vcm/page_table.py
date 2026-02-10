@@ -18,7 +18,7 @@ All operations are atomic via StateManager transactions.
 import logging
 import time
 
-from ...distributed import get_initialized_polymathera
+from ..distributed import get_initialized_polymathera
 from ..distributed.state_management import StateManager
 from .models import PageFault, PageGroup, PageLocation, PageLock, VCMBranch, VirtualPageTableState
 from ..distributed.ray_utils import serving

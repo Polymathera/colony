@@ -17,12 +17,14 @@ from collections import defaultdict
 from overrides import override
 
 from ....agents.base import Agent, AgentState, AgentCapability
-from ....agents.models import ActionResult, AgentSuspensionState
-from ....agents.context_page_source import (
-    PageCluster,
+from ....agents.models import (
+    AgentSuspensionState,
+    AttentionContext,
 )
 from ....agents.patterns.attention import PageQuery
 from ....cluster import InferenceResponse
+from ....vcm.sources import PageCluster
+from ....agents.patterns.attention.query_routing import PageQueryRoutingPolicy, create_page_query_router2
 
 from ....agents.patterns.scope import ScopeAwareResult
 from ....agents.patterns.actions.policies import (
@@ -38,6 +40,7 @@ class ClusterAnalyzerCapability(AgentCapability):
 
     def __init__(self, agent = None, scope_id = None, *, blackboard = None):
         super().__init__(agent, scope_id, blackboard=blackboard)
+        self.query_router: PageQueryRoutingPolicy | None = None
 
     async def initialize(self) -> None:
         """Initialize cluster analyzer."""
@@ -60,6 +63,21 @@ class ClusterAnalyzerCapability(AgentCapability):
 
         # State machine
         self.pages_analyzed = 0
+
+
+        self.query_router = await create_page_query_router2(
+            agent=self,
+            attention_policy_type=parameters.get("attention_policy_type", "hierarchical"),
+            top_k_clusters=parameters.get("top_k_clusters", 5),
+            top_n_pages_per_cluster=parameters.get("top_n_pages_per_cluster", 3),
+            top_n_pages_overall=parameters.get("top_n_pages_overall", 10),
+            top_n_pages=parameters.get("top_n_pages", 10),
+            cluster_id=self.cluster.cluster_id if self.cluster else None,
+            router_type=parameters.get("query_router_type", "hierarchical"),
+            page_keys=self.page_keys if self.page_keys else None,
+            working_set=parameters.get("working_set", set()),
+            cache_boost_factor=parameters.get("cache_boost_factor", 1.5)
+        )
 
         logger.info(
             f"ClusterAnalyzer initialized: cluster={self.cluster.cluster_id}, "
@@ -155,8 +173,14 @@ class ClusterAnalyzerCapability(AgentCapability):
                     )
 
                     # Find relevant pages using attention mechanism
-                    # TODO: Method query_pages no longer exists; Should be implemented in a separate capability or policy.
-                    relevant_pages = await self.agent.context_page_source.query_pages(page_query)
+                    # Use unified query routing policy
+                    relevant_pages = await self.query_router.route_query(
+                        query=page_query,
+                        context=AttentionContext(
+                            source_agent=self.agent.agent_id,
+                            source_cluster=self.cluster.cluster_id,
+                        )
+                    )
 
                     self.queries.append({
                         "source_page": page_id,

@@ -60,7 +60,7 @@ from .sources.blackboard_page_source import (
     MappedScope,
     SimpleTokenizer,
 )
-from .page_storage import PageStorage
+from .page_storage import PageStorage, PageStorageConfig
 from .page_table import VirtualPageTable
 from .allocation import AllocationStrategy, DEFAULT_ALLOCATION_STRATEGY
 from ..deployment_names import get_deployment_names
@@ -86,6 +86,7 @@ class VirtualContextManager:
         allocation_strategy: AllocationStrategy | None = None,
         page_storage_backend_type: Literal["efs", "s3"] = "efs",  # Default to EFS for fast access
         page_storage_path: str = "colony/context_pages",
+        page_storage_s3_bucket: str = "polymathera-context-pages",
         reconciliation_interval_s: float = 30.0
     ):
         """Initialize VirtualContextManager.
@@ -93,11 +94,16 @@ class VirtualContextManager:
         Args:
             caching_policy: Page eviction policy ("LRU" or "LFU")
             allocation_strategy: Strategy for page allocation decisions
+            page_storage_backend_type: Backend type for page storage ("efs" or "s3")
+            page_storage_path: Path for page storage (EFS directory or S3 prefix)
+            page_storage_s3_bucket: S3 bucket name for page storage (if using S3 backend)
+            reconciliation_interval_s: Interval for periodic reconciliation (seconds)
         """
         self.caching_policy = caching_policy
         self.allocation_strategy = allocation_strategy
         self.page_storage_backend_type = page_storage_backend_type
         self.page_storage_path = page_storage_path
+        self.page_storage_s3_bucket = page_storage_s3_bucket
 
         # Initialized in initialize
         self.app_name: str | None = None
@@ -204,6 +210,13 @@ class VirtualContextManager:
         )
 
     # === Page Management API ===
+    @serving.endpoint
+    def get_page_storage_config(self):
+        return PageStorageConfig(
+            backend_type=self.page_storage_backend_type,
+            storage_path=self.page_storage_path,
+            s3_bucket=self.page_storage_s3_bucket,
+        )
 
     @serving.endpoint
     async def create_virtual_page(

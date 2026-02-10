@@ -6,10 +6,8 @@ This module provides:
 
 Example:
     ```python
-    from polymathera.colony.samples.code_analysis import (
-        CodeAnalysisCoordinator,
-        ContextPageSourceFactory
-    )
+    from polymathera.colony.samples.code_analysis import CodeAnalysisCoordinator
+    from polymathera.colony.vcm.sources import ContextPageSourceFactory
 
     # Create context page source
     source = ContextPageSourceFactory.create(
@@ -26,7 +24,6 @@ Example:
         "agent_type": "polymathera.colony.samples.code_analysis.CodeAnalysisCoordinator",
         "metadata": {
             "repo_id": "repo-123",
-            "context_page_source_config": source.get_config()
         }
     }])
     ```

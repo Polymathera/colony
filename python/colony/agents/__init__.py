@@ -14,10 +14,8 @@ This module provides the complete agent infrastructure:
 
 Example:
     ```python
-    from polymathera.colony.samples.code_analysis import (
-        CodeAnalysisCoordinator,
-        ContextPageSourceFactory
-    )
+    from polymathera.colony.samples.code_analysis import CodeAnalysisCoordinator
+    from polymathera.colony.vcm.sources import ContextPageSourceFactory
 
     # Create context page source
     source = ContextPageSourceFactory.create(

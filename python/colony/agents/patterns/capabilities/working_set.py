@@ -423,18 +423,14 @@ class WorkingSetCapability(AgentCapability):
             query_history = context.get("query_history", [])
             page_scorer = SimplePageScorer(query_history)
         elif scorer == "edge":
-            page_graph = context.get("page_graph")
             completed_pages = context.get("completed_pages", set())
-            if page_graph is None:
-                # Load from context page source
-                page_graph = await self.agent.context_page_source.load_page_graph()
+            # Load from page storage
+            page_graph = await self.agent.load_page_graph()
             page_scorer = EdgePageScorer(page_graph, completed_pages)
         elif scorer == "composite":
             query_history = context.get("query_history", [])
-            page_graph = context.get("page_graph")
             completed_pages = context.get("completed_pages", set())
-            if page_graph is None:
-                page_graph = await self.agent.context_page_source.load_page_graph()
+            page_graph = await self.agent.load_page_graph()
             page_scorer = CompositePageScorer(
                 [SimplePageScorer(query_history), EdgePageScorer(page_graph, completed_pages)],
                 [0.5, 0.5]
@@ -543,8 +539,8 @@ class WorkingSetCapability(AgentCapability):
         """Initialize cluster-wide working set using coordination policy.
 
         Args:
-            page_graph: Page graph (loads from context_page_source if None)
-            available_pages: Available page IDs (loads from context_page_source if None)
+            page_graph: Page graph (loads from page storage if None)
+            available_pages: Available page IDs (loads from page storage if None)
             run_context: Analysis goal and context
 
         Returns:
@@ -557,7 +553,7 @@ class WorkingSetCapability(AgentCapability):
 
         # Load page graph if not provided
         if page_graph is None:
-            page_graph = await self.agent.context_page_source.load_page_graph()
+            page_graph = await self.agent.load_page_graph()
 
         # Get available pages if not provided
         if available_pages is None:

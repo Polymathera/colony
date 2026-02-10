@@ -2509,7 +2509,6 @@ class AgentMetadata(BaseModel):
 
     # Optional page binding
     bound_pages: list[str] = Field(default_factory=list)
-    context_page_source_config: dict[str, Any] = Field(default_factory=dict)
 
     max_iterations: int = Field(
         default=20,

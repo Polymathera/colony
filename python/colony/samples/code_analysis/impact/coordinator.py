@@ -1078,11 +1078,6 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
             page_ids: Page IDs for this batch (already prioritized by working set overlap)
             change_description: Description of changes (for logging)
         """
-        # IMPORTANT: Get context page source config for agents to load page graph
-        context_page_source_config = None
-        if self.agent.context_page_source:
-            context_page_source_config = self.agent.context_page_source.get_config()
-
         # Serialize changes for passing to agents
         changes_data = [c.model_dump() for c in self._current_changes]
 
@@ -1101,7 +1096,6 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
                     "change_description": change_description,
                     # Pass config for agents to load page graph dynamically
                     "parent_agent_id": self.agent.agent_id,
-                    "context_page_source_config": context_page_source_config,
                     "group_id": self.agent.metadata.get("group_id"),
                     "tenant_id": self.agent.metadata.get("tenant_id"),
                     "quality_threshold": self.agent.metadata.get("quality_threshold", 0.7),

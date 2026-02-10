@@ -28,7 +28,6 @@ from ....distributed.ray_utils import serving
 from ....system import get_llm_cluster
 from ....utils import setup_logger
 from ...models import AttentionContext
-from ....vcm.page_storage import PageStorage
 from ....cluster.models import InferenceRequest
 
 logger = setup_logger(__name__)

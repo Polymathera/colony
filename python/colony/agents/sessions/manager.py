@@ -21,7 +21,7 @@ import uuid
 from typing import Any
 
 from ...distributed.ray_utils import serving
-from ....distributed import get_initialized_polymathera
+from ...distributed import get_initialized_polymathera
 from ...distributed.state_management import StateManager
 from ...deployment_names import get_deployment_names
 from .models import (

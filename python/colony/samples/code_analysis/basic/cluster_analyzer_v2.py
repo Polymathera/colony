@@ -42,7 +42,7 @@ from ....agents.patterns.attention import (
 )
 from ....agents.patterns.attention.key_registry import GlobalPageKeyRegistry
 from ....agents.patterns.attention.query_routing import PageQueryRoutingPolicy, create_page_query_router2
-from ....agents.context_page_source import PageCluster
+from ....vcm.sources import PageCluster
 from .config import ClusterAnalyzerConfig
 
 logger = logging.getLogger(__name__)
@@ -868,11 +868,6 @@ class ClusterAnalyzerV2(Agent):
     async def initialize(self) -> None:
         """Initialize cluster analyzer."""
         await super().initialize()
-
-        # Reconstruct config
-        config = self.metadata.context_page_source_config
-        if not config:
-            raise ValueError("Missing context_page_source_config in metadata")
 
         self.action_policy = await create_default_action_policy(
             agent=self,

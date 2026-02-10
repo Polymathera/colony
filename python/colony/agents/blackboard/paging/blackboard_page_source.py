@@ -26,10 +26,9 @@ import asyncio
 import json
 import logging
 import time
-import pickle
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field as dataclass_field
-from typing import Any, AsyncIterator, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
 import networkx as nx
@@ -38,16 +37,16 @@ from overrides import override
 from ....vcm.sources import (
     ContextPageSource,
     ContextPageSourceFactory,
-    PageCluster,
 )
 from ....vcm.models import VirtualContextPage
 from ....distributed.ray_utils import serving
+from ....system import get_vcm
 
 if TYPE_CHECKING:
     from ..types import BlackboardEvent, BlackboardScope
     from ..blackboard import EnhancedBlackboard
     from ....cluster.tokenization import TokenizerProtocol
-    from ....vcm.page_storage import PageStorage
+    from ....vcm.page_storage import PageStorage, PageStorageConfig
 
 logger = logging.getLogger(__name__)
 
@@ -699,7 +698,6 @@ class BlackboardContextPageSource(ContextPageSource):
         tenant_id: str,
         scope_id: str,
         tokenizer: TokenizerProtocol,
-        page_storage: PageStorage,
         ingestion_policy: IngestionPolicy | None = None,
     ):
         """Initialize page source for a storage scope.
@@ -718,7 +716,7 @@ class BlackboardContextPageSource(ContextPageSource):
         self.scope_id = scope_id
         self.tenant_id = tenant_id
         self.tokenizer = tokenizer
-        self._page_storage = page_storage
+        self._page_storage: PageStorage | None = None
 
         # Pluggable ingestion policy (controls the entire record->page pipeline)
         self.ingestion_policy = ingestion_policy or GroupAndFlushIngestionPolicy()
@@ -760,6 +758,20 @@ class BlackboardContextPageSource(ContextPageSource):
                 Typically serving.get_my_replica_id().
         """
         await self.blackboard.initialize()
+
+        vcm_handle = get_vcm()
+        config: PageStorageConfig | None = vcm_handle.get_page_storage_config()
+        if not config:
+            raise ValueError("Missing PageStorageConfig in VCM")
+
+        self._page_storage = PageStorage(
+            group_id = self.scope_id,
+            tenant_id = self.tenant_id,
+            backend_type=config.backend_type,
+            storage_path=config.storage_path,
+            s3_bucket=config.s3_bucket,
+        )
+        await self._page_storage.initialize()
 
         # Initialize the ingestion policy with shared record_to_page dict
         await self.ingestion_policy.initialize(
@@ -961,137 +973,6 @@ class BlackboardContextPageSource(ContextPageSource):
                     f"error processing event: {e}",
                     exc_info=True,
                 )
-
-    # -------------------------------------------------------------------------
-    # ContextPageSource ABC implementation
-    # -------------------------------------------------------------------------
-
-    @override
-    async def get_page_storage(self) -> "PageStorage":
-        """Get the page storage instance."""
-        return self._page_storage
-
-    @override
-    async def load_page_graph(self) -> nx.DiGraph:
-        """Load the page graph."""
-        # TODO: This should be loaded from PageStorage dynamically
-        if not self._page_graph or len(self._page_graph.nodes) == 0:
-            await self._page_storage.initialize()
-            graph_data = await self._page_storage.retrieve_page_graph(
-                group_id=self.scope_id,
-                tenant_id=self.tenant_id
-            )
-            if graph_data:
-                graph_dict = pickle.loads(graph_data)
-                self._page_graph = graph_dict["graph"]
-        return self._page_graph
-
-    @override
-    async def get_page_cluster(
-        self,
-        cluster_size: int = 10,
-        cluster_type: str | None = None,
-    ) -> PageCluster:
-        """Get a cluster of related pages."""
-        if not self._page_graph or len(self._page_graph.nodes) == 0:
-            raise RuntimeError(
-                f"BlackboardContextPageSource[{self.scope_id}]: "
-                f"page graph is empty"
-            )
-
-        # Group by locality_key from page metadata
-        groups: dict[str, list[str]] = {}
-        for node in self._page_graph.nodes:
-            data = self._page_graph.nodes[node]
-            locality = data.get("locality_key", "unknown")
-            groups.setdefault(locality, []).append(node)
-
-        # Return the largest cluster that fits
-        for group_key, page_ids in sorted(
-            groups.items(), key=lambda x: len(x[1]), reverse=True
-        ):
-            if len(page_ids) <= cluster_size:
-                return PageCluster(
-                    cluster_id=f"bb:{self.scope_id}:{group_key}",
-                    page_ids=page_ids,
-                    relationship_score=0.8,
-                    cluster_type=cluster_type or "locality_group",
-                    metadata={"locality_key": group_key},
-                )
-
-        # Fallback: take first N pages
-        all_pages = list(self._page_graph.nodes)[:cluster_size]
-        return PageCluster(
-            cluster_id=f"bb:{self.scope_id}:fallback",
-            page_ids=all_pages,
-            relationship_score=0.5,
-            cluster_type="fallback",
-            metadata={},
-        )
-
-    @override
-    async def get_all_clusters(
-        self,
-        max_cluster_size: int = 10,
-        min_cluster_size: int = 2,
-    ) -> AsyncIterator[PageCluster]:
-        """Iterate over all page clusters grouped by locality key."""
-        groups: dict[str, list[str]] = {}
-        for node in self._page_graph.nodes:
-            data = self._page_graph.nodes[node]
-            locality = data.get("locality_key", "unknown")
-            groups.setdefault(locality, []).append(node)
-
-        for group_key, page_ids in groups.items():
-            if min_cluster_size <= len(page_ids) <= max_cluster_size:
-                yield PageCluster(
-                    cluster_id=f"bb:{self.scope_id}:{group_key}",
-                    page_ids=page_ids,
-                    relationship_score=0.8,
-                    cluster_type="locality_group",
-                    metadata={"locality_key": group_key},
-                )
-
-    @override
-    async def update_page_graph(
-        self,
-        page_relationships: dict[tuple[str, str], dict[str, Any]],
-    ) -> None:
-        """Update page graph with new relationships."""
-        for (src, tgt), rel_info in page_relationships.items():
-            if self._page_graph.has_edge(src, tgt):
-                edge_data = self._page_graph.get_edge_data(src, tgt)
-                edge_data.update(rel_info)
-            else:
-                self._page_graph.add_edge(src, tgt, **rel_info)
-
-    @override
-    async def get_page_neighbors(
-        self,
-        page_id: str,
-        max_neighbors: int = 5,
-        relationship_types: list[str] | None = None,
-    ) -> list[tuple[str, float]]:
-        """Get nearest neighbor pages."""
-        if page_id not in self._page_graph:
-            return []
-
-        neighbors = []
-        for neighbor in self._page_graph.successors(page_id):
-            edge_data = self._page_graph.get_edge_data(page_id, neighbor)
-            weight = edge_data.get("weight", 0.5)
-            neighbors.append((neighbor, weight))
-
-        neighbors.sort(key=lambda x: x[1], reverse=True)
-        return neighbors[:max_neighbors]
-
-    @override
-    def get_config(self) -> dict[str, Any]:
-        """Get configuration for recreating this source."""
-        return {
-            "type": "blackboard",
-            "scope_id": self.scope_id,
-        }
 
     # -------------------------------------------------------------------------
     # Helpers

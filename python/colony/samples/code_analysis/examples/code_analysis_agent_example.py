@@ -53,6 +53,8 @@ async def analyze_repository(
     await context_page_source.initialize()
     logger.info("ContextPageSource initialized")
 
+    # TODO: Build the page graph and persist it so the coordinator can load it (or let coordinator build it - needs repo access)
+
     # 2. Get AgentSystemDeployment handle
     agent_system = get_agent_system()
 
@@ -62,7 +64,6 @@ async def analyze_repository(
         agent_type="polymathera.colony.samples.code_analysis.CodeAnalysisCoordinator",
         metadata={
             "repo_id": repo_id,
-            "context_page_source_config": context_page_source.get_config(),
             "session_id": session_id,
             "run_id": run_id
         },

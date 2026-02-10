@@ -1,7 +1,7 @@
 """Page graph capability for graph-based page traversal.
 
 Provides @action_executor methods for traversing and updating the page
-relationship graph. Wraps ContextPageSource graph operations.
+relationship graph. Wraps PageStorage graph operations.
 
 Storage: Uses existing PageStorage.store_page_graph() / retrieve_page_graph().
 
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 class PageGraphCapability(AgentCapability):
     """Traverses and updates the page relationship graph.
 
-    Wraps ContextPageSource graph operations as @action_executors.
+    Wraps PageStorage graph operations as @action_executors.
     Graph is stored via PageStorage.store_page_graph() (EFS/S3).
 
     Primitives for:
@@ -66,18 +66,19 @@ class PageGraphCapability(AgentCapability):
         self._page_graph: nx.DiGraph | None = None
 
     async def _get_page_graph(self) -> nx.DiGraph:
-        """Load page graph via ContextPageSource."""
+        """Load page graph via PageStorage."""
+        # TODO: This needs to be loaded dynamically since the page graph can change.
         if self._page_graph is None:
-            self._page_graph = await self.agent.context_page_source.load_page_graph()
+            self._page_graph = await self.agent.load_page_graph()
         return self._page_graph
 
     async def _persist_graph(self) -> None:
-        """Persist graph changes via ContextPageSource."""
+        """Persist graph changes via PageStorage."""
         if self._page_graph is not None:
-            # TODO: This call to update_page_graph with an empty dict is a workaround
-            # to call self.agent.context_page_source._persist_graph(). FIXME.
-            await self.agent.context_page_source.update_page_graph({})
-            # Note: update_page_graph persists via _persist_graph() internally
+            # TODO - FIXME: This can introduce race conditions if multiple updates happen concurrently.
+            # We may need a more robust graph storage/update mechanism for large graphs.
+            page_storage = await self.agent.get_page_storage()
+            await page_storage.store_page_graph(self._page_graph)
 
     # === Action Executors ===
 
@@ -308,7 +309,9 @@ class PageGraphCapability(AgentCapability):
             edge_created = True
 
         # Persist changes
-        await self.agent.context_page_source.update_page_graph({
+        # TODO: This can introduce race conditions if multiple updates happen concurrently.
+        page_storage = await self.agent.get_page_storage()
+        await page_storage.update_page_graph({
             (source, target): {
                 "weight": new_weight,
                 "relationship_type": relationship_type,
@@ -385,7 +388,7 @@ class PageGraphCapability(AgentCapability):
 
         Use for batch-based processing of related pages.
 
-        Wraps ContextPageSource.get_all_clusters().
+        Wraps PageStorage.get_all_clusters().
 
         Args:
             algorithm: Clustering algorithm ("connected" for connected components)
@@ -400,7 +403,9 @@ class PageGraphCapability(AgentCapability):
         clusters = []
         cluster_idx = 0
 
-        async for cluster in self.agent.context_page_source.get_all_clusters(
+        page_storage = await self.agent.get_page_storage()
+
+        async for cluster in page_storage.get_all_clusters(
             max_cluster_size=max_size or 100,
             min_cluster_size=min_size,
         ):
@@ -498,6 +503,7 @@ class PageGraphCapability(AgentCapability):
             - cluster_pages: List of page IDs in cluster (including input page)
             - size: Cluster size
         """
+        # TODO: Unify this with PageStorage.get_page_cluster()
         graph = await self._get_page_graph()
 
         if page_id not in graph:
@@ -975,7 +981,9 @@ class PageGraphCapability(AgentCapability):
             edge_created = True
 
         # Persist changes
-        await self.agent.context_page_source.update_page_graph({
+        # TODO: This can introduce race conditions if multiple updates happen concurrently.
+        page_storage = await self.agent.get_page_storage()
+        await page_storage.update_page_graph({
             (source_page_id, target_page_id): {
                 "weight": new_weight,
                 "relationship_type": "discovered_dependency",
