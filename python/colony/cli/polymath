@@ -1,20 +1,89 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# ===========================================================================
+# polymath — Integration test CLI for the Polymathera multi-agent framework
+# ===========================================================================
+#
+# This script launches the polymath CLI tool, which runs complete analysis
+# workflows on codebases using the Colony multi-agent framework.
+#
+# Prerequisites:
+#   - Python 3.10+ with the colony package installed
+#   - typer, rich (pip install typer rich)
+#   - pyyaml for YAML config support (pip install pyyaml)
+#   - A running Ray cluster for actual agent execution
+#
+# Usage:
+#   # Run an integration test
+#   export PYTHONPATH=$WORKSPACE/polymathera_inc/colony/python:$PYTHONPATH
+#   ./polymath run /path/to/codebase --analysis impact --analysis compliance
+#
+#   # Run with a YAML config file
+#   ./polymath run /path/to/codebase --config test_config.yaml
+#
+#   # Show planned hierarchy without running (dry run)
+#   ./polymath run /path/to/codebase --analysis impact --dry-run
+#
+#   # List available analyses, agents, and capabilities
+#   ./polymath list analyses
+#   ./polymath list agents
+#   ./polymath list capabilities
+#
+#   # Generate a sample YAML config
+#   ./polymath init-config --output my_test.yaml
+#
+#   # Describe a specific analysis type
+#   ./polymath describe impact
+#
+# Environment Variables:
+#   RAY_ADDRESS        — Ray cluster address (default: auto-detect)
+#   POLYMATH_APP_NAME  — Polymathera serving application name
+#   POLYMATH_LOG_LEVEL — Logging level (DEBUG, INFO, WARNING, ERROR)
+#
+# ===========================================================================
 
+set -euo pipefail
 
-# Ensure python version higher than or equal to 3.12 is installed on the system and
-# use it to run the polymath.py file in the same directory as this file (even if
-# the current working directory is different) and pass all command-line arguments to it.
+# --- Resolve script location ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Check if Python 3.12 or higher is installed
-python_version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+# --- Configure logging ---
+if [ -n "${POLYMATH_LOG_LEVEL:-}" ]; then
+    export LOG_LEVEL="${POLYMATH_LOG_LEVEL}"
+fi
 
-if [ $? -ne 0 ] || [ $(echo "$python_version" | awk -F. '{if ($1 >= 3 && $2 >= 12) print 1; else print 0;}') -eq 0 ]; then
-    echo "Error: Python 3.12 or higher is required."
+# --- Pass through RAY_ADDRESS if set ---
+if [ -n "${RAY_ADDRESS:-}" ]; then
+    export RAY_ADDRESS
+fi
+
+# --- Pass through app name if set ---
+EXTRA_ARGS=()
+if [ -n "${POLYMATH_APP_NAME:-}" ]; then
+    EXTRA_ARGS+=("--app-name" "${POLYMATH_APP_NAME}")
+fi
+
+# --- Find Python ---
+# Prefer the Python from the current virtual environment, fall back to system.
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+    PYTHON="${VIRTUAL_ENV}/bin/python"
+elif command -v python3 &> /dev/null; then
+    PYTHON="python3"
+elif command -v python &> /dev/null; then
+    PYTHON="python"
+else
+    echo "Error: Python not found. Please install Python 3.10+ or activate a virtual environment." >&2
     exit 1
 fi
 
-# Get the directory of this script
-script_dir=$(dirname "$0")
+# --- Verify minimum Python version ---
+PY_VERSION=$("${PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "0.0")
+PY_MAJOR=$(echo "${PY_VERSION}" | cut -d. -f1)
+PY_MINOR=$(echo "${PY_VERSION}" | cut -d. -f2)
 
-# Run polymath.py with all command-line arguments
-exec python3 "$script_dir/polymath.py" "$@"
+if [ "${PY_MAJOR}" -lt 3 ] || { [ "${PY_MAJOR}" -eq 3 ] && [ "${PY_MINOR}" -lt 10 ]; }; then
+    echo "Error: Python 3.10+ is required (found ${PY_VERSION})." >&2
+    exit 1
+fi
+
+# --- Run the CLI ---
+exec "${PYTHON}" -m colony.cli.polymath "${EXTRA_ARGS[@]}" "$@"
