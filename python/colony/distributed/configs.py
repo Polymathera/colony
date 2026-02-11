@@ -5,15 +5,9 @@ from typing import Any, ClassVar
 
 from pydantic import Field
 
-from ..caching.simple import CacheConfig
-from ..config import ConfigComponent, register_polymathera_config
-from ..llms.inference.cluster.embedding import EmbeddingClientConfig
-from ..llms.inference.cluster.config import InferenceManagementConfig
-from ..vectors.etl import VectorStoreETLConfig
-from ..vectors.stores import VectorSearchConfig
-from ..memory.config import MemorySystemConfig
-from ..redis_utils.client import RedisConfig
-from . import get_polymathera
+from .caching.simple import CacheConfig
+from .config import ConfigComponent, register_polymathera_config
+from .redis_utils.client import RedisConfig
 
 
 @register_polymathera_config()
@@ -342,8 +336,6 @@ class SystemConfig(ConfigComponent):
     name: str = Field(default="polymathera")
     version: str = Field(default="1.0.0")
     architecture: str = Field(default="x86_64")
-    load_balancer_domain: str = Field(default="polymathera.com")
-    memory: MemorySystemConfig | None = Field(default=None)
     storage: StorageConfig | None = Field(default=None)
     chat: UserChatServiceConfig | None = Field(default=None)
     redis: RedisConfig | None = Field(default=None)
@@ -352,11 +344,7 @@ class SystemConfig(ConfigComponent):
     observability: ObservabilityConfig | None = Field(default=None)
     service_registry: ServiceRegistryConfig | None = Field(default=None)
     messaging: SystemMessagingConfig | None = Field(default=None)
-    inference_manager: InferenceManagementConfig | None = Field(default=None)
     distributed_state: DistributedStateConfig | None = Field(default=None)
-    embedding: EmbeddingClientConfig | None = Field(default=None)
-    vector_store: VectorSearchConfig | None = Field(default=None)
-    vector_etl: VectorStoreETLConfig | None = Field(default=None)
 
     CONFIG_PATH: ClassVar[str] = "system"
 

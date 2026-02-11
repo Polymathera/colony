@@ -59,7 +59,7 @@ from .sources import ContextPageSource, ContextPageSourceFactory
 from .page_storage import PageStorage, PageStorageConfig
 from .page_table import VirtualPageTable
 from .allocation import AllocationStrategy, DEFAULT_ALLOCATION_STRATEGY
-from ..deployment_names import get_deployment_names
+from ..system import get_llm_cluster
 
 logger = logging.getLogger(__name__)
 
@@ -150,14 +150,9 @@ class VirtualContextManager:
         self.page_table = VirtualPageTable()
         await self.page_table.initialize()
 
-        names = get_deployment_names()
-
         # Get LLMCluster handle for allocation decisions and page loading
         try:
-            self.llm_cluster_handle = serving.get_deployment(
-                app_name=self.app_name,
-                deployment_name=names.llm_cluster,
-            )
+            self.llm_cluster_handle = get_llm_cluster()
             logger.info("Connected to LLMCluster deployment")
         except Exception as e:
             logger.warning(f"LLMCluster deployment not found (allocation will use default strategies): {e}")

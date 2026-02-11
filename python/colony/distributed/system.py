@@ -77,6 +77,75 @@ class PolymatheraApp:
 
         self._initialized = False
 
+    async def setup_ray(
+        self,
+        worker_env_vars: dict[str, str],
+        working_dir: str | None = None,
+        py_modules: list = None,
+        ray_logging_setup_func: Callable[[], None] | None = None,
+    ) -> None:
+        """Initialize Ray cluster.
+
+        This should be called on the driver node before any Ray operations are performed.
+
+        Args:
+            worker_env_vars: Environment variables to propagate to Ray worker processes
+            working_dir: Directory to set as working directory for Ray workers (also distributed to workers).
+                Used to distribute all files to workers (including autoscaled ones).
+                This ensures workers have the latest code from the driver, not stale code from Docker image.
+            ray_logging_setup_func: Optional function to set up logging in Ray worker processes
+            py_modules: List of Python modules to be available in worker processes (adds to PYTHONPATH)
+                All the polymathera.colony modules will be included by default, so this is only needed for external dependencies that are not in the Docker image.
+        """
+        if ray.is_initialized():
+            return
+
+        # Get environment variables for Ray workers
+        logger.info(f"Propagating {len(worker_env_vars)} environment variables to Ray workers")
+        logger.info(f"Worker env vars: {list(worker_env_vars.keys())}")
+
+        # Try to connect to existing Ray cluster (on EKS)
+        try:
+            py_modules = py_modules or []
+            from ... import colony
+            py_modules.append(colony)  # Ensure polymathera.colony modules are included in worker processes
+
+            # Try to connect to the cluster
+            ray.init(
+                address="auto",
+                ignore_reinit_error=True,
+                _system_config={"health_check_timeout_ms": 5000},
+                ### # Enable structured JSON logging with actor/task metadata
+                ### logging_config=ray.LoggingConfig(
+                ###     encoding="JSON",
+                ###     log_level="INFO", # "DEBUG", # Lower to DEBUG for init details
+                ###     # Include additional metadata for debugging
+                ###     additional_log_standard_attrs=['name', 'funcName', 'module', 'lineno'] #, 'process', 'levelname', 'exc_info']
+                ### ),
+                # Use log_to_driver=True for development/debugging
+                log_to_driver=True,
+                runtime_env={
+                    "worker_process_setup_hook": ray_logging_setup_func,
+                    # Ensure polymathera module is available in worker processes (adds to PYTHONPATH)
+                    "py_modules": py_modules,
+                    # Set working directory and distribute all files to workers (including autoscaled ones)
+                    # This ensures workers have the latest code from the driver, not stale code from Docker image
+                    "working_dir": working_dir,
+                    # Propagate environment variables to worker processes
+                    "env_vars": worker_env_vars,
+                    # In a cluster environment, we can provide extra dependencies for Ray
+                    # "pip": ["boto3", "opensearch-py", "torch", "transformers", "accelerate", "bitsandbytes", "optimum"]
+                },
+            )
+            logger.info(f"Connected to Ray cluster: {ray.cluster_resources()}")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize Ray: {e}")
+            raise
+
+        # Don't shutdown if we connected to existing cluster
+        # ray.shutdown()
+
     async def get_config_manager(self) -> ConfigurationManager:
         await self.initialize()
         return self._config_manager

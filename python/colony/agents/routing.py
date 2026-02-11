@@ -9,10 +9,9 @@ This router implements intelligent agent spawning policies:
 import logging
 from typing import Any
 
-from ..distributed.ray_utils import serving
 from ..distributed.ray_utils.serving.router import RequestRouter
 from ..distributed.ray_utils.serving.models import DeploymentReplicaInfo, DeploymentRequest, RoutingHints
-from ..deployment_names import get_deployment_names
+from ..system import get_vcm, get_agent_system
 from ..vcm.models import PageLocation
 
 
@@ -51,10 +50,8 @@ class SoftPageAffinityRouter(RequestRouter):
     async def _get_vcm_handle(self):
         """Lazy initialization of VCM handle."""
         if self._vcm_handle is None:
-            app_name = serving.get_my_app_name()
             # Get deployment names
-            names = get_deployment_names()
-            self._vcm_handle = serving.get_deployment(app_name, names.vcm)
+            self._vcm_handle = get_vcm()
         return self._vcm_handle
 
     @staticmethod
@@ -294,11 +291,7 @@ class AgentAffinityRouter(RequestRouter):
     async def _get_agent_system_handle(self):
         """Lazy init agent system handle."""
         if self._agent_system_handle is None:
-            app_name = serving.get_my_app_name()
-            names = get_deployment_names()
-            self._agent_system_handle = serving.get_deployment(
-                app_name, names.agent_system
-            )
+            self._agent_system_handle = get_agent_system()
         return self._agent_system_handle
 
     @staticmethod

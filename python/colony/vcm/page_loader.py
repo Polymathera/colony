@@ -23,7 +23,7 @@ from ..distributed.ray_utils import serving
 from .models import PageAllocationRequest, PageAllocationResponse, PagePriority
 from .models import VirtualContextPage, PageLocation, ContextPageId
 from .page_table import VirtualPageTable
-from ..deployment_names import get_deployment_names
+from ..system import get_vcm
 
 logger = logging.getLogger(__name__)
 
@@ -64,14 +64,9 @@ class PageLoader:
         self.policy = policy.upper()
 
         # Get VCM handle
-        self.vcm_handle: serving.DeploymentHandle | None = None  # Deprecated, for backward compatibility
+        self.vcm_handle: serving.DeploymentHandle | None = None  # TODO: Deprecated, for backward compatibility
         try:
-            app_name = serving.get_my_app_name()
-            names = get_deployment_names()
-            self.vcm_handle = serving.get_deployment(
-                app_name=app_name,
-                deployment_name=names.vcm,
-            )
+            self.vcm_handle = get_vcm()
             logger.info("Connected to VCM deployment.")
         except Exception as e:
             logger.debug(f"VCM deployment not found (expected after merge): {e}")

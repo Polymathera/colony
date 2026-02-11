@@ -13,7 +13,6 @@ from ..distributed import get_polymathera
 from ..distributed.state_management import StateManager
 from ..distributed.ray_utils import serving
 from .config import ClusterConfig
-from .embedding_deployment import EmbeddingDeployment
 from .models import (
     ClusterStatistics,
     InferenceRequest,
@@ -21,8 +20,7 @@ from .models import (
     LLMClusterState
 )
 from ..vcm.models import VirtualContextPage, ContextPageId
-from .vllm_deployment import VLLMDeployment
-from ..deployment_names import get_deployment_names
+from ..system import get_embedding_deployment, get_vllm_deployment
 
 logger = logging.getLogger(__name__)
 
@@ -241,19 +239,15 @@ class LLMCluster:
         # Get deployment handles for all vLLM deployments
         for dconf in self.config.vllm_deployments:
             deployment_name = dconf.get_deployment_name()
-            self.vllm_deployment_handles[deployment_name] = serving.get_deployment(
-                self.app_name,
+            self.vllm_deployment_handles[deployment_name] = get_vllm_deployment(
                 deployment_name,
+                self.app_name,
             )
             logger.debug(f"Connected to VLLM deployment: {deployment_name}")
 
         # Get embedding deployment handle if configured
         if self.config.embedding_config:
-            names = get_deployment_names()
-            self.embedding_deployment_handle = serving.get_deployment(
-                self.app_name,
-                names.embedding,
-            )
+            self.embedding_deployment_handle = get_embedding_deployment(self.app_name)
             logger.debug("Connected to embedding deployment")
 
         # Per-deployment state managers (for reading deployment states)

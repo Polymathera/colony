@@ -22,7 +22,13 @@ from pydantic import Field
 from ..distributed import get_polymathera
 from ..distributed.state_management import SharedState, StateManager
 from ..distributed.ray_utils import serving
-from ..deployment_names import get_deployment_names
+from ..system import (
+    get_vcm,
+    get_session_manager,
+    get_llm_cluster,
+    get_standalone_agents,
+    get_vllm_deployment
+)
 from .base import Agent, AgentState, ResourceExhausted
 from .models import (
     AgentResourceRequirements,
@@ -126,9 +132,6 @@ class AgentSystemDeployment:
         self.app_name = serving.get_my_app_name()
         logger.info(f"Initializing AgentSystemDeployment for app {self.app_name}")
 
-        # Get deployment names configuration
-        names = get_deployment_names()
-
         # Get Polymathera for state management
         polymathera = get_polymathera()
 
@@ -138,32 +141,17 @@ class AgentSystemDeployment:
             state_key=AgentSystemState.get_state_key(self.app_name),
         )
 
-        # Try to discover VCM deployment in same app
+        # Try to discover VCM and SessionManager deployments in same app
+        self.vcm_handle = get_vcm()
         try:
-            self.vcm_handle = serving.get_deployment(
-                app_name=self.app_name,
-                deployment_name=names.vcm,
-            )
-            logger.info(f"Connected to VCM deployment: {names.vcm}")
+            self.session_manager_handle = get_session_manager()
         except Exception as e:
-            logger.error(f"VCM deployment '{names.vcm}' not found: {e}")
-            raise e
+            logger.warning(f"SessionManager deployment not found: {e}")
+            # This is optional - don't fail initialization
 
         # Start background task for resource-driven resumption
-        import asyncio
         self._resource_monitor_task = asyncio.create_task(self._resource_monitor_loop())
         logger.info("Started resource monitor loop for agent resumption")
-
-        # Try to discover SessionManager deployment in same app
-        try:
-            self.session_manager_handle = serving.get_deployment(
-                app_name=self.app_name,
-                deployment_name=names.session_manager,
-            )
-            logger.info(f"Connected to SessionManagerDeployment: {names.session_manager}")
-        except Exception as e:
-            logger.warning(f"SessionManager deployment '{names.session_manager}' not found: {e}")
-            # This is optional - don't fail initialization
 
         logger.info("AgentSystemDeployment initialized")
 
@@ -297,21 +285,11 @@ class AgentSystemDeployment:
             ```
         """
         agent_ids = []
-        app_name = serving.get_my_app_name()
-        names = get_deployment_names()
 
         # Get LLMCluster handle for requirement-based routing
         llm_cluster_handle = None
         if any(spec.has_deployment_affinity() for spec in agent_specs):
-            try:
-                llm_cluster_handle = serving.get_deployment(
-                    app_name,
-                    names.llm_cluster,
-                    #deployment_class=LLMCluster,
-                )
-            except Exception as e:
-                logger.error(f"Failed to get LLMCluster handle for routing: {e}")
-                raise
+            llm_cluster_handle = get_llm_cluster()
 
         for spec in agent_specs:
             # Generate agent ID if not provided
@@ -342,7 +320,7 @@ class AgentSystemDeployment:
                         requirements=spec.requirements
                     )
 
-                    vllm_handle = serving.get_deployment(app_name, vllm_deployment_name)
+                    vllm_handle = get_vllm_deployment(vllm_deployment_name)
                     spawned_id = await vllm_handle.start_agent(
                         agent_class_id=spec.agent_type,
                         agent_id=agent_id,
@@ -389,11 +367,10 @@ class AgentSystemDeployment:
                 retry_count = 0
                 spawned = False
 
+                standalone_handle = get_standalone_agents()
+
                 while not spawned and retry_count <= self.resource_exhausted_config.max_retries:
                     try:
-                        standalone_handle = serving.get_deployment(
-                            app_name, names.standalone_agents
-                        )
                         spawned_id = await standalone_handle.start_agent(
                             agent_class_id=spec.agent_type,
                             agent_id=agent_id,
@@ -428,7 +405,6 @@ class AgentSystemDeployment:
                             agent_id=agent_id,
                             metadata=metadata,
                             standalone_handle=standalone_handle,
-                            deployment_name=names.standalone_agents,
                         )
 
                         agent_ids.append(spawned_id)
@@ -438,7 +414,7 @@ class AgentSystemDeployment:
 
                     except Exception as e:
                         logger.error(
-                            f"Failed to spawn agent {agent_id} on standalone deployment '{names.standalone_agents}': {e}"
+                            f"Failed to spawn agent {agent_id} on standalone agents deployment: {e}"
                         )
                         raise
 
@@ -905,7 +881,6 @@ class AgentSystemDeployment:
         agent_id: str,
         metadata: dict[str, Any],
         standalone_handle: serving.DeploymentHandle,
-        deployment_name: str,
     ) -> str:
         """Handle ResourceExhausted error for standalone agent spawning.
 
@@ -917,7 +892,6 @@ class AgentSystemDeployment:
             agent_id: Generated agent ID
             metadata: Agent metadata
             standalone_handle: Handle to StandaloneAgentDeployment
-            deployment_name: Name of standalone deployment
 
         Returns:
             Spawned agent ID if successful
@@ -940,7 +914,7 @@ class AgentSystemDeployment:
         for attempt in range(self.resource_exhausted_config.max_retries):
             logger.info(
                 f"ResourceExhausted for agent {agent_id}, attempt {attempt + 1}/"
-                f"{self.resource_exhausted_config.max_retries}: Scaling up {deployment_name}"
+                f"{self.resource_exhausted_config.max_retries}: Scaling up standalone deployment"
             )
 
             try:
@@ -950,19 +924,19 @@ class AgentSystemDeployment:
 
                 if not success:
                     logger.warning(
-                        f"Failed to scale {deployment_name} to {current_count + 1} replicas"
+                        f"Failed to scale standalone deployment to {current_count + 1} replicas"
                     )
                     if attempt < self.resource_exhausted_config.max_retries - 1:
                         await asyncio.sleep(self.resource_exhausted_config.retry_delay_s)
                         continue
                     else:
                         raise ResourceExhausted(
-                            f"Failed to scale {deployment_name} after {attempt + 1} attempts"
+                            f"Failed to scale standalone deployment after {attempt + 1} attempts"
                         )
 
                 # Wait for new replica to come online
                 logger.info(
-                    f"Scaled {deployment_name} to {current_count + 1} replicas, "
+                    f"Scaled standalone deployment to {current_count + 1} replicas, "
                     f"waiting {self.resource_exhausted_config.retry_delay_s}s for new replica"
                 )
                 await asyncio.sleep(self.resource_exhausted_config.retry_delay_s)
@@ -976,7 +950,7 @@ class AgentSystemDeployment:
                 )
 
                 logger.info(
-                    f"Successfully spawned agent {spawned_id} after scaling {deployment_name}"
+                    f"Successfully spawned agent {spawned_id} after scaling standalone deployment"
                 )
                 return spawned_id
 
@@ -989,7 +963,7 @@ class AgentSystemDeployment:
                     await asyncio.sleep(self.resource_exhausted_config.retry_delay_s)
                 else:
                     logger.error(
-                        f"ResourceExhausted persists after {attempt + 1} retries and scaling"
+                        f"ResourceExhausted persists after {attempt + 1} retries and scaling standalone deployment"
                     )
                     raise
 

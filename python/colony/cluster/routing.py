@@ -255,7 +255,7 @@ class ContextAwareRouter(RequestRouter):
             from ..distributed import get_polymathera
             from ..distributed.ray_utils import serving
             from .models import VLLMDeploymentState
-            from ..deployment_names import get_deployment_names
+            from ..system import get_vcm
 
             # Get app name and deployment from serving context
             # These are set via runtime_env by serving.Application during deployment
@@ -269,12 +269,8 @@ class ContextAwareRouter(RequestRouter):
             )
 
             # Get VCM handle for page fault issuing
-            names = get_deployment_names()
             try:
-                self._vcm_handle = serving.get_deployment(
-                    app_name=app_name,
-                    deployment_name=names.vcm,
-                )
+                self._vcm_handle = get_vcm()
                 logger.info(f"ContextAwareRouter connected to VCM for page fault handling")
             except Exception as e:
                 logger.warning(f"VCM deployment not found, page fault handling disabled: {e}")

@@ -236,7 +236,7 @@ class GitColdStorage:
 
     async def cleanup(self) -> None:
         """Cleanup background tasks and resources"""
-        from polymathera.utils import cleanup_dynamic_asyncio_tasks
+        from ...utils import cleanup_dynamic_asyncio_tasks
 
         try:
             await cleanup_dynamic_asyncio_tasks(self, raise_exceptions=False)
@@ -650,7 +650,7 @@ class GitFileStorage:
 
     async def cleanup(self) -> None:
         """Cleanup background tasks and resources"""
-        from polymathera.utils import cleanup_dynamic_asyncio_tasks
+        from ...utils import cleanup_dynamic_asyncio_tasks
 
         try:
             await cleanup_dynamic_asyncio_tasks(self, raise_exceptions=False)

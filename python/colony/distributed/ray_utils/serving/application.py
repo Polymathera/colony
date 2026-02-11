@@ -154,7 +154,7 @@ class Application:
         self.name = name
         self.deployments: list[DeploymentInfo] = []
         self._running = False
-        self._state_manager = None
+        self._state_manager: StateManager | None = None
         self._health_check_interval_s = health_check_interval_s
         self._health_monitor_task: asyncio.Task | None = None
         logger.info(f"Created application '{name}'")

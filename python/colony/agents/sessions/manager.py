@@ -23,7 +23,7 @@ from typing import Any
 from ...distributed.ray_utils import serving
 from ...distributed import get_initialized_polymathera
 from ...distributed.state_management import StateManager
-from ...deployment_names import get_deployment_names
+from ...system import get_vcm
 from .models import (
     Session,
     SessionState,
@@ -117,7 +117,6 @@ class SessionManagerDeployment:
     async def initialize(self):
         """Initialize session manager."""
         self.app_name = serving.get_my_app_name()
-        names = get_deployment_names()
         polymathera = await get_initialized_polymathera()
 
         # Initialize state manager
@@ -127,7 +126,7 @@ class SessionManagerDeployment:
         )
 
         # Get VCM handle for branch operations
-        self.vcm_handle = serving.get_deployment(self.app_name, names.vcm)
+        self.vcm_handle = get_vcm()
 
         logger.info("SessionManagerDeployment initialized")
 

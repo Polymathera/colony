@@ -16,8 +16,8 @@ import magic  # python-magic for file type detection
 import networkx as nx
 from circuitbreaker import circuit
 
-from ...caching.simple import CacheConfig
-from ...config import ConfigComponent, register_polymathera_config
+from ....distributed.caching.simple import CacheConfig
+from ....distributed.config import ConfigComponent, register_polymathera_config
 from ....distributed import get_polymathera
 from ...metrics.common import BaseMetricsMonitor
 
@@ -28,8 +28,8 @@ from .file_grouping import FileGrouper, FileGrouperConfig, FileGroup
 from .file_grouping_wrapper import FileGrouperWithGraph
 from .tokenization import TokenizationConfig, TokenizationStrategy, TokenManager
 from .analyzers.base import FileContentCache
-from .....utils.git import validate_git_repository, configure_git_safety
-from .....utils.retry import standard_retry
+from ....utils.git import validate_git_repository, configure_git_safety
+from ....utils.retry import standard_retry
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +257,7 @@ class GitRepoShardCache:
         )
 
     async def cleanup(self) -> None:
-        from .....utils import cleanup_dynamic_asyncio_tasks
+        from ....utils import cleanup_dynamic_asyncio_tasks
         try:
             await cleanup_dynamic_asyncio_tasks(self, raise_exceptions=False)
             await self.cache.cleanup()

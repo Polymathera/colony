@@ -250,9 +250,8 @@ class PolymatheraCluster:
         await self.app.start()
 
         # Get handles to deployed components for convenience
-        names = get_deployment_names()
-        self.llm_cluster_handle = serving.get_deployment(self.app_name, names.llm_cluster)
-        self.vcm_handle = serving.get_deployment(self.app_name, names.vcm)
+        self.llm_cluster_handle = get_llm_cluster(self.app_name)
+        self.vcm_handle = get_vcm(self.app_name)
 
         logger.info(f"Polymathera cluster '{self.app_name}' deployed successfully")
 
@@ -277,34 +276,68 @@ class PolymatheraCluster:
 
 
 
-def get_agent_system() -> serving.DeploymentHandle:
+def _get_deployment_by_name(name_attr: str, app_name: str | None = None) -> serving.DeploymentHandle:
     """Get agent system deployment via serving."""
-    names = get_deployment_names()
-    return serving.get_deployment(serving.get_my_app_name(), names.agent_system)
+    try:
+        names = get_deployment_names()
+        handle = serving.get_deployment(
+            app_name or serving.get_my_app_name(),
+            getattr(names, name_attr)
+        )
+        logger.info(f"Connected to {name_attr} deployment: {getattr(names, name_attr)}")
+        return handle
+    except Exception as e:
+        logger.error(f"{name_attr} deployment '{getattr(names, name_attr)}' not found: {e}")
+        raise e
 
 
-def get_llm_cluster() -> serving.DeploymentHandle:
+def get_agent_system(app_name: str | None = None) -> serving.DeploymentHandle:
+    """Get agent system deployment via serving."""
+    return _get_deployment_by_name("agent_system", app_name)
+
+
+def get_llm_cluster(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get LLM deployment via serving."""
-    names = get_deployment_names()
-    return serving.get_deployment(serving.get_my_app_name(), names.llm_cluster)
+    return _get_deployment_by_name("llm_cluster", app_name)
 
 
-def get_tool_manager() -> serving.DeploymentHandle:
+def get_tool_manager(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get tool manager deployment via serving."""
-    names = get_deployment_names()
-    return serving.get_deployment(serving.get_my_app_name(), names.tool_manager)
+    return _get_deployment_by_name("tool_manager", app_name)
 
 
-def get_vcm() -> serving.DeploymentHandle:
+def get_vcm(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get VCM deployment via serving."""
-    names = get_deployment_names()
-    return serving.get_deployment(serving.get_my_app_name(), names.vcm)
+    return _get_deployment_by_name("vcm", app_name)
 
 
-def get_session_manager() -> serving.DeploymentHandle:
+def get_standalone_agents(app_name: str | None = None) -> serving.DeploymentHandle:
+    """Get standalone agents deployment via serving."""
+    return _get_deployment_by_name("standalone_agents", app_name)
+
+
+def get_session_manager(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get session manager deployment via serving."""
-    names = get_deployment_names()
-    return serving.get_deployment(serving.get_my_app_name(), names.session_manager)
+    return _get_deployment_by_name("session_manager", app_name)
+
+
+def get_vllm_deployment(deployment_name: str, app_name: str | None = None) -> serving.DeploymentHandle:
+    """Get specific VLLM deployment via serving."""
+    try:
+        handle = serving.get_deployment(
+            app_name or serving.get_my_app_name(),
+            deployment_name
+        )
+        logger.info(f"Connected to VLLM deployment: {deployment_name}")
+        return handle
+    except Exception as e:
+        logger.error(f"VLLM deployment '{deployment_name}' not found: {e}")
+        raise e
+
+
+def get_embedding_deployment(app_name: str | None = None) -> serving.DeploymentHandle:
+    return _get_deployment_by_name("embedding", app_name)
+
 
 
 async def spawn_agents(
