@@ -59,8 +59,6 @@ from .sources import ContextPageSource, ContextPageSourceFactory
 from .page_storage import PageStorage, PageStorageConfig
 from .page_table import VirtualPageTable
 from .allocation import AllocationStrategy, DEFAULT_ALLOCATION_STRATEGY
-from ..system import get_llm_cluster
-
 logger = logging.getLogger(__name__)
 
 
@@ -151,6 +149,9 @@ class VirtualContextManager:
         await self.page_table.initialize()
 
         # Get LLMCluster handle for allocation decisions and page loading
+        # NOTE: Imported here (not at module level) to break the circular import
+        # chain: cluster/models → vcm/__init__ → vcm/manager → system → agents → cluster/models
+        from ..system import get_llm_cluster
         try:
             self.llm_cluster_handle = get_llm_cluster()
             logger.info("Connected to LLMCluster deployment")

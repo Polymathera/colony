@@ -1718,6 +1718,8 @@ class ActionSharedDataDependency(BaseModel):
     Agents should design their versioning scheme accordingly.
     """
 
+    model_config = {"arbitrary_types_allowed": True}
+
     data_key: str = Field(
         description=(
             "Logical name of the data object (e.g., game state key). "

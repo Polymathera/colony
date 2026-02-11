@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Polymath: Integration test CLI for the Polymathera multi-agent framework.
 
-This tool runs a complete analysis workflow on a codebase using the Colony
+This tool runs a complete analysis workflow on a codebase using the Polymathera Colony
 multi-agent framework. It demonstrates:
 
 1. **Context Paging** — Using VirtualContextManager.mmap_application_scope with
@@ -727,12 +727,14 @@ async def run_integration_test(
         List of result dictionaries, one per analysis.
     """
     # -----------------------------------------------------------------------
-    # Lazy imports — these require Ray and colony to be available
+    # Lazy imports — these require Ray and colony to be available.
+    # We use absolute imports so the CLI can run both as a module
+    # (python -m colony.cli.polymath) and as a direct script (./polymath.py).
     # -----------------------------------------------------------------------
-    from ..vcm.sources import BuilInContextPageSourceType
-    from ..vcm.models import MmapConfig, MmapResult
-    from ..agents.models import AgentSpawnSpec, AgentMetadata, AgentResourceRequirements
-    from ..system import get_agent_system, get_vcm, spawn_agents
+    from colony.vcm.sources import BuilInContextPageSourceType
+    from colony.vcm.models import MmapConfig, MmapResult
+    from colony.agents.models import AgentSpawnSpec, AgentMetadata, AgentResourceRequirements
+    from colony.system import get_agent_system, get_vcm, spawn_agents
 
     results: list[dict[str, Any]] = []
 

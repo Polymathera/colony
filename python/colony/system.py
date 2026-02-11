@@ -152,15 +152,15 @@ class PolymatheraCluster:
 
         Example:
             ```python
-            from polymathera.colony.cluster import ClusterConfig, DeploymentConfig
+            from polymathera.colony.cluster import ClusterConfig, LLMDeploymentConfig
 
             # Create deployment configs from registry
-            llama_8b = DeploymentConfig.from_model_registry(
+            llama_8b = LLMDeploymentConfig.from_model_registry(
                 model_name="meta-llama/Llama-3.1-8B",
                 tensor_parallel_size=2,
                 num_replicas=4,
             )
-            llama_70b = DeploymentConfig.from_model_registry(
+            llama_70b = LLMDeploymentConfig.from_model_registry(
                 model_name="meta-llama/Llama-3.1-70B",
                 tensor_parallel_size=4,
                 num_replicas=2,

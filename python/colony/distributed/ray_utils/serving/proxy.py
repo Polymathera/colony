@@ -20,8 +20,10 @@ from .models import (
     LoggingConfig,
     ApplicationRegistry,
     RoutingHints,
+    LeastLoadedRouter,
+    RequestRouter,
+    RoundRobinRouter
 )
-from .router import LeastLoadedRouter, RequestRouter, RoundRobinRouter
 
 logger = logging.getLogger(__name__)
 

@@ -86,4 +86,9 @@ if [ "${PY_MAJOR}" -lt 3 ] || { [ "${PY_MAJOR}" -eq 3 ] && [ "${PY_MINOR}" -lt 1
 fi
 
 # --- Run the CLI ---
-exec "${PYTHON}" -m colony.cli.polymath "${EXTRA_ARGS[@]}" "$@"
+# We invoke polymath.py directly rather than `python -m colony.cli.polymath`
+# because the latter triggers colony/__init__.py which eagerly imports vllm/CUDA
+# dependencies. The polymath CLI only needs those heavy imports when actually
+# connecting to a Ray cluster (inside run_integration_test), not for listing
+# analyses, generating configs, or dry-run mode.
+exec "${PYTHON}" "${SCRIPT_DIR}/polymath.py" "${EXTRA_ARGS[@]}" "$@"

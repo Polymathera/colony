@@ -6,14 +6,14 @@ from typing import Any, Type
 
 import ray
 
+from .decorators import DeploymentConfig
 from .models import (
-    DeploymentConfig,
     DeploymentRequest,
     DeploymentResponse,
     DeploymentResponseStatus,
     ApplicationRegistry,
+    RequestRouter,
 )
-from .router import RequestRouter
 
 logger = logging.getLogger(__name__)
 

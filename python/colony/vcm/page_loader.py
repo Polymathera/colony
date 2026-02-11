@@ -23,8 +23,6 @@ from ..distributed.ray_utils import serving
 from .models import PageAllocationRequest, PageAllocationResponse, PagePriority
 from .models import VirtualContextPage, PageLocation, ContextPageId
 from .page_table import VirtualPageTable
-from ..system import get_vcm
-
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +62,8 @@ class PageLoader:
         self.policy = policy.upper()
 
         # Get VCM handle
+        # NOTE: Imported here (not at module level) to break circular import chain
+        from ..system import get_vcm
         self.vcm_handle: serving.DeploymentHandle | None = None  # TODO: Deprecated, for backward compatibility
         try:
             self.vcm_handle = get_vcm()

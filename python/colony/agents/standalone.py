@@ -9,7 +9,7 @@ These agents can:
 import logging
 
 from ..distributed.ray_utils import serving
-from ..cluster.config import DeploymentConfig
+from ..cluster.config import LLMDeploymentConfig
 from .base import AgentManagerBase
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class StandaloneAgentDeployment(AgentManagerBase):
         ```
     """
 
-    def __init__(self, deployment_config: DeploymentConfig | None = None):
+    def __init__(self, deployment_config: LLMDeploymentConfig | None = None):
         """Initialize standalone agent deployment.
 
         Uses environment-based discovery to find all services.

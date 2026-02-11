@@ -31,7 +31,7 @@ from .models import (
     LLMClientState,
     LoadedContextPage,
 )
-from .config import DeploymentConfig
+from .config import LLMDeploymentConfig
 from ..vcm.models import VirtualContextPage, ContextPageId
 from ..vcm.events import PageEvent, PageLoadedEvent, PageEvictedEvent, PageLoadFailedEvent
 from .registry import ModelRegistry
@@ -159,7 +159,7 @@ class VLLMDeployment(AgentManagerBase):
         quantization: str | None = None,
         s3_bucket: str | None = None,
         s3_retry_attempts: int = 10,
-        deployment_config: DeploymentConfig | None = None,
+        deployment_config: LLMDeploymentConfig | None = None,
     ):
         """Initialize VLLMDeployment.
 

@@ -52,7 +52,7 @@ from ..system import (
 )
 from .routing import AgentAffinityRouter, SoftPageAffinityRouter
 from ..vcm.page_storage import PageStorage, PageStorageConfig
-from ..cluster.config import DeploymentConfig
+from ..cluster.config import LLMDeploymentConfig
 from .patterns.hooks import AgentHookRegistry, Pointcut, HookType, ErrorMode, auto_register_hooks
 
 if TYPE_CHECKING:
@@ -2798,7 +2798,7 @@ class AgentManagerBase:
     - Provides communication infrastructure (via EnhancedBlackboard)
     """
 
-    def __init__(self, deployment_config: DeploymentConfig | None = None):
+    def __init__(self, deployment_config: LLMDeploymentConfig | None = None):
         """Initialize agent manager.
 
         Note: This is a mixin, so it should be called from the deployment's __init__.
@@ -2811,7 +2811,7 @@ class AgentManagerBase:
         self._agent_tasks: dict[str, asyncio.Task] = {}
         self._agent_lock = asyncio.Lock()
 
-        # Resource limits (from DeploymentConfig)
+        # Resource limits (from LLMDeploymentConfig)
         if deployment_config:
             self.max_agents = deployment_config.max_agents_per_replica
             self.max_cpu_cores = deployment_config.max_cpu_cores_per_replica

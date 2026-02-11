@@ -20,8 +20,6 @@ from .models import (
     LLMClusterState
 )
 from ..vcm.models import VirtualContextPage, ContextPageId
-from ..system import get_embedding_deployment, get_vllm_deployment
-
 logger = logging.getLogger(__name__)
 
 
@@ -85,15 +83,15 @@ class LLMCluster:
 
         Example:
             ```python
-            from polymathera.colony.cluster import ClusterConfig, DeploymentConfig
+            from polymathera.colony.cluster import ClusterConfig, LLMDeploymentConfig
 
             # Create deployment configs from registry
-            llama_8b = DeploymentConfig.from_model_registry(
+            llama_8b = LLMDeploymentConfig.from_model_registry(
                 model_name="meta-llama/Llama-3.1-8B",
                 tensor_parallel_size=2,
                 num_replicas=4,
             )
-            llama_70b = DeploymentConfig.from_model_registry(
+            llama_70b = LLMDeploymentConfig.from_model_registry(
                 model_name="meta-llama/Llama-3.1-70B",
                 tensor_parallel_size=4,
                 num_replicas=2,
@@ -236,6 +234,8 @@ class LLMCluster:
         - deploy() when top_level=True (after manual deployment)
         - initialize() when top_level=False (after automatic deployment)
         """
+        # NOTE: Imported here (not at module level) to break circular import chain
+        from ..system import get_embedding_deployment, get_vllm_deployment
         # Get deployment handles for all vLLM deployments
         for dconf in self.config.vllm_deployments:
             deployment_name = dconf.get_deployment_name()

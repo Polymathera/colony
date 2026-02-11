@@ -10,9 +10,8 @@ from typing import Any, Type
 import ray
 
 from .decorators import BoundDeployment
-from .models import ApplicationInfo, ApplicationRegistry, AutoscalingConfig, DeploymentProxyInfo, LoggingConfig
+from .models import ApplicationInfo, ApplicationRegistry, AutoscalingConfig, DeploymentProxyInfo, LoggingConfig, RequestRouter
 from .proxy import DeploymentProxyRayActor
-from .router import RequestRouter
 from ...state_management import StateManager
 
 logger = logging.getLogger(__name__)

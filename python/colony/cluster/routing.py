@@ -10,13 +10,18 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ..distributed.ray_utils.serving import DeploymentRequest, RequestRouter, LeastLoadedRouter
-from ..distributed.ray_utils.serving.models import DeploymentReplicaInfo, RoutingHints
+from ..distributed.ray_utils.serving import (
+    DeploymentRequest,
+    RequestRouter,
+    LeastLoadedRouter,
+    DeploymentReplicaInfo,
+    RoutingHints
+)
 from .models import InferenceRequest, LLMClientRequirements, LLMClientState
 from ..vcm.models import ContextPageId
 
 if TYPE_CHECKING:
-    from .config import DeploymentConfig
+    from .config import LLMDeploymentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -714,7 +719,7 @@ class RequirementBasedRouter:
 
     def __init__(
         self,
-        deployment_configs: list[DeploymentConfig],
+        deployment_configs: list[LLMDeploymentConfig],
         enable_fallbacks: bool = True,
     ):
         """Initialize requirement-based router.
@@ -723,7 +728,7 @@ class RequirementBasedRouter:
             deployment_configs: List of deployment configurations
             enable_fallbacks: Whether to enable fallback routing if primary fails constraints
         """
-        from .config import DeploymentConfig
+        from .config import LLMDeploymentConfig
         self.deployment_configs = deployment_configs
         self.enable_fallbacks = enable_fallbacks
 
@@ -773,7 +778,7 @@ class RequirementBasedRouter:
 
     def _matches_requirements(
         self,
-        dconf: DeploymentConfig,
+        dconf: LLMDeploymentConfig,
         requirements: LLMClientRequirements,
     ) -> bool:
         """Check if deployment matches requirements.
@@ -841,9 +846,9 @@ class RequirementBasedRouter:
 
     def _score_and_select(
         self,
-        candidates: list[DeploymentConfig],
+        candidates: list[LLMDeploymentConfig],
         requirements: LLMClientRequirements,
-    ) -> DeploymentConfig:
+    ) -> LLMDeploymentConfig:
         """Score candidates and select best deployment.
 
         Args:

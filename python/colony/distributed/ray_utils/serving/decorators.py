@@ -7,8 +7,7 @@ import logging
 import os
 from typing import Any, Callable, Type
 
-from .models import AutoscalingConfig, DeploymentRequest, DeploymentResponse, LoggingConfig
-from .router import RequestRouter
+from .models import AutoscalingConfig, DeploymentRequest, DeploymentResponse, LoggingConfig, RequestRouter
 
 logger = logging.getLogger(__name__)
 

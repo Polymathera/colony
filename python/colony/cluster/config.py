@@ -74,7 +74,7 @@ class LoRAAdapterConfig(BaseModel):
     )
 
 
-class DeploymentConfig(BaseModel):
+class LLMDeploymentConfig(BaseModel):
     """Configuration for a single vLLM deployment instance.
 
     This configuration is derived from model registry parameters and
@@ -284,7 +284,7 @@ class DeploymentConfig(BaseModel):
         quantization: str | None = None,
         s3_bucket: str | None = None,
         **overrides,
-    ) -> "DeploymentConfig":
+    ) -> LLMDeploymentConfig:
         """Create deployment config from model registry.
 
         Args:
@@ -295,11 +295,11 @@ class DeploymentConfig(BaseModel):
             **overrides: Additional configuration overrides
 
         Returns:
-            DeploymentConfig instance with registry-derived settings
+            LLMDeploymentConfig instance with registry-derived settings
 
         Example:
             ```python
-            config = DeploymentConfig.from_model_registry(
+            config = LLMDeploymentConfig.from_model_registry(
                 model_name="meta-llama/Llama-3.1-8B",
                 tensor_parallel_size=2,
                 quantization="awq",
@@ -402,12 +402,12 @@ class ClusterConfig(BaseModel):
     app_name: str = Field(description="Name for the serving application")
 
     # Multi-deployment configuration
-    vllm_deployments: list[DeploymentConfig] = Field(
+    vllm_deployments: list[LLMDeploymentConfig] = Field(
         description="List of vLLM deployment configurations for different models"
     )
 
     # Optional embedding deployment
-    embedding_config: DeploymentConfig | None = Field(
+    embedding_config: LLMDeploymentConfig | None = Field(
         default=None,
         description="Optional configuration for embedding model deployment"
     )

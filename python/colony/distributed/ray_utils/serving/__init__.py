@@ -70,10 +70,13 @@ from .models import (
     DeploymentResponse,
     DeploymentResponseStatus,
     LoggingConfig,
+    RoutingHints,
+    # Routing (for custom routing policies)
+    LeastLoadedRouter,
+    RequestRouter,
+    RoundRobinRouter,
 )
 
-# Routing (for custom routing policies)
-from .router import LeastLoadedRouter, RequestRouter, RoundRobinRouter
 
 # Internal components (exposed for advanced usage and testing)
 from .autoscaler import DeploymentAutoscaler
@@ -106,6 +109,7 @@ __all__ = [
     "DeploymentResponse",
     "DeploymentResponseStatus",
     "DeploymentReplicaInfo",
+    "RoutingHints",
     # Routing
     "RequestRouter",
     "RoundRobinRouter",

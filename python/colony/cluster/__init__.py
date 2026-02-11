@@ -50,7 +50,7 @@ Components:
 """
 
 from .cluster import LLMCluster
-from .config import ClusterConfig, DeploymentConfig, LoRAAdapterConfig
+from .config import ClusterConfig, LLMDeploymentConfig, LoRAAdapterConfig
 from .embedding_deployment import EmbeddingDeployment
 from .models import (
     ClusterStatistics,
@@ -64,7 +64,6 @@ from .models import (
     VLLMDeploymentState,
     LLMClusterState
 )
-from ..vcm.models import VirtualContextPage, ContextPageId
 from .registry import (
     LLMBackend,
     LLMCapability,
@@ -82,7 +81,7 @@ __all__ = [
     "LLMClusterState",
     # Configuration
     "ClusterConfig",
-    "DeploymentConfig",
+    "LLMDeploymentConfig",
     "LoRAAdapterConfig",
     # Deployments
     "VLLMDeployment",
@@ -91,8 +90,6 @@ __all__ = [
     "ContextAwareRouter",
     "PageAffinityRouter",
     # Models
-    "VirtualContextPage",
-    "ContextPageId",
     "ContextPageState",
     "LoadedContextPage",
     "InferenceRequest",
