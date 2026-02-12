@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from .registry import LLMModelParameters, QuantizationMethod
 
 from .registry import ModelRegistry
+from .remote_config import RemoteLLMDeploymentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +404,14 @@ class ClusterConfig(BaseModel):
 
     # Multi-deployment configuration
     vllm_deployments: list[LLMDeploymentConfig] = Field(
+        default_factory=list,
         description="List of vLLM deployment configurations for different models"
+    )
+
+    # Remote LLM deployments (Anthropic, OpenRouter)
+    remote_deployments: list[RemoteLLMDeploymentConfig] = Field(
+        default_factory=list,
+        description="List of remote LLM deployment configurations (no GPUs required)"
     )
 
     # Optional embedding deployment
@@ -457,7 +465,8 @@ class ClusterConfig(BaseModel):
         """
         logger.info(
             f"Deploying LLM cluster '{self.app_name}' to existing application "
-            f"with {len(self.vllm_deployments)} vLLM deployment(s)"
+            f"with {len(self.vllm_deployments)} vLLM deployment(s) "
+            f"and {len(self.remote_deployments)} remote deployment(s)"
         )
         from ..cluster import LLMCluster
         from .vllm_deployment import VLLMDeployment
@@ -505,6 +514,41 @@ class ClusterConfig(BaseModel):
                 },
                 ray_actor_options={
                     "num_gpus": dconf.tensor_parallel_size,
+                },
+            )
+
+        # Add each remote deployment (Anthropic / OpenRouter)
+        for rconf in self.remote_deployments:
+            deployment_name = rconf.get_deployment_name()
+            logger.info(
+                f"Adding remote deployment '{deployment_name}': "
+                f"model={rconf.model_name}, provider={rconf.provider}, "
+                f"replicas={rconf.num_replicas}"
+            )
+
+            # Select deployment class based on provider
+            if rconf.provider == "anthropic":
+                from .anthropic_deployment import AnthropicLLMDeployment
+                deployment_cls = AnthropicLLMDeployment
+            elif rconf.provider == "openrouter":
+                from .openrouter_deployment import OpenRouterLLMDeployment
+                deployment_cls = OpenRouterLLMDeployment
+            else:
+                raise ValueError(f"Unknown remote provider: {rconf.provider}")
+
+            default_router_class = get_routing_policy_class(rconf.default_router_class)
+
+            app.add_deployment(
+                deployment_cls.bind(config=rconf),
+                name=deployment_name,
+                default_router_class=default_router_class,
+                autoscaling_config={
+                    "min_replicas": rconf.min_replicas,
+                    "max_replicas": rconf.max_replicas,
+                    "target_queue_length": rconf.target_queue_length,
+                },
+                ray_actor_options={
+                    "num_gpus": 0,  # No GPUs needed for remote deployments
                 },
             )
 

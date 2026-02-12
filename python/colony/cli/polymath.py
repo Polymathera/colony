@@ -411,6 +411,9 @@ class TestConfig:
     # references custom agent_type or capability paths that aren't in the Docker
     # image or the colony package.
     working_dir: str | None = None
+    # Budget enforcement for remote LLM deployments
+    budget_usd: float | None = None  # Maximum budget in USD (None = unlimited)
+    warn_budget_pct: float = 0.8     # Warn when cost reaches this fraction of budget
 
 
 def load_config_from_yaml(path: str) -> TestConfig:
@@ -484,6 +487,8 @@ def load_config_from_yaml(path: str) -> TestConfig:
         timeout_seconds=raw.get("timeout_seconds", 600),
         verbose=raw.get("verbose", False),
         working_dir=raw.get("working_dir"),
+        budget_usd=raw.get("budget_usd"),
+        warn_budget_pct=raw.get("warn_budget_pct", 0.8),
     )
 
 
@@ -610,6 +615,13 @@ hierarchy:
 output_dir: "./polymath-results"
 timeout_seconds: 600
 verbose: false
+
+# --- Budget Enforcement (Remote LLM APIs) ---
+# Maximum spend in USD for remote LLM API calls (Anthropic, OpenRouter).
+# When the budget is exceeded, remaining analyses are skipped (soft stop).
+# Omit or set to null for unlimited spending.
+# budget_usd: 5.00
+# warn_budget_pct: 0.8    # Warn when cost reaches 80% of budget (default)
 """
 
 
@@ -691,12 +703,23 @@ def build_analysis_tree(config: TestConfig) -> Tree:
 
 def display_results_table(results: list[dict[str, Any]]) -> None:
     """Display analysis results in a rich table."""
+    # Check if any result has cost data to decide whether to show cost columns
+    has_cost_data = any(r.get("cost_usd", 0) > 0 for r in results)
+    has_token_data = any(
+        r.get("input_tokens", 0) > 0 or r.get("output_tokens", 0) > 0
+        for r in results
+    )
+
     table = Table(title="Analysis Results", show_lines=True)
     table.add_column("Analysis", style="bold cyan", min_width=20)
     table.add_column("Status", min_width=10)
     table.add_column("Coordinator", style="dim", min_width=20)
     table.add_column("Agents Spawned", justify="right", min_width=8)
     table.add_column("Duration", justify="right", min_width=10)
+    if has_token_data:
+        table.add_column("Tokens (in/out)", justify="right", min_width=14)
+    if has_cost_data:
+        table.add_column("Cost ($)", justify="right", min_width=10)
     table.add_column("Summary", min_width=30)
 
     for r in results:
@@ -706,6 +729,7 @@ def display_results_table(results: list[dict[str, Any]]) -> None:
             "failed": "[bold red]failed[/bold red]",
             "timeout": "[bold yellow]timeout[/bold yellow]",
             "skipped": "[dim]skipped[/dim]",
+            "budget_exceeded": "[bold red]budget exceeded[/bold red]",
         }.get(status, f"[dim]{status}[/dim]")
 
         duration = r.get("duration_seconds", 0)
@@ -715,16 +739,40 @@ def display_results_table(results: list[dict[str, Any]]) -> None:
         if len(summary) > 60:
             summary = summary[:57] + "..."
 
-        table.add_row(
+        row = [
             r.get("analysis_type", "-"),
             status_style,
             r.get("coordinator_id", "-"),
             str(r.get("agents_spawned", "-")),
             duration_str,
-            summary,
-        )
+        ]
+
+        if has_token_data:
+            in_tok = r.get("input_tokens", 0)
+            out_tok = r.get("output_tokens", 0)
+            row.append(f"{in_tok:,}/{out_tok:,}" if in_tok or out_tok else "-")
+
+        if has_cost_data:
+            cost = r.get("cost_usd", 0.0)
+            row.append(f"${cost:.4f}" if cost > 0 else "-")
+
+        row.append(summary)
+        table.add_row(*row)
 
     console.print(table)
+
+    # Print cost summary if there's cost data
+    if has_cost_data:
+        total_cost = sum(r.get("cost_usd", 0.0) for r in results)
+        total_in = sum(r.get("input_tokens", 0) for r in results)
+        total_out = sum(r.get("output_tokens", 0) for r in results)
+        total_cache_read = sum(r.get("cache_read_tokens", 0) for r in results)
+        total_cache_write = sum(r.get("cache_write_tokens", 0) for r in results)
+        console.print(
+            f"\n  [bold]Total cost:[/bold] ${total_cost:.4f}  "
+            f"[dim](tokens: {total_in:,} in / {total_out:,} out, "
+            f"cache: {total_cache_read:,} read / {total_cache_write:,} write)[/dim]"
+        )
 
 
 # ===========================================================================
@@ -763,7 +811,8 @@ async def run_integration_test(
     from colony.vcm.sources import BuilInContextPageSourceType
     from colony.vcm.models import MmapConfig, MmapResult
     from colony.agents import AgentSpawnSpec, AgentMetadata, AgentHandle, AgentRunEvent
-    from colony.system import get_vcm
+    from colony.system import get_vcm, get_session_manager
+    from colony.agents.sessions import AgentRun
 
     results: list[dict[str, Any]] = []
 
@@ -964,6 +1013,30 @@ async def run_integration_test(
         border_style="yellow",
     ))
 
+    async def _get_run_cost(run_id: str) -> dict[str, Any]:
+        """Query SessionManagerDeployment for accumulated cost data for a run."""
+        try:
+            sm_handle = get_session_manager(app_name)
+            run: AgentRun = await sm_handle.get_run(run_id=run_id)
+            if run and run.resource_usage:
+                usage = run.resource_usage
+                return {
+                    "cost_usd": usage.cost_usd,
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_read_tokens": usage.cache_read_tokens,
+                    "cache_write_tokens": usage.cache_write_tokens,
+                }
+        except Exception as e:
+            logger.debug(f"Could not retrieve cost data for run {run_id}: {e}")
+        return {
+            "cost_usd": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+        }
+
     async def monitor_coordinator(
         analysis_cfg: AnalysisConfig,
         handle: AgentHandle,
@@ -977,6 +1050,19 @@ async def run_integration_test(
         start = time.time()
         event_count = 0
         last_event_type = "unknown"
+
+        def _make_result(
+            status: str, agents_spawned: int, summary: str,
+        ) -> dict[str, Any]:
+            return {
+                "analysis_type": reg["label"],
+                "coordinator_id": handle.agent_id,
+                "status": status,
+                "agents_spawned": agents_spawned,
+                "duration_seconds": time.time() - start,
+                "summary": summary,
+                "events": event_count,
+            }
 
         try:
             async for event in handle.run_streamed(
@@ -1003,65 +1089,47 @@ async def run_integration_test(
                         value = event.data.get("value", {})
                         if isinstance(value, dict):
                             agents_spawned = value.get("agents_spawned", 0)
-                    return {
-                        "analysis_type": reg["label"],
-                        "coordinator_id": handle.agent_id,
-                        "status": "completed",
-                        "agents_spawned": agents_spawned,
-                        "duration_seconds": time.time() - start,
-                        "summary": "Analysis complete",
-                        "events": event_count,
-                    }
+                    result = _make_result("completed", agents_spawned, "Analysis complete")
+                    cost_data = await _get_run_cost(config.run_id)
+                    result.update(cost_data)
+                    return result
 
                 if event.event_type == "error":
                     error_msg = "Unknown error"
                     if isinstance(event.data, dict):
                         error_msg = event.data.get("error", error_msg)
-                    return {
-                        "analysis_type": reg["label"],
-                        "coordinator_id": handle.agent_id,
-                        "status": "failed",
-                        "agents_spawned": 0,
-                        "duration_seconds": time.time() - start,
-                        "summary": f"Error: {error_msg}",
-                        "events": event_count,
-                    }
+                    result = _make_result("failed", 0, f"Error: {error_msg}")
+                    cost_data = await _get_run_cost(config.run_id)
+                    result.update(cost_data)
+                    return result
 
                 if event.event_type == "timeout":
-                    return {
-                        "analysis_type": reg["label"],
-                        "coordinator_id": handle.agent_id,
-                        "status": "timeout",
-                        "agents_spawned": 0,
-                        "duration_seconds": time.time() - start,
-                        "summary": f"Timed out after {config.timeout_seconds}s",
-                        "events": event_count,
-                    }
+                    result = _make_result("timeout", 0, f"Timed out after {config.timeout_seconds}s")
+                    cost_data = await _get_run_cost(config.run_id)
+                    result.update(cost_data)
+                    return result
 
         except Exception as e:
             logger.error(f"Error monitoring {handle.agent_id}: {e}")
-            return {
-                "analysis_type": reg["label"],
-                "coordinator_id": handle.agent_id,
-                "status": "failed",
-                "agents_spawned": 0,
-                "duration_seconds": time.time() - start,
-                "summary": f"Monitor error: {e}",
-                "events": event_count,
-            }
+            result = _make_result("failed", 0, f"Monitor error: {e}")
+            cost_data = await _get_run_cost(config.run_id)
+            result.update(cost_data)
+            return result
 
         # Stream ended without an explicit terminal event
-        return {
-            "analysis_type": reg["label"],
-            "coordinator_id": handle.agent_id,
-            "status": "completed" if last_event_type != "error" else "failed",
-            "agents_spawned": 0,
-            "duration_seconds": time.time() - start,
-            "summary": f"Stream ended (last event: {last_event_type})",
-            "events": event_count,
-        }
+        result = _make_result(
+            "completed" if last_event_type != "error" else "failed",
+            0,
+            f"Stream ended (last event: {last_event_type})",
+        )
+        cost_data = await _get_run_cost(config.run_id)
+        result.update(cost_data)
+        return result
 
-    # Run all monitors concurrently
+    # Run all monitors concurrently with budget tracking
+    accumulated_cost_usd = 0.0
+    budget_exceeded = False
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -1080,6 +1148,15 @@ async def run_integration_test(
             for analysis_cfg, handle in coordinator_handles
         ]
 
+        ### remaining_tasks = list(monitor_tasks)
+        ### while remaining_tasks:
+        ###     done, remaining_tasks_set = await asyncio.wait(
+        ###         remaining_tasks, return_when=asyncio.FIRST_COMPLETED,
+        ###     )
+        ###     remaining_tasks = list(remaining_tasks_set)
+
+        ###     for task in done:
+        ###         result = task.result()
         for coro in asyncio.as_completed(monitor_tasks):
             result = await coro
             results.append(result)
@@ -1087,12 +1164,67 @@ async def run_integration_test(
 
             label = result.get("analysis_type", "?")
             status = result.get("status", "?")
+            cost = result.get("cost_usd", 0.0)
+            accumulated_cost_usd += cost
+
             style = {
                 "completed": "green",
                 "failed": "red",
                 "timeout": "yellow",
+                "budget_exceeded": "red",
             }.get(status, "dim")
-            console.print(f"  [{style}]{label}: {status}[/{style}]")
+
+            cost_str = f" (${cost:.4f})" if cost > 0 else ""
+            console.print(f"  [{style}]{label}: {status}{cost_str}[/{style}]")
+
+            # Budget enforcement (soft stop)
+            if config.budget_usd is not None and not budget_exceeded:
+                warn_threshold = config.budget_usd * config.warn_budget_pct
+                if accumulated_cost_usd >= config.budget_usd:
+                    budget_exceeded = True
+                    console.print(
+                        f"\n  [bold red]BUDGET EXCEEDED:[/bold red] "
+                        f"${accumulated_cost_usd:.4f} >= ${config.budget_usd:.2f} limit. "
+                        f"Cancelling remaining analyses."
+                    )
+                    # Cancel remaining monitor tasks
+                    for t in remaining_tasks:
+                        t.cancel()
+                    # Record skipped analyses
+                    for t in remaining_tasks:
+                        try:
+                            await t
+                        except asyncio.CancelledError:
+                            pass
+                    # Add budget_exceeded entries for cancelled analyses
+                    completed_ids = {r["coordinator_id"] for r in results}
+                    for analysis_cfg, handle in coordinator_handles:
+                        if handle.agent_id not in completed_ids:
+                            reg = ANALYSIS_REGISTRY[analysis_cfg.type]
+                            results.append({
+                                "analysis_type": reg["label"],
+                                "coordinator_id": handle.agent_id,
+                                "status": "budget_exceeded",
+                                "agents_spawned": 0,
+                                "duration_seconds": 0,
+                                "summary": f"Skipped — budget exceeded (${accumulated_cost_usd:.4f}/${config.budget_usd:.2f})",
+                                "events": 0,
+                                "cost_usd": 0.0,
+                            })
+                    remaining_tasks = []
+                    break
+                elif accumulated_cost_usd >= warn_threshold:
+                    console.print(
+                        f"  [yellow]WARNING:[/yellow] Cost ${accumulated_cost_usd:.4f} "
+                        f"has reached {config.warn_budget_pct*100:.0f}% of "
+                        f"${config.budget_usd:.2f} budget"
+                    )
+
+    # Print total cost summary
+    if accumulated_cost_usd > 0:
+        console.print(
+            f"\n  [bold]Total accumulated cost:[/bold] ${accumulated_cost_usd:.4f}"
+        )
 
     return results
 
@@ -1203,6 +1335,11 @@ def run(
         "--dry-run",
         help="Show the planned agent hierarchy without running the test.",
     ),
+    budget: Optional[float] = typer.Option(
+        None,
+        "--budget",
+        help="Maximum budget in USD for remote LLM API calls. Analyses are stopped when exceeded.",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose", "-v",
@@ -1235,9 +1372,11 @@ def run(
         try:
             test_config = load_config_from_yaml(config)
             console.print(f"[dim]Loaded config from {config}[/dim]")
-            # CLI --working-dir overrides YAML value
+            # CLI options override YAML values
             if working_dir is not None:
                 test_config.working_dir = working_dir
+            if budget is not None:
+                test_config.budget_usd = budget
         except Exception as e:
             console.print(f"[red]Failed to load config: {e}[/red]")
             raise typer.Exit(1)
@@ -1265,6 +1404,7 @@ def run(
             timeout_seconds=timeout,
             verbose=verbose,
             working_dir=working_dir,
+            budget_usd=budget,
         )
 
     # Validate codebase path
@@ -1286,12 +1426,18 @@ def run(
         raise typer.Exit(0)
 
     # Run the integration test
+    budget_line = (
+        f"\n[bold]Budget:[/bold]   ${test_config.budget_usd:.2f}"
+        if test_config.budget_usd is not None
+        else "\n[bold]Budget:[/bold]   unlimited"
+    )
     console.print(Panel(
         f"[bold]Codebase:[/bold] {codebase_path}\n"
         f"[bold]Repo ID:[/bold]  {test_config.repo_id}\n"
         f"[bold]Session:[/bold]  {test_config.session_id}\n"
         f"[bold]Run ID:[/bold]   {test_config.run_id}\n"
-        f"[bold]Timeout:[/bold]  {test_config.timeout_seconds}s",
+        f"[bold]Timeout:[/bold]  {test_config.timeout_seconds}s"
+        f"{budget_line}",
         title="[bold]Starting Integration Test[/bold]",
         border_style="bright_blue",
     ))
@@ -1320,12 +1466,15 @@ def run(
     output_path.mkdir(parents=True, exist_ok=True)
     results_file = output_path / f"results_{test_config.session_id}.json"
 
+    total_cost = sum(r.get("cost_usd", 0.0) for r in test_results)
     results_payload = {
         "session_id": test_config.session_id,
         "run_id": test_config.run_id,
         "repo_id": test_config.repo_id,
         "codebase_path": str(codebase),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "total_cost_usd": total_cost,
+        "budget_usd": test_config.budget_usd,
         "results": test_results,
     }
 
@@ -1336,9 +1485,15 @@ def run(
 
     # Exit with error code if any analysis failed
     failures = [r for r in test_results if r.get("status") in ("failed", "timeout")]
+    budget_skipped = [r for r in test_results if r.get("status") == "budget_exceeded"]
     if failures:
         console.print(f"\n[yellow]{len(failures)} analysis(es) failed or timed out.[/yellow]")
         raise typer.Exit(1)
+    if budget_skipped:
+        console.print(
+            f"\n[yellow]{len(budget_skipped)} analysis(es) skipped due to budget limit.[/yellow]"
+        )
+        raise typer.Exit(2)
 
     console.print("\n[bold green]All analyses completed successfully.[/bold green]")
 

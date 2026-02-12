@@ -598,6 +598,7 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
         page = VirtualContextPage(
             page_id=page_id,
             tokens=tokens,
+            text=content_text,
             size=len(tokens),
             group_id=f"bb:{self._scope_id}:{locality_key}",
             metadata={

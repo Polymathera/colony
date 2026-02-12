@@ -883,6 +883,9 @@ class SessionManagerDeployment:
         output_tokens: int = 0,
         llm_calls: int = 0,
         child_agent_id: str | None = None,
+        cost_usd: float = 0.0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
     ) -> bool:
         """Update resource usage for a run.
 
@@ -894,6 +897,9 @@ class SessionManagerDeployment:
             output_tokens: Output tokens to add
             llm_calls: LLM calls to add
             child_agent_id: Child agent spawned (if any)
+            cost_usd: Cost in USD to add (from remote LLM deployments)
+            cache_read_tokens: Cache read tokens to add (prefix cache hits)
+            cache_write_tokens: Cache write tokens to add (prefix cache creation)
 
         Returns:
             True if run was found and updated
@@ -907,6 +913,9 @@ class SessionManagerDeployment:
             run.resource_usage.output_tokens += output_tokens
             run.resource_usage.total_tokens += input_tokens + output_tokens
             run.resource_usage.llm_calls += llm_calls
+            run.resource_usage.cost_usd += cost_usd
+            run.resource_usage.cache_read_tokens += cache_read_tokens
+            run.resource_usage.cache_write_tokens += cache_write_tokens
 
             if child_agent_id:
                 run.resource_usage.agents_spawned += 1

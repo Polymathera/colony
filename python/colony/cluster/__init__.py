@@ -72,6 +72,10 @@ from .registry import (
     ModelRegistry,
     QuantizationMethod,
 )
+from .remote_config import RemoteLLMDeploymentConfig
+from .remote_deployment import RemoteLLMDeployment
+from .anthropic_deployment import AnthropicLLMDeployment
+from .openrouter_deployment import OpenRouterLLMDeployment
 from .routing import ContextAwareRouter, PageAffinityRouter
 from .vllm_deployment import VLLMDeployment
 
@@ -83,9 +87,13 @@ __all__ = [
     "ClusterConfig",
     "LLMDeploymentConfig",
     "LoRAAdapterConfig",
+    "RemoteLLMDeploymentConfig",
     # Deployments
     "VLLMDeployment",
     "EmbeddingDeployment",
+    "RemoteLLMDeployment",
+    "AnthropicLLMDeployment",
+    "OpenRouterLLMDeployment",
     # Routing
     "ContextAwareRouter",
     "PageAffinityRouter",

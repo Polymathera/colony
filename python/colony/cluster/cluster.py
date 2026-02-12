@@ -121,6 +121,7 @@ class LLMCluster:
         # Will be set during deployment
         self.app: serving.Application | None = None
         self.vllm_deployment_handles: dict[str, serving.DeploymentHandle] = {}
+        self.remote_deployment_handles: dict[str, serving.DeploymentHandle] = {}
         self.embedding_deployment_handle: serving.DeploymentHandle | None = None
         self.state_manager: StateManager | None = None
         self.deployment_state_managers: dict[str, StateManager] = {}
@@ -152,7 +153,8 @@ class LLMCluster:
         await self._discover_deployment_handles()
 
         logger.info(
-            f"LLMCluster deployment initialized: {len(self.vllm_deployment_handles)} VLLM deployments"
+            f"LLMCluster deployment initialized: {len(self.vllm_deployment_handles)} VLLM deployments, "
+            f"{len(self.remote_deployment_handles)} remote deployments"
         )
 
     async def cleanup_state_managers(self) -> None:
@@ -228,7 +230,7 @@ class LLMCluster:
         )
 
     async def _discover_deployment_handles(self) -> None:
-        """Discover VLLM deployment handles and initialize deployment state managers.
+        """Discover VLLM and remote deployment handles and initialize state managers.
 
         Called by:
         - deploy() when top_level=True (after manual deployment)
@@ -245,6 +247,16 @@ class LLMCluster:
             )
             logger.debug(f"Connected to VLLM deployment: {deployment_name}")
 
+        # Get deployment handles for all remote deployments
+        for rconf in self.config.remote_deployments:
+            deployment_name = rconf.get_deployment_name()
+            # Remote deployments use the same serving.get_deployment() mechanism
+            self.remote_deployment_handles[deployment_name] = serving.get_deployment(
+                self.app_name,
+                deployment_name,
+            )
+            logger.debug(f"Connected to remote deployment: {deployment_name}")
+
         # Get embedding deployment handle if configured
         if self.config.embedding_config:
             self.embedding_deployment_handle = get_embedding_deployment(self.app_name)
@@ -255,8 +267,9 @@ class LLMCluster:
 
     async def _initialize_deployment_state_managers(self) -> None:
         # Per-deployment state managers (for reading deployment states)
+        total_deployments = len(self.config.vllm_deployments) + len(self.config.remote_deployments)
         if len(self.deployment_state_managers) > 0:
-            if len(self.deployment_state_managers) != len(self.config.vllm_deployments):
+            if len(self.deployment_state_managers) != total_deployments:
                 raise RuntimeError("Deployment state managers must match configured deployments")
             return  # Already initialized
 
@@ -265,8 +278,18 @@ class LLMCluster:
         polymathera = get_polymathera()
 
         self.deployment_state_managers = {}
+        # vLLM deployments
         for dconf in self.config.vllm_deployments:
             deployment_name = dconf.get_deployment_name()
+            deployment_state_manager = await polymathera.get_state_manager(
+                state_type=VLLMDeploymentState,
+                state_key=VLLMDeploymentState.get_state_key(self.app_name, deployment_name),
+            )
+            self.deployment_state_managers[deployment_name] = deployment_state_manager
+
+        # Remote deployments (reuse VLLMDeploymentState — same structure)
+        for rconf in self.config.remote_deployments:
+            deployment_name = rconf.get_deployment_name()
             deployment_state_manager = await polymathera.get_state_manager(
                 state_type=VLLMDeploymentState,
                 state_key=VLLMDeploymentState.get_state_key(self.app_name, deployment_name),
@@ -284,6 +307,7 @@ class LLMCluster:
                 await self.app.stop()
             self.app = None
         self.vllm_deployment_handles = {}
+        self.remote_deployment_handles = {}
         self.embedding_deployment_handle = None
         logger.info(f"LLM cluster '{self.app_name}' shut down successfully")
 
@@ -304,7 +328,8 @@ class LLMCluster:
             RuntimeError: If cluster is not deployed
             ValueError: If no deployment matches requirements or tenant validation fails
         """
-        if not self.vllm_deployment_handles:
+        all_handles = {**self.vllm_deployment_handles, **self.remote_deployment_handles}
+        if not all_handles:
             raise RuntimeError("Cluster not deployed. Call deploy() first.")
 
         # Validate tenant access if multi-tenancy is enabled
@@ -313,7 +338,7 @@ class LLMCluster:
 
         # Select deployment based on requirements
         deployment_name = self._select_deployment_for_request(request)
-        deployment_handle = self.vllm_deployment_handles[deployment_name]
+        deployment_handle = all_handles[deployment_name]
 
         logger.debug(
             f"Routing request {request.request_id} to deployment '{deployment_name}' "
@@ -373,7 +398,8 @@ class LLMCluster:
             RuntimeError: If cluster is not deployed
             ValueError: If tenant validation fails or client_id specified without deployment_name
         """
-        if not self.vllm_deployment_handles:
+        all_handles = {**self.vllm_deployment_handles, **self.remote_deployment_handles}
+        if not all_handles:
             raise RuntimeError("Cluster not deployed. Call deploy() first.")
 
         # Validate tenant access
@@ -388,12 +414,12 @@ class LLMCluster:
 
         # Determine which deployments to load into
         if deployment_name:
-            if deployment_name not in self.vllm_deployment_handles:
+            if deployment_name not in all_handles:
                 raise ValueError(f"Deployment '{deployment_name}' not found in cluster")
-            deployment_handles = {deployment_name: self.vllm_deployment_handles[deployment_name]}
+            deployment_handles = {deployment_name: all_handles[deployment_name]}
         else:
             # Load into all deployments for maximum availability
-            deployment_handles = self.vllm_deployment_handles
+            deployment_handles = all_handles
 
         # Load page into selected deployment(s)
         # Each deployment's replicas will track internally which specific replica has the page
@@ -438,15 +464,16 @@ class LLMCluster:
         Raises:
             RuntimeError: If cluster is not deployed
         """
-        if not self.vllm_deployment_handles:
+        all_handles = {**self.vllm_deployment_handles, **self.remote_deployment_handles}
+        if not all_handles:
             raise RuntimeError("Cluster not deployed. Call deploy() first.")
 
         # Determine which deployments to evict from
         if deployment_name:
-            deployment_handles = {deployment_name: self.vllm_deployment_handles[deployment_name]}
+            deployment_handles = {deployment_name: all_handles[deployment_name]}
         else:
             # Evict from all deployments
-            deployment_handles = self.vllm_deployment_handles
+            deployment_handles = all_handles
 
         # Evict page from selected deployment(s)
         success = False
@@ -534,7 +561,7 @@ class LLMCluster:
 
     @serving.endpoint
     async def get_all_deployment_names(self) -> list[str]:
-        """Get names of all VLLM deployments in the cluster.
+        """Get names of all deployments (vLLM + remote) in the cluster.
 
         Returns:
             List of deployment names
@@ -542,7 +569,7 @@ class LLMCluster:
         if not self.app:
             raise RuntimeError("Cluster not deployed. Call deploy() first.")
 
-        return list(self.vllm_deployment_handles.keys())
+        return list(self.vllm_deployment_handles.keys()) + list(self.remote_deployment_handles.keys())
 
     @serving.endpoint
     async def get_all_client_states(self) -> dict[str, dict[str, dict[str, any]]]:
@@ -671,9 +698,10 @@ class LLMCluster:
         """
         from .routing import RequirementBasedRouter
 
-        # Create router for deployment selection
+        # Create router for deployment selection (includes both vLLM and remote)
         router = RequirementBasedRouter(
             deployment_configs=self.config.vllm_deployments,
+            remote_deployment_configs=self.config.remote_deployments,
             enable_fallbacks=self.config.enable_fallbacks,
         )
 

@@ -704,6 +704,12 @@ class PageStorage:
 
             storage_location = await self.blob_storage.store_blob(blob_key, tokens_data)
 
+            # 2b. Store text blob if available (for remote LLM deployments)
+            if page.text is not None:
+                text_blob_key = f"{blob_key}.text"
+                text_data = page.text.encode("utf-8")
+                await self.blob_storage.store_blob(text_blob_key, text_data)
+
             # 3. Store metadata to PostgreSQL
             await self.page_metadata_store.store_page_metadata(
                 page,
@@ -713,7 +719,8 @@ class PageStorage:
 
             logger.info(
                 f"Stored page {page.page_id} "
-                f"(backend={self.backend_type}, size={page.size} tokens, location={storage_location})"
+                f"(backend={self.backend_type}, size={page.size} tokens, "
+                f"has_text={page.text is not None}, location={storage_location})"
             )
 
         except Exception as e:
@@ -750,6 +757,19 @@ class PageStorage:
             # 3. Deserialize tokens
             tokens = msgpack.unpackb(tokens_data, raw=False)
 
+            # 3b. Try to retrieve text blob (may not exist for older pages)
+            text = None
+            try:
+                blob_key = self._get_blob_key(page_id, page_metadata.tenant_id)
+                text_blob_key = f"{blob_key}.text"
+                text_data = await self.blob_storage.retrieve_blob(text_blob_key)
+                if text_data:
+                    text = text_data.decode("utf-8")
+            except Exception:
+                # Text blob doesn't exist — this is expected for pages created
+                # before the text field was added
+                pass
+
             # 4. Reconstruct VirtualContextPage
             metadata = json.loads(page_metadata.metadata_json)
 
@@ -757,6 +777,7 @@ class PageStorage:
                 page_id=page_metadata.page_id,
                 tenant_id=page_metadata.tenant_id,
                 tokens=tokens,
+                text=text,
                 size=page_metadata.size,
                 created_at=page_metadata.created_at.timestamp(),
                 metadata=metadata,
@@ -806,6 +827,14 @@ class PageStorage:
 
             # 3. Delete blob from storage
             await self.blob_storage.delete_blob(storage_location)
+
+            # 3b. Delete text blob if it exists
+            try:
+                blob_key = self._get_blob_key(page_id, page_metadata.tenant_id)
+                text_blob_key = f"{blob_key}.text"
+                await self.blob_storage.delete_blob(text_blob_key)
+            except Exception:
+                pass  # Text blob may not exist
 
             logger.info(f"Deleted page {page_id} (backend={self.backend_type})")
             return True

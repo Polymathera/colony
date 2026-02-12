@@ -99,6 +99,12 @@ class VirtualContextPage(BaseModel):
 
     page_id: ContextPageId = Field(..., description="Unique page identifier")
     tokens: list[int] = Field(..., description="Token sequence")
+    text: str | None = Field(
+        None,
+        description="Source text for remote LLM deployments that consume text, not token IDs. "
+        "VLLMDeployment ignores this field (uses tokens). RemoteLLMDeployment requires it "
+        "(falls back to tokenizer.decode(tokens) if None)."
+    )
     size: int = Field(..., description="Number of tokens")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Arbitrary metadata")
 

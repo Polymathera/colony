@@ -213,6 +213,11 @@ class RunResourceUsage(BaseModel):
     total_tokens: int = Field(default=0, ge=0, description="Total tokens (input + output)")
     llm_calls: int = Field(default=0, ge=0, description="Number of LLM API calls")
 
+    # Cost tracking (for remote LLM deployments)
+    cost_usd: float = Field(default=0.0, ge=0.0, description="Estimated cost in USD")
+    cache_read_tokens: int = Field(default=0, ge=0, description="Tokens read from cache (prefix cache hits)")
+    cache_write_tokens: int = Field(default=0, ge=0, description="Tokens written to cache (prefix cache creation)")
+
     # Agent tree
     agents_spawned: int = Field(default=0, ge=0, description="Child agents spawned")
     child_agent_ids: list[str] = Field(

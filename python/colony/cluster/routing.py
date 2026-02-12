@@ -719,18 +719,25 @@ class RequirementBasedRouter:
 
     def __init__(
         self,
-        deployment_configs: list[LLMDeploymentConfig],
+        deployment_configs: list[LLMDeploymentConfig] | None = None,
+        remote_deployment_configs: list | None = None,
         enable_fallbacks: bool = True,
     ):
         """Initialize requirement-based router.
 
         Args:
-            deployment_configs: List of deployment configurations
+            deployment_configs: List of vLLM deployment configurations
+            remote_deployment_configs: List of remote deployment configurations
             enable_fallbacks: Whether to enable fallback routing if primary fails constraints
         """
         from .config import LLMDeploymentConfig
-        self.deployment_configs = deployment_configs
+        self.deployment_configs = deployment_configs or []
+        self.remote_deployment_configs = remote_deployment_configs or []
         self.enable_fallbacks = enable_fallbacks
+
+    def _get_all_configs(self) -> list:
+        """Get all deployment configs (vLLM + remote) as a flat list."""
+        return list(self.deployment_configs) + list(self.remote_deployment_configs)
 
     def select_deployment(
         self,
@@ -747,10 +754,12 @@ class RequirementBasedRouter:
         Raises:
             ValueError: If no deployment matches requirements
         """
+        all_configs = self._get_all_configs()
+
         if not requirements:
             # No requirements, return first deployment
-            if self.deployment_configs:
-                return self.deployment_configs[0].get_deployment_name()
+            if all_configs:
+                return all_configs[0].get_deployment_name()
             raise ValueError("No deployments available")
 
         # Filter by requirements
@@ -758,18 +767,21 @@ class RequirementBasedRouter:
         for dconf in self.deployment_configs:
             if self._matches_requirements(dconf, requirements):
                 candidates.append(dconf)
+        for rconf in self.remote_deployment_configs:
+            if self._matches_remote_requirements(rconf, requirements):
+                candidates.append(rconf)
 
         if not candidates:
-            if self.enable_fallbacks:
+            if self.enable_fallbacks and all_configs:
                 # Fallback to any deployment
                 logger.warning(
                     f"No deployment matches requirements {requirements}. "
                     f"Using fallback to first deployment."
                 )
-                return self.deployment_configs[0].get_deployment_name()
+                return all_configs[0].get_deployment_name()
             raise ValueError(
                 f"No deployment matches requirements: {requirements}. "
-                f"Available: {[d.get_deployment_name() for d in self.deployment_configs]}"
+                f"Available: {[d.get_deployment_name() for d in all_configs]}"
             )
 
         # Score candidates and select best
@@ -838,6 +850,53 @@ class RequirementBasedRouter:
             if deployment_name not in requirements.preferred_deployment_ids:
                 # Not in preferred list, but might still be acceptable
                 # Check if it's explicitly excluded via fallback list
+                if requirements.fallback_deployment_ids:
+                    if deployment_name not in requirements.fallback_deployment_ids:
+                        return False
+
+        return True
+
+    def _matches_remote_requirements(
+        self,
+        rconf,
+        requirements: LLMClientRequirements,
+    ) -> bool:
+        """Check if a remote deployment matches requirements.
+
+        Remote deployments don't have model registry entries, so matching
+        is done directly on the config fields.
+
+        Args:
+            rconf: RemoteLLMDeploymentConfig
+            requirements: Client requirements
+
+        Returns:
+            True if deployment matches all required constraints
+        """
+        # Check model family via model_name string
+        if requirements.model_family:
+            if requirements.model_family.lower() not in rconf.model_name.lower():
+                return False
+
+        # Remote deployments don't expose context_window directly — skip those checks
+        # (Remote APIs handle context limits internally)
+
+        # Check capability requirements
+        if requirements.requires_structured_output:
+            if "structured_output" not in rconf.capabilities:
+                return False
+        if requirements.requires_function_calling:
+            if "function_calling" not in rconf.capabilities:
+                return False
+
+        # LoRA adapters not supported on remote deployments
+        if requirements.lora_adapter_id:
+            return False
+
+        # Check preferred deployments
+        if requirements.preferred_deployment_ids:
+            deployment_name = rconf.get_deployment_name()
+            if deployment_name not in requirements.preferred_deployment_ids:
                 if requirements.fallback_deployment_ids:
                     if deployment_name not in requirements.fallback_deployment_ids:
                         return False
