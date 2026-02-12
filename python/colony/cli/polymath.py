@@ -155,6 +155,12 @@ class AnalysisType(str, Enum):
 # Maps analysis types to their coordinator and worker agent class paths.
 # These are the fully-qualified Python class paths used by the agent system
 # to instantiate agent classes dynamically.
+#
+# NOTE on worker_capabilities: These are DOCUMENTATION-ONLY. Workers are
+# self-configuring — each worker agent class adds its own capabilities in its
+# initialize() method (e.g., ChangeImpactAnalysisAgent extends HypothesisGameAgent
+# which adds HypothesisGameProtocol automatically). The lists here are used by
+# the `describe` and `list` commands to show what each worker provides.
 ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
     "impact": {
         "label": "Change Impact Analysis",
@@ -174,12 +180,12 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "ResultCapability",
             "CriticCapability",
             "SynthesisCapability",
-            "HypothesisGameProtocol",
         ],
         "worker_capabilities": [
             "ChangeImpactAnalysisCapability",
             "MergeCapability",
             "GroundingCapability",
+            "HypothesisGameProtocol",  # via HypothesisGameAgent base class
         ],
         "extra_metadata_keys": ["changes", "change_description"],
     },
@@ -711,10 +717,10 @@ async def run_integration_test(
     """Run the integration test workflow.
 
     This is the main entry point that:
-    1. Connects to the Ray cluster and Polymathera application
+    1. Connects to the Ray cluster via PolymatheraApp.setup_ray()
     2. Pages the codebase into VCM using FileGrouperContextPageSource
-    3. Spawns coordinator agents for each configured analysis
-    4. Monitors progress and collects results
+    3. Spawns coordinator agents via AgentHandle.from_agent_type()
+    4. Monitors progress via handle.run_streamed() and collects results
     5. Returns a list of result dictionaries
 
     Args:
@@ -731,15 +737,43 @@ async def run_integration_test(
     # We use absolute imports so the CLI can run both as a module
     # (python -m colony.cli.polymath) and as a direct script (./polymath.py).
     # -----------------------------------------------------------------------
+    from colony.distributed import get_initialized_polymathera
     from colony.vcm.sources import BuilInContextPageSourceType
     from colony.vcm.models import MmapConfig, MmapResult
-    from colony.agents.models import AgentSpawnSpec, AgentMetadata, AgentResourceRequirements
-    from colony.system import get_agent_system, get_vcm, spawn_agents
+    from colony.agents import AgentSpawnSpec, AgentMetadata, AgentHandle, AgentRunEvent
+    from colony.system import get_vcm
 
     results: list[dict[str, Any]] = []
 
     # -----------------------------------------------------------------------
-    # Step 1: Connect to VCM and page the codebase
+    # Step 0: Connect to Ray cluster
+    # -----------------------------------------------------------------------
+    console.print()
+    console.print(Panel(
+        f"[bold]Step 0:[/bold] Connecting to Ray cluster\n"
+        f"  working_dir: {codebase_path}",
+        title="[bold blue]Ray Cluster Connection[/bold blue]",
+        border_style="blue",
+    ))
+
+    with console.status("[blue]Connecting to Ray cluster..."):
+        polymathera = await get_initialized_polymathera()
+
+        # setup_ray connects to the Ray cluster and broadcasts the codebase
+        # (working_dir) to all worker nodes — including autoscaled ones.
+        # Worker env vars are propagated so workers can reach Redis, etc.
+        await polymathera.setup_ray(
+            worker_env_vars={
+                k: v for k, v in os.environ.items()
+                if k.startswith(("POLYMATH_", "RAY_", "REDIS_", "PYTHONPATH"))
+            },
+            working_dir=codebase_path,
+        )
+
+    console.print("  [green]OK[/green] — Connected to Ray cluster")
+
+    # -----------------------------------------------------------------------
+    # Step 1: Page the codebase into VCM
     # -----------------------------------------------------------------------
     console.print()
     console.print(Panel(
@@ -773,14 +807,17 @@ async def run_integration_test(
 
     if mmap_result.status in ("mapped", "already_mapped"):
         console.print(
-            f"  [green]OK[/green] — {mmap_result.status}: {mmap_result.message or 'codebase mapped successfully'}"
+            f"  [green]OK[/green] — {mmap_result.status}: "
+            f"{mmap_result.message or 'codebase mapped successfully'}"
         )
     else:
-        console.print(f"  [red]FAILED[/red] — {mmap_result.status}: {mmap_result.message}")
+        console.print(
+            f"  [red]FAILED[/red] — {mmap_result.status}: {mmap_result.message}"
+        )
         return [{"analysis_type": "paging", "status": "failed", "summary": mmap_result.message}]
 
     # -----------------------------------------------------------------------
-    # Step 2: Spawn coordinator agents for each analysis
+    # Step 2: Spawn coordinator agents via AgentHandle
     # -----------------------------------------------------------------------
     console.print()
     console.print(Panel(
@@ -789,7 +826,7 @@ async def run_integration_test(
         border_style="green",
     ))
 
-    coordinator_specs: list[tuple[AnalysisConfig, AgentSpawnSpec]] = []
+    coordinator_handles: list[tuple[AnalysisConfig, AgentHandle]] = []
 
     for analysis in config.analyses:
         reg = ANALYSIS_REGISTRY.get(analysis.type)
@@ -834,15 +871,20 @@ async def run_integration_test(
             },
         )
 
-        # Resolve extra capabilities
+        # Resolve extra capabilities (with warnings for unknown names)
         all_extra_caps = list(set(
             analysis.extra_capabilities + config.hierarchy.extra_capabilities
         ))
-        capability_paths = [
-            EXTRA_CAPABILITIES_REGISTRY[c]["path"]
-            for c in all_extra_caps
-            if c in EXTRA_CAPABILITIES_REGISTRY
-        ]
+        capability_paths = []
+        for cap_name in all_extra_caps:
+            if cap_name in EXTRA_CAPABILITIES_REGISTRY:
+                capability_paths.append(EXTRA_CAPABILITIES_REGISTRY[cap_name]["path"])
+            else:
+                console.print(
+                    f"  [yellow]WARNING[/yellow] Extra capability [bold]{cap_name}[/bold] "
+                    f"not found in EXTRA_CAPABILITIES_REGISTRY — skipping.\n"
+                    f"    Available: {', '.join(sorted(EXTRA_CAPABILITIES_REGISTRY.keys()))}"
+                )
 
         spec = AgentSpawnSpec(
             agent_type=coord_class,
@@ -851,35 +893,32 @@ async def run_integration_test(
             bound_pages=[],  # Coordinators don't bind to pages
         )
 
-        coordinator_specs.append((analysis, spec))
         coord_name = coord_class.rsplit(".", 1)[-1]
         console.print(
             f"  [green]+[/green] {reg['label']} — [cyan]{coord_name}[/cyan] "
             f"(max_agents={analysis.max_agents}, batching={analysis.batching_policy})"
         )
 
-    if not coordinator_specs:
+        # Spawn via AgentHandle.from_agent_type() — higher-level than raw
+        # spawn_agents(), returns a handle for monitoring and communication.
+        with console.status(f"  [green]Spawning {coord_name}..."):
+            handle = await AgentHandle.from_agent_type(
+                agent_spec=spec,
+                session_id=config.session_id,
+                run_id=config.run_id,
+            )
+
+        console.print(f"    [dim]agent_id: {handle.agent_id}[/dim]")
+        coordinator_handles.append((analysis, handle))
+
+    if not coordinator_handles:
         console.print("  [red]No valid analyses to run.[/red]")
         return results
 
-    # Spawn all coordinators
-    all_specs = [spec for _, spec in coordinator_specs]
-
-    with console.status("[green]Spawning coordinator agents..."):
-        coordinator_ids = await spawn_agents(
-            agent_specs=all_specs,
-            session_id=config.session_id,
-            run_id=config.run_id,
-            soft_affinity=True,
-        )
-
-    console.print(f"\n  Spawned {len(coordinator_ids)} coordinator(s):")
-    for cid, (analysis, _) in zip(coordinator_ids, coordinator_specs):
-        reg = ANALYSIS_REGISTRY[analysis.type]
-        console.print(f"    [dim]{cid}[/dim] — {reg['label']}")
+    console.print(f"\n  Spawned {len(coordinator_handles)} coordinator(s)")
 
     # -----------------------------------------------------------------------
-    # Step 3: Monitor progress
+    # Step 3: Monitor progress via AgentHandle.run_streamed()
     # -----------------------------------------------------------------------
     console.print()
     console.print(Panel(
@@ -889,10 +928,104 @@ async def run_integration_test(
         border_style="yellow",
     ))
 
-    agent_system = get_agent_system(app_name)
-    start_time = time.time()
-    completed: set[str] = set()
+    async def monitor_coordinator(
+        analysis_cfg: AnalysisConfig,
+        handle: AgentHandle,
+    ) -> dict[str, Any]:
+        """Monitor a single coordinator via handle.run_streamed().
 
+        Sends the analysis task to the coordinator and streams events
+        until completion, error, or timeout.
+        """
+        reg = ANALYSIS_REGISTRY[analysis_cfg.type]
+        start = time.time()
+        event_count = 0
+        last_event_type = "unknown"
+
+        try:
+            async for event in handle.run_streamed(
+                input_data={
+                    "repo_id": config.repo_id,
+                    "analysis_type": analysis_cfg.type,
+                    **analysis_cfg.parameters,
+                },
+                timeout=float(config.timeout_seconds),
+                session_id=config.session_id,
+            ):
+                event_count += 1
+                last_event_type = event.event_type
+
+                if config.verbose:
+                    console.print(
+                        f"    [dim]{handle.agent_id[:12]}… "
+                        f"[{event.event_type}] {event.data}[/dim]"
+                    )
+
+                if event.event_type == "completed":
+                    agents_spawned = 0
+                    if isinstance(event.data, dict):
+                        value = event.data.get("value", {})
+                        if isinstance(value, dict):
+                            agents_spawned = value.get("agents_spawned", 0)
+                    return {
+                        "analysis_type": reg["label"],
+                        "coordinator_id": handle.agent_id,
+                        "status": "completed",
+                        "agents_spawned": agents_spawned,
+                        "duration_seconds": time.time() - start,
+                        "summary": "Analysis complete",
+                        "events": event_count,
+                    }
+
+                if event.event_type == "error":
+                    error_msg = "Unknown error"
+                    if isinstance(event.data, dict):
+                        error_msg = event.data.get("error", error_msg)
+                    return {
+                        "analysis_type": reg["label"],
+                        "coordinator_id": handle.agent_id,
+                        "status": "failed",
+                        "agents_spawned": 0,
+                        "duration_seconds": time.time() - start,
+                        "summary": f"Error: {error_msg}",
+                        "events": event_count,
+                    }
+
+                if event.event_type == "timeout":
+                    return {
+                        "analysis_type": reg["label"],
+                        "coordinator_id": handle.agent_id,
+                        "status": "timeout",
+                        "agents_spawned": 0,
+                        "duration_seconds": time.time() - start,
+                        "summary": f"Timed out after {config.timeout_seconds}s",
+                        "events": event_count,
+                    }
+
+        except Exception as e:
+            logger.error(f"Error monitoring {handle.agent_id}: {e}")
+            return {
+                "analysis_type": reg["label"],
+                "coordinator_id": handle.agent_id,
+                "status": "failed",
+                "agents_spawned": 0,
+                "duration_seconds": time.time() - start,
+                "summary": f"Monitor error: {e}",
+                "events": event_count,
+            }
+
+        # Stream ended without an explicit terminal event
+        return {
+            "analysis_type": reg["label"],
+            "coordinator_id": handle.agent_id,
+            "status": "completed" if last_event_type != "error" else "failed",
+            "agents_spawned": 0,
+            "duration_seconds": time.time() - start,
+            "summary": f"Stream ended (last event: {last_event_type})",
+            "events": event_count,
+        }
+
+    # Run all monitors concurrently
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -901,74 +1034,29 @@ async def run_integration_test(
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task(
+        progress_task = progress.add_task(
             "Analyses running...",
-            total=len(coordinator_ids),
+            total=len(coordinator_handles),
         )
 
-        while len(completed) < len(coordinator_ids):
-            elapsed = time.time() - start_time
-            if elapsed > config.timeout_seconds:
-                console.print(f"\n  [yellow]Timeout reached ({config.timeout_seconds}s)[/yellow]")
-                break
+        monitor_tasks = [
+            asyncio.create_task(monitor_coordinator(analysis_cfg, handle))
+            for analysis_cfg, handle in coordinator_handles
+        ]
 
-            for i, cid in enumerate(coordinator_ids):
-                if cid in completed:
-                    continue
+        for coro in asyncio.as_completed(monitor_tasks):
+            result = await coro
+            results.append(result)
+            progress.update(progress_task, advance=1)
 
-                try:
-                    agent_info = await agent_system.get_agent_info(cid)
-                    state = agent_info.get("state", "unknown") if agent_info else "unknown"
-                except Exception:
-                    state = "unknown"
-
-                if state in ("stopped", "failed"):
-                    completed.add(cid)
-                    progress.update(task, advance=1)
-
-                    analysis_cfg = coordinator_specs[i][0]
-                    reg = ANALYSIS_REGISTRY.get(analysis_cfg.type, {})
-                    duration = time.time() - start_time
-
-                    # Attempt to retrieve results from blackboard
-                    result_summary = "Analysis complete"
-                    agents_spawned = 0
-                    try:
-                        # The coordinator writes final results to blackboard
-                        # under its own agent_id
-                        run_info = await agent_system.get_agent_info(cid)
-                        if run_info:
-                            agents_spawned = run_info.get("children_count", 0)
-                    except Exception:
-                        pass
-
-                    if state == "failed":
-                        result_summary = "Analysis failed — check logs"
-
-                    results.append({
-                        "analysis_type": reg.get("label", analysis_cfg.type),
-                        "coordinator_id": cid,
-                        "status": "completed" if state == "stopped" else "failed",
-                        "agents_spawned": agents_spawned,
-                        "duration_seconds": duration,
-                        "summary": result_summary,
-                    })
-
-            await asyncio.sleep(2)
-
-    # Mark timed-out analyses
-    for i, cid in enumerate(coordinator_ids):
-        if cid not in completed:
-            analysis_cfg = coordinator_specs[i][0]
-            reg = ANALYSIS_REGISTRY.get(analysis_cfg.type, {})
-            results.append({
-                "analysis_type": reg.get("label", analysis_cfg.type),
-                "coordinator_id": cid,
-                "status": "timeout",
-                "agents_spawned": 0,
-                "duration_seconds": config.timeout_seconds,
-                "summary": f"Timed out after {config.timeout_seconds}s",
-            })
+            label = result.get("analysis_type", "?")
+            status = result.get("status", "?")
+            style = {
+                "completed": "green",
+                "failed": "red",
+                "timeout": "yellow",
+            }.get(status, "dim")
+            console.print(f"  [{style}]{label}: {status}[/{style}]")
 
     return results
 

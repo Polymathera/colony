@@ -30,7 +30,17 @@ Example:
 """
 
 # Base classes
-from .base import Agent, AgentManagerBase, AgentState
+from .base import (
+    Agent,
+    AgentManagerBase,
+    AgentState,
+    AgentHandle,
+    AgentCapability,
+    AgentMetadata,
+    AgentRun,
+    AgentRunConfig,
+    AgentRunEvent,
+)
 
 # Agent system coordination
 from .system import AgentSystemDeployment, AgentSystemState
@@ -82,6 +92,12 @@ __all__ = [
     "Agent",
     "AgentManagerBase",
     "AgentState",
+    "AgentHandle",
+    "AgentCapability",
+    "AgentMetadata",
+    "AgentRun",
+    "AgentRunConfig",
+    "AgentRunEvent",
     # System
     "AgentSystemDeployment",
     "AgentSystemState",
