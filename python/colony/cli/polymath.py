@@ -401,6 +401,16 @@ class TestConfig:
     output_dir: str = "./polymath-results"
     timeout_seconds: int = 600
     verbose: bool = False
+    # Optional directory containing user code (custom agents, capabilities, configs)
+    # to distribute to Ray worker nodes.  Ray zips this directory on the driver,
+    # uploads it to every worker (including autoscaled ones), unpacks it, and
+    # adds it to sys.path so its modules are importable.
+    #
+    # This is NOT for the codebase being analyzed — that lives on shared storage
+    # (e.g. EFS) and is accessed via VCM paging.  Use this when your YAML config
+    # references custom agent_type or capability paths that aren't in the Docker
+    # image or the colony package.
+    working_dir: str | None = None
 
 
 def load_config_from_yaml(path: str) -> TestConfig:
@@ -473,6 +483,7 @@ def load_config_from_yaml(path: str) -> TestConfig:
         output_dir=raw.get("output_dir", "./polymath-results"),
         timeout_seconds=raw.get("timeout_seconds", 600),
         verbose=raw.get("verbose", False),
+        working_dir=raw.get("working_dir"),
     )
 
 
@@ -584,6 +595,17 @@ hierarchy:
     # - ReputationCapability     # No-regret learning for agent reputation
     # - ValidationCapability     # Multi-level validation
     # - ObjectiveGuardCapability # Goal drift prevention
+
+# --- Ray Worker Code Distribution ---
+# Optional directory containing YOUR code (custom agents, capabilities, configs)
+# to distribute to all Ray worker nodes.  Ray zips this on the driver, uploads
+# it to every worker (including autoscaled ones), and adds it to sys.path.
+#
+# This is NOT for the codebase being analyzed — that lives on shared storage
+# (e.g. EFS) and is accessed via VCM paging.  Use this when your config
+# references custom agent_type or capability class paths that aren't already
+# in the Docker image or the colony package.
+# working_dir: "/path/to/my-custom-agents"
 
 output_dir: "./polymath-results"
 timeout_seconds: 600
@@ -749,9 +771,12 @@ async def run_integration_test(
     # Step 0: Connect to Ray cluster
     # -----------------------------------------------------------------------
     console.print()
+    # Build Step 0 display
+    step0_lines = ["[bold]Step 0:[/bold] Connecting to Ray cluster"]
+    if config.working_dir:
+        step0_lines.append(f"  working_dir: {config.working_dir}")
     console.print(Panel(
-        f"[bold]Step 0:[/bold] Connecting to Ray cluster\n"
-        f"  working_dir: {codebase_path}",
+        "\n".join(step0_lines),
         title="[bold blue]Ray Cluster Connection[/bold blue]",
         border_style="blue",
     ))
@@ -759,18 +784,29 @@ async def run_integration_test(
     with console.status("[blue]Connecting to Ray cluster..."):
         polymathera = await get_initialized_polymathera()
 
-        # setup_ray connects to the Ray cluster and broadcasts the codebase
-        # (working_dir) to all worker nodes — including autoscaled ones.
-        # Worker env vars are propagated so workers can reach Redis, etc.
+        # setup_ray connects to the Ray cluster and propagates env vars to
+        # all worker processes (including autoscaled nodes).
+        #
+        # working_dir (optional): A directory on the driver containing user
+        # code — custom agents, capabilities, configs — that workers need to
+        # import.  Ray zips it, uploads it to every worker, unpacks it, and
+        # prepends it to sys.path.
+        #
+        # This is NOT for the codebase being analyzed.  The target codebase
+        # lives on shared storage (e.g. EFS) and workers access it through
+        # VCM paging.  Colony modules are already distributed via py_modules
+        # (setup_ray appends the colony package automatically).
         await polymathera.setup_ray(
             worker_env_vars={
                 k: v for k, v in os.environ.items()
                 if k.startswith(("POLYMATH_", "RAY_", "REDIS_", "PYTHONPATH"))
             },
-            working_dir=codebase_path,
+            working_dir=config.working_dir,
         )
 
     console.print("  [green]OK[/green] — Connected to Ray cluster")
+    if config.working_dir:
+        console.print(f"  [dim]User code distributed from: {config.working_dir}[/dim]")
 
     # -----------------------------------------------------------------------
     # Step 1: Page the codebase into VCM
@@ -1146,6 +1182,17 @@ def run(
         "--app-name",
         help="Polymathera serving application name (auto-detected if omitted).",
     ),
+    working_dir: Optional[str] = typer.Option(
+        None,
+        "--working-dir", "-w",
+        help=(
+            "Directory containing user code (custom agents, capabilities) to "
+            "distribute to Ray worker nodes.  Ray zips this on the driver and "
+            "uploads it to every worker so its modules are importable.  This is "
+            "NOT for the codebase being analyzed — that stays on shared storage "
+            "(EFS) and is accessed via VCM paging."
+        ),
+    ),
     extra_capabilities: Optional[list[str]] = typer.Option(
         None,
         "--capability",
@@ -1188,6 +1235,9 @@ def run(
         try:
             test_config = load_config_from_yaml(config)
             console.print(f"[dim]Loaded config from {config}[/dim]")
+            # CLI --working-dir overrides YAML value
+            if working_dir is not None:
+                test_config.working_dir = working_dir
         except Exception as e:
             console.print(f"[red]Failed to load config: {e}[/red]")
             raise typer.Exit(1)
@@ -1214,6 +1264,7 @@ def run(
             output_dir=output_dir,
             timeout_seconds=timeout,
             verbose=verbose,
+            working_dir=working_dir,
         )
 
     # Validate codebase path

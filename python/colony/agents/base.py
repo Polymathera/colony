@@ -863,7 +863,7 @@ class AgentHandle:
         Raises:
             ValueError: If failed to spawn agent
         """
-        child_ids: list[str] = spawn_agents(
+        child_ids: list[str] = await spawn_agents(
             agent_specs=[agent_spec],
             session_id=session_id or agent_spec.metadata.session_id,
             run_id=run_id or agent_spec.metadata.run_id,
