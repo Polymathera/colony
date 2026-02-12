@@ -2,18 +2,21 @@
 
 import logging
 import pickle
+from collections import defaultdict
 from overrides import override
 from typing import Any, AsyncIterator, Literal
 import networkx as nx
 
-from colony.python.colony.system import get_vcm
+from ...system import get_vcm
 
 from ...vcm.sources import ContextPageSource, ContextPageSourceFactory
-from ...vcm.models import MmapConfig
+from ...vcm.models import MmapConfig, ContextPageId, VirtualContextPage
 from ...vcm.page_storage import PageStorage, PageStorageConfig
 from ...distributed import get_polymathera
 from .sharding.file_grouping_wrapper import FileGrouperWithGraph
 from .sharding.strategy_wrapper import GitRepoShardingWithMapping
+from .sharding.prompting import IdentityPromptStrategy
+from .sharding.strategy import GitRepoShardingStrategy
 
 
 logger = logging.getLogger(__name__)
@@ -69,13 +72,13 @@ class FileGrouperContextPageSource(ContextPageSource):
             return  # Already initialized
 
         vcm_handle = get_vcm()
-        config: PageStorageConfig | None = vcm_handle.get_page_storage_config()
+        config: PageStorageConfig | None = await vcm_handle.get_page_storage_config()
         if not config:
             raise ValueError("Missing PageStorageConfig in VCM")
 
         self.page_storage = PageStorage(
-            scope_id = self.scope_id,
-            tenant_id = self.tenant_id,
+            group_id=self.scope_id,
+            tenant_id=self.tenant_id,
             backend_type=config.backend_type,
             storage_path=config.storage_path,
             s3_bucket=config.s3_bucket,
@@ -85,23 +88,158 @@ class FileGrouperContextPageSource(ContextPageSource):
         # Try to load existing graph
         page_graph = await self.page_storage.retrieve_page_graph()
 
-        if page_graph:
+        if page_graph and page_graph.number_of_nodes() > 0:
             self.page_graph = page_graph
+            self.file_to_page = await self.page_storage.retrieve_page_graph_level_data("file_to_page") or {}
+            self.page_to_file = await self.page_storage.retrieve_page_graph_level_data("page_to_file") or {}
+            self.page_keys = await self.page_storage.retrieve_page_graph_level_data("page_keys") or {}
             logger.info(
                 f"Loaded page graph for {self.scope_id}: "
                 f"{len(self.page_graph.nodes)} nodes, {len(self.page_graph.edges)} edges"
             )
         else:
-            # Build new graph (requires FileGrouper - deferred to first usage)
-            logger.info(f"No existing page graph for {self.scope_id}, will build on first use")
-            self.page_graph = nx.DiGraph()
+            # No existing graph — build from repository
+            logger.info(
+                f"No existing page graph for {self.scope_id}, "
+                f"building from repository at {self.repo_path}"
+            )
+            await self._build_and_persist_page_graph()
 
-        self.file_to_page = await self.page_storage.retrieve_page_graph_level_data("file_to_page") or {}
-        self.page_to_file = await self.page_storage.retrieve_page_graph_level_data("page_to_file") or {}
-        self.page_keys = await self.page_storage.retrieve_page_graph_level_data("page_keys") or {}
+    async def _build_and_persist_page_graph(self) -> None:
+        """Build page graph from repository and persist everything.
 
-        # TODO: Create the file_grouper and sharding_strategy instances and
-        # use them to populate the page graph and mappings if they don't exist yet
+        Uses GitRepoShardingStrategy to:
+        1. Analyze file relationships (imports, dependencies, etc.)
+        2. Group related files into shards (pages)
+        3. Build page-level relationship graph
+
+        Then creates VirtualContextPages from shards and persists:
+        - Page graph (networkx DiGraph)
+        - File-to-page / page-to-file mappings
+        - Individual pages (text for remote LLMs)
+        """
+        import git
+
+        prompt_strategy = IdentityPromptStrategy()
+        strategy = GitRepoShardingStrategy(
+            prompt_strategy=prompt_strategy,
+            config=None,  # Auto-loaded from Polymathera config system
+        )
+        await strategy.initialize()
+
+        try:
+            repo = git.Repo(self.repo_path)
+            result = await strategy.create_shards_with_graph(
+                group_id=self.scope_id,
+                repo=repo,
+            )
+
+            logger.info(f"Created {len(result.shards)} shards from {self.repo_path}")
+
+            # Page graph
+            if result.page_graph and result.page_graph.number_of_nodes() > 0:
+                self.page_graph = result.page_graph
+                logger.info(
+                    f"Page graph: {self.page_graph.number_of_nodes()} pages, "
+                    f"{self.page_graph.number_of_edges()} cross-page relationships"
+                )
+            else:
+                logger.warning("No page graph from sharding strategy, creating minimal graph")
+                self.page_graph = nx.DiGraph()
+                for shard in result.shards:
+                    self.page_graph.add_node(shard.shard_id)
+
+            # File-to-page and page-to-file mappings
+            self.file_to_page = result.file_to_page or {}
+            if not self.file_to_page:
+                for shard in result.shards:
+                    for seg in shard.metadata.file_segments:
+                        self.file_to_page[seg.file_path] = shard.shard_id
+
+            ptf: dict[str, list[str]] = defaultdict(list)
+            for file_path, page_id in self.file_to_page.items():
+                ptf[page_id].append(file_path)
+            self.page_to_file = dict(ptf)
+
+            # Page keys (page_id -> summary for relevance matching)
+            # TODO: This should be page_id -> PageKey and should use
+            # a KeyGenerator strategy to create keys, rather than just joining file names
+            # TODO: Still key generation should be done in a lazy way in the KeyRegistry, not eagerly here at graph build time
+            ### self.page_keys = {}
+            ### for shard in result.shards:
+            ###     file_names = [
+            ###         seg.file_path.rsplit("/", 1)[-1]
+            ###         for seg in shard.metadata.file_segments
+            ###     ]
+            ###     self.page_keys[shard.shard_id] = " ".join(file_names)
+
+            # Create and persist VirtualContextPages
+            for shard in result.shards:
+                page = VirtualContextPage(
+                    page_id=shard.shard_id,
+                    tokens=[],  # Remote deployments use text; vLLM path would tokenize separately
+                    text=shard.raw_content,
+                    size=max(1, len(shard.raw_content) // 4),  # Rough token estimate
+                    metadata={
+                        "source": "file_grouper",
+                        "files": [seg.file_path for seg in shard.metadata.file_segments],
+                        "file_count": len(shard.metadata.file_segments),
+                        "content_size_bytes": shard.metadata.content_size_bytes,
+                    },
+                    group_id=self.scope_id,
+                    tenant_id=self.tenant_id,
+                )
+                await self.page_storage.store_page(page)
+
+            logger.info(f"Stored {len(result.shards)} pages to PageStorage")
+
+            # Persist graph and mappings
+            await self.page_storage.store_page_graph(self.page_graph)
+            await self.page_storage.store_page_graph_level_data("file_to_page", self.file_to_page)
+            await self.page_storage.store_page_graph_level_data("page_to_file", self.page_to_file)
+            await self.page_storage.store_page_graph_level_data("page_keys", self.page_keys)
+
+            logger.info(
+                f"Persisted page graph for {self.scope_id}: "
+                f"{self.page_graph.number_of_nodes()} pages, "
+                f"{len(self.file_to_page)} files mapped"
+            )
+
+        finally:
+            await strategy.cleanup()
+
+    # === Abstract method implementations (ContextPageSource) ===
+
+    @override
+    async def claim_orphaned_events(self) -> None:
+        """No event stream for file-grouper source (files are static)."""
+        pass
+
+    @override
+    async def shutdown(self) -> None:
+        """Clean up resources."""
+        self.page_storage = None
+        self.page_graph = None
+
+    @override
+    async def get_page_id_for_record(self, record_id: str) -> ContextPageId | None:
+        """Get page ID for a file path (record_id = file path)."""
+        return self.file_to_page.get(record_id)
+
+    @override
+    async def get_record_ids_for_page(self, page_id: ContextPageId) -> list[str]:
+        """Get file paths contained in a page."""
+        return self.page_to_file.get(page_id, [])
+
+    @override
+    async def get_all_mapped_records(self) -> dict[str, ContextPageId]:
+        """Get complete file-to-page mapping."""
+        return dict(self.file_to_page)
+
+    @override
+    async def get_all_mapped_pages(self) -> dict[ContextPageId, list[str]]:
+        """Get complete page-to-files mapping."""
+        return dict(self.page_to_file)
 
     # === Helper Methods ===
 
@@ -212,7 +350,7 @@ class FileGrouperContextPageSource(ContextPageSource):
         """
         if self.sharding_strategy:
             return self.sharding_strategy.get_files_in_page(page_id)
-        return [self.page_to_file.get(page_id, [])]
+        return self.page_to_file.get(page_id, [])
 
     def get_file_to_page_mapping(self) -> dict[str, str]:
         """Get complete file-to-page mapping.

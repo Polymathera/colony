@@ -218,7 +218,7 @@ class GitRepoShardingWithMapping(GitRepoShardingStrategy):
 
             # Extract unique files from shard segments
             files_in_shard = set()
-            for segment in shard.file_segments:
+            for segment in shard.metadata.file_segments:
                 files_in_shard.add(segment.file_path)
 
             # Update mappings
@@ -231,7 +231,7 @@ class GitRepoShardingWithMapping(GitRepoShardingStrategy):
                 "file_count": len(files_in_shard),
                 "total_tokens": shard.metadata.total_tokens if shard.metadata else 0,
                 "languages": set(
-                    seg.language for seg in shard.file_segments if seg.language
+                    seg.language for seg in shard.metadata.file_segments if seg.language
                 ),
                 "has_binary": (
                     any(shard.metadata.binary_files) if shard.metadata and shard.metadata.binary_files else False

@@ -389,6 +389,23 @@ class HierarchyConfig:
 
 
 @dataclass
+class VLLMDeploymentYAMLConfig:
+    """YAML-friendly config for a single vLLM deployment (GPU-based).
+
+    Parsed from the YAML cluster.vllm_deployments list and converted to
+    LLMDeploymentConfig when building the PolymatheraCluster.
+    """
+    model_name: str = "meta-llama/Llama-3.1-8B"
+    tensor_parallel_size: int = 1
+    gpu_memory_utilization: float = 0.9
+    max_model_len: int | None = None
+    kv_cache_capacity: int | None = None
+    num_replicas: int = 2
+    quantization: str | None = None
+    s3_bucket: str | None = None
+
+
+@dataclass
 class RemoteDeploymentYAMLConfig:
     """YAML-friendly config for a single remote LLM deployment.
 
@@ -407,14 +424,46 @@ class RemoteDeploymentYAMLConfig:
 
 
 @dataclass
+class VCMYAMLConfig:
+    """YAML-friendly config for VirtualContextManager.
+
+    Parsed from the top-level 'vcm' section of the YAML config and converted
+    to VCMConfig when building the PolymatheraCluster.
+    """
+    caching_policy: str = "LRU"                    # "LRU" or "LFU"
+    page_storage_backend_type: str = "efs"         # "efs" or "s3"
+    page_storage_path: str = "colony/context_pages"
+    page_fault_processing_interval_s: float = 5.0
+    metrics_collection_interval_s: float = 30.0
+    reconciliation_interval_s: float = 30.0
+
+
+@dataclass
+class AgentSystemYAMLConfig:
+    """YAML-friendly config for AgentSystem.
+
+    Parsed from the top-level 'agent_system' section of the YAML config
+    and converted to AgentSystemConfig when building the PolymatheraCluster.
+    """
+    max_retries: int = 3
+    enable_sessions: bool = True
+    default_session_ttl: float = 86400.0   # 24 hours
+    max_sessions_per_tenant: int = 100
+
+
+@dataclass
 class LLMClusterYAMLConfig:
     """YAML-friendly cluster configuration.
 
-    Controls which LLM deployments are created. For local testing without
-    GPUs, specify remote_deployments only (no vllm_deployments needed).
+    Controls which LLM deployments are created.
+    - Cloud mode (GPUs): specify vllm_deployments (and optional embedding_config)
+    - Local mode (no GPUs): specify remote_deployments only
+    - Hybrid: both vllm_deployments and remote_deployments
     """
     app_name: str = "polymathera"
+    vllm_deployments: list[VLLMDeploymentYAMLConfig] = field(default_factory=list)
     remote_deployments: list[RemoteDeploymentYAMLConfig] = field(default_factory=list)
+    embedding_config: VLLMDeploymentYAMLConfig | None = None
     cleanup_on_init: bool = True
 
 
@@ -429,6 +478,8 @@ class TestConfig:
     analyses: list[AnalysisConfig] = field(default_factory=lambda: [AnalysisConfig(type="basic")])
     hierarchy: HierarchyConfig = field(default_factory=HierarchyConfig)
     cluster: LLMClusterYAMLConfig = field(default_factory=LLMClusterYAMLConfig)
+    vcm: VCMYAMLConfig = field(default_factory=VCMYAMLConfig)
+    agent_system: AgentSystemYAMLConfig = field(default_factory=AgentSystemYAMLConfig)
     output_dir: str = "./polymath-results"
     timeout_seconds: int = 600
     verbose: bool = False
@@ -506,17 +557,46 @@ def load_config_from_yaml(path: str) -> TestConfig:
         extra_capabilities=hierarchy_raw.get("extra_capabilities", []),
     )
 
-    # Parse cluster config (remote deployments)
+    # Parse cluster config (vLLM deployments, remote deployments, embedding)
     cluster_raw = raw.get("cluster", {})
+
+    vllm_deps = []
+    for vd in cluster_raw.get("vllm_deployments", []):
+        vllm_deps.append(VLLMDeploymentYAMLConfig(
+            **{k: v for k, v in vd.items() if k in VLLMDeploymentYAMLConfig.__dataclass_fields__},
+        ))
+
     remote_deps = []
     for rd in cluster_raw.get("remote_deployments", []):
         remote_deps.append(RemoteDeploymentYAMLConfig(
             **{k: v for k, v in rd.items() if k in RemoteDeploymentYAMLConfig.__dataclass_fields__},
         ))
+
+    embedding_raw = cluster_raw.get("embedding_config")
+    embedding_cfg = None
+    if embedding_raw:
+        embedding_cfg = VLLMDeploymentYAMLConfig(
+            **{k: v for k, v in embedding_raw.items() if k in VLLMDeploymentYAMLConfig.__dataclass_fields__},
+        )
+
     cluster = LLMClusterYAMLConfig(
         app_name=cluster_raw.get("app_name", "polymathera"),
+        vllm_deployments=vllm_deps,
         remote_deployments=remote_deps,
+        embedding_config=embedding_cfg,
         cleanup_on_init=cluster_raw.get("cleanup_on_init", True),
+    )
+
+    # Parse VCM config
+    vcm_raw = raw.get("vcm", {})
+    vcm_cfg = VCMYAMLConfig(
+        **{k: v for k, v in vcm_raw.items() if k in VCMYAMLConfig.__dataclass_fields__},
+    )
+
+    # Parse agent system config
+    agent_system_raw = raw.get("agent_system", {})
+    agent_system_cfg = AgentSystemYAMLConfig(
+        **{k: v for k, v in agent_system_raw.items() if k in AgentSystemYAMLConfig.__dataclass_fields__},
     )
 
     return TestConfig(
@@ -528,6 +608,8 @@ def load_config_from_yaml(path: str) -> TestConfig:
         analyses=analyses,
         hierarchy=hierarchy,
         cluster=cluster,
+        vcm=vcm_cfg,
+        agent_system=agent_system_cfg,
         output_dir=raw.get("output_dir", "./polymath-results"),
         timeout_seconds=raw.get("timeout_seconds", 600),
         verbose=raw.get("verbose", False),
@@ -553,11 +635,33 @@ tenant_id: "test-tenant"
 
 # --- LLM Cluster Configuration ---
 # Controls which LLM deployments are created and deployed.
-# For local testing without GPUs, use remote_deployments only.
+#
+# Modes:
+#   - Local (no GPUs):  Use remote_deployments only
+#   - Cloud (GPUs):     Use vllm_deployments (and optional embedding_config)
+#   - Hybrid:           Both vllm_deployments and remote_deployments
 cluster:
   app_name: "polymathera"
   cleanup_on_init: true        # Clean up previous deployment state on startup
 
+  # --- Self-hosted vLLM deployments (require GPUs) ---
+  # vllm_deployments:
+  #   - model_name: "meta-llama/Llama-3.1-8B"
+  #     tensor_parallel_size: 1   # GPUs per replica
+  #     gpu_memory_utilization: 0.9
+  #     max_model_len: null        # Auto from model registry
+  #     num_replicas: 2
+  #     quantization: null         # "awq", "gptq", "fp8", or null
+  #     s3_bucket: null            # S3 bucket for model weights
+
+  # --- Embedding model (requires GPU) ---
+  # embedding_config:
+  #   model_name: "intfloat/e5-small-v2"
+  #   tensor_parallel_size: 1
+  #   gpu_memory_utilization: 0.5
+  #   num_replicas: 1
+
+  # --- Remote LLM deployments (no GPUs required) ---
   remote_deployments:
     # Anthropic Claude — uses prefix caching for VCM page text
     - model_name: "claude-sonnet-4-20250514"
@@ -573,6 +677,24 @@ cluster:
     #   provider: "openrouter"
     #   api_key_env_var: "OPENROUTER_API_KEY"
     #   num_replicas: 1
+
+# --- VCM Configuration ---
+# Controls VirtualContextManager behavior: page storage, eviction policy, etc.
+# vcm:
+#   caching_policy: "LRU"              # Page eviction policy: "LRU" or "LFU"
+#   page_storage_backend_type: "efs"   # Storage backend: "efs" or "s3"
+#   page_storage_path: "colony/context_pages"
+#   page_fault_processing_interval_s: 5.0
+#   metrics_collection_interval_s: 30.0
+#   reconciliation_interval_s: 30.0
+
+# --- Agent System Configuration ---
+# Controls agent system behavior: sessions, retries, etc.
+# agent_system:
+#   max_retries: 3
+#   enable_sessions: true
+#   default_session_ttl: 86400.0       # 24 hours
+#   max_sessions_per_tenant: 100
 
 # --- VCM Paging Configuration ---
 # Controls how the codebase is partitioned into VCM pages.
@@ -962,70 +1084,91 @@ async def run_integration_test(
             num_replicas=rd.num_replicas,
         ))
 
-    # Test configuration
-    TEST_MODEL_SMALL = "facebook/opt-125m"  # Small model for quick tests
-    TEST_EMBEDDING_MODEL = "intfloat/e5-small-v2"  # Small embedding model
-    S3_BUCKET = os.getenv("S3_MODELS_BUCKET", None)  # Optional S3 bucket for model caching
+    # Build LLMDeploymentConfig objects from YAML vllm_deployments
+    vllm_deployment_configs = []
+    for vd in config.cluster.vllm_deployments:
+        vllm_deployment_configs.append(LLMDeploymentConfig.from_model_registry(
+            model_name=vd.model_name,
+            tensor_parallel_size=vd.tensor_parallel_size,
+            quantization=vd.quantization,
+            s3_bucket=vd.s3_bucket,
+            gpu_memory_utilization=vd.gpu_memory_utilization,
+            max_model_len=vd.max_model_len,
+            kv_cache_capacity=vd.kv_cache_capacity,
+            num_replicas=vd.num_replicas,
+        ))
 
-    # Configure VLLM deployment
-    vllm_config = LLMDeploymentConfig.from_model_registry(
-        model_name=TEST_MODEL_SMALL,
-        tensor_parallel_size=1,
-        gpu_memory_utilization=0.5,
-        max_model_len=1024,
-        num_replicas=2,
-        s3_bucket=S3_BUCKET,
-    )
+    # Build embedding config from YAML (if specified)
+    embedding_deployment_config = None
+    if config.cluster.embedding_config is not None:
+        ec = config.cluster.embedding_config
+        embedding_deployment_config = LLMDeploymentConfig.from_model_registry(
+            model_name=ec.model_name,
+            tensor_parallel_size=ec.tensor_parallel_size,
+            quantization=ec.quantization,
+            s3_bucket=ec.s3_bucket,
+            gpu_memory_utilization=ec.gpu_memory_utilization,
+            max_model_len=ec.max_model_len,
+            kv_cache_capacity=ec.kv_cache_capacity,
+            num_replicas=ec.num_replicas,
+        )
 
-    embedding_config = LLMDeploymentConfig.from_model_registry(
-        model_name=TEST_EMBEDDING_MODEL,
-        tensor_parallel_size=1,
-        gpu_memory_utilization=0.5,
-        num_replicas=1,
-        s3_bucket=S3_BUCKET,
-    )
-
-    llm_cluster_config = ClusterConfig(
+    cluster_config = ClusterConfig(
         app_name=effective_app_name,
-        vllm_deployments=[vllm_config],
-        embedding_config=embedding_config,
+        vllm_deployments=vllm_deployment_configs,
+        embedding_config=embedding_deployment_config,
         remote_deployments=remote_deployment_configs,
         cleanup_on_init=config.cluster.cleanup_on_init,
     )
 
     vcm_config = VCMConfig(
-        caching_policy="LRU",
-        page_fault_processing_interval_s=5.0,
-        metrics_collection_interval_s=30.0,
-        allocation_strategy=None,
-        page_storage_backend_type="efs",  # Default to EFS for fast access
-        page_storage_path="colony/context_pages",
-        reconciliation_interval_s=30.0,
+        caching_policy=config.vcm.caching_policy,
+        page_storage_backend_type=config.vcm.page_storage_backend_type,
+        page_storage_path=config.vcm.page_storage_path,
+        page_fault_processing_interval_s=config.vcm.page_fault_processing_interval_s,
+        metrics_collection_interval_s=config.vcm.metrics_collection_interval_s,
+        reconciliation_interval_s=config.vcm.reconciliation_interval_s,
+    )
+    agent_system_config = AgentSystemConfig(
+        max_retries=config.agent_system.max_retries,
+        enable_sessions=config.agent_system.enable_sessions,
+        default_session_ttl=config.agent_system.default_session_ttl,
+        max_sessions_per_tenant=config.agent_system.max_sessions_per_tenant,
     )
 
     polyconfig = PolymatheraClusterConfig(
         app_name=effective_app_name,
-        llm_cluster_config=llm_cluster_config,
+        llm_cluster_config=cluster_config,
         vcm_config=vcm_config,
-        agent_system_config=AgentSystemConfig(),
+        agent_system_config=agent_system_config,
         cleanup_on_init=config.cluster.cleanup_on_init,
     )
 
-    if remote_deployment_configs:
-        deploy_lines = [
-            f"[bold]Step 0.5:[/bold] Deploying PolymatheraCluster",
-            f"  App:    {effective_app_name}",
-        ]
-        for rd in remote_deployment_configs:
-            deploy_lines.append(
-                f"  Remote: {rd.model_name} ({rd.provider}, {rd.num_replicas} replica(s))"
-            )
-        console.print()
-        console.print(Panel(
-            "\n".join(deploy_lines),
-            title="[bold magenta]Cluster Deployment[/bold magenta]",
-            border_style="magenta",
-        ))
+    # Display deployment info
+    deploy_lines = [
+        f"[bold]Step 0.5:[/bold] Deploying PolymatheraCluster",
+        f"  App:    {effective_app_name}",
+    ]
+    for vd in vllm_deployment_configs:
+        deploy_lines.append(
+            f"  vLLM:   {vd.model_name} (tp={vd.tensor_parallel_size}, {vd.num_replicas} replica(s))"
+        )
+    for rd in remote_deployment_configs:
+        deploy_lines.append(
+            f"  Remote: {rd.model_name} ({rd.provider}, {rd.num_replicas} replica(s))"
+        )
+    if embedding_deployment_config:
+        deploy_lines.append(
+            f"  Embed:  {embedding_deployment_config.model_name} ({embedding_deployment_config.num_replicas} replica(s))"
+        )
+    if not vllm_deployment_configs and not remote_deployment_configs:
+        deploy_lines.append("  [yellow]WARNING: No LLM deployments configured[/yellow]")
+    console.print()
+    console.print(Panel(
+        "\n".join(deploy_lines),
+        title="[bold magenta]Cluster Deployment[/bold magenta]",
+        border_style="magenta",
+    ))
 
     with console.status("[magenta]Deploying cluster..."):
         polycluster = PolymatheraCluster(

@@ -13,6 +13,7 @@ import pickle
 from .attention import PageKey
 from ...base import Agent
 from ....vcm.page_storage import PageStorage
+from ...blackboard import EnhancedBlackboard
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,8 @@ class GlobalPageKeyRegistry:
             agent: Agent instance (for accessing blackboard)
         """
         self.agent: Agent = agent
-        self.page_keys_blackboard = None
-        self.cluster_summaries_blackboard = None
+        self.page_keys_blackboard: EnhancedBlackboard = None
+        self.cluster_summaries_blackboard: EnhancedBlackboard = None
         self.page_storage: PageStorage | None = None
 
     async def initialize(self) -> None:
