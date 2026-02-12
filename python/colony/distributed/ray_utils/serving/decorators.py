@@ -613,3 +613,4 @@ def list_deployments() -> list[str]:
         List of deployment names.
     """
     return list(_DEPLOYMENT_REGISTRY.keys())
+

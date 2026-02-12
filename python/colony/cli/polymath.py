@@ -22,7 +22,7 @@ multi-agent framework. It demonstrates:
    provide @action_executor methods and @event_handler hooks.
 
 Prerequisites:
-    - A running Ray cluster (local or AWS) with the Polymathera application deployed
+    - A running Ray cluster (local or AWS) — the CLI deploys the Polymathera application
     - The target codebase available on the cluster filesystem (e.g., via EFS or
       shared Docker volume)
     - Python dependencies: typer, rich, pyyaml
@@ -389,6 +389,36 @@ class HierarchyConfig:
 
 
 @dataclass
+class RemoteDeploymentYAMLConfig:
+    """YAML-friendly config for a single remote LLM deployment.
+
+    Parsed from the YAML cluster.remote_deployments list and converted to
+    RemoteLLMDeploymentConfig when building the PolymatheraCluster.
+    """
+    model_name: str = "claude-sonnet-4-20250514"
+    provider: str = "anthropic"  # "anthropic" or "openrouter"
+    api_key_env_var: str = "ANTHROPIC_API_KEY"
+    max_cached_pages: int = 50
+    max_cached_tokens: int = 2_000_000
+    system_prompt: str | None = None
+    ttl: str = "1h"  # "5m" or "1h"
+    max_concurrent_requests: int = 10
+    num_replicas: int = 1
+
+
+@dataclass
+class LLMClusterYAMLConfig:
+    """YAML-friendly cluster configuration.
+
+    Controls which LLM deployments are created. For local testing without
+    GPUs, specify remote_deployments only (no vllm_deployments needed).
+    """
+    app_name: str = "polymathera"
+    remote_deployments: list[RemoteDeploymentYAMLConfig] = field(default_factory=list)
+    cleanup_on_init: bool = True
+
+
+@dataclass
 class TestConfig:
     """Complete integration test configuration."""
     repo_id: str = "polymath-test"
@@ -398,6 +428,7 @@ class TestConfig:
     paging: PagingConfig = field(default_factory=PagingConfig)
     analyses: list[AnalysisConfig] = field(default_factory=lambda: [AnalysisConfig(type="basic")])
     hierarchy: HierarchyConfig = field(default_factory=HierarchyConfig)
+    cluster: LLMClusterYAMLConfig = field(default_factory=LLMClusterYAMLConfig)
     output_dir: str = "./polymath-results"
     timeout_seconds: int = 600
     verbose: bool = False
@@ -475,6 +506,19 @@ def load_config_from_yaml(path: str) -> TestConfig:
         extra_capabilities=hierarchy_raw.get("extra_capabilities", []),
     )
 
+    # Parse cluster config (remote deployments)
+    cluster_raw = raw.get("cluster", {})
+    remote_deps = []
+    for rd in cluster_raw.get("remote_deployments", []):
+        remote_deps.append(RemoteDeploymentYAMLConfig(
+            **{k: v for k, v in rd.items() if k in RemoteDeploymentYAMLConfig.__dataclass_fields__},
+        ))
+    cluster = LLMClusterYAMLConfig(
+        app_name=cluster_raw.get("app_name", "polymathera"),
+        remote_deployments=remote_deps,
+        cleanup_on_init=cluster_raw.get("cleanup_on_init", True),
+    )
+
     return TestConfig(
         repo_id=raw.get("repo_id", "polymath-test"),
         tenant_id=raw.get("tenant_id", "test-tenant"),
@@ -483,6 +527,7 @@ def load_config_from_yaml(path: str) -> TestConfig:
         paging=paging,
         analyses=analyses,
         hierarchy=hierarchy,
+        cluster=cluster,
         output_dir=raw.get("output_dir", "./polymath-results"),
         timeout_seconds=raw.get("timeout_seconds", 600),
         verbose=raw.get("verbose", False),
@@ -505,6 +550,29 @@ repo_id: "my-project"
 tenant_id: "test-tenant"
 # session_id: "auto-generated-if-omitted"
 # run_id: "auto-generated-if-omitted"
+
+# --- LLM Cluster Configuration ---
+# Controls which LLM deployments are created and deployed.
+# For local testing without GPUs, use remote_deployments only.
+cluster:
+  app_name: "polymathera"
+  cleanup_on_init: true        # Clean up previous deployment state on startup
+
+  remote_deployments:
+    # Anthropic Claude — uses prefix caching for VCM page text
+    - model_name: "claude-sonnet-4-20250514"
+      provider: "anthropic"
+      api_key_env_var: "ANTHROPIC_API_KEY"
+      max_cached_pages: 50
+      max_cached_tokens: 2000000
+      ttl: "1h"                # Prefix cache TTL ("5m" or "1h")
+      num_replicas: 1
+
+    # OpenRouter — OpenAI-compatible API, supports many providers
+    # - model_name: "anthropic/claude-sonnet-4"
+    #   provider: "openrouter"
+    #   api_key_env_var: "OPENROUTER_API_KEY"
+    #   num_replicas: 1
 
 # --- VCM Paging Configuration ---
 # Controls how the codebase is partitioned into VCM pages.
@@ -788,10 +856,11 @@ async def run_integration_test(
 
     This is the main entry point that:
     1. Connects to the Ray cluster via PolymatheraApp.setup_ray()
-    2. Pages the codebase into VCM using FileGrouperContextPageSource
-    3. Spawns coordinator agents via AgentHandle.from_agent_type()
-    4. Monitors progress via handle.run_streamed() and collects results
-    5. Returns a list of result dictionaries
+    2. Deploys PolymatheraCluster (LLM deployments, VCM, agent system)
+    3. Pages the codebase into VCM using FileGrouperContextPageSource
+    4. Spawns coordinator agents via AgentHandle.from_agent_type()
+    5. Monitors progress via handle.run_streamed() and collects results
+    6. Returns a list of result dictionaries
 
     Args:
         codebase_path: Absolute path to the codebase on the cluster filesystem.
@@ -811,7 +880,14 @@ async def run_integration_test(
     from colony.vcm.sources import BuilInContextPageSourceType
     from colony.vcm.models import MmapConfig, MmapResult
     from colony.agents import AgentSpawnSpec, AgentMetadata, AgentHandle, AgentRunEvent
-    from colony.system import get_vcm, get_session_manager
+    from colony.system import (
+        PolymatheraCluster, PolymatheraClusterConfig,
+        get_vcm, get_session_manager,
+    )
+    from colony.cluster.config import ClusterConfig, LLMDeploymentConfig
+    from colony.cluster.remote_config import RemoteLLMDeploymentConfig
+    from colony.vcm.config import VCMConfig
+    from colony.agents.config import AgentSystemConfig
     from colony.agents.sessions import AgentRun
 
     results: list[dict[str, Any]] = []
@@ -845,17 +921,120 @@ async def run_integration_test(
         # lives on shared storage (e.g. EFS) and workers access it through
         # VCM paging.  Colony modules are already distributed via py_modules
         # (setup_ray appends the colony package automatically).
+        # Collect env vars to propagate — include API keys for remote deployments
+        env_prefixes = ("POLYMATH_", "RAY_", "REDIS_", "PYTHONPATH")
+        api_key_vars = {
+            rd.api_key_env_var
+            for rd in config.cluster.remote_deployments
+        }
+        worker_env_vars = {
+            k: v for k, v in os.environ.items()
+            if k.startswith(env_prefixes) or k in api_key_vars
+        }
+
         await polymathera.setup_ray(
-            worker_env_vars={
-                k: v for k, v in os.environ.items()
-                if k.startswith(("POLYMATH_", "RAY_", "REDIS_", "PYTHONPATH"))
-            },
+            worker_env_vars=worker_env_vars,
             working_dir=config.working_dir,
         )
 
     console.print("  [green]OK[/green] — Connected to Ray cluster")
     if config.working_dir:
         console.print(f"  [dim]User code distributed from: {config.working_dir}[/dim]")
+
+    # Use the deployed app name for subsequent handle lookups
+    effective_app_name = app_name or config.cluster.app_name
+
+    # -----------------------------------------------------------------------
+    # Step 0.5: Deploy PolymatheraCluster (LLM deployments, VCM, agent system)
+    # -----------------------------------------------------------------------
+    # Build RemoteLLMDeploymentConfig objects from YAML config
+    remote_deployment_configs = []
+    for rd in config.cluster.remote_deployments:
+        remote_deployment_configs.append(RemoteLLMDeploymentConfig(
+            model_name=rd.model_name,
+            provider=rd.provider,
+            api_key_env_var=rd.api_key_env_var,
+            max_cached_pages=rd.max_cached_pages,
+            max_cached_tokens=rd.max_cached_tokens,
+            system_prompt=rd.system_prompt,
+            ttl=rd.ttl,
+            max_concurrent_requests=rd.max_concurrent_requests,
+            num_replicas=rd.num_replicas,
+        ))
+
+    # Test configuration
+    TEST_MODEL_SMALL = "facebook/opt-125m"  # Small model for quick tests
+    TEST_EMBEDDING_MODEL = "intfloat/e5-small-v2"  # Small embedding model
+    S3_BUCKET = os.getenv("S3_MODELS_BUCKET", None)  # Optional S3 bucket for model caching
+
+    # Configure VLLM deployment
+    vllm_config = LLMDeploymentConfig.from_model_registry(
+        model_name=TEST_MODEL_SMALL,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.5,
+        max_model_len=1024,
+        num_replicas=2,
+        s3_bucket=S3_BUCKET,
+    )
+
+    embedding_config = LLMDeploymentConfig.from_model_registry(
+        model_name=TEST_EMBEDDING_MODEL,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.5,
+        num_replicas=1,
+        s3_bucket=S3_BUCKET,
+    )
+
+    llm_cluster_config = ClusterConfig(
+        app_name=effective_app_name,
+        vllm_deployments=[vllm_config],
+        embedding_config=embedding_config,
+        remote_deployments=remote_deployment_configs,
+        cleanup_on_init=config.cluster.cleanup_on_init,
+    )
+
+    vcm_config = VCMConfig(
+        caching_policy="LRU",
+        page_fault_processing_interval_s=5.0,
+        metrics_collection_interval_s=30.0,
+        allocation_strategy=None,
+        page_storage_backend_type="efs",  # Default to EFS for fast access
+        page_storage_path="colony/context_pages",
+        reconciliation_interval_s=30.0,
+    )
+
+    polyconfig = PolymatheraClusterConfig(
+        app_name=effective_app_name,
+        llm_cluster_config=llm_cluster_config,
+        vcm_config=vcm_config,
+        agent_system_config=AgentSystemConfig(),
+        cleanup_on_init=config.cluster.cleanup_on_init,
+    )
+
+    if remote_deployment_configs:
+        deploy_lines = [
+            f"[bold]Step 0.5:[/bold] Deploying PolymatheraCluster",
+            f"  App:    {effective_app_name}",
+        ]
+        for rd in remote_deployment_configs:
+            deploy_lines.append(
+                f"  Remote: {rd.model_name} ({rd.provider}, {rd.num_replicas} replica(s))"
+            )
+        console.print()
+        console.print(Panel(
+            "\n".join(deploy_lines),
+            title="[bold magenta]Cluster Deployment[/bold magenta]",
+            border_style="magenta",
+        ))
+
+    with console.status("[magenta]Deploying cluster..."):
+        polycluster = PolymatheraCluster(
+            config=polyconfig,
+            top_level=True,
+        )
+        await polycluster.deploy()
+
+    console.print("  [green]OK[/green] — Cluster deployed")
 
     # -----------------------------------------------------------------------
     # Step 1: Page the codebase into VCM
@@ -870,7 +1049,7 @@ async def run_integration_test(
         border_style="cyan",
     ))
 
-    vcm_handle = get_vcm(app_name)
+    vcm_handle = get_vcm(effective_app_name)
 
     mmap_config = MmapConfig(
         flush_policy_type=config.paging.flush_policy_type,
@@ -1016,7 +1195,7 @@ async def run_integration_test(
     async def _get_run_cost(run_id: str) -> dict[str, Any]:
         """Query SessionManagerDeployment for accumulated cost data for a run."""
         try:
-            sm_handle = get_session_manager(app_name)
+            sm_handle = get_session_manager(effective_app_name)
             run: AgentRun = await sm_handle.get_run(run_id=run_id)
             if run and run.resource_usage:
                 usage = run.resource_usage

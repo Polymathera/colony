@@ -41,6 +41,7 @@ Example:
 
 # Core decorators
 from .decorators import (
+    DeploymentConfig,
     deployment,
     endpoint,
     replica_property,
@@ -85,6 +86,7 @@ from .proxy import DeploymentProxyRayActor
 
 __all__ = [
     # Decorators
+    "DeploymentConfig",
     "deployment",
     "endpoint",
     "replica_property",
