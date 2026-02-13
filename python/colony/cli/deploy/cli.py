@@ -45,8 +45,15 @@ def up(
     config = DeployConfig(mode="k8s" if k8s else "compose")
     manager = DeploymentManager(config)
 
-    with console.status("[blue]Starting colony environment..."):
-        services = _run(manager.up(build=not no_build, workers=workers))
+    try:
+        services = _run(manager.up(
+            build=not no_build,
+            workers=workers,
+            on_status=lambda msg: console.print(f"  [blue]{msg}[/blue]"),
+        ))
+    except RuntimeError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
     all_ok = all(s.status == ProviderStatus.RUNNING for s in services)
 
@@ -79,8 +86,12 @@ def down(
     config = DeployConfig(mode="k8s" if k8s else "compose")
     manager = DeploymentManager(config)
 
-    with console.status("[blue]Stopping colony environment..."):
-        _run(manager.down())
+    try:
+        with console.status("[blue]Stopping colony environment..."):
+            _run(manager.down())
+    except RuntimeError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
     console.print("[green]Colony environment stopped.[/green]")
 
@@ -124,10 +135,14 @@ def run(
     deploy_config = DeployConfig(mode="k8s" if k8s else "compose")
     manager = DeploymentManager(deploy_config)
 
-    exit_code = _run(manager.run(
-        codebase_path=codebase_path,
-        config_path=config,
-    ))
+    try:
+        exit_code = _run(manager.run(
+            codebase_path=codebase_path,
+            config_path=config,
+        ))
+    except (RuntimeError, FileNotFoundError) as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
 
     raise typer.Exit(exit_code)
 

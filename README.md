@@ -32,8 +32,11 @@ Colony ships with `colony-env`, a CLI tool that spins up a local Ray cluster + R
 # Start the cluster (builds image on first run)
 colony-env up
 
+# Generate a sample analysis config
+polymath init-config --output my_analysis.yaml
+
 # Run a code analysis over a local codebase
-colony-env run /path/to/codebase --config analysis.yaml
+colony-env run /path/to/codebase --config my_analysis.yaml
 
 # Check service status
 colony-env status

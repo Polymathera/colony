@@ -75,6 +75,7 @@ RUN mkdir -p /tmp/ray && \
     chown -R ${RAY_CONTAINER_USER}:users /home/${RAY_CONTAINER_USER}/.local
 
 ENV RAY_DISABLE_DOCKER_CPU_WARNING=1
+ENV PYTHONPATH=${APP_MOUNT_PATH}/python
 
 USER ${RAY_CONTAINER_USER}
 CMD ["/bin/bash"]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from .config import DeployConfig
 from .providers.base import DeploymentProvider, ServiceInfo
 from .providers.compose import DockerComposeProvider
@@ -22,8 +24,15 @@ class DeploymentManager:
             return KindKubeRayProvider(self._config)
         raise ValueError(f"Unknown deployment mode: {self._config.mode}")
 
-    async def up(self, build: bool = True, workers: int = 1) -> list[ServiceInfo]:
-        return await self._provider.up(build=build, workers=workers)
+    async def up(
+        self,
+        build: bool = True,
+        workers: int = 1,
+        on_status: Callable[[str], None] | None = None,
+    ) -> list[ServiceInfo]:
+        return await self._provider.up(
+            build=build, workers=workers, on_status=on_status,
+        )
 
     async def down(self) -> None:
         return await self._provider.down()

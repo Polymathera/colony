@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from ..config import DeployConfig
@@ -47,20 +47,27 @@ class DockerComposeProvider(DeploymentProvider):
             await proc.wait()
             return proc.returncode, "", ""
 
-    async def up(self, build: bool = True, workers: int = 1) -> list[ServiceInfo]:
+    async def up(
+        self,
+        build: bool = True,
+        workers: int = 1,
+        on_status: Callable[[str], None] | None = None,
+    ) -> list[ServiceInfo]:
         """Build image and start Ray cluster + Redis."""
+        def _log(msg: str) -> None:
+            if on_status:
+                on_status(msg)
+
         if build:
-            rc, _, stderr = await self._exec(*self._compose_cmd("build"))
+            _log("Building colony:local image...")
+            # Stream build output to terminal so user sees download/compile progress
+            rc, _, stderr = await self._exec(
+                *self._compose_cmd("build"), capture=False,
+            )
             if rc != 0:
                 raise RuntimeError(f"Docker Compose build failed:\n{stderr}")
 
-        env = {
-            **os.environ,
-            "COLONY_DASHBOARD_PORT": str(self._config.ray.dashboard_port),
-            "COLONY_CLIENT_PORT": str(self._config.ray.client_port),
-            "COLONY_REDIS_PORT": str(self._config.redis.host_port),
-        }
-
+        _log(f"Starting services (workers={workers})...")
         rc, _, stderr = await self._exec(
             *self._compose_cmd(
                 "up", "-d",
@@ -72,18 +79,28 @@ class DockerComposeProvider(DeploymentProvider):
             raise RuntimeError(f"Docker Compose up failed:\n{stderr}")
 
         # Wait for services to be ready
+        _log("Waiting for ray-head to become healthy...")
         head_ready = await wait_until_ready(
             lambda: docker_container_healthy(self._config.ray.head_container_name),
             timeout=120.0,
             interval=3.0,
             description="ray-head",
         )
+        _log(
+            "ray-head: healthy" if head_ready
+            else "ray-head: not healthy (timed out after 120s)"
+        )
 
+        _log("Waiting for redis...")
         redis_ready = await wait_until_ready(
             lambda: redis_ping("localhost", self._config.redis.host_port),
             timeout=30.0,
             interval=1.0,
             description="redis",
+        )
+        _log(
+            "redis: ready" if redis_ready
+            else "redis: not responding (timed out after 30s)"
         )
 
         services = [

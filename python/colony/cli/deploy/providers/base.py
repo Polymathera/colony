@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -27,7 +28,12 @@ class DeploymentProvider(ABC):
     """Base class for deployment providers (Compose, K8s, etc.)."""
 
     @abstractmethod
-    async def up(self, build: bool = True, workers: int = 1) -> list[ServiceInfo]:
+    async def up(
+        self,
+        build: bool = True,
+        workers: int = 1,
+        on_status: Callable[[str], None] | None = None,
+    ) -> list[ServiceInfo]:
         """Start all infrastructure. Returns status of each service."""
 
     @abstractmethod

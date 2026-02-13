@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from ..config import DeployConfig
 from .base import DeploymentProvider, ServiceInfo
 
@@ -24,7 +26,12 @@ class KindKubeRayProvider(DeploymentProvider):
     def __init__(self, config: DeployConfig) -> None:
         self._config = config
 
-    async def up(self, build: bool = True, workers: int = 1) -> list[ServiceInfo]:
+    async def up(
+        self,
+        build: bool = True,
+        workers: int = 1,
+        on_status: Callable[[str], None] | None = None,
+    ) -> list[ServiceInfo]:
         raise NotImplementedError(
             "Kind + KubeRay deployment is not yet implemented. "
             "Use Docker Compose mode (default) for now."
