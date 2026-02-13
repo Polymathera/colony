@@ -1,0 +1,81 @@
+# Colony local development cluster
+# Usage: docker compose -f docker-compose.yml up -d
+# Managed by: colony-env CLI
+
+services:
+  ray-head:
+    build:
+      context: ../../../../..   # colony repo root (where pyproject.toml lives)
+      dockerfile: python/colony/cli/deploy/docker/Dockerfile.local
+    image: colony:local
+    container_name: colony-ray-head
+    command: >
+      ray start --head
+      --port=6379
+      --dashboard-host=0.0.0.0
+      --dashboard-port=8265
+      --ray-client-server-port=10001
+      --num-cpus=0
+      --block
+    ports:
+      - "${COLONY_DASHBOARD_PORT:-8265}:8265"
+      - "${COLONY_CLIENT_PORT:-10001}:10001"
+    volumes:
+      - colony-shared:/mnt/shared
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RAY_CLUSTER_ENVIRONMENT=true
+      - POLYMATHERA_ENV=development
+    depends_on:
+      redis:
+        condition: service_started
+    shm_size: '4gb'
+    networks:
+      - colony-net
+    healthcheck:
+      test: ["CMD", "ray", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  ray-worker:
+    image: colony:local
+    command: >
+      ray start
+      --address=ray-head:6379
+      --block
+    volumes:
+      - colony-shared:/mnt/shared
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RAY_CLUSTER_ENVIRONMENT=true
+      - POLYMATHERA_ENV=development
+    depends_on:
+      ray-head:
+        condition: service_healthy
+    shm_size: '4gb'
+    networks:
+      - colony-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: colony-redis
+    command: redis-server --appendonly yes --protected-mode no
+    ports:
+      - "${COLONY_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - colony-net
+
+volumes:
+  colony-shared:
+  redis-data:
+
+networks:
+  colony-net:
+    name: colony-net
+    driver: bridge

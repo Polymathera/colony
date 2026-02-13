@@ -1,0 +1,80 @@
+# Colony local development image — CPU only
+# Adapted from deployment/docker/Dockerfile.ray-cpu (production)
+# Stripped: SSH, AWS CLI, NFS, monitoring, metrics scripts
+# Kept: All Colony deps, faiss-cpu, git, linguist, Ray user setup
+FROM rayproject/ray:2.49.0-py311-cpu
+
+ARG RAY_CONTAINER_USER=ray
+ARG APP_MOUNT_PATH=/home/ray/app
+
+USER root
+WORKDIR ${APP_MOUNT_PATH}
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+RUN ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime
+
+# Copy project configuration first (layer caching)
+COPY pyproject.toml poetry.lock ./
+
+# Install Poetry
+ARG POLYMATHERA_PYTHON_CMD=python3.11
+RUN ${POLYMATHERA_PYTHON_CMD} -m pip install --no-cache-dir poetry
+
+# Install Python dependencies
+RUN --mount=type=cache,target=/root/.cache \
+    poetry config virtualenvs.create false && \
+    poetry config virtualenvs.in-project false && \
+    poetry lock --no-ansi --no-interaction && \
+    poetry install --only main --extras "code_analysis cpu" --no-interaction --no-ansi --no-root && \
+    pip install --no-cache-dir faiss-cpu==1.7.4
+
+# System dependencies (subset of production — no SSH, AWS, NFS, monitoring)
+RUN apt-get update -yq && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    git-lfs \
+    graphviz \
+    graphviz-dev \
+    pkg-config \
+    libmagic1 \
+    python3-dev \
+    libblas-dev \
+    liblapack-dev \
+    libopenblas-dev \
+    cloc \
+    ruby-dev \
+    libssl-dev \
+    libkrb5-dev \
+    libicu-dev \
+    zlib1g-dev \
+    libcurl4-openssl-dev \
+    cmake \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Linguist Ruby gem (code metrics analysis)
+RUN gem install github-linguist
+
+# Create ray user group if needed and set up permissions
+RUN groupadd -r ${RAY_CONTAINER_USER} 2>/dev/null || true && \
+    useradd -r -g ${RAY_CONTAINER_USER} -s /bin/bash ${RAY_CONTAINER_USER} 2>/dev/null || true && \
+    usermod -aG sudo ${RAY_CONTAINER_USER} && \
+    echo "${RAY_CONTAINER_USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# Copy project code
+COPY --chown=${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} . .
+
+# Fix permissions
+RUN mkdir -p /tmp/ray && \
+    chown -R ${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} /tmp/ray && \
+    chown -R ${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} ${APP_MOUNT_PATH} && \
+    chmod -R 755 ${APP_MOUNT_PATH} && \
+    chown -R ${RAY_CONTAINER_USER}:users /home/${RAY_CONTAINER_USER}/.config && \
+    chown -R ${RAY_CONTAINER_USER}:users /home/${RAY_CONTAINER_USER}/.local
+
+ENV RAY_DISABLE_DOCKER_CPU_WARNING=1
+
+USER ${RAY_CONTAINER_USER}
+CMD ["/bin/bash"]

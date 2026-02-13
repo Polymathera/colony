@@ -1,0 +1,139 @@
+# Local RayCluster CRD for colony-env K8s mode
+# Simplified from deployment/k8s/config/ray-cluster.yaml
+# Stripped: EFS, nodeSelector, tolerations, ECR, GPU workers
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: colony-local
+spec:
+  rayVersion: '2.49.0'
+  enableInTreeAutoscaling: true
+
+  autoscalerOptions:
+    upscalingMode: Default
+    idleTimeoutSeconds: 60
+    resources:
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+      requests:
+        cpu: "250m"
+        memory: "256Mi"
+
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: '0.0.0.0'
+      dashboard-port: '8265'
+      port: '6379'
+      ray-client-server-port: '10001'
+      num-cpus: '0'
+    template:
+      spec:
+        containers:
+        - name: ray-head
+          image: colony:local
+          imagePullPolicy: IfNotPresent
+          ports:
+          - containerPort: 6379
+            name: gcs
+          - containerPort: 8265
+            name: dashboard
+          - containerPort: 10001
+            name: client
+          env:
+          - name: REDIS_HOST
+            value: "colony-redis"
+          - name: REDIS_PORT
+            value: "6379"
+          - name: RAY_CLUSTER_ENVIRONMENT
+            value: "true"
+          - name: POLYMATHERA_ENV
+            value: "development"
+          volumeMounts:
+          - name: shared-storage
+            mountPath: /mnt/shared
+          - name: dshm
+            mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "1"
+              memory: "4Gi"
+          livenessProbe:
+            exec:
+              command: ["ray", "status"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+          readinessProbe:
+            exec:
+              command: ["ray", "status"]
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 10
+        volumes:
+        - name: shared-storage
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "4Gi"
+
+  workerGroupSpecs:
+  - replicas: 1
+    minReplicas: 0
+    maxReplicas: 3
+    groupName: cpu-workers
+    rayStartParams: {}
+    template:
+      spec:
+        containers:
+        - name: ray-worker
+          image: colony:local
+          imagePullPolicy: IfNotPresent
+          env:
+          - name: REDIS_HOST
+            value: "colony-redis"
+          - name: REDIS_PORT
+            value: "6379"
+          - name: RAY_CLUSTER_ENVIRONMENT
+            value: "true"
+          - name: POLYMATHERA_ENV
+            value: "development"
+          volumeMounts:
+          - name: shared-storage
+            mountPath: /mnt/shared
+          - name: dshm
+            mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+          livenessProbe:
+            exec:
+              command: ["ray", "status"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command: ["ray", "status"]
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
+        volumes:
+        - name: shared-storage
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "4Gi"

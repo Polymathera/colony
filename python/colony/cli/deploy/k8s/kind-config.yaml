@@ -1,0 +1,13 @@
+# Kind cluster configuration for colony-env K8s mode
+# Creates a single-node K8s cluster with port mappings for Ray dashboard and client
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - containerPort: 30265   # NodePort for Ray dashboard
+    hostPort: 8265
+    protocol: TCP
+  - containerPort: 30001   # NodePort for Ray client
+    hostPort: 10001
+    protocol: TCP
