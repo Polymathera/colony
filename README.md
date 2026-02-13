@@ -1,61 +1,94 @@
-# colony
+# Colony
+
 Polymathera's no-RAG, multi-agent framework for extremely long, *dense* contexts (1B+ tokens). It provides:
+
 - A cluster-level **virtual context memory** with user-defined context paging.
-- Cache aware agent action policies.
+- Cache-aware agent action policies.
 - Powerful and composable multi-agent patterns.
 - Arbitrarily sophisticated memory hierarchies and cognitive processes.
 
+## Quick Start
 
-### Requirement: Optional Dependencies
+### Installation
 
-Extras are used when you want users who install your package via pip to have access to optional features.
-
-First, mark the dependency as optional under `[tool.poetry.dependencies]`, then list it under `[tool.poetry.extras]`
-
-```toml
-[tool.poetry.dependencies]
-requests = { version = "^2.25", optional = true }
-
-[tool.poetry.extras]
-http = ["requests"]
+```bash
+pip install colony
 ```
 
-To install the extras:
+With optional extras:
+
 ```bash
-poetry install --extras http
-# OR
-poetry install -E http
-# OR (install all)
+pip install colony[code_analysis]    # Code analysis tools
+pip install colony[gpu]              # GPU inference (vLLM, PyTorch)
+pip install colony[cpu]              # CPU-only inference (Anthropic API)
+pip install colony --all-extras      # Everything
+```
+
+### Local Test Environment
+
+Colony ships with `colony-env`, a CLI tool that spins up a local Ray cluster + Redis using Docker Compose. The only prerequisite is **Docker**.
+
+```bash
+# Start the cluster (builds image on first run)
+colony-env up
+
+# Run a code analysis over a local codebase
+colony-env run /path/to/codebase --config analysis.yaml
+
+# Check service status
+colony-env status
+
+# Scale workers
+colony-env up --workers 3
+
+# Tear down
+colony-env down
+
+# Verify prerequisites
+colony-env doctor
+```
+
+All Colony dependencies run inside Docker — no local GPU drivers, Ray, or Redis installation required. The `colony-env run` command copies your codebase to be analyzed into the cluster and executes inside the Ray head container with full access to the framework.
+
+**Services started by `colony-env up`:**
+
+| Service | Port | Description |
+|---------|------|-------------|
+| Ray dashboard | `localhost:8265` | Cluster monitoring UI |
+| Ray client | `localhost:10001` | Ray client connection |
+| Redis | `localhost:6379` | State management backend |
+
+## Development
+
+```bash
+git clone https://github.com/polymathera/colony.git
+cd colony
 poetry install --all-extras
 ```
 
+### Optional Dependencies
 
+Dependencies that require system libraries (CUDA, native extensions) are declared as optional extras in `pyproject.toml`:
 
-```bash
-# Install the core package only:
-pip install my-package
+```toml
+[tool.poetry.dependencies]
+some-dep = { version = "^1.0", optional = true }
 
-# Install with a single optional feature:
-pip install my-package[plot]
-
-# Install with multiple optional features:
-pip install my-package[plot,dev]
+[tool.poetry.extras]
+feature_name = ["some-dep"]
 ```
 
-
-- Handle Optional Imports in Your Code
+Guard optional imports in code:
 
 ```python
 try:
-    import bokeh
+    import heavy_dep
 except ImportError:
-    bokeh = None
+    heavy_dep = None
 
-def make_interactive_plot():
-    if bokeh is None:
-        raise ImportError("The 'plot' optional dependency is required for this feature. Install with: pip install my-package[plot]")
-    # Your plotting code using bokeh goes here
+def feature_function():
+    if heavy_dep is None:
+        raise ImportError(
+            "Install with: pip install colony[feature_name]"
+        )
 ```
-
-
-
