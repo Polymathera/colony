@@ -20,6 +20,7 @@ services:
     ports:
       - "${COLONY_DASHBOARD_PORT:-8265}:8265"
       - "${COLONY_CLIENT_PORT:-10001}:10001"
+      - "${COLONY_METRICS_PORT:-9090}:9090"
     volumes:
       - colony-shared:/mnt/shared
     environment:
@@ -27,6 +28,7 @@ services:
       - REDIS_PORT=6379
       - RAY_CLUSTER_ENVIRONMENT=true
       - POLYMATHERA_ENV=development
+      - PROMETHEUS_PORT=9090
     depends_on:
       redis:
         condition: service_started

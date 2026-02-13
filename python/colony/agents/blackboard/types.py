@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
+from pydantic import BaseModel, Field
+
 
 class BlackboardScope(str, Enum):
     """Blackboard visibility scope."""
@@ -18,23 +20,25 @@ class BlackboardScope(str, Enum):
     PERSISTENT = "persistent"  # Persisted to VCM/disk
 
 
-@dataclass
-class BlackboardEntry:
+class BlackboardEntry(BaseModel):
     """Entry with metadata for debugging and audit trails.
 
     This is stored in the backend and contains all metadata about a value.
+    Pydantic BaseModel so it is compatible with RedisIndex (RedisOM).
     """
 
     key: str
-    value: Any
+    value: Any = None
     version: int = 0
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
+    created_at: float = Field(default_factory=time.time)
+    updated_at: float = Field(default_factory=time.time)
     created_by: str | None = None  # Agent ID
     updated_by: str | None = None  # Agent ID
     ttl_seconds: float | None = None  # Time-to-live
-    tags: set[str] = field(default_factory=set)  # For querying
-    metadata: dict[str, Any] = field(default_factory=dict)  # Extensible
+    tags: set[str] = Field(default_factory=set)  # For querying
+    metadata: dict[str, Any] = Field(default_factory=dict)  # Extensible
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 @dataclass

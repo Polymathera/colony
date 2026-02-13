@@ -21,6 +21,9 @@ COPY pyproject.toml poetry.lock ./
 ARG POLYMATHERA_PYTHON_CMD=python3.11
 RUN ${POLYMATHERA_PYTHON_CMD} -m pip install --no-cache-dir poetry
 
+# Upgrade virtualenv to avoid stale cache conflicts (virtualenv.seed.embed)
+RUN pip install --no-cache-dir --upgrade virtualenv
+
 # Install Python dependencies
 RUN --mount=type=cache,target=/root/.cache \
     poetry config virtualenvs.create false && \
