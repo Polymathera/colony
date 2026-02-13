@@ -352,13 +352,16 @@ class DeploymentConfig:
 
 
 def deployment(
+    _cls: Type[Any] | None = None,
+    /,
+    *,
     name: str | None = None,
     router_class: Type[RequestRouter] | None = None,
     autoscaling_config: dict[str, Any] | None = None,
     ray_actor_options: dict[str, Any] | None = None,
     max_concurrency: int | None = None,
     logging_config: LoggingConfig | None = None,
-) -> Callable[[Type[Any]], Type[Any]]:
+) -> Callable[[Type[Any]], Type[Any]] | Type[Any]:
     """Decorator to mark a class as a deployment.
 
     This wraps the user's service class with additional functionality:
@@ -366,6 +369,8 @@ def deployment(
     - Health checking
     - Error handling with tracebacks
     - Lifecycle methods
+
+    Supports both ``@deployment`` and ``@deployment()`` syntax.
 
     Args:
         name: Deployment name (defaults to class name).
@@ -376,10 +381,11 @@ def deployment(
         logging_config: Logging configuration for deployment actors.
 
     Returns:
-        Decorator function.
+        Decorated class, or decorator function.
 
     Example:
         ```python
+        # With parameters:
         @deployment(
             name="MyService",
             autoscaling_config={"min_replicas": 2, "max_replicas": 10},
@@ -389,6 +395,13 @@ def deployment(
             @endpoint
             async def process(self, data: str) -> str:
                 return f"Processed: {data}"
+
+        # Without parameters:
+        @deployment
+        class MyOtherService:
+            @endpoint
+            async def health(self) -> str:
+                return "ok"
         ```
     """
 
@@ -571,6 +584,9 @@ def deployment(
 
         return WrappedDeployment
 
+    # Support @deployment (without parens) — _cls is the class itself
+    if _cls is not None:
+        return decorator(_cls)
     return decorator
 
 

@@ -41,10 +41,10 @@ class BlackboardEntry:
 class BlackboardEvent:
     """Event emitted on blackboard changes."""
 
-    event_id: str = field(default_factory=lambda: f"blackboard_event_{uuid.uuid4().hex[:8]}")
     event_type: str  # "write", "delete", "clear"
     key: str | None  # None for clear events
     value: Any | None  # None for delete/clear events
+    event_id: str = field(default_factory=lambda: f"blackboard_event_{uuid.uuid4().hex[:8]}")
     version: int = 0
     old_value: Any | None = None  # Previous value (for updates)
     timestamp: float = field(default_factory=time.time)

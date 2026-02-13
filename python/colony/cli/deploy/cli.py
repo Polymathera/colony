@@ -4,7 +4,7 @@ Usage:
     colony-env up [--workers N] [--no-build] [--k8s]
     colony-env down [--k8s]
     colony-env status
-    colony-env run PATH [--config YAML]
+    colony-env run PATH [--config YAML] [--verbose]
     colony-env doctor
 """
 
@@ -130,15 +130,24 @@ def run(
     codebase_path: str = typer.Argument(..., help="Path to the codebase to analyze"),
     config: Optional[str] = typer.Option(None, "--config", "-c", help="Path to analysis YAML config"),
     k8s: bool = typer.Option(False, "--k8s", help="Use Kind + KubeRay (advanced)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose polymath output"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show planned hierarchy without running"),
 ):
     """Run polymath.py analysis inside the cluster."""
     deploy_config = DeployConfig(mode="k8s" if k8s else "compose")
     manager = DeploymentManager(deploy_config)
 
+    extra_args: list[str] = []
+    if verbose:
+        extra_args.append("--verbose")
+    if dry_run:
+        extra_args.append("--dry-run")
+
     try:
         exit_code = _run(manager.run(
             codebase_path=codebase_path,
             config_path=config,
+            extra_args=extra_args or None,
         ))
     except (RuntimeError, FileNotFoundError) as e:
         console.print(f"[red]Error:[/red] {e}")

@@ -49,9 +49,10 @@ Components:
     - Models: Data structures for pages, requests, responses, state
 """
 
+import importlib as _importlib
+
 from .cluster import LLMCluster
 from .config import ClusterConfig, LLMDeploymentConfig, LoRAAdapterConfig
-from .embedding_deployment import EmbeddingDeployment
 from .models import (
     ClusterStatistics,
     ContextPageState,
@@ -77,7 +78,13 @@ from .remote_deployment import RemoteLLMDeployment
 from .anthropic_deployment import AnthropicLLMDeployment
 from .openrouter_deployment import OpenRouterLLMDeployment
 from .routing import ContextAwareRouter, PageAffinityRouter
-from .vllm_deployment import VLLMDeployment
+
+# VLLMDeployment and EmbeddingDeployment depend on vllm (GPU optional dep).
+# Lazy-loaded via __getattr__ so CPU-only environments work.
+_VLLM_NAMES = {
+    "VLLMDeployment": ".vllm_deployment",
+    "EmbeddingDeployment": ".embedding_deployment",
+}
 
 __all__ = [
     # Cluster management
@@ -115,3 +122,14 @@ __all__ = [
     "LLMBackend",
     "QuantizationMethod",
 ]
+
+
+def __getattr__(name: str):
+    if name in _VLLM_NAMES:
+        mod = _importlib.import_module(_VLLM_NAMES[name], __name__)
+        return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return list(globals()) + list(_VLLM_NAMES)

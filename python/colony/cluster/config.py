@@ -469,9 +469,6 @@ class ClusterConfig(BaseModel):
             f"and {len(self.remote_deployments)} remote deployment(s)"
         )
         from ..cluster import LLMCluster
-        from .vllm_deployment import VLLMDeployment
-        from .embedding_deployment import EmbeddingDeployment
-        from .routing import get_routing_policy_class
 
         # Add LLMCluster deployment (unless it's top-level on driver)
         if not top_level:
@@ -480,7 +477,11 @@ class ClusterConfig(BaseModel):
                 name="llm_cluster"
             )
 
-        # Add each vLLM deployment
+        # Add each vLLM deployment (import only when needed — vllm is optional)
+        if self.vllm_deployments:
+            from .vllm_deployment import VLLMDeployment
+            from .routing import get_routing_policy_class
+
         for dconf in self.vllm_deployments:
             deployment_name = dconf.get_deployment_name()
             logger.info(
@@ -536,6 +537,7 @@ class ClusterConfig(BaseModel):
             else:
                 raise ValueError(f"Unknown remote provider: {rconf.provider}")
 
+            from .routing import get_routing_policy_class
             default_router_class = get_routing_policy_class(rconf.default_router_class)
 
             app.add_deployment(
@@ -552,8 +554,9 @@ class ClusterConfig(BaseModel):
                 },
             )
 
-        # Add embedding deployment if configured
+        # Add embedding deployment if configured (import only when needed — vllm is optional)
         if self.embedding_config:
+            from .embedding_deployment import EmbeddingDeployment
             econf = self.embedding_config
             logger.info(f"Adding embedding deployment: {econf.model_name}")
             app.add_deployment(

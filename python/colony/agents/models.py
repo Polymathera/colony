@@ -9,13 +9,12 @@ from __future__ import annotations
 import time
 import uuid
 from enum import Enum
-from typing import Any, Literal, TYPE_CHECKING, AsyncContextManager
+from typing import Any, Literal, AsyncContextManager
 from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, Field, PrivateAttr
 
-if TYPE_CHECKING:
-    from ..distributed.state_management import SharedState
+from ..distributed.state_management import SharedState
 
 
 # ============================================================================
@@ -1812,8 +1811,8 @@ class PolicyREPL(ABC):
         """Check if result exists for action ID."""
         pass
 
-    @abstractmethod
     @property
+    @abstractmethod
     def results(self) -> dict[str, "ActionResult"]:
         """Get all action results (copy)."""
         pass
