@@ -10,8 +10,30 @@ from .config import ConfigComponent, register_polymathera_config
 from .redis_utils.client import RedisConfig
 
 
+class FileSystemBackendType(str, Enum):
+    """Supported filesystem backends"""
+    LOCAL = "local"
+    EFS = "efs"
+
+
+class JsonStorageBackendType(str, Enum):
+    """Supported JSON storage backends"""
+    LOCAL = "local"
+    DYNAMODB = "dynamodb"
+
+
+class ObjectStorageBackendType(str, Enum):
+    """Supported object storage backends"""
+    DISABLED = "disabled"
+    S3 = "s3"
+
+
 @register_polymathera_config()
 class ObjectStorageConfig(ConfigComponent):
+    backend: ObjectStorageBackendType = Field(
+        default=ObjectStorageBackendType.S3,
+        json_schema_extra={"env": "OBJECT_STORAGE_BACKEND"},
+    )
     region_name: str | None = Field(default=None)
     access_key: str | None = Field(default=None)
     secret_key: str | None = Field(default=None)
@@ -22,10 +44,19 @@ class ObjectStorageConfig(ConfigComponent):
 
 @register_polymathera_config()
 class JsonStorageConfig(ConfigComponent):
+    backend: JsonStorageBackendType = Field(
+        default=JsonStorageBackendType.DYNAMODB,
+        json_schema_extra={"env": "JSON_STORAGE_BACKEND"},
+    )
     cache_ttl: int = Field(default=3600)
     dynamodb_table: str | None = Field(default="JsonStorage", json_schema_extra={"env": "JSON_STORAGE_DDB_TABLE_NAME"})
     cache_config: CacheConfig | None = Field(default=None)
     aws_region: str = Field(default="us-east-1", json_schema_extra={"env": "AWS_REGION"})
+    local_storage_path: str = Field(
+        default="/tmp/colony_json_storage",
+        description="Root path for local JSON file storage",
+        json_schema_extra={"env": "JSON_STORAGE_LOCAL_PATH"},
+    )
 
     CONFIG_PATH: ClassVar[str] = "json_storage"
 
@@ -45,8 +76,14 @@ class GitCacheManagerConfig(ConfigComponent):
 
 @register_polymathera_config()
 class GitColdStorageConfig(ConfigComponent):
+    enable_cold_storage: bool = Field(
+        default=True,
+        description="Enable S3-based cold storage for git repos. Disable for local mode.",
+        json_schema_extra={"env": "GIT_COLD_STORAGE_ENABLED"},
+    )
     s3_buckets: list[str] = Field(
-        json_schema_extra={"env": "GIT_COLD_STORAGE_S3_BUCKETS", "parser": lambda x: x.split(",")}
+        default_factory=list,
+        json_schema_extra={"env": "GIT_COLD_STORAGE_S3_BUCKETS", "parser": lambda x: x.split(",")},
     )
     repo_metadata_table: str = Field(default="RepoMetadata", json_schema_extra={"env": "REPO_METADATA_DDB_TABLE_NAME"})
     s3_monitor_interval: int = Field(default=3600)
@@ -84,14 +121,23 @@ class FileStorageConfig(ConfigComponent):
 
 @register_polymathera_config()
 class DistributedFileSystemConfig(ConfigComponent):
+    backend: FileSystemBackendType = Field(
+        default=FileSystemBackendType.EFS,
+        json_schema_extra={"env": "DISTRIBUTED_FS_BACKEND"},
+    )
     efs_mount_path: str = Field(
         default="/mnt/efs",
         description="The mount path for the EFS file system.",
         json_schema_extra={"env": "EFS_MOUNT_PATH"},
     )
+    local_root_path: str = Field(
+        default="/tmp/colony_storage",
+        description="Root path for local filesystem backend.",
+        json_schema_extra={"env": "LOCAL_FS_ROOT_PATH"},
+    )
     compression_level: int = Field(
         default=6,
-        description="The compression level for the EFS file system.",
+        description="The compression level for the file system.",
         json_schema_extra={"env": "EFS_COMPRESSION_LEVEL", "optional": True},
     )
 
@@ -126,11 +172,12 @@ class AuthConfig(ConfigComponent):
 
 @register_polymathera_config()
 class RelationalStorageConfig(ConfigComponent):
-    db_user: str                = Field(..., json_schema_extra={"env": "RDS_USER"})
-    db_password_secret_arn: str = Field(..., json_schema_extra={"env": "RDS_SECRET_ARN"})
-    db_host: str                = Field(..., json_schema_extra={"env": "RDS_HOST"})
-    db_port: int                = Field(..., json_schema_extra={"env": "RDS_PORT"})
-    db_name: str                = Field(..., json_schema_extra={"env": "RDS_DB_NAME"})
+    db_user: str | None         = Field(default=None, json_schema_extra={"env": "RDS_USER"})
+    db_password: str | None     = Field(default=None, json_schema_extra={"env": "RDS_PASSWORD"})
+    db_password_secret_arn: str | None = Field(default=None, json_schema_extra={"env": "RDS_SECRET_ARN"})
+    db_host: str | None         = Field(default=None, json_schema_extra={"env": "RDS_HOST"})
+    db_port: int | None         = Field(default=None, json_schema_extra={"env": "RDS_PORT"})
+    db_name: str | None         = Field(default=None, json_schema_extra={"env": "RDS_DB_NAME"})
 
     @property
     def database_url(self) -> str:

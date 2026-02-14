@@ -9,7 +9,7 @@ from sqlalchemy import select, update, delete
 from sqlalchemy.exc import IntegrityError
 
 from ..configs import RelationalStorageConfig
-from polymathera.schema.vmr import (
+from ...schema.vmr import (
     VirtualMonorepo,
     Repository,
     RepositoryDependency,
@@ -17,8 +17,12 @@ from polymathera.schema.vmr import (
 )
 from ...utils.retry import standard_retry
 
-import boto3
-from botocore.exceptions import ClientError
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ImportError:
+    boto3 = None  # type: ignore[assignment]
+
 import os
 
 logger = logging.getLogger(__name__)
@@ -492,26 +496,30 @@ class RelationalStorage:
         )
 
     def _resolve_db_password(self) -> str | None:
-        """Fetch the DB password from AWS Secrets Manager if an ARN is configured."""
+        """Resolve the DB password from config, env var, or AWS Secrets Manager."""
 
+        # 1. Direct password from config/env
+        if self.config.db_password:
+            return self.config.db_password
+
+        # 2. AWS Secrets Manager
         arn = self.config.db_password_secret_arn
-        logger.debug(f"________ Resolving DB password from SecretsManager: {arn}")
         if not arn or arn == "" or arn.startswith("placeholder"):
-            logger.debug(f"________ No DB password secret ARN provided, using placeholder")
             return None
 
+        if boto3 is None:
+            raise ImportError(
+                "boto3 is required for AWS Secrets Manager password resolution. "
+                "Install it with: pip install boto3  (or poetry install --extras aws)"
+            )
+
         sm = boto3.client("secretsmanager", region_name=os.getenv("AWS_REGION", "us-east-1"))
-        logger.debug(f"________ Created SecretsManager client for region: {os.getenv('AWS_REGION', 'us-east-1')}")
         try:
             resp = sm.get_secret_value(SecretId=arn)
-            logger.debug(f"________ Retrieved DB password from SecretsManager: {resp}")
             secret_str = resp.get("SecretString", "")
             if secret_str:
-                logger.debug(f"________ Parsed DB password from SecretsManager: {secret_str}")
                 import json
-
                 parsed = json.loads(secret_str)
-                logger.debug(f"________ Parsed DB password from SecretsManager: {parsed}")
                 return parsed.get("password") or list(parsed.values())[0]
         except ClientError as exc:
             logger.warning(f"Could not retrieve DB password from SecretsManager: {exc}")

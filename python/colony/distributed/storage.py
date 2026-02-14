@@ -4,20 +4,23 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from multipledispatch import dispatch
 from pydantic import HttpUrl, UUID4
 
-from ..agents.types import ActionPlan
+from ..agents.models import ActionPlan
 from ..schema.exceptions import AuthorizationError
 from ..schema.base_types import RepoId
 from ..schema.vmr import VirtualMonorepo, Repository
-from .auth import AuthToken, DistributedAuthManager
 from .stores.databases import RelationalStorage
-from .stores.files import FileStorage, ScalableDistributedFileSystem
+from .stores.files import FileStorage, ScalableDistributedFileSystem, LocalFileSystem
 from .stores.git import GitFileStorage
-from .stores.json import JsonStorage
+from .stores.json import JsonStorage, LocalJsonStorage
 from .stores.objects import ObjectStorage
-from .configs import StorageConfig
+from .configs import (
+    StorageConfig,
+    FileSystemBackendType,
+    JsonStorageBackendType,
+    ObjectStorageBackendType,
+)
 
 
 
@@ -28,6 +31,18 @@ from .configs import StorageConfig
 
 
 logger = logging.getLogger(__name__)
+
+
+class AuthToken:
+    """Placeholder — auth module has not been ported to this repo yet."""
+    actor_id: str = ""
+
+
+class DistributedAuthManager:
+    """Placeholder — auth module has not been ported to this repo yet."""
+    async def initialize(self) -> None: pass
+    async def cleanup(self) -> None: pass
+    async def verify_permission(self, **kwargs) -> bool: return True
 
 
 
@@ -73,23 +88,47 @@ class Storage:
                 raise
 
         self.config = await StorageConfig.check_or_get_component(self.config)
-        self.object_storage = ObjectStorage(self.config.object_storage)
+
+        # -- Filesystem backend --
+        fs_cfg = self.config.distributed_file_system
+        if fs_cfg and fs_cfg.backend == FileSystemBackendType.LOCAL:
+            self.distributed_file_system = LocalFileSystem(fs_cfg)
+        else:
+            self.distributed_file_system = ScalableDistributedFileSystem(fs_cfg)
+
+        # -- Object storage backend --
+        obj_cfg = self.config.object_storage
+        if obj_cfg and obj_cfg.backend == ObjectStorageBackendType.DISABLED:
+            self.object_storage = None
+        else:
+            self.object_storage = ObjectStorage(obj_cfg)
+
+        # -- JSON storage backend --
+        json_cfg = self.config.json_storage
+        if json_cfg and json_cfg.backend == JsonStorageBackendType.LOCAL:
+            self.json_storage = LocalJsonStorage(json_cfg)
+        else:
+            self.json_storage = JsonStorage(json_cfg)
+
+        # -- Relational, file, git storage (always created) --
         self.relational_storage = RelationalStorage(self.config.relational_storage)
-        self.distributed_file_system = ScalableDistributedFileSystem(self.config.distributed_file_system)
-        self.json_storage = JsonStorage(self.config.json_storage)
         self.file_storage = FileStorage(self.distributed_file_system, self.config.file_storage)
         self.git_storage = GitFileStorage(self.distributed_file_system, self.config.git_storage)
-        self.auth_manager = DistributedAuthManager(self.config.auth_config)
+
+        # -- Auth manager (not available in this repo) --
+        self.auth_manager = None # DistributedAuthManager(self.config.auth_config)
 
         init_tasks = [
-            _run_timed("object_storage", self.object_storage.initialize()),
             _run_timed("relational_storage", self.relational_storage.initialize()),
             _run_timed("distributed_file_system", self.distributed_file_system.initialize()),
             _run_timed("json_storage", self.json_storage.initialize()),
             _run_timed("file_storage", self.file_storage.initialize()),
             _run_timed("git_storage", self.git_storage.initialize()),
-            _run_timed("auth_manager", self.auth_manager.initialize()),
         ]
+        if self.object_storage:
+            init_tasks.append(_run_timed("object_storage", self.object_storage.initialize()))
+        if self.auth_manager:
+            init_tasks.append(_run_timed("auth_manager", self.auth_manager.initialize()))
 
         logger.info("Storage.initialize: awaiting %d init tasks", len(init_tasks))
         await asyncio.gather(*init_tasks)
@@ -144,9 +183,13 @@ class Storage:
         return await self.distributed_file_system.write_compressed_file(path, data)
 
     async def store_object(self, bucket, key, data):
+        if not self.object_storage:
+            raise RuntimeError("Object storage is disabled")
         return await self.object_storage.store_object(bucket, key, data)
 
     async def get_object(self, bucket, key):
+        if not self.object_storage:
+            raise RuntimeError("Object storage is disabled")
         return await self.object_storage.get_object(bucket, key)
 
     async def add_repo_to_vmr(self, repo: Repository, vmr: VirtualMonorepo) -> bool:
@@ -314,7 +357,6 @@ class Storage:
     async def get_size_mb(self, path: str) -> float:
         return await self.distributed_file_system.get_size_mb(path)
 
-    @dispatch(AuthToken, str, str, str, str)
     async def release_reference(
         self,
         auth_token: AuthToken,
@@ -336,8 +378,11 @@ class Storage:
         resource_id: str,
         required_permission: str,
     ):
-        """Verify access with proper error handling and auditing"""
-        if not self.config.enable_auth:
+        """Verify access with proper error handling and auditing.
+
+        Auth module is not available in this repo — this is a no-op stub.
+        """
+        if not self.config.enable_auth or self.auth_manager is None:
             return
 
         try:
@@ -350,8 +395,7 @@ class Storage:
 
             if not has_permission:
                 raise AuthorizationError(
-                    f"Access denied: {auth_token.actor_id} does not have "
-                    f"{required_permission} permission for {resource_type}:{resource_id}"
+                    f"Access denied: {required_permission} permission for {resource_type}:{resource_id}"
                 )
 
         except AuthorizationError:

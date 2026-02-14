@@ -9,7 +9,6 @@ from pathlib import Path
 from overrides import override
 from typing import AsyncGenerator
 
-import aiobotocore.session
 from prometheus_client import Counter, Gauge, Histogram
 
 from ..configs import (
@@ -106,6 +105,128 @@ class FileSystemInterface(ABC):
         Join multiple path components together to form a complete path.
         """
         pass
+
+
+class LocalFileSystem(FileSystemInterface):
+    """Local filesystem backend. Uses plain pathlib operations on a root directory."""
+
+    def __init__(self, config: DistributedFileSystemConfig | None = None):
+        self.config: DistributedFileSystemConfig | None = config
+        self.root_path: Path | None = None
+        self.compression_level: int = 6
+
+    @override
+    async def initialize(self) -> None:
+        self.config = await DistributedFileSystemConfig.check_or_get_component(self.config)
+        self.root_path = Path(self.config.local_root_path)
+        self.compression_level = self.config.compression_level
+        self.root_path.mkdir(parents=True, exist_ok=True)
+        logger.info("Local file system initialized at %s", self.root_path)
+
+    @override
+    async def cleanup(self) -> None:
+        pass
+
+    def _get_path_for_namespace(self, namespace: str) -> Path:
+        namespace_hash = hashlib.md5(namespace.encode()).hexdigest()
+        return self.root_path / namespace_hash[:2] / namespace_hash[2:4] / namespace_hash
+
+    @override
+    async def exists(self, path: Path) -> bool:
+        return (self.root_path / path).exists()
+
+    @override
+    async def get_size_mb(self, path: Path) -> float:
+        full_path = self.root_path / path
+        if not full_path.exists():
+            return 0.0
+        return os.path.getsize(full_path) / (1024 * 1024)
+
+    @override
+    async def get_root_path(self, namespace: str) -> Path:
+        root_path = self._get_path_for_namespace(namespace)
+        root_path.mkdir(parents=True, exist_ok=True)
+        return root_path
+
+    @override
+    async def read_file(self, file_path: str | Path) -> str:
+        full_path = self.root_path / file_path
+        return full_path.read_text(encoding="utf-8")
+
+    @override
+    async def write_file(self, file_path: Path, data: str) -> None:
+        full_path = self.root_path / file_path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(data, encoding="utf-8")
+
+    @override
+    async def read_binary_file(self, file_path: str | Path) -> bytes:
+        return (self.root_path / file_path).read_bytes()
+
+    @override
+    async def write_binary_file(self, file_path: Path, data: bytes) -> None:
+        full_path = self.root_path / file_path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_bytes(data)
+
+    @override
+    async def read_compressed_file(self, file_path: str | Path) -> bytes:
+        compressed_data = (self.root_path / file_path).read_bytes()
+        return zlib.decompress(compressed_data)
+
+    @override
+    async def write_compressed_file(self, file_path: Path, data: bytes) -> None:
+        full_path = self.root_path / file_path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_bytes(zlib.compress(data, self.compression_level))
+
+    @override
+    async def delete(self, file_path: Path) -> None:
+        import shutil
+        full_path = self.root_path / file_path
+        if full_path.is_file() or full_path.is_symlink():
+            os.remove(full_path)
+        elif full_path.is_dir():
+            shutil.rmtree(full_path)
+
+    @override
+    async def list_files(self, directory: Path) -> list[Path]:
+        full_path = self.root_path / directory
+        if not full_path.exists():
+            return []
+        return [p.relative_to(self.root_path) for p in full_path.glob("*") if p.is_file()]
+
+    @override
+    async def glob(self, path: Path, pattern: str = "*") -> list[Path]:
+        full_path = self.root_path / path
+        if not full_path.exists():
+            return []
+        return [p.relative_to(self.root_path) for p in full_path.glob(pattern) if p.is_file()]
+
+    @override
+    async def close(self) -> None:
+        pass
+
+    @override
+    async def walk(self, path: Path) -> AsyncGenerator[tuple[Path, list[Path], list[Path]], None]:
+        full_path = self.root_path / path
+        if not full_path.exists():
+            return
+        for dirpath, dirnames, filenames in os.walk(full_path):
+            yield (
+                Path(dirpath).relative_to(self.root_path),
+                [Path(d) for d in dirnames],
+                [Path(f) for f in filenames],
+            )
+
+    @override
+    async def join(self, *paths) -> Path:
+        if not paths:
+            return Path()
+        result = Path(paths[0])
+        for path in paths[1:]:
+            result = result / path
+        return result
 
 
 class FileStorage(FileSystemInterface):
@@ -634,7 +755,15 @@ class ScalableDistributedFileSystem1(FileSystemInterface):
 
     def __init__(self, config: DistributedFileSystemConfig1 | None = None):
         self.config: DistributedFileSystemConfig1 | None = config
-        self.session = aiobotocore.session.get_session()
+        try:
+            import aiobotocore.session
+            self.session = aiobotocore.session.get_session()
+        except ImportError:
+            raise ImportError(
+                "aiobotocore is required for ScalableDistributedFileSystem1. "
+                "Install it with: pip install aiobotocore  "
+                "(or use poetry install --extras aws)"
+            )
         self.efs_clients = {}
         self.ec2_client = None
         self.cloudwatch_client = None

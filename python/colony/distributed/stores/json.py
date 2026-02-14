@@ -4,12 +4,14 @@ import logging
 from typing import Any
 from pydantic import Field
 
-import boto3
-from botocore.exceptions import ClientError
-
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ImportError:
+    boto3 = None  # type: ignore[assignment]
 
 from ...distributed import get_polymathera
-from ..configs import JsonStorageConfig
+from ..configs import JsonStorageConfig, JsonStorageBackendType
 from ...utils.retry import standard_retry
 
 
@@ -150,3 +152,68 @@ class JsonStorage:
         except Exception as e:
             logger.error(f"_____ JsonStorage: Failed to generate ID for metadata: {e!s}")
             raise
+
+
+class LocalJsonStorage:
+    """Local filesystem-based JSON storage. Stores JSON files on disk."""
+
+    def __init__(self, config: JsonStorageConfig | None = None):
+        self.config = config
+        self.root_path = None
+        self.cache = None
+        self.cache_ttl = None
+
+    async def initialize(self) -> None:
+        from pathlib import Path
+        self.config = await JsonStorageConfig.check_or_get_component(self.config)
+        self.root_path = Path(self.config.local_storage_path)
+        self.root_path.mkdir(parents=True, exist_ok=True)
+        self.cache_ttl = self.config.cache_ttl
+        try:
+            self.cache = await get_polymathera().create_distributed_simple_cache(
+                namespace="json:data",
+                config=self.config.cache_config,
+            )
+        except Exception:
+            self.cache = None
+            logger.info("LocalJsonStorage: distributed cache unavailable, using disk only")
+        logger.info("Initialized local JSON storage at %s", self.root_path)
+
+    async def cleanup(self) -> None:
+        pass
+
+    def _generate_id(self, metadata: dict[str, Any]) -> str:
+        metadata_str = json.dumps(metadata, sort_keys=True)
+        return hashlib.md5(metadata_str.encode()).hexdigest()
+
+    async def save(self, data: dict[str, Any], metadata: dict[str, Any]) -> None:
+        item_id = self._generate_id(metadata)
+        file_path = self.root_path / f"{item_id}.json"
+        item = {"data": data, "metadata": metadata}
+        file_path.write_text(json.dumps(item, indent=2), encoding="utf-8")
+        if self.cache:
+            await self.cache.set(item_id, data, ttl=self.cache_ttl)
+        logger.info(f"LocalJsonStorage: saved item {item_id}")
+
+    async def load(self, metadata: dict[str, Any]) -> dict[str, Any] | None:
+        item_id = self._generate_id(metadata)
+        if self.cache:
+            cached_data = await self.cache.get(item_id)
+            if cached_data:
+                return cached_data
+        file_path = self.root_path / f"{item_id}.json"
+        if not file_path.exists():
+            return None
+        item = json.loads(file_path.read_text(encoding="utf-8"))
+        data = item["data"]
+        if self.cache:
+            await self.cache.set(item_id, data, ttl=self.cache_ttl)
+        return data
+
+    async def contains(self, metadata: dict[str, Any]) -> bool:
+        item_id = self._generate_id(metadata)
+        if self.cache:
+            if await self.cache.exists(item_id):
+                return True
+        file_path = self.root_path / f"{item_id}.json"
+        return file_path.exists()

@@ -484,7 +484,7 @@ class PolymatheraConfig(ConfigComponent):
         if not new_version_data.get("content_version"):
             new_version_data["content_version"] = self.calculate_content_version()
 
-        env_vars = self._read_env_vars(ConfigVersion)
+        env_vars = self._read_env_vars(ConfigVersion, version_data)
         self._deep_update(new_version_data, env_vars)
 
         self.version = ConfigVersion(**new_version_data)
@@ -498,7 +498,7 @@ class PolymatheraConfig(ConfigComponent):
             current = current.get(part, {})
         return current
 
-    def _read_env_vars(self, cls: type[BaseModel]) -> dict[str, Any]:
+    def _read_env_vars(self, cls: type[BaseModel], config_data: dict[str, Any]) -> dict[str, Any]:
         """Read environment variables for a component. This is not recursive because config
         components are created first before their subcomponents are initialized separately."""
         env_vars = {}
@@ -561,7 +561,7 @@ class PolymatheraConfig(ConfigComponent):
         (whether previously initialized or not) have their own nested components initialized.
         """
         # Read environment variables to be validated when the component is initialized
-        env_vars = self._read_env_vars(config_cls)
+        env_vars = self._read_env_vars(config_cls, config_data)
         config_data.update(env_vars)
         component = config_cls(**config_data) # This validates the config data
 

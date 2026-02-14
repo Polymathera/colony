@@ -2,10 +2,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import boto3
-from botocore.exceptions import ClientError
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ImportError:
+    boto3 = None  # type: ignore[assignment]
 
-from ..configs import ObjectStorageConfig
+from ..configs import ObjectStorageConfig, ObjectStorageBackendType
 from ...utils.retry import standard_retry
 
 logger = logging.getLogger(__name__)

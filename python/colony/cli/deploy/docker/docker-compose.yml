@@ -28,10 +28,26 @@ services:
       - REDIS_PORT=6379
       - RAY_CLUSTER_ENVIRONMENT=true
       - POLYMATHERA_ENV=development
+      - POLYMATHERA_RUNNING_LOCALLY=true
       - PROMETHEUS_PORT=9090
+      # Storage backends — local mode
+      - DISTRIBUTED_FS_BACKEND=local
+      - LOCAL_FS_ROOT_PATH=/mnt/shared/filesystem
+      - OBJECT_STORAGE_BACKEND=disabled
+      - JSON_STORAGE_BACKEND=local
+      - JSON_STORAGE_LOCAL_PATH=/mnt/shared/json_storage
+      - GIT_COLD_STORAGE_ENABLED=false
+      # PostgreSQL
+      - RDS_HOST=postgres
+      - RDS_PORT=5432
+      - RDS_USER=colony
+      - RDS_PASSWORD=colony_dev
+      - RDS_DB_NAME=colony
     depends_on:
       redis:
         condition: service_started
+      postgres:
+        condition: service_healthy
     shm_size: '4gb'
     networks:
       - colony-net
@@ -55,6 +71,20 @@ services:
       - REDIS_PORT=6379
       - RAY_CLUSTER_ENVIRONMENT=true
       - POLYMATHERA_ENV=development
+      - POLYMATHERA_RUNNING_LOCALLY=true
+      # Storage backends — local mode
+      - DISTRIBUTED_FS_BACKEND=local
+      - LOCAL_FS_ROOT_PATH=/mnt/shared/filesystem
+      - OBJECT_STORAGE_BACKEND=disabled
+      - JSON_STORAGE_BACKEND=local
+      - JSON_STORAGE_LOCAL_PATH=/mnt/shared/json_storage
+      - GIT_COLD_STORAGE_ENABLED=false
+      # PostgreSQL
+      - RDS_HOST=postgres
+      - RDS_PORT=5432
+      - RDS_USER=colony
+      - RDS_PASSWORD=colony_dev
+      - RDS_DB_NAME=colony
     depends_on:
       ray-head:
         condition: service_healthy
@@ -73,9 +103,29 @@ services:
     networks:
       - colony-net
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: colony-postgres
+    environment:
+      - POSTGRES_USER=colony
+      - POSTGRES_PASSWORD=colony_dev
+      - POSTGRES_DB=colony
+    ports:
+      - "${COLONY_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - colony-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U colony"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
 volumes:
   colony-shared:
   redis-data:
+  postgres-data:
 
 networks:
   colony-net:

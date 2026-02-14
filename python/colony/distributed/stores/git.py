@@ -13,8 +13,12 @@ from typing import Any
 from pydantic import BaseModel, Field, UUID4
 import shutil
 
-import boto3
-from botocore.exceptions import ClientError
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ImportError:
+    boto3 = None  # type: ignore[assignment]
+
 from git import Repo  # Using GitPython
 from git.exc import GitError, GitCommandError
 from multipledispatch import dispatch
@@ -25,7 +29,7 @@ from .files import FileSystemInterface
 from ...distributed import get_polymathera
 from ..configs import GitCacheManagerConfig, GitColdStorageConfig, GitFileStorageConfig
 from ...schema.base_types import RepoId
-from ...metrics.common import BaseMetricsMonitor
+from ..metrics.common import BaseMetricsMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -472,6 +476,34 @@ class GitColdStorage:
             await asyncio.sleep(interval)
 
 
+class NoOpGitColdStorage:
+    """No-op cold storage for local mode. All operations are stubs."""
+
+    async def initialize(self) -> None:
+        logger.info("NoOpGitColdStorage: cold storage disabled (local mode)")
+
+    async def cleanup(self) -> None:
+        pass
+
+    async def repository_exists(self, origin_url: str) -> bool:
+        return False
+
+    async def store_repository(self, origin_url: str, repo_path: Path) -> None:
+        logger.debug("NoOpGitColdStorage: skipping store for %s", origin_url)
+
+    async def retrieve_repository(self, origin_url: str, repo_path: Path, force_download: bool = False) -> None:
+        raise FileNotFoundError(f"Cold storage disabled; repository {origin_url} not available")
+
+    async def delete_repository(self, origin_url: str) -> None:
+        pass
+
+    async def get_all_repo_metadata(self) -> list[dict[str, Any]]:
+        return []
+
+    async def repair_metadata_once(self, batch_size: int = 100) -> None:
+        pass
+
+
 class GitCloneTransaction(BaseModel):
     origin_url: str
     branch: str | None = None
@@ -670,7 +702,11 @@ class GitFileStorage:
         self.prune_interval = self.config.prune_interval
         self.gc_interval = self.config.gc_interval
         self.semaphore = asyncio.Semaphore(self.max_concurrent_clones)
-        self.cold_storage = GitColdStorage(self.config.cold_storage_config)
+        cold_cfg = self.config.cold_storage_config
+        if cold_cfg and not cold_cfg.enable_cold_storage:
+            self.cold_storage = NoOpGitColdStorage()
+        else:
+            self.cold_storage = GitColdStorage(cold_cfg)
         self.cache_manager = GitCacheManager(self.config.cache_manager_config)
         self.metrics = GitFileStorageMetricsMonitor()
 
