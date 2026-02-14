@@ -22,7 +22,7 @@ import time
 import uuid
 from typing import Any, Callable, AsyncIterator, TYPE_CHECKING
 from abc import ABC, abstractmethod
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 import networkx as nx
 
 from ..cluster.models import InferenceRequest, InferenceResponse
@@ -1565,7 +1565,6 @@ class Agent(BaseModel):
     created_at: float = Field(default_factory=time.time)
 
     capability_classes: list[type[AgentCapability]] = Field(default_factory=list)
-    _capabilities: dict[str, AgentCapability] = Field(default_factory=dict)
 
     # Memory configuration
     enable_memory_hierarchy: bool = Field(
@@ -1583,25 +1582,16 @@ class Agent(BaseModel):
 
     child_agents: dict[str, str] = Field(default_factory=dict)  # role -> agent_id
 
-    # Runtime state (not serialized)
-    _running: bool = False
-    _stop_requested: bool = False
-    _suspend_requested: bool = False
-    _suspend_reason: str | None = None
-    _manager: AgentManagerBase | None = None
-    _hook_registry: AgentHookRegistry | None = None
+    # Private attributes (not serialized, use PrivateAttr for Pydantic v2)
+    _capabilities: dict[str, AgentCapability] = PrivateAttr(default_factory=dict)
+    _running: bool = PrivateAttr(default=False)
+    _stop_requested: bool = PrivateAttr(default=False)
+    _suspend_requested: bool = PrivateAttr(default=False)
+    _suspend_reason: str | None = PrivateAttr(default=None)
+    _manager: AgentManagerBase | None = PrivateAttr(default=None)
+    _hook_registry: AgentHookRegistry | None = PrivateAttr(default=None)
 
-    class Config:
-        arbitrary_types_allowed = True
-        # Don't serialize runtime state
-        fields = {
-            "_running": {"exclude": True},
-            "_stop_requested": {"exclude": True},
-            "_suspend_requested": {"exclude": True},
-            "_suspend_reason": {"exclude": True},
-            "_manager": {"exclude": True},
-            "_hook_registry": {"exclude": True},
-        }
+    model_config = {"arbitrary_types_allowed": True}
 
     def set_manager(self, manager: AgentManagerBase) -> None:
         """Attach agent manager reference for delegation.

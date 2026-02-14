@@ -232,7 +232,7 @@ class ConfigComponent(BaseModel):
         if cls.running_locally():
             return cls() if config is None else config
 
-        from ..distributed import get_polymathera
+        from .. import get_polymathera
         config_manager = await get_polymathera().get_config_manager()
 
         return await config_manager.check_or_get_component(cls.CONFIG_PATH, cls, config)

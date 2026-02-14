@@ -77,17 +77,9 @@ from .types import (
     TypeValidationPolicy,
 )
 
-from .task_graph import TaskGraph, Task, TaskStatus
-from .obligation_graph import ObligationGraph, ComplianceRelationship
-from .causality_timeline import (
-    VectorClock,
-    EventType,
-    CausalRelation,
-    CausalEvent,
-    CausalityMatrix,
-    ConcurrencyConflict,
-    CausalityTimeline,
-)
+# task_graph, obligation_graph, and causality_timeline are lazily imported
+# via __getattr__ below to avoid a circular import:
+#   base.py → blackboard/ → task_graph → patterns/ → capabilities/ → base.py
 
 # Backend protocol and transaction
 from .backend import (
@@ -130,14 +122,14 @@ __all__ = [
     "EventTypeFilter",
     "AgentFilter",
     "CombinationFilter",
-    # Task graph
+    # Task graph (lazy)
     "TaskGraph",
     "Task",
     "TaskStatus",
-    # Obligation graph
+    # Obligation graph (lazy)
     "ObligationGraph",
     "ComplianceRelationship",
-    # Causality timeline
+    # Causality timeline (lazy)
     "VectorClock",
     "EventType",
     "CausalRelation",
@@ -158,3 +150,35 @@ __all__ = [
     # Context page sources
     "BlackboardContextPageSource",
 ]
+
+# ---------------------------------------------------------------------------
+# Lazy imports to break circular dependency:
+#   base.py → blackboard/ → task_graph → patterns/ → capabilities/ → base.py
+# ---------------------------------------------------------------------------
+_LAZY_IMPORTS = {
+    # task_graph
+    "TaskGraph": ".task_graph",
+    "Task": ".task_graph",
+    "TaskStatus": ".task_graph",
+    # obligation_graph
+    "ObligationGraph": ".obligation_graph",
+    "ComplianceRelationship": ".obligation_graph",
+    # causality_timeline
+    "VectorClock": ".causality_timeline",
+    "EventType": ".causality_timeline",
+    "CausalRelation": ".causality_timeline",
+    "CausalEvent": ".causality_timeline",
+    "CausalityMatrix": ".causality_timeline",
+    "ConcurrencyConflict": ".causality_timeline",
+    "CausalityTimeline": ".causality_timeline",
+}
+
+
+def __getattr__(name: str):
+    if name in _LAZY_IMPORTS:
+        import importlib
+        module = importlib.import_module(_LAZY_IMPORTS[name], __name__)
+        value = getattr(module, name)
+        globals()[name] = value  # cache for subsequent access
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

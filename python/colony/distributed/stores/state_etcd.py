@@ -1,10 +1,16 @@
+from __future__ import annotations
+
 import asyncio
-import etcd3
-import etcd3.exceptions
-from etcd3.client import Etcd3Client
 from typing import AsyncIterator
 from pydantic import BaseModel, Field
 import logging
+
+try:
+    import etcd3
+    import etcd3.exceptions
+    from etcd3.client import Etcd3Client
+except ImportError:
+    etcd3 = None  # type: ignore[assignment]
 
 from .state_base import StateStorageBackend, StateStorageBackendFactory
 
@@ -145,6 +151,13 @@ class EtcdStorage(StateStorageBackend):
         cert_key: str | None = None,
         ttl: int = 3600,
     ):
+        if etcd3 is None:
+            raise ImportError(
+                "etcd3 is required for EtcdStorage. "
+                "Install it with: pip install etcd3  "
+                "(or use poetry install --extras distributed)"
+            )
+
         logger.info(
             f"Initializing EtcdStorage with host={host}, port={port}, timeout={timeout}, ssl={ssl}, ca_cert={ca_cert}, cert_key={cert_key}, ttl={ttl}"
         )

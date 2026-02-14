@@ -5,13 +5,15 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterator
-from typing import Any, TypeVar
-import functools
+from typing import Any, TypeVar, TYPE_CHECKING
 
 import yaml
 
-from ..stores.state_etcd import EtcdStorage
 from ..redis_utils.client import RedisConfig
+
+if TYPE_CHECKING:
+    from ..stores.state_etcd import EtcdStorage
+
 from .configs import (
     AWS_CONFIG_PATH,
     CLOUD_SYSTEM_CONFIG_PATH,
@@ -256,6 +258,15 @@ class ConfigurationManager:
 
     async def _init_etcd(self) -> None:
         """Initialize etcd storage"""
+        try:
+            from ..stores.state_etcd import EtcdStorage
+        except ImportError as e:
+            raise ImportError(
+                "etcd3 is required for distributed mode. "
+                "Install it with: pip install etcd3  "
+                "(or use poetry install --extras distributed)"
+            ) from e
+
         # Initialize etcd storage with basic config to bootstrap
         self._etcd_storage = EtcdStorage(
             host=os.environ["POLYMATHERA_ETCD_HOST"],

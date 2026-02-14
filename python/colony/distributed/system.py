@@ -359,7 +359,8 @@ class PolymatheraApp:
         logger.info(f"Stack trace: {traceback.format_exc()}")
 
         # Initialize configuration manager first
-        config_manager = await self.get_config_manager()
+        await self._config_manager.initialize()
+        config_manager = self._config_manager
 
         # Initialize core attributes
         self.sys_config = await config_manager.check_or_get_component(

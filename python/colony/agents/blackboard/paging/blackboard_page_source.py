@@ -909,7 +909,6 @@ class BlackboardContextPageSource(ContextPageSource):
         for msg_id, msg_data in claimed_messages:
             await self.re_enqueue_event(msg_id, msg_data)
 
-    @override
     async def re_enqueue_event(self, msg_id: bytes, msg_data: dict) -> None:
         """Re-enqueue an orphaned event from XAUTOCLAIM into the event queue.
 

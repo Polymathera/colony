@@ -1196,6 +1196,22 @@ dnspython = ">=2.0.0"
 idna = ">=2.0.0"
 
 [[package]]
+name = "etcd3"
+version = "0.12.0"
+description = "Python client for the etcd3 API"
+optional = true
+python-versions = "*"
+files = [
+    {file = "etcd3-0.12.0.tar.gz", hash = "sha256:89a704cb389bf0a010a1fa050ce19342d23bf6371ebda1c21cfe8ff3ed488726"},
+]
+
+[package.dependencies]
+grpcio = ">=1.27.1"
+protobuf = ">=3.6.1"
+six = ">=1.12.0"
+tenacity = ">=6.1.0"
+
+[[package]]
 name = "executing"
 version = "2.2.1"
 description = "Get the currently executing AST node of a frame, and other information"
@@ -8118,9 +8134,10 @@ cffi = ["cffi (>=1.17,<2.0)", "cffi (>=2.0.0b)"]
 cache-compression = ["zstandard"]
 code-analysis = ["astor", "chardet", "gitpython", "html2text", "markdown", "nbformat", "pillow", "psutil", "pygithub", "python-louvain", "python-magic", "sqlparse", "toml", "tree-sitter", "xxhash"]
 cpu = ["anthropic"]
+distributed = ["etcd3"]
 gpu = ["pynvml", "torch", "torchaudio", "torchvision", "transformers", "vllm"]
 
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<=3.12"
-content-hash = "50275c3980f486e4ac019df609b078ba1f6995724b3e769e9195c39d8a81f0d1"
+content-hash = "3ff5574b6dcd18944f67c4161be665d696a89cdb19d779ba5d45514440e889b0"
