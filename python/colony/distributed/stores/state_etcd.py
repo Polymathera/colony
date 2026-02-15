@@ -30,12 +30,12 @@ class EtcdStateStorageConfig(BaseModel):
     etcd_host: str = Field(
         default="localhost",
         description="Etcd host to connect to",
-        json_schema_extra={"env": "ETCD_HOST"},
+        json_schema_extra={"env": "ETCD_HOST", "optional": True},
     )
     etcd_port: int = Field(
         default=2379,
         description="Etcd port to connect to",
-        json_schema_extra={"env": "ETCD_PORT"},
+        json_schema_extra={"env": "ETCD_PORT", "optional": True},
     )
     etcd_timeout: int = 5  # seconds
     etcd_ssl: bool = False

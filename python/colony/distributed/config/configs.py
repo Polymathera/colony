@@ -20,6 +20,11 @@ from pydantic import BaseModel, Field, PrivateAttr, model_validator, ConfigDict
 print("\nModule loading - about to define ConfigComponent")
 
 
+def is_callable(obj: Any) -> bool:
+    """Check if an object is callable, including built-in callables that may not be detected by callable()"""
+    return callable(obj) or hasattr(obj, "__call__")
+
+
 class ConfigRegistry:
     """Registry that's aware of module reloads and handles duplicate registrations"""
 
@@ -272,7 +277,10 @@ AWS_CONFIG_PATH = "aws"
 class AWSConfig(ConfigComponent):
     """AWS-specific configuration"""
 
-    region: str = Field(default="us-east-1", json_schema_extra={"env": "AWS_REGION"})
+    region: str = Field(default="us-east-1", json_schema_extra={
+        "env": "AWS_REGION",
+        "optional": True
+    })
     access_key_id: str | None = None
     secret_access_key: str | None = None
     session_token: str | None = None
@@ -484,7 +492,7 @@ class PolymatheraConfig(ConfigComponent):
         if not new_version_data.get("content_version"):
             new_version_data["content_version"] = self.calculate_content_version()
 
-        env_vars = self._read_env_vars(ConfigVersion, version_data)
+        env_vars = self._read_env_vars(ConfigVersion)
         self._deep_update(new_version_data, env_vars)
 
         self.version = ConfigVersion(**new_version_data)
@@ -498,7 +506,7 @@ class PolymatheraConfig(ConfigComponent):
             current = current.get(part, {})
         return current
 
-    def _read_env_vars(self, cls: type[BaseModel], config_data: dict[str, Any]) -> dict[str, Any]:
+    def _read_env_vars(self, cls: type[BaseModel]) -> dict[str, Any]:
         """Read environment variables for a component. This is not recursive because config
         components are created first before their subcomponents are initialized separately."""
         env_vars = {}
@@ -511,15 +519,15 @@ class PolymatheraConfig(ConfigComponent):
             # Get the environment variable value
             env_var = field.json_schema_extra["env"]
             if env_var not in os.environ:
-                if field.json_schema_extra.get("optional", False):
-                    logger.warning(
-                        f"Field {field_name} from optional environment variable {env_var} not found"
-                    )
-                    continue
-                else:
+                optional = field.json_schema_extra.get("optional", False)
+                if isinstance(optional, bool) and not optional:
                     raise ValueError(
-                        f"Field {field_name} from environment variable {env_var} not found"
+                        f"Required env var {env_var} for field {field_name} not found."
                     )
+                logger.warning(
+                    f"Optional environment variable for field {field_name} not found."
+                )
+                continue
 
             # Get the field type, handling Optional types
             field_type = field.annotation
@@ -532,13 +540,35 @@ class PolymatheraConfig(ConfigComponent):
             elif (field_type is list or field_type is dict) and field_parser is None:
                 raise ValueError(f"Field {field_name} is a list or dict, which is not supported for environment-configurable fields.")
 
-            value = field_parser(os.environ[env_var]) if field_parser else field_type(os.environ[env_var])  # Ensure the type is correct
+            if field_parser:
+                value = field_parser(os.environ[env_var])
+            elif field_type is bool:
+                value = os.environ[env_var].lower() in ("true", "1", "yes")
+            else:
+                value = field_type(os.environ[env_var])
             env_vars[field_name] = value
             logger.debug(
                 f"Field {field_name} from environment variable {env_var} found: {value}"
             )
 
         return env_vars
+
+    def _check_conditionally_required_env_vars(self, cls: type[BaseModel], config: BaseModel) -> None:
+        """Check conditionally required environment variables for a component."""
+
+        # Check if field should be read from the environment
+        for field_name, field in cls.model_fields.items():
+            if field.json_schema_extra is None or "env" not in field.json_schema_extra:
+                continue
+
+            # Get the environment variable value
+            env_var = field.json_schema_extra["env"]
+            if env_var not in os.environ:
+                optional = field.json_schema_extra.get("optional", False)
+                if is_callable(optional) and not optional(config):
+                    raise ValueError(
+                        f"Conditionally required environment variable {env_var} for field {field_name} not found:\nConfig data: {config.model_dump()}"
+                    )
 
     def _deep_update(
         self, base_dict: dict[str, Any], update_dict: dict[str, Any]
@@ -561,7 +591,7 @@ class PolymatheraConfig(ConfigComponent):
         (whether previously initialized or not) have their own nested components initialized.
         """
         # Read environment variables to be validated when the component is initialized
-        env_vars = self._read_env_vars(config_cls, config_data)
+        env_vars = self._read_env_vars(config_cls)
         config_data.update(env_vars)
         component = config_cls(**config_data) # This validates the config data
 
@@ -638,6 +668,8 @@ class PolymatheraConfig(ConfigComponent):
                     # Reinitialize the component with its default values and env vars applied
                     field_value = self._initialize_config_component(field_value.model_dump(), field_type)
                     setattr(component, field_name, field_value)
+
+        self._check_conditionally_required_env_vars(config_cls, component)
 
         return component
 

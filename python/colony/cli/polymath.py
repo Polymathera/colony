@@ -448,7 +448,6 @@ class AgentSystemYAMLConfig:
     max_retries: int = 3
     enable_sessions: bool = True
     default_session_ttl: float = 86400.0   # 24 hours
-    max_sessions_per_tenant: int = 100
 
 
 @dataclass
@@ -694,7 +693,6 @@ cluster:
 #   max_retries: 3
 #   enable_sessions: true
 #   default_session_ttl: 86400.0       # 24 hours
-#   max_sessions_per_tenant: 100
 
 # --- VCM Paging Configuration ---
 # Controls how the codebase is partitioned into VCM pages.
@@ -1133,7 +1131,6 @@ async def run_integration_test(
         max_retries=config.agent_system.max_retries,
         enable_sessions=config.agent_system.enable_sessions,
         default_session_ttl=config.agent_system.default_session_ttl,
-        max_sessions_per_tenant=config.agent_system.max_sessions_per_tenant,
     )
 
     polyconfig = PolymatheraClusterConfig(

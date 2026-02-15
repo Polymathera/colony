@@ -221,7 +221,7 @@ class DeploymentResponse(BaseModel):
     """Optional metadata (e.g., timing, resource usage)."""
 
     @classmethod
-    def success(cls, request_id: str, result: Any, metadata: dict[str, Any] | None = None) -> "DeploymentResponse":
+    def with_success(cls, request_id: str, result: Any, metadata: dict[str, Any] | None = None) -> DeploymentResponse:
         """Create a successful response."""
         return cls(
             request_id=request_id,
@@ -231,7 +231,7 @@ class DeploymentResponse(BaseModel):
         )
 
     @classmethod
-    def error(cls, request_id: str, error: Exception, metadata: dict[str, Any] | None = None) -> "DeploymentResponse":
+    def with_error(cls, request_id: str, error: Exception, metadata: dict[str, Any] | None = None) -> DeploymentResponse:
         """Create an error response.
 
         Preserves the exception type and module so it can be re-raised on the client side.

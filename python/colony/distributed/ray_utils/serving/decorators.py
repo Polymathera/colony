@@ -523,7 +523,7 @@ def deployment(
                         result = await result
 
                     # Return successful response
-                    return DeploymentResponse.success(
+                    return DeploymentResponse.with_success(
                         request_id=request.request_id,
                         result=result,
                     )
@@ -535,7 +535,7 @@ def deployment(
                         exc_info=True,
                     )
                     # Return error response with traceback
-                    return DeploymentResponse.error(
+                    return DeploymentResponse.with_error(
                         request_id=request.request_id,
                         error=e,
                     )

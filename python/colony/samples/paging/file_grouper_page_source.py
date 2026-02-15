@@ -7,8 +7,6 @@ from overrides import override
 from typing import Any, AsyncIterator, Literal
 import networkx as nx
 
-from ...system import get_vcm
-
 from ...vcm.sources import ContextPageSource, ContextPageSourceFactory
 from ...vcm.models import MmapConfig, ContextPageId, VirtualContextPage
 from ...vcm.page_storage import PageStorage, PageStorageConfig
@@ -71,6 +69,7 @@ class FileGrouperContextPageSource(ContextPageSource):
         if self.page_storage is not None and self.page_graph is not None:
             return  # Already initialized
 
+        from ...system import get_vcm
         vcm_handle = get_vcm()
         config: PageStorageConfig | None = await vcm_handle.get_page_storage_config()
         if not config:

@@ -22,13 +22,6 @@ from pydantic import Field
 from ..distributed import get_polymathera
 from ..distributed.state_management import SharedState, StateManager
 from ..distributed.ray_utils import serving
-from ..system import (
-    get_vcm,
-    get_session_manager,
-    get_llm_cluster,
-    get_standalone_agents,
-    get_vllm_deployment
-)
 from .base import Agent, AgentState, ResourceExhausted
 from .models import (
     AgentResourceRequirements,
@@ -128,6 +121,11 @@ class AgentSystemDeployment:
     @serving.initialize_deployment
     async def initialize(self):
         """Initialize state manager and handles."""
+        from ..system import (
+            get_vcm,
+            get_session_manager,
+        )
+
         # Get app name from environment
         self.app_name = serving.get_my_app_name()
         logger.info(f"Initializing AgentSystemDeployment for app {self.app_name}")
@@ -284,6 +282,12 @@ class AgentSystemDeployment:
             agent_ids = await agent_system.spawn_agents(specs, session_id="sess-123")
             ```
         """
+        from ..system import (
+            get_llm_cluster,
+            get_standalone_agents,
+            get_vllm_deployment
+        )
+
         agent_ids = []
 
         # Get LLMCluster handle for requirement-based routing
@@ -296,7 +300,7 @@ class AgentSystemDeployment:
             agent_id = spec.agent_id or f"agent-{uuid.uuid4().hex[:8]}"
 
             # Add session_id and run_id to metadata for tracking
-            metadata = spec.metadata.copy()
+            metadata = spec.metadata.model_copy().model_dump()  # Start with spec metadata
             if session_id:
                 metadata["session_id"] = session_id
             if run_id:

@@ -248,11 +248,9 @@ class RedisClient:
             ### import tempfile
             ### persistence_dir = tempfile.mkdtemp(prefix='data_redis_')
             ### os.environ['REDIS_PERSISTENCE_DIR'] = persistence_dir
-            ### self.logger.info(f"Created persistence directory: {persistence_dir}")
+            ### logger.info(f"Created persistence directory: {persistence_dir}")
         else:
-            self.logger.info(f"Redis persistence disabled")
-
-
+            logger.info(f"Redis persistence disabled")
 
         # Basic Redis configuration
         pool_kwargs = {

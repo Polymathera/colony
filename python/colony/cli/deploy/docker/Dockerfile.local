@@ -70,8 +70,10 @@ RUN groupadd -r ${RAY_CONTAINER_USER} 2>/dev/null || true && \
 COPY --chown=${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} . .
 
 # Fix permissions
-RUN mkdir -p /tmp/ray && \
-    chown -R ${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} /tmp/ray && \
+# /mnt/shared is the mount point for the colony-shared Docker volume.
+# Docker named volumes inherit ownership from the image on first creation.
+RUN mkdir -p /tmp/ray /mnt/shared && \
+    chown -R ${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} /tmp/ray /mnt/shared && \
     chown -R ${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} ${APP_MOUNT_PATH} && \
     chmod -R 755 ${APP_MOUNT_PATH} && \
     chown -R ${RAY_CONTAINER_USER}:users /home/${RAY_CONTAINER_USER}/.config && \

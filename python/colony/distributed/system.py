@@ -53,7 +53,7 @@ class PolymatheraApp:
         self._redis_client = None
 
         # Registry to track all created cache instances for cleanup
-        self._cache_registry: dict[str, DistributedSimpleCache] = set()
+        self._cache_registry: dict[str, DistributedSimpleCache] = dict()
         self._shared_simple_cache = None
         # Cache for StateManager instances (keyed by state_key)
         self._state_managers: dict[str, StateManager] = {}
@@ -107,14 +107,15 @@ class PolymatheraApp:
         # Try to connect to existing Ray cluster (on EKS)
         try:
             py_modules = py_modules or []
-            from ... import colony
-            py_modules.append(colony)  # Ensure polymathera.colony modules are included in worker processes
+            import colony
+            py_modules.append(colony)  # Ensure colony modules are included in worker processes
 
             # Try to connect to the cluster
             ray.init(
                 address="auto",
                 ignore_reinit_error=True,
-                _system_config={"health_check_timeout_ms": 5000},
+                # When connecting to an existing cluster, _system_config must not be provided.
+                # _system_config={"health_check_timeout_ms": 5000},
                 ### # Enable structured JSON logging with actor/task metadata
                 ### logging_config=ray.LoggingConfig(
                 ###     encoding="JSON",
@@ -223,104 +224,6 @@ class PolymatheraApp:
         weakref.finalize(cache, self._cache_registry.pop, id(cache))
 
         return cache
-
-    async def get_or_create_ray_service(
-        self,
-        svc_class: type,
-        service_name: str,
-    ) -> serving.DeploymentHandle:
-        """
-        Get or create a shared deployment for any service class using polymathera.rayutils.serving.
-        This service is shared across agents and persists for the lifetime
-        of the Ray cluster to avoid repeated deployment overhead.
-
-        Uses Application.start() which handles distributed state management atomically.
-
-        Args:
-            svc_class: The service class to deploy (must be decorated with @serving.deployment)
-            service_name: Name for the service (used as app name)
-
-        Returns:
-            DeploymentHandle for the service
-        """
-        # Use service_name as app name
-        app_name = service_name
-
-        # Check if class has bind method and deployment config
-        if not hasattr(svc_class, 'bind'):
-            raise AttributeError(
-                f"Service class '{svc_class.__name__}' does not have a 'bind' method. "
-                f"Make sure it is decorated with @serving.deployment."
-            )
-
-        if not hasattr(svc_class, '__deployment_config__'):
-            raise AttributeError(
-                f"Service class '{svc_class.__name__}' does not have __deployment_config__. "
-                f"Make sure it is decorated with @serving.deployment."
-            )
-
-        # Get deployment name from decorator config (NOT from class name)
-        # This respects the 'name' parameter in @serving.deployment(name=...)
-        deployment_config = svc_class.__deployment_config__
-        deployment_name = deployment_config.name or svc_class.__name__
-
-        logger.info(
-            f"Service class '{svc_class.__name__}' has deployment name '{deployment_name}' "
-            f"from decorator config"
-        )
-
-        # Try to get existing deployment using distributed service discovery
-        try:
-            handle = serving.get_deployment(app_name, deployment_name)
-            logger.info(f"Found existing deployment '{deployment_name}' in app '{app_name}'")
-            return handle
-        except Exception as e:
-            logger.info(f"Deployment '{deployment_name}' in app '{app_name}' not found: {e}. Will create it.")
-
-        # Deployment doesn't exist, create it using Application
-        # Application.start() handles distributed state management atomically
-        logger.info(f"Creating new application '{app_name}' with deployment '{deployment_name}'")
-
-        try:
-            # Create application and add deployment
-            app = serving.Application(name=app_name)
-            logger.info(f"Created Application instance for '{app_name}'")
-
-            bound_deployment = svc_class.bind()
-            logger.info(f"Successfully called bind() on {svc_class.__name__}")
-
-            app.add_deployment(bound_deployment)
-            logger.info(f"Added deployment to application")
-
-            # Start the application (handles distributed state atomically)
-            logger.info(f"Starting application '{app_name}'...")
-            await app.start()
-            logger.info(f"Application '{app_name}' started successfully")
-
-            # Get deployment handle using distributed service discovery
-            handle = serving.get_deployment(app_name, deployment_name)
-            logger.info(f"Successfully retrieved deployment handle for '{deployment_name}'")
-            return handle
-
-        except Exception as e:
-            logger.error(
-                f"Failed to create/start application '{app_name}' with deployment '{deployment_name}': {e}",
-                exc_info=True
-            )
-            raise
-
-    async def delete_ray_service(self, service_name: str) -> bool:
-        """
-        Delete the Ray service (using service_name as Polymathera Ray serving app name).
-        This function is useful for cleanup during tests to reduce resource usage
-        and associated costs.
-
-        Uses Application.stop_by_name_if_exists() which handles distributed state management.
-
-        Returns:
-            bool: True if service was successfully deleted or didn't exist, False if deletion failed
-        """
-        return await serving.Application.stop_by_name_if_exists(service_name)
 
     async def get_git_file_storage_prefix(self):
         storage = await self.get_storage()

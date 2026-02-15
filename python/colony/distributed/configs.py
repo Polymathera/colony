@@ -22,6 +22,12 @@ class JsonStorageBackendType(str, Enum):
     DYNAMODB = "dynamodb"
 
 
+class RelationalStorageBackendType(str, Enum):
+    """Supported relational storage backends"""
+    LOCAL = "local"
+    RDS = "rds"
+
+
 class ObjectStorageBackendType(str, Enum):
     """Supported object storage backends"""
     DISABLED = "disabled"
@@ -46,16 +52,25 @@ class ObjectStorageConfig(ConfigComponent):
 class JsonStorageConfig(ConfigComponent):
     backend: JsonStorageBackendType = Field(
         default=JsonStorageBackendType.DYNAMODB,
-        json_schema_extra={"env": "JSON_STORAGE_BACKEND"},
+        json_schema_extra={"env": "JSON_STORAGE_BACKEND", "optional": True},
     )
     cache_ttl: int = Field(default=3600)
-    dynamodb_table: str | None = Field(default="JsonStorage", json_schema_extra={"env": "JSON_STORAGE_DDB_TABLE_NAME"})
+    dynamodb_table: str | None = Field(default="JsonStorage", json_schema_extra={
+        "env": "JSON_STORAGE_DDB_TABLE_NAME",
+        "optional": lambda config: config.backend == JsonStorageBackendType.LOCAL
+    })
     cache_config: CacheConfig | None = Field(default=None)
-    aws_region: str = Field(default="us-east-1", json_schema_extra={"env": "AWS_REGION"})
+    aws_region: str = Field(default="us-east-1", json_schema_extra={
+        "env": "AWS_REGION",
+        "optional": lambda config: config.backend == JsonStorageBackendType.LOCAL
+    })
     local_storage_path: str = Field(
         default="/tmp/colony_json_storage",
         description="Root path for local JSON file storage",
-        json_schema_extra={"env": "JSON_STORAGE_LOCAL_PATH"},
+        json_schema_extra={
+            "env": "JSON_STORAGE_LOCAL_PATH",
+            "optional": lambda config: config.backend == JsonStorageBackendType.DYNAMODB
+        },
     )
 
     CONFIG_PATH: ClassVar[str] = "json_storage"
@@ -83,11 +98,21 @@ class GitColdStorageConfig(ConfigComponent):
     )
     s3_buckets: list[str] = Field(
         default_factory=list,
-        json_schema_extra={"env": "GIT_COLD_STORAGE_S3_BUCKETS", "parser": lambda x: x.split(",")},
+        json_schema_extra={
+            "env": "GIT_COLD_STORAGE_S3_BUCKETS",
+            "parser": lambda x: x.split(","),
+            "optional": lambda config: not config.enable_cold_storage
+        },
     )
-    repo_metadata_table: str = Field(default="RepoMetadata", json_schema_extra={"env": "REPO_METADATA_DDB_TABLE_NAME"})
+    repo_metadata_table: str = Field(default="RepoMetadata", json_schema_extra={
+        "env": "REPO_METADATA_DDB_TABLE_NAME",
+        "optional": lambda config: not config.enable_cold_storage
+    })
+    aws_region: str = Field(default="us-east-1", json_schema_extra={
+        "env": "AWS_REGION",
+        "optional": lambda config: not config.enable_cold_storage
+    })
     s3_monitor_interval: int = Field(default=3600)
-    aws_region: str = Field(default="us-east-1", json_schema_extra={"env": "AWS_REGION"})
 
     CONFIG_PATH: ClassVar[str] = "distributed.git_cold_storage"
 
@@ -128,12 +153,12 @@ class DistributedFileSystemConfig(ConfigComponent):
     efs_mount_path: str = Field(
         default="/mnt/efs",
         description="The mount path for the EFS file system.",
-        json_schema_extra={"env": "EFS_MOUNT_PATH"},
+        json_schema_extra={"env": "EFS_MOUNT_PATH", "optional": lambda config: config.backend != FileSystemBackendType.EFS},
     )
     local_root_path: str = Field(
         default="/tmp/colony_storage",
         description="Root path for local filesystem backend.",
-        json_schema_extra={"env": "LOCAL_FS_ROOT_PATH"},
+        json_schema_extra={"env": "LOCAL_FS_ROOT_PATH", "optional": lambda config: config.backend != FileSystemBackendType.LOCAL},
     )
     compression_level: int = Field(
         default=6,
@@ -160,11 +185,25 @@ class DistributedFileSystemConfig1(ConfigComponent):
 
 @register_polymathera_config()
 class AuthConfig(ConfigComponent):
+    enable_auth: bool = Field(
+        default=False,
+        description="Enable authentication. Disable for local mode.",
+        json_schema_extra={"env": "AUTH_ENABLED"},
+    )
     jwt_secret: str = Field(default="polymathera-jwt-secret")
-    permissions_table: str = Field(default="PolymatheraAuthPermissions", json_schema_extra={"env": "AUTH_PERMISSIONS_DDB_TABLE_NAME"})
-    audit_table: str = Field(default="PolymatheraAudits", json_schema_extra={"env": "AUTH_AUDIT_DDB_TABLE_NAME"})
+    permissions_table: str = Field(
+        default="PolymatheraAuthPermissions",
+        json_schema_extra={"env": "AUTH_PERMISSIONS_DDB_TABLE_NAME", "optional": lambda config: not config.enable_auth},
+    )
+    audit_table: str = Field(
+        default="PolymatheraAudits",
+        json_schema_extra={"env": "AUTH_AUDIT_DDB_TABLE_NAME", "optional": lambda config: not config.enable_auth},
+    )
     cache_config: CacheConfig | None = Field(default=None)
-    aws_region: str = Field(default="us-east-1", json_schema_extra={"env": "AWS_REGION"})
+    aws_region: str = Field(default="us-east-1", json_schema_extra={
+        "env": "AWS_REGION",
+        "optional": True
+    })
 
     CONFIG_PATH: ClassVar[str] = "distributed.auth"
 
@@ -172,9 +211,16 @@ class AuthConfig(ConfigComponent):
 
 @register_polymathera_config()
 class RelationalStorageConfig(ConfigComponent):
+    backend: RelationalStorageBackendType = Field(
+        default=RelationalStorageBackendType.RDS,
+        json_schema_extra={"env": "RELATIONAL_STORAGE_BACKEND"},
+    )
     db_user: str | None         = Field(default=None, json_schema_extra={"env": "RDS_USER"})
     db_password: str | None     = Field(default=None, json_schema_extra={"env": "RDS_PASSWORD"})
-    db_password_secret_arn: str | None = Field(default=None, json_schema_extra={"env": "RDS_SECRET_ARN"})
+    db_password_secret_arn: str | None = Field(default=None, json_schema_extra={
+        "env": "RDS_SECRET_ARN",
+        "optional": lambda config: config.backend != RelationalStorageBackendType.RDS
+    })
     db_host: str | None         = Field(default=None, json_schema_extra={"env": "RDS_HOST"})
     db_port: int | None         = Field(default=None, json_schema_extra={"env": "RDS_PORT"})
     db_name: str | None         = Field(default=None, json_schema_extra={"env": "RDS_DB_NAME"})
@@ -247,9 +293,23 @@ class AuthServiceConfig(ConfigComponent):
 
 @register_polymathera_config()
 class SecurityManagerConfig(ConfigComponent):
-    permissions_table: str = Field(default="PolymatheraSecPermissions", json_schema_extra={"env": "SEC_MANAGER_PERMISSIONS_DDB_TABLE_NAME"})
-    vmr_access_table: str = Field(default="VMRAccess", json_schema_extra={"env": "SEC_MANAGER_VMR_ACCESS_DDB_TABLE_NAME"})
-    knowledge_permissions_table: str = Field(default="KnowledgePermissions", json_schema_extra={"env": "SEC_MANAGER_KNOWLEDGE_PERMISSIONS_DDB_TABLE_NAME"})
+    enable_sec_manager: bool = Field(
+        default=False,
+        description="Enable security manager. Disable for local mode.",
+        json_schema_extra={"env": "SEC_MANAGER_ENABLED", "optional": True},
+    )
+    permissions_table: str = Field(default="PolymatheraSecPermissions", json_schema_extra={
+        "env": "SEC_MANAGER_PERMISSIONS_DDB_TABLE_NAME",
+        "optional": lambda config: not config.enable_sec_manager
+    })
+    vmr_access_table: str = Field(default="VMRAccess", json_schema_extra={
+        "env": "SEC_MANAGER_VMR_ACCESS_DDB_TABLE_NAME",
+        "optional": lambda config: not config.enable_sec_manager
+    })
+    knowledge_permissions_table: str = Field(default="KnowledgePermissions", json_schema_extra={
+        "env": "SEC_MANAGER_KNOWLEDGE_PERMISSIONS_DDB_TABLE_NAME",
+        "optional": lambda config: not config.enable_sec_manager
+    })
 
     CONFIG_PATH: ClassVar[str] = "distributed.security_manager"
 
@@ -257,10 +317,18 @@ class SecurityManagerConfig(ConfigComponent):
 
 @register_polymathera_config()
 class ServiceRegistryConfig(ConfigComponent):
+    enable_service_registry: bool = Field(
+        default=False,
+        description="Enable service registry. Disable for local mode.",
+        json_schema_extra={"env": "SERVICE_REGISTRY_ENABLED", "optional": True},
+    )
     service_registry_type: str = Field(default="etcd")
-    etcd_host: str = Field(default="localhost", json_schema_extra={"env": "ETCD_HOST"})
-    etcd_port: int = Field(default=2379, json_schema_extra={"env": "ETCD_PORT"})
-    aws_region: str = Field(default="us-east-1", json_schema_extra={"env": "AWS_REGION"})
+    etcd_host: str = Field(default="localhost", json_schema_extra={"env": "ETCD_HOST", "optional": lambda config: not config.enable_service_registry})
+    etcd_port: int = Field(default=2379, json_schema_extra={"env": "ETCD_PORT", "optional": lambda config: not config.enable_service_registry})
+    aws_region: str = Field(default="us-east-1", json_schema_extra={
+        "env": "AWS_REGION",
+        "optional": lambda config: not config.enable_service_registry
+    })
     load_balancer_type: str = Field(default="haproxy")
 
     CONFIG_PATH: ClassVar[str] = "distributed.service_registry"
@@ -312,12 +380,12 @@ class StateStorageConfig(ConfigComponent):
     etcd_host: str = Field(
         default="localhost",
         description="Etcd host to connect to",
-        json_schema_extra={"env": "ETCD_HOST"},
+        json_schema_extra={"env": "ETCD_HOST", "optional": lambda config: config.backend != StateStorageBackendType.ETCD},
     )
     etcd_port: int = Field(
         default=2379,
         description="Etcd port to connect to",
-        json_schema_extra={"env": "ETCD_PORT"},
+        json_schema_extra={"env": "ETCD_PORT", "optional": lambda config: config.backend != StateStorageBackendType.ETCD},
     )
     etcd_timeout: int = 5  # seconds
     etcd_ssl: bool = False

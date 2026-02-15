@@ -30,19 +30,25 @@ services:
       - POLYMATHERA_ENV=development
       - POLYMATHERA_RUNNING_LOCALLY=true
       - PROMETHEUS_PORT=9090
+      # Authentication - local mode
+      - AUTH_ENABLED=False
       # Storage backends — local mode
       - DISTRIBUTED_FS_BACKEND=local
       - LOCAL_FS_ROOT_PATH=/mnt/shared/filesystem
       - OBJECT_STORAGE_BACKEND=disabled
       - JSON_STORAGE_BACKEND=local
       - JSON_STORAGE_LOCAL_PATH=/mnt/shared/json_storage
-      - GIT_COLD_STORAGE_ENABLED=false
+      - GIT_COLD_STORAGE_ENABLED=False
+      - RELATIONAL_STORAGE_BACKEND=local
       # PostgreSQL
       - RDS_HOST=postgres
       - RDS_PORT=5432
       - RDS_USER=colony
       - RDS_PASSWORD=colony_dev
       - RDS_DB_NAME=colony
+      # API keys — forwarded from host environment
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
     depends_on:
       redis:
         condition: service_started
@@ -72,19 +78,26 @@ services:
       - RAY_CLUSTER_ENVIRONMENT=true
       - POLYMATHERA_ENV=development
       - POLYMATHERA_RUNNING_LOCALLY=true
+      - PROMETHEUS_PORT=9090
+      # Authentication - local mode
+      - AUTH_ENABLED=False
       # Storage backends — local mode
       - DISTRIBUTED_FS_BACKEND=local
       - LOCAL_FS_ROOT_PATH=/mnt/shared/filesystem
       - OBJECT_STORAGE_BACKEND=disabled
       - JSON_STORAGE_BACKEND=local
       - JSON_STORAGE_LOCAL_PATH=/mnt/shared/json_storage
-      - GIT_COLD_STORAGE_ENABLED=false
+      - GIT_COLD_STORAGE_ENABLED=False
+      - RELATIONAL_STORAGE_BACKEND=local
       # PostgreSQL
       - RDS_HOST=postgres
       - RDS_PORT=5432
       - RDS_USER=colony
       - RDS_PASSWORD=colony_dev
       - RDS_DB_NAME=colony
+      # API keys — forwarded from host environment
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
     depends_on:
       ray-head:
         condition: service_healthy

@@ -266,7 +266,7 @@ class DeploymentProxyRayActor:
                     method=method_name,
                     status="no_replicas",
                 ).inc()
-                return DeploymentResponse.error(
+                return DeploymentResponse.with_error(
                     request_id=request.request_id,
                     error=Exception(error_msg),
                 )
@@ -304,7 +304,7 @@ class DeploymentProxyRayActor:
                 method=method_name,
                 status="error",
             ).inc()
-            return DeploymentResponse.error(request_id=request.request_id, error=e)
+            return DeploymentResponse.with_error(request_id=request.request_id, error=e)
 
     async def _process_replica_queue(self, replica: DeploymentReplicaInfo) -> None:
         """Process requests from a replica's queue.
@@ -387,7 +387,7 @@ class DeploymentProxyRayActor:
                 f"Error processing request {request.request_id} on replica {replica.replica_id}: {e}",
                 exc_info=True,
             )
-            response = DeploymentResponse.error(
+            response = DeploymentResponse.with_error(
                 request_id=request.request_id,
                 error=e,
             )
@@ -642,9 +642,16 @@ class DeploymentProxyRayActor:
                 # Prepare actor options with runtime_env for app name and deployment name
                 actor_options = self.ray_actor_options.copy()
 
-                # Set runtime_env with app name and logging configuration
+                # Set runtime_env with app name and logging configuration.
+                # Inherit env vars from the proxy's os.environ (which includes
+                # the driver's runtime_env vars such as API keys) so replicas
+                # can access them even though we set an explicit runtime_env.
                 runtime_env = actor_options.get("runtime_env", {})
-                env_vars = runtime_env.get("env_vars", {})
+                env_vars = {
+                    k: v for k, v in os.environ.items()
+                    if k.startswith(("POLYMATH", "RAY_", "REDIS_", "ANTHROPIC_", "OPENROUTER_", "HUGGING_FACE_")) and v
+                }
+                env_vars.update(runtime_env.get("env_vars", {}))
                 env_vars["POLYMATHERA_SERVING_CURRENT_APP"] = self.app_name
                 env_vars["POLYMATHERA_SERVING_CURRENT_DEPLOYMENT"] = self.deployment_name
                 env_vars["POLYMATHERA_SERVING_CURRENT_REPLICA_ID"] = replica_id

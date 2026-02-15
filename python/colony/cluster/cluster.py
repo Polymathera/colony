@@ -248,12 +248,19 @@ class LLMCluster:
             logger.debug(f"Connected to VLLM deployment: {deployment_name}")
 
         # Get deployment handles for all remote deployments
+        # Retry because remote deployments may still be starting up.
+        # The retry decorator is applied to a local function (not a class method)
+        # because tenacity captures _thread._local which Ray can't serialize.
+        from ..utils.retry import create_retry_with_logging
+
+        @create_retry_with_logging(logger, stop_attempts=30, wait_min=2, wait_max=2)
+        async def _get_remote_handle(deployment_name: str):
+            return serving.get_deployment(self.app_name, deployment_name)
+
         for rconf in self.config.remote_deployments:
             deployment_name = rconf.get_deployment_name()
-            # Remote deployments use the same serving.get_deployment() mechanism
-            self.remote_deployment_handles[deployment_name] = serving.get_deployment(
-                self.app_name,
-                deployment_name,
+            self.remote_deployment_handles[deployment_name] = await _get_remote_handle(
+                deployment_name
             )
             logger.debug(f"Connected to remote deployment: {deployment_name}")
 

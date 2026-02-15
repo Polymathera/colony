@@ -43,13 +43,6 @@ from .sessions.models import AgentRun, AgentRunConfig, AgentRunEvent, RunStatus,
 from ..distributed import get_polymathera
 from ..distributed.state_management import StateManager
 from ..distributed.ray_utils import serving
-from ..system import (
-    get_agent_system,
-    get_llm_cluster,
-    get_tool_manager,
-    get_vcm,
-    spawn_agents
-)
 from .routing import AgentAffinityRouter, SoftPageAffinityRouter
 from ..vcm.page_storage import PageStorage, PageStorageConfig
 from ..cluster.config import LLMDeploymentConfig
@@ -863,6 +856,8 @@ class AgentHandle:
         Raises:
             ValueError: If failed to spawn agent
         """
+        from ..system import spawn_agents
+
         child_ids: list[str] = await spawn_agents(
             agent_specs=[agent_spec],
             session_id=session_id or agent_spec.metadata.session_id,
@@ -879,6 +874,8 @@ class AgentHandle:
 
     async def _load_agent_metadata(self) -> None:
         """Load agent metadata from AgentSystemDeployment."""
+        from ..system import get_agent_system
+
         agent_system = get_agent_system()
         agent_info = await agent_system.get_agent_info(self.child_agent_id)
 
@@ -1355,6 +1352,8 @@ class AgentHandle:
 
     async def stop(self) -> None:
         """Request the target agent to stop."""
+        from ..system import get_agent_system
+
         agent_system = get_agent_system()
         await agent_system.stop_agent(self.child_agent_id)
 
@@ -1755,6 +1754,8 @@ class Agent(BaseModel):
             raise RuntimeError(f"Agent {self.agent_id} not attached to manager")
 
         try:
+            from ..system import get_tool_manager
+
             # Delegate to manager's tool manager handle
             tool_manager = get_tool_manager()
             if category:
@@ -1789,6 +1790,7 @@ class Agent(BaseModel):
         try:
             # Create tool call
             from .models import ToolCall
+            from ..system import get_tool_manager
 
             tool_call = ToolCall(
                 call_id=f"{self.agent_id}-{tool_id}-{time.time()}",
@@ -1819,6 +1821,8 @@ class Agent(BaseModel):
 
         Override in subclasses to perform initialization logic.
         """
+        from ..system import get_vcm
+
         # Check if this is a resumed agent
         if self.metadata.resuming_from_suspension:
             await self._restore_from_suspension()
@@ -2442,6 +2446,8 @@ class Agent(BaseModel):
         Args:
             agent_id: Agent identifier
         """
+        from ..system import get_agent_system
+
         agent_system_handle = get_agent_system()
         await agent_system_handle.stop_agent(agent_id)
 
@@ -2498,6 +2504,7 @@ class Agent(BaseModel):
             result = await asyncio.wait_for(future, timeout=30.0)
             ```
         """
+        from ..system import spawn_agents
 
         if len(roles) != len(agent_specs):
             raise ValueError("Number of roles must match number of agent_specs")
@@ -2830,6 +2837,12 @@ class AgentManagerBase:
         self._blackboard = None
 
     async def initialize(self) -> None:
+        from ..system import (
+            get_agent_system,
+            get_llm_cluster,
+            get_tool_manager,
+            get_vcm,
+        )
         self._agent_system_handle = get_agent_system()
         self._tool_manager_handle = get_tool_manager()
         self._llm_cluster_handle = get_llm_cluster()

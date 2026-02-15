@@ -23,7 +23,6 @@ from typing import Any
 from ...distributed.ray_utils import serving
 from ...distributed import get_initialized_polymathera
 from ...distributed.state_management import StateManager
-from ...system import get_vcm
 from .models import (
     Session,
     SessionState,
@@ -126,6 +125,8 @@ class SessionManagerDeployment:
         )
 
         # Get VCM handle for branch operations
+        from ...system import get_vcm
+
         self.vcm_handle = get_vcm()
 
         logger.info("SessionManagerDeployment initialized")

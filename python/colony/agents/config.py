@@ -16,7 +16,6 @@ class AgentSystemConfig:
         max_retries: Maximum number of retries for agent operations
         enable_sessions: Whether to enable session management
         default_session_ttl: Default session TTL in seconds (24 hours)
-        max_sessions_per_tenant: Maximum sessions per tenant
     """
 
     max_retries: int = 3
@@ -24,7 +23,6 @@ class AgentSystemConfig:
     # Session management configuration
     enable_sessions: bool = True
     default_session_ttl: float = 86400.0  # 24 hours
-    max_sessions_per_tenant: int = 100
 
     def add_deployments_to_app(self, app: serving.Application, top_level: bool) -> None:
         if not top_level:
@@ -53,7 +51,6 @@ class AgentSystemConfig:
             app.add_deployment(
                 SessionManagerDeployment.bind(
                     default_session_ttl=self.default_session_ttl,
-                    max_sessions_per_tenant=self.max_sessions_per_tenant,
                 ),
                 name="session_manager"
             )

@@ -15,7 +15,6 @@ from ..distributed.ray_utils.serving import (
     DeploymentReplicaInfo,
     DeploymentRequest,
 )
-from ..system import get_vcm, get_agent_system
 from ..vcm.models import PageLocation
 
 
@@ -54,6 +53,7 @@ class SoftPageAffinityRouter(RequestRouter):
     async def _get_vcm_handle(self):
         """Lazy initialization of VCM handle."""
         if self._vcm_handle is None:
+            from ..system import get_vcm
             # Get deployment names
             self._vcm_handle = get_vcm()
         return self._vcm_handle
@@ -295,6 +295,7 @@ class AgentAffinityRouter(RequestRouter):
     async def _get_agent_system_handle(self):
         """Lazy init agent system handle."""
         if self._agent_system_handle is None:
+            from ..system import get_agent_system
             self._agent_system_handle = get_agent_system()
         return self._agent_system_handle
 

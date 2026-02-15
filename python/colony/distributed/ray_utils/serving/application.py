@@ -93,7 +93,7 @@ class DeploymentInfo:
     @property
     def default_router_class(self) -> Type[RequestRouter] | None:
         """Get the effective routing policy."""
-        return self.instance_config_overrides.get("default_router_class") or self.base_config.default_router_class
+        return self.instance_config_overrides.get("default_router_class") or self.base_config.router_class
 
     @property
     def ray_actor_options(self) -> dict[str, Any]:
@@ -184,7 +184,7 @@ class Application:
         ray_actor_options: dict[str, Any] | None = None,
         max_concurrency: int | None = None,
         logging_config: LoggingConfig | None = None,
-    ) -> "Application":
+    ) -> Application:
         """Add a deployment to the application.
 
         Args:

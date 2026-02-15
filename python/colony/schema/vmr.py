@@ -1,3 +1,6 @@
+
+from __future__ import annotations
+
 import uuid
 from typing import Any, Callable
 import os
@@ -26,8 +29,7 @@ from .analyses import LLMStaticCodeAnalysisDescription
 from .aspects import PredefinedCodeAspects
 from .constraints import ExplorationConstraints, get_default_exploration_constraints
 from .insights import CodeChurn
-from ..agents.types import ActionPlan
-from ..vectors.etl import RepositoryPointCloud
+from ..agents.models import ActionPlan
 
 logger = getLogger(__name__)
 
@@ -158,6 +160,17 @@ class RepositoryStats(BaseModel):
         # ISO 8601 string
         return v.isoformat() if v is not None else None
 
+
+
+class RepositoryPointCloud(BaseModel):
+    points: list[list[float]] = Field(
+        description="The points in the point cloud.",
+        default_factory=list,
+    )
+    metadata: list[dict] = Field(
+        description="The metadata for the points.",
+        default_factory=list,
+    )
 
 # ---------------------------------------------------------------------------
 # Join table between VMRs and Repositories

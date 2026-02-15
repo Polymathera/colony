@@ -41,7 +41,6 @@ from ....vcm.sources import (
 )
 from ....vcm.models import VirtualContextPage, ContextPageId, MmapConfig
 from ....distributed.ray_utils import serving
-from ....system import get_vcm
 
 if TYPE_CHECKING:
     from ..types import BlackboardEvent, BlackboardScope
@@ -765,6 +764,7 @@ class BlackboardContextPageSource(ContextPageSource):
             self.tokenizer = SimpleTokenizer()
             logger.info("Using SimpleTokenizer fallback for scope mapping")
 
+        from ....system import get_vcm
         vcm_handle = get_vcm()
         config: PageStorageConfig | None = vcm_handle.get_page_storage_config()
         if not config:
