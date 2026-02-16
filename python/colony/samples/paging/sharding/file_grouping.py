@@ -23,10 +23,12 @@ try:
 except ImportError:
     xxhash = None
 
-from ...metrics.common import BaseMetricsMonitor
-from ...caching.simple import CacheConfig
-from ...config import ConfigComponent, register_polymathera_config
-from ....distributed import get_polymathera
+from colony.distributed.metrics.common import BaseMetricsMonitor
+from colony.distributed.caching.simple import CacheConfig
+from colony.distributed.config import ConfigComponent, register_polymathera_config
+from colony.distributed import get_polymathera
+from colony.utils import setup_logger
+
 from .analyzers.base import FileContentCache
 from .analyzers.dependency import DependencyAnalyzer
 from .analyzers.history import CommitAnalysisConfig, CommitHistoryAnalyzer
@@ -39,7 +41,6 @@ from .languages.file_grouping import (
     LanguageFeature,
 )
 from .tokenization import TokenManager
-from ....utils import setup_logger
 
 logger = setup_logger(__name__)
 

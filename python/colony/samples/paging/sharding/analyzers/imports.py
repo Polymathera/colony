@@ -15,10 +15,11 @@ from typing import Any, ClassVar
 
 from overrides import override
 
-from ....config import register_polymathera_config
-from ......distributed import get_polymathera
-from ....metrics.common import BaseMetricsMonitor
-from ......utils import setup_logger
+from colony.distributed.config import register_polymathera_config
+from colony.distributed import get_polymathera
+from colony.distributed.metrics.common import BaseMetricsMonitor
+from colony.utils import setup_logger
+
 from ..languages.imports import get_language_configs
 from ..languages.utils import detect_language, is_comment
 from .base import AnalyzerConfig, BaseAnalyzer, FileContentCache

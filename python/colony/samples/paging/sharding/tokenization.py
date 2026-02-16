@@ -12,13 +12,14 @@ from circuitbreaker import circuit
 from pydantic import Field
 from tenacity import retry_if_exception_type
 
-from ....distributed.caching.simple import CacheConfig, DistributedSimpleCache
-from ...config import ConfigComponent, register_polymathera_config
-from ....distributed import get_polymathera
-from ...metrics.common import BaseMetricsMonitor
+from colony.distributed.caching.simple import CacheConfig, DistributedSimpleCache
+from colony.distributed.config import ConfigComponent, register_polymathera_config
+from colony.distributed import get_polymathera
+from colony.distributed.metrics.common import BaseMetricsMonitor
+from colony.utils.retry import standard_retry
+
 from .languages.utils import detect_language
 from .analyzers.base import FileContentCache
-from ....utils.retry import standard_retry
 
 logger = logging.getLogger(__name__)
 

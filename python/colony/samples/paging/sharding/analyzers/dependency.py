@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Any
 from overrides import override
 
+from colony.utils import setup_logger
+
 from ..languages.dependency import DependencyConfig
-from ......utils import setup_logger
 from .base import BaseAnalyzer, FileContentCache
 
 logger = setup_logger(__name__)

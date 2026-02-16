@@ -1,37 +1,28 @@
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import itertools
 import re
-import time
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from collections.abc import Iterator
 from enum import Enum
 from typing import Any, ClassVar
 from pydantic import Field
 from overrides import override
 
 import numpy as np
-from circuitbreaker import circuit
 
-import torch
-from sentence_transformers import SentenceTransformer
-
-from ....config import register_polymathera_config, ConfigComponent
-from ......distributed import get_polymathera
-from ....caching.simple import CacheConfig
-from ....metrics.common import BaseMetricsMonitor
+from colony.distributed.config import register_polymathera_config, ConfigComponent
+from colony.distributed import get_polymathera
+from colony.distributed.caching.simple import CacheConfig
+from colony.distributed.metrics.common import BaseMetricsMonitor
 from ....vectors.algos import get_similar_pairs
 from ....llms.inference.cluster.embedding import (
     TextChunkerBase,
     TextPreprocessorBase,
 )
-from ......utils import setup_logger
+from colony.utils import setup_logger, cleanup_dynamic_asyncio_tasks
+
 from .base import AnalyzerConfig, BaseAnalyzer, FileContentCache
 
 logger = setup_logger(__name__)
-
 
 
 @register_polymathera_config()
@@ -54,7 +45,7 @@ class ChunkingConfig(ConfigComponent):
     max_chunks_per_file: int = 10
 
     # Patterns for code block detection
-    block_start_patterns: dict[str, str] = field(
+    block_start_patterns: dict[str, str] = Field(
         default_factory=lambda: {
             "python": r"(class|def|async def)\s+\w+.*:$",
             "javascript": r"(class|function|const.*=>)\s+\w+.*{$",
@@ -70,7 +61,7 @@ class ChunkingConfig(ConfigComponent):
     cross_language_threshold: float = 0.6
 
     # Language-specific settings
-    language_weights: dict[str, float] = field(
+    language_weights: dict[str, float] = Field(
         default_factory=lambda: {
             "python": 1.0,
             "javascript": 0.9,
@@ -92,7 +83,7 @@ class SemanticAnalyzerConfig(AnalyzerConfig):
 
     # Chunking configuration
     chunk_large_files: bool = True
-    chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
+    chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
 
     semantic_cache_config: CacheConfig | None = Field(
         default=None
@@ -289,7 +280,6 @@ class SemanticAnalyzer(BaseAnalyzer):
     async def cleanup(self) -> None:
         """Cleanup background tasks and resources"""
         await super().cleanup()
-        from ......utils import cleanup_dynamic_asyncio_tasks
 
         try:
             await cleanup_dynamic_asyncio_tasks(self, raise_exceptions=False)

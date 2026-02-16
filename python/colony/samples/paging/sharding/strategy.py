@@ -16,10 +16,12 @@ import magic  # python-magic for file type detection
 import networkx as nx
 from circuitbreaker import circuit
 
-from ....distributed.caching.simple import CacheConfig
-from ....distributed.config import ConfigComponent, register_polymathera_config
-from ....distributed import get_polymathera
-from ...metrics.common import BaseMetricsMonitor
+from colony.distributed.caching.simple import CacheConfig
+from colony.distributed.config import ConfigComponent, register_polymathera_config
+from colony.distributed import get_polymathera
+from colony.distributed.metrics.common import BaseMetricsMonitor
+from colony.utils.git import validate_git_repository, configure_git_safety
+from colony.utils.retry import standard_retry
 
 from .types import RepositoryShard, ShardFileSegment, ShardMetadata, ShardingError
 from .prompting import ShardedInferencePromptStrategy
@@ -28,8 +30,6 @@ from .file_grouping import FileGrouper, FileGrouperConfig, FileGroup
 from .file_grouping_wrapper import FileGrouperWithGraph
 from .tokenization import TokenizationConfig, TokenizationStrategy, TokenManager
 from .analyzers.base import FileContentCache
-from ....utils.git import validate_git_repository, configure_git_safety
-from ....utils.retry import standard_retry
 
 logger = logging.getLogger(__name__)
 

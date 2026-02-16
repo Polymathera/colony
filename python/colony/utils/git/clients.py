@@ -6,7 +6,7 @@ import aiohttp
 from pydantic import Field
 from urllib.parse import urljoin
 
-from ..config import ConfigComponent, register_polymathera_config
+from ...distributed.config import ConfigComponent, register_polymathera_config
 
 
 

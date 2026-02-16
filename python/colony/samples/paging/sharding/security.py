@@ -39,7 +39,8 @@ from enum import Enum
 from re import Pattern
 import aiohttp
 
-from ...metrics.common import BaseMetricsMonitor
+from colony.distributed.metrics.common import BaseMetricsMonitor
+
 from .types import SecurityError
 
 logger = logging.getLogger(__name__)

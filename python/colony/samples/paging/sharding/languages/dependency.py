@@ -5,8 +5,8 @@ from dataclasses import field
 from re import Pattern
 from typing import ClassVar
 
-from ....config import register_polymathera_config
-from ......distributed import get_polymathera
+from colony.distributed.config import register_polymathera_config
+
 from ..analyzers.base import AnalyzerConfig
 
 

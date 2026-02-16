@@ -117,10 +117,12 @@ from typing import ClassVar
 import psutil
 from pydantic import Field
 
-from ...caching.simple import CacheConfig
-from ...config import ConfigComponent, register_polymathera_config
-from ....distributed import get_polymathera
-from ...metrics.common import BaseMetricsMonitor
+from colony.distributed.caching.simple import CacheConfig
+from colony.distributed.config import ConfigComponent, register_polymathera_config
+from colony.distributed import get_polymathera
+from colony.distributed.metrics.common import BaseMetricsMonitor
+from colony.utils import create_dynamic_asyncio_task, cleanup_dynamic_asyncio_tasks, call_async_in_executor
+
 from .languages.code_splitting import (
     CustomRule,
     LanguageConfig,
@@ -131,7 +133,6 @@ from .languages.code_splitting import (
 )
 from .languages.utils import detect_language
 from .types import ShardFileSegment
-from .....utils import create_dynamic_asyncio_task, cleanup_dynamic_asyncio_tasks, call_async_in_executor
 
 logger = logging.getLogger(__name__)
 

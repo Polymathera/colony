@@ -110,23 +110,99 @@ class BuilInContextPageSourceType(str, Enum):
 
 
 class ContextPageSourceFactory:
-    """Factory for creating ContextPageSource instances."""
+    """Factory for creating ContextPageSource instances.
+
+    Page source classes register via the ``@register_new_source_type``
+    decorator, which records both the class and its module path.  On the
+    driver node (``polymath.py``), all necessary modules are imported
+    (built-in + user-defined), then ``publish_to_env()`` serializes the
+    module paths to ``POLYMATH_PAGE_SOURCE_MODULES``.  That env var is
+    propagated to Ray workers via ``runtime_env``.
+
+    On worker nodes, ``create()`` calls ``_load_sources_from_env()``
+    which reads the env var, imports each module (triggering their
+    ``@register`` decorators), and populates the registry.  This handles
+    both built-in and user-defined page sources without hardcoding.
+    """
 
     _registry: dict[str, type[ContextPageSource]] = {}
+    _module_paths: dict[str, str] = {}
+    _env_loaded: bool = False
+
+    # Env var used to propagate registered module paths to Ray workers.
+    # Starts with POLYMATH_ so it's included in worker_env_vars automatically.
+    _ENV_VAR = "POLYMATH_PAGE_SOURCE_MODULES"
 
     @staticmethod
     def register_new_source_type(source_type: str):
-        """A decorator to register a new ContextPageSource type."""
+        """Decorator to register a new ContextPageSource type."""
         def decorator(source_class: type[ContextPageSource]):
-            if not hasattr(ContextPageSourceFactory, "_registry"):
-                ContextPageSourceFactory._registry = {}
             ContextPageSourceFactory._registry[source_type] = source_class
+            ContextPageSourceFactory._module_paths[source_type] = source_class.__module__
             return source_class
         return decorator
 
     @staticmethod
+    def publish_to_env() -> None:
+        """Serialize registered module paths to env var for propagation to workers.
+
+        Call this on the driver node after all page source modules have been
+        imported and before ``ray.init()`` so the env var is included in
+        ``runtime_env["env_vars"]``.
+        """
+        import json
+        import os
+        os.environ[ContextPageSourceFactory._ENV_VAR] = json.dumps(
+            ContextPageSourceFactory._module_paths
+        )
+        logger.info(
+            "Published %d page source module paths: %s",
+            len(ContextPageSourceFactory._module_paths),
+            list(ContextPageSourceFactory._module_paths.keys()),
+        )
+
+    @staticmethod
+    def _load_sources_from_env() -> None:
+        """Import page source modules from env var (propagated from driver to workers).
+
+        On worker nodes, the registry starts empty. This reads the module
+        paths serialized by ``publish_to_env()`` on the driver and imports
+        each one, which triggers their ``@register_new_source_type``
+        decorators and populates the registry.
+        """
+        if ContextPageSourceFactory._env_loaded:
+            return
+        ContextPageSourceFactory._env_loaded = True
+
+        import json
+        import importlib
+        import os
+
+        module_paths_json = os.environ.get(ContextPageSourceFactory._ENV_VAR)
+        if not module_paths_json:
+            return
+
+        try:
+            module_paths: dict[str, str] = json.loads(module_paths_json)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Invalid JSON in %s env var", ContextPageSourceFactory._ENV_VAR)
+            return
+
+        for source_type, mod_path in module_paths.items():
+            if source_type in ContextPageSourceFactory._registry:
+                continue
+            try:
+                importlib.import_module(mod_path)
+            except ImportError:
+                logger.warning(
+                    "Failed to import page source module %s for type '%s'",
+                    mod_path, source_type,
+                )
+
+    @staticmethod
     def list_registered_source_types() -> list[type[ContextPageSource]]:
         """List all registered context page source types."""
+        ContextPageSourceFactory._load_sources_from_env()
         return list(ContextPageSourceFactory._registry.values())
 
     @staticmethod
@@ -153,6 +229,7 @@ class ContextPageSourceFactory:
         Returns:
             Initialized ContextPageSource instance
         """
+        ContextPageSourceFactory._load_sources_from_env()
         if source_type in ContextPageSourceFactory._registry:
             return ContextPageSourceFactory._registry[source_type](
                 scope_id=scope_id,

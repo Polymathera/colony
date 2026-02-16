@@ -12,11 +12,12 @@ import xxhash
 from circuitbreaker import circuit
 from cachetools import TTLCache
 
-from ....caching.simple import CacheConfig
-from ....config import ConfigComponent, register_polymathera_config
-from ......distributed import get_polymathera
-from ....metrics.common import BaseMetricsMonitor
-from ......utils import setup_logger
+from colony.distributed.caching.simple import CacheConfig
+from colony.distributed.config import ConfigComponent, register_polymathera_config
+from colony.distributed import get_polymathera
+from colony.distributed.metrics.common import BaseMetricsMonitor
+from colony.utils import setup_logger
+
 from ..languages.utils import detect_language
 
 logger = setup_logger(__name__)

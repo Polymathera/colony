@@ -14,12 +14,13 @@ import numpy as np
 import xxhash
 from overrides import override
 
-from ...config import register_polymathera_config
-from .....distributed import get_polymathera
-from ...metrics.common import BaseMetricsMonitor
-from .....utils import setup_logger
-from .....utils.retry import standard_retry
-from .....utils.git.clients import GitHubClient, GitLabClient, GitClientBase
+from colony.distributed.config import register_polymathera_config
+from colony.distributed import get_polymathera
+from colony.distributed.metrics.common import BaseMetricsMonitor
+from colony.utils import setup_logger
+from colony.utils.retry import standard_retry
+from colony.utils.git.clients import GitHubClient, GitLabClient, GitClientBase
+
 from .base import AnalyzerConfig, BaseAnalyzer, FileContentCache
 
 logger = setup_logger(__name__)

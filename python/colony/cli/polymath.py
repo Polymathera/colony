@@ -997,7 +997,7 @@ async def run_integration_test(
     # (python -m colony.cli.polymath) and as a direct script (./polymath.py).
     # -----------------------------------------------------------------------
     from colony.distributed import get_initialized_polymathera
-    from colony.vcm.sources import BuilInContextPageSourceType
+    from colony.vcm.sources import BuilInContextPageSourceType, ContextPageSourceFactory
     from colony.vcm.models import MmapConfig, MmapResult
     from colony.agents import AgentSpawnSpec, AgentMetadata, AgentHandle, AgentRunEvent
     from colony.system import (
@@ -1009,6 +1009,16 @@ async def run_integration_test(
     from colony.vcm.config import VCMConfig
     from colony.agents.config import AgentSystemConfig
     from colony.agents.sessions import AgentRun
+
+    # Import built-in page source modules to trigger their @register decorators.
+    # User-defined page sources from working_dir should also be imported here
+    # (or in user startup code) before publish_to_env() is called.
+    import colony.samples.paging  # noqa: F401 — registers file_grouper
+    # blackboard is already registered via colony.agents.blackboard import chain
+
+    # Publish registered page source module paths to an env var so Ray workers
+    # can discover and import them (they start with a fresh Python interpreter).
+    ContextPageSourceFactory.publish_to_env()
 
     results: list[dict[str, Any]] = []
 
