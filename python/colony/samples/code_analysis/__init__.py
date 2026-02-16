@@ -14,9 +14,10 @@ Example:
     vcm_handle = get_vcm()
     mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
         scope_id="repo-123",
+        group_id="vmr-456",
+        tenant_id="tenant-1",
         source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
         config=MmapConfig(),
-        tenant_id="tenant-1",
         repo_path="/path/to/repo",
     )
 
@@ -26,6 +27,8 @@ Example:
         "agent_type": "polymathera.colony.samples.code_analysis.CodeAnalysisCoordinator",
         "metadata": {
             "repo_id": "repo-123",
+            "group_id": "vmr-456",
+            "tenant_id": "tenant-1",
         }
     }])
     ```

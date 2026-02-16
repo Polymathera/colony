@@ -1539,6 +1539,8 @@ class Agent(BaseModel):
     state: AgentState = Field(default=AgentState.INITIALIZED)
 
     tenant_id: str = "default"  # Tenant/namespace for multi-tenant deployments
+    # TODO: Replace group_id with vmr_id or colony_id once we have virtual monorepo support in place.
+    group_id: str = "default"  # Group ID for grouping related context sources (e.g., all repos in a virtual monorepo, and all VCM-mapped blackboard scopes)
 
     # Optional page binding
     bound_pages: list[str] = Field(default_factory=list)
@@ -1950,7 +1952,7 @@ class Agent(BaseModel):
         """Get page storage handle from context page source."""
         return self.page_storage
 
-    async def load_page_graph(self) -> nx.DiGraph:
+    async def load_page_graph(self, cached: bool = True) -> nx.DiGraph:
         """Load page graph dynamically from PageStorage.
 
         Uses page_storage to access PageStorage.
@@ -1959,7 +1961,7 @@ class Agent(BaseModel):
         """
         if not self.page_storage:
             return nx.DiGraph()
-        return await self.page_storage.load_page_graph()
+        return await self.page_storage.load_page_graph(self.tenant_id, self.group_id, cached)
 
     async def _restore_from_suspension(self) -> None:
         """Restore base agent state from suspension.

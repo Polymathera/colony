@@ -73,7 +73,9 @@ class MappedScope:
 
     source: ContextPageSource
     config: MmapConfig
-    tenant_id: str | None = None
+    scope_id: str
+    group_id: str
+    tenant_id: str
 
 
 
@@ -169,12 +171,11 @@ class VirtualContextManager:
         from ..distributed import get_polymathera
 
         polymathera = get_polymathera()
-        storage_backend = await polymathera.get_storage()
 
         self.page_storage = PageStorage(
-            storage_backend=storage_backend,
             backend_type=self.page_storage_backend_type,
             storage_path=self.page_storage_path,
+            s3_bucket=self.page_storage_s3_bucket,
         )
         await self.page_storage.initialize()
         logger.info("Initialized PageStorage with EFS backend")
@@ -657,6 +658,8 @@ class VirtualContextManager:
     async def replicate_page(
         self,
         page_id: str,
+        group_id: str,
+        tenant_id: str,
         target_deployment_name: str,
         target_client_id: str,
         priority: int = 20,
@@ -675,6 +678,8 @@ class VirtualContextManager:
 
         Args:
             page_id: Virtual page identifier
+            group_id: Group ID for identifying related pages (e.g., from same git repo)
+            tenant_id: Tenant ID for multi-tenancy
             target_deployment_name: Target VLLM deployment name
             target_client_id: Target VLLM replica ID
             priority: Page loading priority (default: 20 for agent spawning)
@@ -712,14 +717,15 @@ class VirtualContextManager:
         # This uses the allocation system but targets a specific client
         allocation_request = PageAllocationRequest(
             virtual_page_ids=[page_id],
-            tenant_id="system",  # System-initiated replication
+            group_id=group_id,
+            tenant_id=tenant_id,
             priority=priority,
             preferred_deployment=target_deployment_name,
             target_client_id=target_client_id,  # Override allocation strategy
         )
 
         try:
-            response = await self.allocate_pages(allocation_request)
+            response: PageAllocationResponse = await self.allocate_pages(allocation_request)
 
             # Check if page was loaded successfully
             if page_id in response.failed_pages:
@@ -982,13 +988,14 @@ class VirtualContextManager:
                     # Create allocation request
                     allocation_request = PageAllocationRequest(
                         virtual_page_ids=pages_to_load,
+                        group_id=fault.group_id,
                         tenant_id=fault.tenant_id,
                         priority=fault.priority,
                         # Could add affinity_pages here for spatial locality optimization
                     )
 
                     # Allocate pages
-                    response = await self.allocate_pages(allocation_request)
+                    response: PageAllocationResponse = await self.allocate_pages(allocation_request)
 
                     # Check if all pages were allocated successfully
                     success = len(response.failed_pages) == 0
@@ -1550,10 +1557,12 @@ class VirtualContextManager:
     @serving.endpoint
     async def mmap_application_scope(
         self,
+        *,
         scope_id: str,
+        group_id: str,
+        tenant_id: str,
         source_type: str = "blackboard",
         config: MmapConfig | None = None,
-        tenant_id: str | None = None,
         **kwargs,
     ) -> MmapResult:
         """Map an application scope (blackboard entries, memories, files, knowledge graphs, etc.) into VCM pages.
@@ -1568,9 +1577,10 @@ class VirtualContextManager:
 
         Args:
             scope_id: The scope to map (e.g., "tenant:acme:discoveries"). Unique identifier for the data source.
+            group_id: Identifier for grouping related context sources into one address space (e.g., VMR ID)
+            tenant_id: Tenant ID for multi-tenancy
             source_type: Type of the source (e.g., "blackboard", "memory", "file", "kg"). This controls the ContextPageSource to be created.
             config: Mapping configuration (controls flushing, locality, etc.)
-            tenant_id: Tenant ID for multi-tenancy
             **kwargs: Additional parameters for future extensibility (e.g., filters, initial load options)
 
         Returns:
@@ -1584,14 +1594,17 @@ class VirtualContextManager:
                 return MmapResult(
                     status="already_mapped",
                     scope_id=scope_id,
+                    group_id=group_id,
+                    tenant_id=tenant_id,
                     message=f"Scope {scope_id} is already mapped",
                 )
 
         # Record mapping in shared state (visible to all replicas)
         mapping_config = MappedScopeConfig(
             scope_id=scope_id,
-            config=config,
+            group_id=group_id,
             tenant_id=tenant_id,
+            config=config,
             source_type=source_type,
             created_at=time.time(),
             kwargs=kwargs,
@@ -1602,24 +1615,41 @@ class VirtualContextManager:
 
         # Materialize locally on this replica
         try:
-            await self._materialize_scope_mapping(scope_id, source_type, config, tenant_id, **kwargs)
+            await self._materialize_scope_mapping(
+                scope_id=scope_id,
+                group_id=group_id,
+                tenant_id=tenant_id,
+                source_type=source_type,
+                config=config,
+                **kwargs
+            )
         except Exception as e:
-            logger.error(f"Failed to materialize scope mapping for {scope_id}: {e}", exc_info=True)
+            logger.error(f"Failed to materialize scope mapping for {scope_id} (tenant={tenant_id}, group={group_id}): {e}", exc_info=True)
             return MmapResult(
                 status="error",
                 scope_id=scope_id,
+                group_id=group_id,
+                tenant_id=tenant_id,
                 message=f"Mapping recorded but materialization failed: {e}",
             )
 
-        logger.info(f"Mapped scope {scope_id} into VCM (tenant={tenant_id})")
+        logger.info(f"Mapped scope {scope_id} into VCM (tenant={tenant_id}, group={group_id})")
         return MmapResult(
             status="mapped",
             scope_id=scope_id,
+            group_id=group_id,
+            tenant_id=tenant_id,
             message=f"Scope {scope_id} mapped successfully",
         )
 
     @serving.endpoint
-    async def munmap_application_scope(self, scope_id: str) -> MmapResult:
+    async def munmap_application_scope(
+        self,
+        *,
+        scope_id: str,
+        group_id: str,
+        tenant_id: str
+    ) -> MmapResult:
         """Unmap an application scope from VCM.
 
         Flushes any pending records, shuts down the page source, and
@@ -1627,6 +1657,8 @@ class VirtualContextManager:
 
         Args:
             scope_id: The scope to unmap
+            group_id: Identifier for grouping related context sources (e.g., VMR ID)
+            tenant_id: Tenant ID for multi-tenancy
 
         Returns:
             MmapResult with status and message
@@ -1640,6 +1672,8 @@ class VirtualContextManager:
             return MmapResult(
                 status="not_mapped",
                 scope_id=scope_id,
+                group_id=group_id,
+                tenant_id=tenant_id,
                 message=f"Scope {scope_id} is not mapped",
             )
 
@@ -1647,16 +1681,18 @@ class VirtualContextManager:
         if scope_id in self._local_mapped_scopes:
             mapped = self._local_mapped_scopes.pop(scope_id)
             await mapped.source.shutdown()
-            logger.info(f"Shut down local page source for scope {scope_id}")
+            logger.info(f"Shut down local page source for scope {scope_id} (tenant={tenant_id}, group={group_id})")
 
         # Remove from shared state
         async for state in self.page_table.state_manager.write_transaction():
             state.mapped_scopes.pop(scope_id, None)
 
-        logger.info(f"Unmapped scope {scope_id} from VCM")
+        logger.info(f"Unmapped scope {scope_id} from VCM (tenant={tenant_id}, group={group_id})")
         return MmapResult(
             status="unmapped",
             scope_id=scope_id,
+            group_id=group_id,
+            tenant_id=tenant_id,
             message=f"Scope {scope_id} unmapped successfully",
         )
 
@@ -1928,30 +1964,35 @@ class VirtualContextManager:
 
     async def _materialize_scope_mapping(
         self,
+        *,
         scope_id: str,
+        group_id: str,
+        tenant_id: str,
         source_type: str,
         config: MmapConfig,
-        tenant_id: str | None = None,
         **kwargs,
     ) -> None:
         """Create a ContextPageSource for a scope on this replica.
 
         Args:
             scope_id: The scope being mapped
+            group_id: Identifier for grouping related context sources (e.g., VMR ID)
+            tenant_id: Tenant ID for multi-tenancy
             source_type: Type of the source (e.g., "blackboard", "memory", "file", "kg")
             config: Mapping configuration
-            tenant_id: Tenant ID for multi-tenancy
             **kwargs: Additional parameters for context page source creation
         """
-        if scope_id in self._local_mapped_scopes:
-            logger.debug(f"Scope {scope_id} already materialized locally, skipping")
+        scope_key = f"{tenant_id}:{group_id}:{scope_id}"
+        if scope_key in self._local_mapped_scopes:
+            logger.debug(f"Scope {tenant_id}:{group_id}:{scope_id} already materialized locally, skipping")
             return
 
         # Create page source
         source = ContextPageSourceFactory.create(
-            source_type=source_type,
             scope_id=scope_id,
+            group_id=group_id,
             tenant_id=tenant_id,
+            source_type=source_type,
             mmap_config=config,
             **kwargs,
         )
@@ -1959,9 +2000,11 @@ class VirtualContextManager:
         await source.initialize()
 
         # Track locally
-        self._local_mapped_scopes[scope_id] = MappedScope(
+        self._local_mapped_scopes[scope_key] = MappedScope(
             source=source,
             config=config,
+            scope_id=scope_id,
+            group_id=group_id,
             tenant_id=tenant_id,
         )
 
@@ -1969,7 +2012,7 @@ class VirtualContextManager:
         if config.pinned:
             await self._pin_scope_pages(scope_id)
 
-        logger.info(f"Materialized scope mapping: scope={scope_id}")
+        logger.info(f"Materialized scope mapping: scope={scope_id} (tenant={tenant_id}, group={group_id})")
 
     async def _reconcile_scope_mappings(self) -> None:
         """Synchronize local scope mappings with shared state.
@@ -1993,9 +2036,10 @@ class VirtualContextManager:
                 try:
                     await self._materialize_scope_mapping(
                         scope_id=scope_id,
+                        tenant_id=mapping.tenant_id,
+                        group_id=mapping.group_id,
                         source_type=mapping.source_type,
                         config=mapping.config,
-                        tenant_id=mapping.tenant_id,
                         **mapping.kwargs,
                     )
                     logger.info(f"Reconciliation: materialized scope mapping {scope_id}")

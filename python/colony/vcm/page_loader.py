@@ -142,6 +142,7 @@ class PageLoader:
         try:
             request = PageAllocationRequest(
                 virtual_page_ids=[page.page_id],
+                group_id=page.group_id,
                 tenant_id=tenant_id,
                 priority=page_priority,
             )

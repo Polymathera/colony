@@ -97,19 +97,19 @@ class VirtualContextPage(BaseModel):
         sensitivity_level: Data sensitivity classification
     """
 
-    page_id: ContextPageId = Field(..., description="Unique page identifier")
-    tokens: list[int] = Field(..., description="Token sequence")
+    page_id: ContextPageId = Field(description="Unique page identifier")
+    tokens: list[int] = Field(description="Token sequence")
     text: str | None = Field(
         None,
         description="Source text for remote LLM deployments that consume text, not token IDs. "
         "VLLMDeployment ignores this field (uses tokens). RemoteLLMDeployment requires it "
         "(falls back to tokenizer.decode(tokens) if None)."
     )
-    size: int = Field(..., description="Number of tokens")
+    size: int = Field(description="Number of tokens")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Arbitrary metadata")
 
-    # Optional grouping for spatial locality
-    group_id: str | None = Field(None, description="Page group ID for co-loading")
+    scope_id: str = Field(description="Scope identifier for this page (e.g., repo ID, blackboard scope)")
+    group_id: str = Field(description="Page group ID to group related page sources in one address space.")
 
     # Storage location
     storage_uri: str | None = Field(None, description="Where raw data is stored")
@@ -523,11 +523,15 @@ class MmapResult(BaseModel):
         status: One of ``"mapped"``, ``"already_mapped"``, ``"not_mapped"``,
             ``"unmapped"``, ``"error"``.
         scope_id: The scope that was (un)mapped.
+        group_id: The group that was (un)mapped.
+        tenant_id: The tenant that was (un)mapped.
         message: Optional human-readable message with details.
     """
 
     status: str
     scope_id: str
+    group_id: str
+    tenant_id: str
     message: str = ""
 
 
@@ -539,17 +543,19 @@ class MappedScopeConfig(BaseModel):
 
     Attributes:
         scope_id: The blackboard/memory scope being mapped.
+        group_id: The group that owns this mapping (for multi-tenancy isolation).
+        tenant_id: Tenant that owns this mapping (for multi-tenancy isolation).
         source_type: Type of the scope (e.g., "blackboard", "memory", "file", "kg").
         config: The MmapConfig used for this mapping.
-        tenant_id: Tenant that owns this mapping (for multi-tenancy isolation).
         created_at: Timestamp when the mapping was created.
         kwargs: Additional parameters for future extensibility (e.g., filters, initial load options).
     """
 
     scope_id: str
+    group_id: str
+    tenant_id: str
     source_type: str  # e.g., "blackboard", "memory", "file", "kg"
     config: MmapConfig
-    tenant_id: str | None = None
     created_at: float = Field(default_factory=time.time)
     kwargs: dict[str, Any] = Field(default_factory=dict, description="Additional parameters for future extensibility")
 
@@ -1459,6 +1465,7 @@ class PageAllocationRequest(BaseModel):
 
     Attributes:
         virtual_page_ids: List of virtual page IDs to allocate
+        group_id: Group ID for identifying related pages (e.g., from same git repo)
         tenant_id: Tenant requesting the allocation
         priority: Allocation priority
         preferred_deployment: Optional preferred deployment name
@@ -1469,6 +1476,7 @@ class PageAllocationRequest(BaseModel):
     """
 
     virtual_page_ids: list[str]
+    group_id: str
     tenant_id: str = "default"
     priority: PagePriority = PagePriority.NORMAL
     preferred_deployment: str | None = None

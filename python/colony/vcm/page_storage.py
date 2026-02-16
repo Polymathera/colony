@@ -290,12 +290,12 @@ class RelationalPageMetadataStore(PageMetadataStore):
         ``created_by``) when available for efficient queries. Falls back to
         JSON metadata search for non-indexed fields.
 
-        Convention: ``BlackboardContextPageSource`` sets
-        ``metadata["source"] = f"bb:{scope_id}"`` on all pages it creates.
+        Convention: ``XYZContextPageSource`` sets
+        ``metadata["source"] = f"{XYZContextPageSource.get_source_metadata(scope_id)}"`` on all pages it creates.
         Queries by ``scope_id`` use the indexed ``source`` column.
 
         Supported filter keys:
-        - ``scope_id``: Maps to ``source = f"bb:{scope_id}"``.
+        - ``scope_id``: Maps to ``source = f"{XYZContextPageSource.get_source_metadata(scope_id)}"``.
         - ``group_id``: Direct indexed column match.
         - ``tenant_id``: Direct indexed column match.
         - ``created_by``: Direct indexed column match.
@@ -316,11 +316,15 @@ class RelationalPageMetadataStore(PageMetadataStore):
 
                 # Apply indexed column filters
                 if "scope_id" in filters:
-                    # Convention: BlackboardContextPageSource uses source="bb:{scope_id}"
-                    source_prefix = f"bb:{filters['scope_id']}"
-                    stmt = stmt.where(
-                        VirtualContextPageMetadata.source.like(f"{source_prefix}%")
-                    )
+                    from .sources.context_page_source import ContextPageSourceFactory
+                    source_prefixes = [
+                        f"{cls.get_source_metadata(filters['scope_id'])}"
+                        for cls in ContextPageSourceFactory.list_registered_source_types()
+                    ]
+                    for source_prefix in source_prefixes:
+                        stmt = stmt.where(
+                            VirtualContextPageMetadata.source.like(f"{source_prefix}%")
+                        )
 
                 if "group_id" in filters:
                     stmt = stmt.where(
@@ -623,8 +627,6 @@ class PageStorage:
 
     def __init__(
         self,
-        group_id: str,
-        tenant_id: str,
         backend_type: Literal["efs", "s3"] = "efs",
         storage_path: str = "colony/context_pages",
         s3_bucket: str = "polymathera-context-pages",
@@ -632,8 +634,6 @@ class PageStorage:
         """Initialize page storage.
 
         Args:
-            group_id: Group ID for page organization (e.g., "code_analysis")
-            tenant_id: Tenant ID for multi-tenancy (e.g., "default")
             backend_type: Storage backend to use ("efs" or "s3")
             storage_path: Path prefix for storing pages
             s3_bucket: S3 bucket name (used only if backend_type="s3")
@@ -641,14 +641,12 @@ class PageStorage:
         self.backend_type = backend_type
         self.storage_path = storage_path
         self.s3_bucket = s3_bucket
-        self.group_id = group_id
-        self.tenant_id = tenant_id
         self.storage_backend: Storage | None = None
 
         # Storage components (initialized in initialize())
         self.page_metadata_store: PageMetadataStore | None = None
         self.blob_storage: PageBlobStorage | None = None  # ScalableDistributedFileSystem or ObjectStorage
-        self._page_graph: nx.DiGraph = nx.DiGraph()  # TODO: This should be loaded from PageStorage dynamically? Or is this just a local cache?
+        self._page_graphs: dict[str, nx.DiGraph] = {}  # TODO: This should be loaded from PageStorage dynamically? Or is this just a local cache?
         self._page_graph_data: dict[str, Any] = {}  # For storing additional graph-level data (e.g., page-to-file mapping)
 
     async def initialize(self) -> None:
@@ -882,12 +880,12 @@ class PageStorage:
         ``created_by``) when available for efficient queries. Falls back to
         JSON metadata search for non-indexed fields.
 
-        Convention: ``BlackboardContextPageSource`` sets
-        ``metadata["source"] = f"bb:{scope_id}"`` on all pages it creates.
+        Convention: ``XYZContextPageSource`` sets
+        ``metadata["source"] = f"{XYZContextPageSource.get_source_metadata(scope_id)}"`` on all pages it creates.
         Queries by ``scope_id`` use the indexed ``source`` column.
 
         Supported filter keys:
-        - ``scope_id``: Maps to ``source = f"bb:{scope_id}"``.
+        - ``scope_id``: Maps to ``source = f"{XYZContextPageSource.get_source_metadata(scope_id)}"``.
         - ``group_id``: Direct indexed column match.
         - ``tenant_id``: Direct indexed column match.
         - ``created_by``: Direct indexed column match.
@@ -945,6 +943,8 @@ class PageStorage:
 
     async def store_page_graph_level_data(
         self,
+        tenant_id: str,
+        group_id: str,
         data_key: str,
         graph_data: Any,
     ) -> None:
@@ -960,43 +960,53 @@ class PageStorage:
         Raises:
             `Exception`: If storage operation fails
         """
-        logger.debug(f"Storing page graph data {data_key} for group {self.group_id}")
+        logger.debug(f"Storing page graph data {data_key} for group {group_id}")
 
         try:
             # Generate storage key for graph
-            graph_key = f"{self.storage_path}/graphs/{self.tenant_id}/{self.group_id}.{data_key}"
+            graph_key = f"{self.storage_path}/graphs/{tenant_id}/{group_id}.{data_key}"
             await self.blob_storage.store_blob(graph_key, pickle.dumps(graph_data))
 
         except Exception as e:
-            logger.error(f"Failed to store page graph data {data_key} for group {self.group_id}: {e}", exc_info=True)
+            logger.error(f"Failed to store page graph data {data_key} for group {group_id}: {e}", exc_info=True)
             raise
 
-    async def store_page_graph(self, graph_data: nx.DiGraph) -> None:
+    async def store_page_graph(
+        self,
+        tenant_id: str,
+        group_id: str,
+        graph_data: nx.DiGraph) -> None:
         """Store a page relationship graph to persistent storage.
 
         This supports ContextPageSource implementations that maintain
         relationship graphs between pages.
 
         Args:
-            `graph_data`: Page graph (`networkx.DiGraph`)
+            tenant_id: Tenant identifier
+            group_id: Group identifier
+            graph_data: Page graph (`networkx.DiGraph`)
 
         Raises:
             `Exception`: If storage operation fails
         """
-        logger.debug(f"Storing page graph for group {self.group_id}")
+        logger.debug(f"Storing page graph for group {group_id}")
 
         try:
             return await self.store_page_graph_level_data(
+                tenant_id=tenant_id,
+                group_id=group_id,
                 data_key="graph",
                 graph_data=graph_data
             )
 
         except Exception as e:
-            logger.error(f"Failed to store page graph for group {self.group_id}: {e}", exc_info=True)
+            logger.error(f"Failed to store page graph for group {group_id}: {e}", exc_info=True)
             raise
 
     async def retrieve_page_graph_level_data(
         self,
+        tenant_id: str,
+        group_id: str,
         data_key: str,
         cached: bool = True
     ) -> Any | None:
@@ -1007,25 +1017,26 @@ class PageStorage:
         is computed once by one entity (e.g., sharding strategy) and used by all agents."""
         try:
             # Check local cache first
-            if cached and data_key in self._page_graph_data:
-                return self._page_graph_data[data_key]
+            effective_data_key = f"{tenant_id}:{group_id}:{data_key}"
+            if cached and effective_data_key in self._page_graph_data:
+                return self._page_graph_data[effective_data_key]
 
             # Generate storage key for graph
-            graph_key = f"{self.storage_path}/graphs/{self.tenant_id}/{self.group_id}.{data_key}"
+            graph_key = f"{self.storage_path}/graphs/{tenant_id}/{group_id}.{data_key}"
             graph_data = await self.blob_storage.retrieve_blob(graph_key)
             if not graph_data:
-                logger.debug(f"Page graph data {data_key} for group {self.group_id} not found in EFS")
+                logger.debug(f"Page graph data {data_key} for group {group_id} not found in EFS")
                 return None
 
             data_obj = pickle.loads(graph_data)
-            self._page_graph_data[data_key] = data_obj
+            self._page_graph_data[effective_data_key] = data_obj
             return data_obj
 
         except Exception as e:
-            logger.error(f"Failed to retrieve page graph data {data_key} for group {self.tenant_id}:{self.group_id}: {e}", exc_info=True)
+            logger.error(f"Failed to retrieve page graph data {data_key} for group {tenant_id}:{group_id}: {e}", exc_info=True)
             raise
 
-    async def retrieve_page_graph(self) -> nx.DiGraph | None:
+    async def retrieve_page_graph(self, tenant_id: str, group_id: str) -> nx.DiGraph | None:
         """Retrieve a page relationship graph from persistent storage.
         This allows ContextPageSource implementations to load/store
         auxiliary data with their relationship graphs (e.g., file-to-page mappings).
@@ -1036,8 +1047,10 @@ class PageStorage:
         Raises:
             `Exception`: If retrieval operation fails
         """
-        logger.debug(f"Retrieving page graph for group {self.group_id}")
+        logger.debug(f"Retrieving page graph for group {group_id}")
         return await self.retrieve_page_graph_level_data(
+            tenant_id=tenant_id,
+            group_id=group_id,
             data_key="graph",
             cached=False
         )
@@ -1076,14 +1089,7 @@ class PageStorage:
             logger.error(f"Failed to delete page graph for group {group_id}: {e}", exc_info=True)
             raise
 
-
-
-
-
-
-
-
-    async def load_page_graph(self, cached: bool = True) -> nx.DiGraph:
+    async def load_page_graph(self, tenant_id: str, group_id: str, cached: bool = True) -> nx.DiGraph:
         """Load page graph dynamically from PageStorage.
 
         This allows the agent and its components to load
@@ -1091,44 +1097,49 @@ class PageStorage:
         passing the entire graph in metadata.
 
         Args:
+            tenant_id: Tenant identifier
+            group_id: Group identifier (e.g., VMR ID)
             cached: If True, return the locally cached graph if available. If False, always load from storage.
         Returns:
             The page graph as a networkx DiGraph. If loading from storage fails, returns an empty graph.
         """
-        if cached and self._page_graph and len(self._page_graph.nodes) > 0:
-            return self._page_graph
+        graph_key = f"{tenant_id}:{group_id}:graph"
+        if cached and graph_key in self._page_graphs and len(self._page_graphs[graph_key].nodes) > 0:
+            return self._page_graphs[graph_key]
 
         try:
-            if not self.group_id or not self.tenant_id:
+            if not group_id or not tenant_id:
                 raise RuntimeError("Missing group_id or tenant_id, creating empty page graph")
 
             await self.initialize()
 
-            graph = await self.retrieve_page_graph()
+            graph = await self.retrieve_page_graph(tenant_id=tenant_id, group_id=group_id)
 
             if graph:
-                self._page_graph = graph
+                self._page_graphs[graph_key] = graph
                 logger.info(
-                    f"Loaded page graph for {self.group_id}: "
-                    f"{len(self._page_graph.nodes)} nodes, {len(self._page_graph.edges)} edges, "
-                    f"{self._page_graph.number_of_edges()} relationships"
+                    f"Loaded page graph for {group_id}: "
+                    f"{len(graph.nodes)} nodes, {len(graph.edges)} edges, "
+                    f"{graph.number_of_edges()} relationships"
                 )
             else:
                 # Build new graph (requires FileGrouper - deferred to first usage)
-                logger.info(f"No existing page graph for {self.group_id}, "
+                logger.info(f"No existing page graph for {group_id}, "
                             "will build on first use, creating empty graph")
-                logger.warning("No existing page graph found in storage, creating empty graph")
-                self._page_graph = nx.DiGraph()
+                logger.warning(f"No existing page graph found in storage for {group_id}, creating empty graph")
+                self._page_graphs[graph_key] = nx.DiGraph()
 
-            return self._page_graph
+            return self._page_graphs[graph_key]
 
         except Exception as e:
             logger.debug(f"Failed to load page graph: {e}")
-            self._page_graph = nx.DiGraph()
-            return self._page_graph
+            self._page_graphs[graph_key] = nx.DiGraph()
+            return self._page_graphs[graph_key]
 
     async def get_page_cluster(
         self,
+        tenant_id: str,
+        group_id: str,
         cluster_size: int = 10,
         cluster_type: str | None = None
     ) -> PageCluster:
@@ -1136,20 +1147,23 @@ class PageStorage:
         # TODO: Get page graph dynamically from PageStorage, rather than relying on in-memory graph.
         # This allows the agent to pick up the latest graph state.
         # Simple implementation: use community detection or just take connected component
-        if not self._page_graph or len(self._page_graph.nodes) == 0:
+        graph_key = f"{tenant_id}:{group_id}:graph"
+        if not self._page_graphs.get(graph_key) or len(self._page_graphs[graph_key].nodes) == 0:
             raise RuntimeError(
-                f"PageStorage[{self.group_id}]: page graph not initialized or empty"
+                f"PageStorage[{group_id}]: page graph not initialized or empty"
             )
 
+        graph = self._page_graphs[graph_key]
+
         # Get strongly connected components
-        components = list(nx.strongly_connected_components(self._page_graph))
+        components = list(nx.strongly_connected_components(graph))
 
         # Find component matching size
         for i, component in enumerate(components):
             if len(component) <= cluster_size:
                 page_ids = list(component)
                 return PageCluster(
-                    cluster_id=f"{self.group_id}-cluster-{i}",
+                    cluster_id=f"{group_id}-cluster-{i}",
                     page_ids=page_ids,
                     relationship_score=0.8,  # TODO: Compute from graph
                     cluster_type=cluster_type or "connected_component",
@@ -1158,8 +1172,8 @@ class PageStorage:
 
         ### # Group by locality_key from page metadata
         ### groups: dict[str, list[str]] = {}
-        ### for node in self._page_graph.nodes:
-        ###     data = self._page_graph.nodes[node]
+        ### for node in graph.nodes:
+        ###     data = graph.nodes[node]
         ###     locality = data.get("locality_key", "unknown")
         ###     groups.setdefault(locality, []).append(node)
         ### # Return the largest cluster that fits
@@ -1168,7 +1182,7 @@ class PageStorage:
         ### ):
         ###     if len(page_ids) <= cluster_size:
         ###         return PageCluster(
-        ###             cluster_id=f"bb:{self.tenant_id}:{self.group_id}:{group_key}",
+        ###             cluster_id=f"bb:{tenant_id}:{group_id}:{group_key}",
         ###             page_ids=page_ids,
         ###             relationship_score=0.8,
         ###             cluster_type=cluster_type or "locality_group",
@@ -1176,9 +1190,9 @@ class PageStorage:
         ###         )
 
         # Fallback: take first N pages
-        all_pages = list(self._page_graph.nodes)[:cluster_size]
+        all_pages = list(graph.nodes)[:cluster_size]
         return PageCluster(
-            cluster_id=f"bb:{self.tenant_id}:{self.group_id}:cluster-fallback",
+            cluster_id=f"bb:{tenant_id}:{group_id}:cluster-fallback",
             page_ids=all_pages,
             relationship_score=0.5,
             cluster_type="fallback",
@@ -1187,37 +1201,42 @@ class PageStorage:
 
     async def get_all_clusters(
         self,
+        tenant_id: str,
+        group_id: str,
         max_cluster_size: int = 10,
         min_cluster_size: int = 2
     ) -> AsyncIterator[PageCluster]:
         """Iterate over all page clusters."""
         # TODO: Get page graph dynamically from PageStorage, rather than relying on in-memory graph.
         # This allows the agent to pick up the latest graph state.
-        if not self._page_graph or len(self._page_graph.nodes) == 0:
+        graph_key = f"{tenant_id}:{group_id}:graph"
+        if not self._page_graphs.get(graph_key) or len(self._page_graphs[graph_key].nodes) == 0:
             return
 
+        graph = self._page_graphs[graph_key]
+
         # Get strongly connected components
-        components = list(nx.strongly_connected_components(self._page_graph))
+        components = list(nx.strongly_connected_components(graph))
 
         for i, component in enumerate(components):
             if min_cluster_size <= len(component) <= max_cluster_size:
                 page_ids = list(component)
                 yield PageCluster(
-                    cluster_id=f"{self.tenant_id}:{self.group_id}-cluster-{i}",
+                    cluster_id=f"{tenant_id}:{group_id}-cluster-{i}",
                     page_ids=page_ids,
                     relationship_score=0.8,
                     cluster_type="connected_component",
                     metadata={"component_index": i}
                 )
         ### groups: dict[str, list[str]] = {}
-        ### for node in self._page_graph.nodes:
-        ###     data = self._page_graph.nodes[node]
+        ### for node in graph.nodes:
+        ###     data = graph.nodes[node]
         ###     locality = data.get("locality_key", "unknown")
         ###     groups.setdefault(locality, []).append(node)
         ### for group_key, page_ids in groups.items():
         ###     if min_cluster_size <= len(page_ids) <= max_cluster_size:
         ###         yield PageCluster(
-        ###             cluster_id=f"bb:{self.tenant_id}:{self.group_id}:{group_key}",
+        ###             cluster_id=f"bb:{tenant_id}:{group_id}:{group_key}",
         ###             page_ids=page_ids,
         ###             relationship_score=0.8,
         ###             cluster_type="locality_group",
@@ -1226,6 +1245,8 @@ class PageStorage:
 
     async def update_page_graph(
         self,
+        tenant_id: str,
+        group_id: str,
         page_relationships: dict[tuple[str, str], dict[str, Any]],
     ) -> None:
         """Update page graph with new relationships and persist to storage."""
@@ -1233,39 +1254,50 @@ class PageStorage:
         # This may be susceptible to race conditions if multiple agents are updating the graph concurrently.
         # We should consider implementing a more robust graph update mechanism that can handle concurrent updates,
         # such as using graph databases or implementing locking mechanisms.
+        graph_key = f"{tenant_id}:{group_id}:graph"
+        if not self._page_graphs.get(graph_key) or len(self._page_graphs[graph_key].nodes) == 0:
+            return
+
+        graph = self._page_graphs[graph_key]
+
         for (src, tgt), rel_info in page_relationships.items():
-            if self._page_graph.has_edge(src, tgt):
-                edge_data = self._page_graph.get_edge_data(src, tgt)
+            if graph.has_edge(src, tgt):
+                edge_data = graph.get_edge_data(src, tgt)
                 edge_data.update(rel_info)
             else:
-                self._page_graph.add_edge(src, tgt, **rel_info)
+                graph.add_edge(src, tgt, **rel_info)
 
         # Persist to storage
         await self.store_page_graph(
-            graph_data=self._page_graph,
+            graph_data=graph,
         )
-        logger.info(f"Persisted page graph for {self.tenant_id}:{self.group_id}")
+        logger.info(f"Persisted page graph for {tenant_id}:{group_id}")
 
     async def get_page_neighbors(
         self,
         page_id: str,
+        tenant_id: str,
+        group_id: str,
         max_neighbors: int = 5,
         relationship_types: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Get nearest neighbor pages."""
-        if not self._page_graph or page_id not in self._page_graph:
+        graph_key = f"{tenant_id}:{group_id}:graph"
+        if not self._page_graphs.get(graph_key) or len(self._page_graphs[graph_key].nodes) == 0:
+            return []
+
+        graph = self._page_graphs[graph_key]
+
+        if not graph or page_id not in graph:
             return []
 
         neighbors = []
-        for neighbor in self._page_graph.successors(page_id):
-            edge_data = self._page_graph.get_edge_data(page_id, neighbor)
+        for neighbor in graph.successors(page_id):
+            edge_data = graph.get_edge_data(page_id, neighbor)
             weight = edge_data.get("weight", 0.5)
             neighbors.append((neighbor, weight))
 
         neighbors.sort(key=lambda x: x[1], reverse=True)
         return neighbors[:max_neighbors]
-
-
-
 
 

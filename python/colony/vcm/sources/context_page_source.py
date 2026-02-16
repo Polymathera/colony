@@ -23,6 +23,7 @@ class PageCluster(BaseModel):
     """A cluster of related pages."""
     cluster_id: str
     page_ids: list[str]
+    group_id: str  # For identifying related pages (e.g., from same git repo)
     relationship_score: float = Field(ge=0.0, le=1.0, description="Average relationship strength")
     cluster_type: str  # "file_group", "semantic", "hybrid", etc.
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -43,12 +44,26 @@ class ContextPageSource(ABC):
     def __init__(
         self,
         scope_id: str,
+        group_id: str,
         tenant_id: str,
         mmap_config: MmapConfig,
     ):
+        """Initialize the context page source.
+        Args:
+            scope_id: Unique identifier for the scope of this source (e.g., file system ID, blackboard scope ID)
+            group_id: Identifier for grouping related context sources into one address space (e.g., VMR ID)
+            tenant_id: Identifier for multi-tenant deployments
+            mmap_config: Configuration for memory-mapped storage (if needed)
+        """
         self.scope_id = scope_id
+        self.group_id = group_id
         self.tenant_id = tenant_id
         self.mmap_config = mmap_config
+
+    @classmethod
+    def get_source_metadata(cls, scope_id: str) -> str:
+        """Get metadata for the page source."""
+        return f"{cls.__qualname__}:{scope_id}"
 
     @abstractmethod
     async def initialize(self) -> None:
@@ -110,9 +125,15 @@ class ContextPageSourceFactory:
         return decorator
 
     @staticmethod
+    def list_registered_source_types() -> list[type[ContextPageSource]]:
+        """List all registered context page source types."""
+        return list(ContextPageSourceFactory._registry.values())
+
+    @staticmethod
     def create(
         source_type: str,
         scope_id: str,
+        group_id: str,
         tenant_id: str,
         mmap_config: MmapConfig,
         *args: Any,
@@ -122,6 +143,10 @@ class ContextPageSourceFactory:
 
         Args:
             source_type: Type of source to create ("file_grouper", etc.)
+            scope_id: Unique identifier for the scope (e.g., file system ID, blackboard scope ID)
+            group_id: Identifier for grouping related context sources into one address space (e.g., VMR ID)
+            tenant_id: Identifier for multi-tenant deployments
+            mmap_config: Configuration for memory-mapped storage (if needed)
             *args: Positional arguments for source constructor
             **kwargs: Keyword arguments for source constructor
 
@@ -131,12 +156,13 @@ class ContextPageSourceFactory:
         if source_type in ContextPageSourceFactory._registry:
             return ContextPageSourceFactory._registry[source_type](
                 scope_id=scope_id,
+                group_id=group_id,
                 tenant_id=tenant_id,
                 mmap_config=mmap_config,
                 *args,
                 **kwargs
             )
         else:
-            raise ValueError(f"Unknown ContextPageSource type: {source_type}")
+            raise ValueError(f"Unknown ContextPageSource type: {source_type}, not found in registry: {list(ContextPageSourceFactory._registry.keys())}")
 
 

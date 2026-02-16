@@ -65,7 +65,7 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
         await super().initialize()
 
         # Key generator and registry to be used by action executors
-        self.key_registry = GlobalPageKeyRegistry(self)
+        self.key_registry = GlobalPageKeyRegistry(self.agent)
         await self.key_registry.initialize()
         self.key_generator = HybridKeyGenerator()
 
@@ -152,6 +152,9 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
         # TODO: Replace all calls to self.agent methods with calls to tools/policies where applicable
         if not page_id:
             return ActionResult(success=False, error="Missing page_id parameter")
+
+        if page_id not in self.cluster.page_ids:
+            return ActionResult(success=False, error=f"Page {page_id} not in assigned cluster")
 
         try:
             # Request page load
@@ -635,6 +638,9 @@ Output format (JSON):
         if cached_key:
             return cached_key
 
+        if page_id not in self.cluster.page_ids:
+            raise ValueError(f"Page {page_id} not in assigned cluster")
+
         # Ensure page is loaded into VCM (if not already)
         await self.agent.request_page(page_id, priority=10)
         await self._wait_for_page_load(page_id, max_wait=30)
@@ -644,7 +650,11 @@ Output format (JSON):
         key = await self.key_generator.generate_key(page_id, metadata)
 
         # Cache it
-        await self.key_registry.publish_page_key(page_id, key, cluster_id="unknown")
+        await self.key_registry.publish_page_key(
+            page_id,
+            key=key,
+            cluster_id=self.cluster.cluster_id,
+        )
 
         return key
 

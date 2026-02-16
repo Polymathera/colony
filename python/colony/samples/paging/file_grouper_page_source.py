@@ -7,7 +7,7 @@ from overrides import override
 from typing import Any, AsyncIterator, Literal
 import networkx as nx
 
-from ...vcm.sources import ContextPageSource, ContextPageSourceFactory
+from ...vcm.sources import ContextPageSource, ContextPageSourceFactory, BuilInContextPageSourceType
 from ...vcm.models import MmapConfig, ContextPageId, VirtualContextPage
 from ...vcm.page_storage import PageStorage, PageStorageConfig
 from ...distributed import get_polymathera
@@ -19,7 +19,7 @@ from .sharding.strategy import GitRepoShardingStrategy
 
 logger = logging.getLogger(__name__)
 
-@ContextPageSourceFactory.register_new_source_type("file_grouper")
+@ContextPageSourceFactory.register_new_source_type(BuilInContextPageSourceType.FILE_GROUPER.value)
 class FileGrouperContextPageSource(ContextPageSource):
     """ContextPageSource backed by EFS/S3 storage using `FileGrouper`.
 
@@ -35,20 +35,21 @@ class FileGrouperContextPageSource(ContextPageSource):
         self,
         *,
         scope_id: str,  # Repo ID
-        tenant_id: str = "default",
+        group_id: str,
+        tenant_id: str,
         mmap_config: MmapConfig,
         repo_path: str,  # Path to cloned repo
     ):
         """Initialize file-grouper-based context page source.
 
         Args:
-            scope_id: Repository or group identifier
+            scope_id: Repository (or scope) identifier
+            group_id: Group identifier for VCM address space
             tenant_id: Tenant identifier
             mmap_config: Configuration for memory-mapped page graph data
             repo_path: Local path to git repository
         """
-        super().__init__(tenant_id=tenant_id, scope_id=scope_id, mmap_config=mmap_config)
-        self.scope_id = scope_id
+        super().__init__(scope_id=scope_id, group_id=group_id, tenant_id=tenant_id, mmap_config=mmap_config)
         self.repo_path = repo_path
 
         # File grouping and sharding wrappers (expose graph and file-to-page mapping)
@@ -76,8 +77,6 @@ class FileGrouperContextPageSource(ContextPageSource):
             raise ValueError("Missing PageStorageConfig in VCM")
 
         self.page_storage = PageStorage(
-            group_id=self.scope_id,
-            tenant_id=self.tenant_id,
             backend_type=config.backend_type,
             storage_path=config.storage_path,
             s3_bucket=config.s3_bucket,
@@ -85,21 +84,36 @@ class FileGrouperContextPageSource(ContextPageSource):
         await self.page_storage.initialize()
 
         # Try to load existing graph
-        page_graph = await self.page_storage.retrieve_page_graph()
+        page_graph = await self.page_storage.retrieve_page_graph(
+            group_id=self.group_id,
+            tenant_id=self.tenant_id,
+        )
 
         if page_graph and page_graph.number_of_nodes() > 0:
             self.page_graph = page_graph
-            self.file_to_page = await self.page_storage.retrieve_page_graph_level_data("file_to_page") or {}
-            self.page_to_file = await self.page_storage.retrieve_page_graph_level_data("page_to_file") or {}
-            self.page_keys = await self.page_storage.retrieve_page_graph_level_data("page_keys") or {}
+            self.file_to_page = await self.page_storage.retrieve_page_graph_level_data(
+                data_key="file_to_page",
+                tenant_id=self.tenant_id,
+                group_id=self.group_id
+            ) or {}
+            self.page_to_file = await self.page_storage.retrieve_page_graph_level_data(
+                data_key="page_to_file",
+                tenant_id=self.tenant_id,
+                group_id=self.group_id
+            ) or {}
+            self.page_keys = await self.page_storage.retrieve_page_graph_level_data(
+                data_key="page_keys",
+                tenant_id=self.tenant_id,
+                group_id=self.group_id
+            ) or {}
             logger.info(
-                f"Loaded page graph for {self.scope_id}: "
+                f"Loaded page graph for {self.tenant_id}:{self.group_id}:{self.scope_id}: "
                 f"{len(self.page_graph.nodes)} nodes, {len(self.page_graph.edges)} edges"
             )
         else:
             # No existing graph — build from repository
             logger.info(
-                f"No existing page graph for {self.scope_id}, "
+                f"No existing page graph for {self.tenant_id}:{self.group_id}:{self.scope_id}, "
                 f"building from repository at {self.repo_path}"
             )
             await self._build_and_persist_page_graph()
@@ -129,7 +143,7 @@ class FileGrouperContextPageSource(ContextPageSource):
         try:
             repo = git.Repo(self.repo_path)
             result = await strategy.create_shards_with_graph(
-                group_id=self.scope_id,
+                group_id=self.group_id,
                 repo=repo,
             )
 
@@ -180,12 +194,13 @@ class FileGrouperContextPageSource(ContextPageSource):
                     text=shard.raw_content,
                     size=max(1, len(shard.raw_content) // 4),  # Rough token estimate
                     metadata={
-                        "source": "file_grouper",
+                        "source": FileGrouperContextPageSource.get_source_metadata(self.scope_id),
                         "files": [seg.file_path for seg in shard.metadata.file_segments],
                         "file_count": len(shard.metadata.file_segments),
                         "content_size_bytes": shard.metadata.content_size_bytes,
                     },
-                    group_id=self.scope_id,
+                    scope_id=self.scope_id,
+                    group_id=self.group_id,
                     tenant_id=self.tenant_id,
                 )
                 await self.page_storage.store_page(page)
@@ -194,12 +209,18 @@ class FileGrouperContextPageSource(ContextPageSource):
 
             # Persist graph and mappings
             await self.page_storage.store_page_graph(self.page_graph)
-            await self.page_storage.store_page_graph_level_data("file_to_page", self.file_to_page)
-            await self.page_storage.store_page_graph_level_data("page_to_file", self.page_to_file)
-            await self.page_storage.store_page_graph_level_data("page_keys", self.page_keys)
+            await self.page_storage.store_page_graph_level_data(
+                tenant_id=self.tenant_id, group_id=self.group_id, key="file_to_page", value=self.file_to_page
+            )
+            await self.page_storage.store_page_graph_level_data(
+                tenant_id=self.tenant_id, group_id=self.group_id, key="page_to_file", value=self.page_to_file
+            )
+            await self.page_storage.store_page_graph_level_data(
+                tenant_id=self.tenant_id, group_id=self.group_id, key="page_keys", value=self.page_keys
+            )
 
             logger.info(
-                f"Persisted page graph for {self.scope_id}: "
+                f"Persisted page graph for {self.tenant_id}:{self.group_id}:{self.scope_id}: "
                 f"{self.page_graph.number_of_nodes()} pages, "
                 f"{len(self.file_to_page)} files mapped"
             )

@@ -1203,9 +1203,10 @@ async def run_integration_test(
     with console.status("[cyan]Mapping codebase into VCM pages..."):
         mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
             scope_id=config.repo_id,
+            group_id=config.repo_id,  # Using repo_id as group_id for simplicity
+            tenant_id=config.tenant_id,
             source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
             config=mmap_config,
-            tenant_id=config.tenant_id,
             repo_path=codebase_path,
         )
 

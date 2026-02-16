@@ -408,6 +408,8 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
 
             page_storage = await self.agent.get_page_storage()
             async for cluster in page_storage.get_all_clusters(
+                tenant_id=self.agent.tenant_id,
+                group_id=self.agent.group_id,
                 max_cluster_size=10,  # TODO: Make configurable
                 min_cluster_size=2    # TODO: Make configurable
             ):
@@ -570,6 +572,8 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
             all_clusters: list[PageCluster] = []
             page_storage = await self.agent.get_page_storage()
             async for cluster in page_storage.get_all_clusters(
+                self.agent.tenant_id,
+                self.agent.group_id,
                 max_cluster_size=self.agent.metadata.get("max_cluster_size", 10),
                 min_cluster_size=self.agent.metadata.get("min_cluster_size", 2)
             ):

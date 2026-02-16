@@ -495,12 +495,14 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
 
     def __init__(
         self,
+        source: ContextPageSource,
         locality_policy: LocalityPolicy | None = None,
         flush_policy: FlushPolicy | None = None,
         serialization_policy: SerializationPolicy | None = None,
         update_policy: PageUpdatePolicy | None = None,
         eviction_policy: PageEvictionPolicy | None = None,
     ):
+        self.source: ContextPageSource = source
         self.locality_policy = locality_policy or TagLocalityPolicy()
         self.flush_policy = flush_policy or ThresholdFlushPolicy()
         self.serialization_policy = serialization_policy or JsonSerializationPolicy()
@@ -508,7 +510,6 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
         self.eviction_policy = eviction_policy or LazyEvictionPolicy()
 
         # Set during initialize()
-        self._scope_id: str = ""
         self._page_storage: PageStorage | None = None
         self._tokenizer: TokenizerProtocol | None = None
         self._record_to_page: dict[str, str] = {}
@@ -518,12 +519,10 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
 
     async def initialize(
         self,
-        scope_id: str,
         page_storage: "PageStorage",
         tokenizer: "TokenizerProtocol",
         record_to_page: dict[str, str],
     ) -> None:
-        self._scope_id = scope_id
         self._page_storage = page_storage
         self._tokenizer = tokenizer
         self._record_to_page = record_to_page
@@ -588,28 +587,25 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
         tokens = self._tokenizer.encode(content_text)
 
         # 3. Create page
-        page_id = f"bb:{self._scope_id}:{locality_key}:{uuid4().hex[:8]}"
+        page_id = f"bb:{self.source.scope_id}:{locality_key}:{uuid4().hex[:8]}"
         all_tags = set().union(*(r.tags for r in group))
-
-        # Extract tenant_id from scope_id if it follows convention "tenant:{id}:..."
-        tenant_id = self._extract_tenant_id()
 
         page = VirtualContextPage(
             page_id=page_id,
             tokens=tokens,
             text=content_text,
             size=len(tokens),
-            group_id=f"bb:{self._scope_id}:{locality_key}",
+            group_id=self.source.group_id, # f"bb:{self.source.scope_id}:{locality_key}",
+            tenant_id=self.source.tenant_id,
             metadata={
-                "source": f"bb:{self._scope_id}",
-                "scope_id": self._scope_id,
+                "source": BlackboardContextPageSource.get_source_metadata(self.source.scope_id),
+                "scope_id": self.source.scope_id,
                 "locality_key": locality_key,
                 "record_count": len(group),
                 "record_keys": [r.key for r in group],
                 "tags": list(all_tags),
                 "created_at": time.time(),
             },
-            tenant_id=tenant_id,
             created_by="blackboard_page_source",
             isolation_level="shared",
         )
@@ -626,7 +622,7 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
             self._page_graph.add_node(page_id, **page.metadata)
 
         logger.info(
-            f"GroupAndFlushIngestionPolicy[{self._scope_id}]: created page "
+            f"GroupAndFlushIngestionPolicy[{self.source.scope_id}]: created page "
             f"{page_id} ({len(group)} records, {len(tokens)} tokens, "
             f"locality={locality_key})"
         )
@@ -637,19 +633,9 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
         if self._page_graph is not None and page_id in self._page_graph:
             self._page_graph.nodes[page_id]["stale"] = True
         logger.debug(
-            f"GroupAndFlushIngestionPolicy[{self._scope_id}]: "
+            f"GroupAndFlushIngestionPolicy[{self.source.scope_id}]: "
             f"marked page {page_id} as stale"
         )
-
-    def _extract_tenant_id(self) -> str:
-        """Extract tenant_id from scope_id if it follows convention.
-
-        Convention: scope_id may be "tenant:{tenant_id}:..." or just a plain ID.
-        """
-        parts = self._scope_id.split(":")
-        if len(parts) >= 2 and parts[0] == "tenant":
-            return parts[1]
-        return "default"
 
 
 # =============================================================================
@@ -657,7 +643,7 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
 # =============================================================================
 
 
-@ContextPageSourceFactory.register_new_source_type(BuilInContextPageSourceType.BLACKBOARD)
+@ContextPageSourceFactory.register_new_source_type(BuilInContextPageSourceType.BLACKBOARD.value)
 class BlackboardContextPageSource(ContextPageSource):
     """Pages any EnhancedBlackboard scope into VCM pages via IngestionPolicy.
 
@@ -690,8 +676,9 @@ class BlackboardContextPageSource(ContextPageSource):
     def __init__(
         self,
         *,
-        tenant_id: str,
         scope_id: str,
+        group_id: str,
+        tenant_id: str,
         mmap_config: MmapConfig,
     ):
         """Initialize page source for a storage scope.
@@ -699,11 +686,12 @@ class BlackboardContextPageSource(ContextPageSource):
         Called by VCM's mmap_application_scope() — not by agents directly.
 
         Args:
-            tenant_id: The tenant ID for the scope
             scope_id: The scope being paged (e.g., "tenant:acme:discoveries")
+            group_id: Identifier for grouping related context sources (e.g., VMR ID)
+            tenant_id: The tenant ID for the scope
             mmap_config: Configuration for the memory-mapped page source
         """
-        super().__init__(tenant_id=tenant_id, scope_id=scope_id, mmap_config=mmap_config)
+        super().__init__(scope_id=scope_id, group_id=group_id, tenant_id=tenant_id, mmap_config=mmap_config)
         #    ingestion_policy: How records are organized into pages.
         #        Default: GroupAndFlushIngestionPolicy (tag-based locality,
         #        threshold-based flushing, JSON serialization).
@@ -867,6 +855,7 @@ class BlackboardContextPageSource(ContextPageSource):
             )
 
         return GroupAndFlushIngestionPolicy(
+            source=self,
             locality_policy=locality,
             flush_policy=flush,
         )

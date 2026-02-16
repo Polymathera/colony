@@ -101,6 +101,8 @@ class GlobalPageKeyRegistry:
                 {
                     "key": key.model_dump(),
                     "cluster_id": cluster_id,
+                    "group_id": self.agent.group_id if self.agent else None,
+                    "tenant_id": self.agent.tenant_id if self.agent else None,
                     "timestamp": time.time(),
                     "agent_id": self.agent.agent_id,
                     "metadata": metadata or {}
@@ -303,6 +305,8 @@ class GlobalPageKeyRegistry:
         # Retrieve from VCM page storage
         try:
             return await self.page_storage.retrieve_page_graph_level_data(
+                tenant_id=self.agent.tenant_id,
+                group_id=self.agent.group_id,
                 data_key=self._get_page_graph_group_id(page_id),
             )
         except Exception as e:
@@ -313,7 +317,9 @@ class GlobalPageKeyRegistry:
         """Cache key for page."""
         # Store in VCM page storage
         try:
-            await self.page_storage.store_page_graph_level_data(
+            await self.page_storage.store_page_graph_level_data(  # TODO: Page keys are not really graph-level data, we should add a separate method for page-level data
+                tenant_id=self.agent.tenant_id,
+                group_id=self.agent.group_id if self.agent else None,
                 data_key=self._get_page_graph_group_id(page_id),
                 graph_data=page_key,
             )
