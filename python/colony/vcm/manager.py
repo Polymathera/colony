@@ -187,10 +187,6 @@ class VirtualContextManager:
         except Exception as e:
             logger.warning(f"Failed to reconcile scope mappings during init: {e}")
 
-        # Start periodic reconciliation task
-        self._reconciliation_task = asyncio.create_task(self._periodic_reconciliation_loop())
-        logger.info(f"Started periodic reconciliation task (interval={self._reconciliation_interval_s}s)")
-
         logger.info(
             f"VirtualContextManager initialized with caching_policy={self.caching_policy}, "
             f"allocation_strategy={type(self.allocation_strategy).__name__} "
@@ -220,6 +216,10 @@ class VirtualContextManager:
                 logger.info("Initialized Redis event subscriptions for page state reconciliation")
             except Exception as e:
                 logger.warning(f"Failed to initialize Redis event subscriptions: {e}. Layer 2 reconciliation will rely on periodic scans only.")
+
+        # Start periodic reconciliation task
+        self._reconciliation_task = asyncio.create_task(self._periodic_reconciliation_loop())
+        logger.info(f"Started periodic reconciliation task (interval={self._reconciliation_interval_s}s)")
 
     # === Page Management API ===
     @serving.endpoint

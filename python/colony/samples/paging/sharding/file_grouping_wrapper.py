@@ -192,9 +192,10 @@ class FileGrouperWithGraph(FileGrouper):
         results = []
         for target in self._last_graph.neighbors(file_path):
             edge_data = self._last_graph.get_edge_data(file_path, target)
+            edge_types = edge_data.get("relationship_types", [])
 
             # Filter by relationship type
-            if relationship_types and edge_data["relationship_type"] not in relationship_types:
+            if relationship_types and not any(t in relationship_types for t in edge_types):
                 continue
 
             # Filter by weight
@@ -203,7 +204,7 @@ class FileGrouperWithGraph(FileGrouper):
 
             results.append({
                 "target": target,
-                "relationship_type": edge_data["relationship_type"],
+                "relationship_types": edge_types,
                 "weight": edge_data["weight"],
                 "metadata": edge_data.get("metadata", {}),
             })

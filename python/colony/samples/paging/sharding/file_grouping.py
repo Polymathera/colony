@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
-import json
 import os
 import time
 from collections import defaultdict
@@ -11,7 +9,6 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, ClassVar, Iterable
 import mimetypes
-import functools
 
 import git
 import networkx as nx
@@ -26,7 +23,7 @@ except ImportError:
 from colony.distributed.metrics.common import BaseMetricsMonitor
 from colony.distributed.caching.simple import CacheConfig
 from colony.distributed.config import ConfigComponent, register_polymathera_config
-from colony.distributed import get_polymathera
+from colony.distributed import get_initialized_polymathera
 from colony.utils import setup_logger
 
 from .analyzers.base import FileContentCache
@@ -47,148 +44,6 @@ logger = setup_logger(__name__)
 # Import centralized language detection
 from .languages.extensions import detect_language as _detect_language_centralized
 
-
-# TODO: Implement the remaining analyzer classes?
-# TODO: Implement the analyzer classes?
-# TODO: Add more sophisticated dependency analysis?
-# TODO: Add more sophisticated semantic analysis strategies?
-
-# TODO: Add more sophisticated directory relationship scoring?
-# TODO: Implement batch size auto-tuning?
-
-# TODO: Enhance the error recovery mechanisms?
-# TODO: The comprehensive error handling and recovery system?
-# TODO: Add more detailed metrics for directory analysis?
-# TODO: Each part will maintain production-quality code with comprehensive error handling, metrics, and configurability.
-
-
-# TODO: The enhanced concurrency control system?
-# TODO: Each part will build on this foundation while maintaining production-readiness and configurability.
-
-# TODO: Implement more optimization strategies?
-# TODO: Enhance the pattern matching?
-
-# TODO: The remaining language-specific optimizations (interface-based, partial classes)?
-# TODO: Add more language configurations?
-# TODO: Add more language-specific optimizations?
-# TODO: Add more sophisticated grouping algorithms?
-
-# TODO: Implement language-specific embedding models?
-
-# TODO: Add more cross-language optimization strategies?
-# TODO: The enhanced dependency analysis that handles cross-language dependencies?
-# TODO: The language-specific analyzers for different types of cross-language bindings?
-# TODO: The optimization strategies that preserve cross-language relationships?
-# TODO: The cross-language optimization implementation?
-# TODO: Add cross-language analysis?
-# TODO: Add more cross-language relationship patterns?
-
-# TODO: Enhance the caching system?
-# TODO: Enhance the caching system for cross-language analysis?
-# TODO: Enhance the caching system for semantic analysis?
-
-# TODO: Cross-Language Relationship Management
-# 1. Add versioning for cross-language binding rules
-# 2. Implement validation for cross-language relationships
-# 3. Add metrics for cross-language binding changes
-# 4. Track relationship strength over time
-
-# TODO: Graph Metadata Management
-# 1. Add schema versioning for graph metadata
-# 2. Implement metadata validation
-# 3. Add metadata compression
-# 4. Track metadata size metrics
-
-# TODO: Cache Consistency
-# 1. Add consistency checks for graph metadata
-# 2. Implement repair mechanisms for corrupted metadata
-# 3. Add metadata recovery strategies
-# 4. Track metadata consistency metrics
-"""
-A multi-stage optimization process that includes:
-1. Cross-language optimizations
-2. Language-specific optimizations
-3. Token-based optimizations
-
-
-1. Group Splitting:
-    - Smart splitting of large groups
-    - Token-aware splitting
-    - Relationship preservation
-    - Fallback mechanisms
-
-2. Optimization:
-    - Dynamic sizing
-    - Token count management
-    - Relationship score calculation
-    - Edge type tracking
-
-3. Error Handling:
-    - Graceful degradation
-    - Multiple fallback levels
-    - Comprehensive error logging
-
-4. Performance:
-    - Concurrent token counting
-    - Efficient graph operations
-    - Caching integration
-
-1. Asynchronous Processing:
-    - Made directory relationship analysis fully async
-    - Added batch processing for memory efficiency
-    - Concurrent processing of file pairs within batches
-2. Resource Management:
-    - Added semaphore control
-    - Batch size configuration
-    - Memory usage optimization
-3. Error Handling:
-    - Granular error tracking
-    - Detailed logging
-    - Metrics for each stage
-4. Performance:
-    - Parallel processing of file pairs
-    - Batched processing for large repos
-    - Configurable batch sizes
-
-5. Language-Specific Features:
-    - Scope detection
-    - Dependency tracking
-    - Import analysis
-    - Context preservation
-
-6. Optimization Strategies:
-    - Module-based grouping
-    - Interface-based grouping
-    - Partial class handling
-
-7. Pattern Matching:
-    - Compiled regex patterns
-    - Language-specific patterns
-    - Efficient matching
-8. Feature Detection:
-    - Language feature sets
-    - Capability checking
-    - Extension mapping
-
-1. Cross-Language Awareness:
-    - Considers language pairs in similarity thresholds
-    - Tracks cross-language semantic bindings
-    - Adjusts weights based on language relationships
-2. Language-Specific Processing:
-    - Includes language context in embeddings
-    - Different thresholds for same/cross-language pairs
-    - Special handling for known language combinations
-3. Performance Optimizations:
-    - Efficient batch processing
-    - Caching of embeddings
-    - Language-aware threshold adjustments
-4. Enhanced Detection:
-    - API implementation matching
-    - Configuration file relationships
-    - Cross-language test files
-    - Documentation relationships
-    - Generated code detection
-"""
 
 class FileGraphCacheMetricsMonitor(BaseMetricsMonitor):
     """Base class for Prometheus metrics monitoring using node-global HTTP server."""
@@ -241,7 +96,8 @@ class FileGraphCache:
         self.config = await CacheConfig.check_or_get_component(self.config)
 
         # Use existing TokenizedFileCache with "graphs" type
-        self.cache = await get_polymathera().create_distributed_simple_cache(
+        polymathera = await get_initialized_polymathera()
+        self.cache = await polymathera.create_distributed_simple_cache(
             namespace="relationship_graphs",  # TODO: Does this need to be VMR-specific?
             config=self.config,
         )
@@ -268,6 +124,8 @@ class FileGraphCache:
 
             if self.config.serialization_format == "json":
                 graph = nx.node_link_graph(data)
+            else:
+                raise ValueError(f"Unsupported serialization format: {self.config.serialization_format}")
 
             self.metrics.cache_hits.labels(operation="get").inc()
             return graph
@@ -285,13 +143,13 @@ class FileGraphCache:
         try:
             self.metrics.active_operations.labels(operation="put").inc()
 
-            # Serialize and compress
             if self.config.serialization_format == "json":
-                graph = nx.node_link_data(graph)
+                data = nx.node_link_data(graph)
+            else:
+                raise ValueError(f"Unsupported serialization format: {self.config.serialization_format}")
 
-            # Store with version
             cache_key = self._make_version_key(key, version)
-            return await self.cache.set(cache_key, graph)
+            return await self.cache.set(cache_key, data)
 
         except Exception as e:
             logger.error(f"Error storing graph in cache: {e}")
@@ -488,17 +346,15 @@ class FileGrouper:
         config: FileGrouperConfig | None = None,
         file_content_cache: FileContentCache | None = None,
     ):
-        logger.info(f"________ FileGrouper: 0 {token_manager} {config} {file_content_cache}")
-        self.config = config
-        logger.info(f"________ FileGrouper: 1 {self.config}")
+        self.config: FileGrouperConfig | None = config
         self.file_content_cache = file_content_cache
-        logger.info(f"________ FileGrouper: 2 {self.file_content_cache}")
         self.token_manager = token_manager
-        self.dependency_analyzer = None
-        self.import_analyzer = None
+        self.default_dependency_analyzer = None
+        self.default_import_analyzer = None
         self.commit_analyzer = None
         self.semantic_analyzer = None
         self.file_graph_cache = None
+        self._language_cache: dict[str, str] = {}
         # Initialize analyzer caches
         self._import_analyzers = {}
         self._dependency_analyzers = {}
@@ -510,7 +366,6 @@ class FileGrouper:
         self.semaphore = None
         # Metrics
         self.metrics = FileGrouperMetricsMonitor()
-        logger.info(f"________ FileGrouper: 9")
 
     async def initialize(self):
         self.config = await FileGrouperConfig.check_or_get_component(self.config)
@@ -519,55 +374,47 @@ class FileGrouper:
             await self.file_content_cache.initialize()
 
         # Analyzers
-        self.dependency_analyzer = DependencyAnalyzer(
+        self.default_dependency_analyzer = DependencyAnalyzer(
             file_content_cache=self.file_content_cache,
             config=self.config.dependency_config
         )
-        await self.dependency_analyzer.initialize()
-        logger.info(f"________ FileGrouper: 3")
-        self.import_analyzer = ImportAnalyzer(
+        await self.default_dependency_analyzer.initialize()
+        self.default_import_analyzer = ImportAnalyzer(
             file_content_cache=self.file_content_cache,
             config=self.config.import_config
         )
-        await self.import_analyzer.initialize()
-        logger.info(f"________ FileGrouper: 4")
+        await self.default_import_analyzer.initialize()
         self.commit_analyzer = CommitHistoryAnalyzer(
             file_content_cache=self.file_content_cache,
             config=self.config.commit_config
         )
         await self.commit_analyzer.initialize()
-        logger.info(f"________ FileGrouper: 5")
-        self.semantic_analyzer = (
-            SemanticAnalyzer(
+        if self.config.enable_semantic_grouping:
+            self.semantic_analyzer = SemanticAnalyzer(
                 file_content_cache=self.file_content_cache,
-                config=self.config.semantic_config
+                config=self.config.semantic_config,
             )
-            if self.config.enable_semantic_grouping
-            else None
-        )
-        await self.semantic_analyzer.initialize()
-        logger.info(f"________ FileGrouper: 6")
+            await self.semantic_analyzer.initialize()
 
         # Initialize graph cache
         self.file_graph_cache = FileGraphCache(
             config=self.config.file_graph_cache_config,
         )
         await self.file_graph_cache.initialize()
-        logger.info(f"________ FileGrouper: 7")
         # Concurrency control
         self.semaphore = asyncio.Semaphore(self.config.max_concurrent_analysis)
-        logger.info(f"________ FileGrouper: 8")
 
     async def _ensure_caches_initialized(self) -> None:
         """Initialize caches if not already done."""
+        polymathera = await get_initialized_polymathera()
         # TODO: Add cache namespaces
         if self.dependency_cache is None:
-            self.dependency_cache = await get_polymathera().create_distributed_simple_cache(
+            self.dependency_cache = await polymathera.create_distributed_simple_cache(
                 namespace="dependency_graphs",  # TODO: Does this need to be VMR-specific?
                 config=self.config.dependency_cache_config,
             )
         if self.imports_cache is None:
-            self.imports_cache = await get_polymathera().create_distributed_simple_cache(
+            self.imports_cache = await polymathera.create_distributed_simple_cache(
                 namespace="import_graphs",  # TODO: Does this need to be VMR-specific?
                 config=self.config.imports_cache_config,
             )
@@ -583,8 +430,8 @@ class FileGrouper:
             if self.imports_cache:
                 await self.imports_cache.cleanup()
             await self.file_graph_cache.cleanup()
-            await self.dependency_analyzer.cleanup()
-            await self.import_analyzer.cleanup()
+            await self.default_dependency_analyzer.cleanup()
+            await self.default_import_analyzer.cleanup()
             if self.semantic_analyzer:
                 await self.semantic_analyzer.cleanup()
             await self.commit_analyzer.cleanup()
@@ -595,33 +442,40 @@ class FileGrouper:
         except Exception as e:
             logger.warning(f"Error cleaning up FileGrouper: {e}")
 
-    @functools.lru_cache(maxsize=1000)
     def _detect_language(self, file_path: str) -> str:
-        """Detect programming language from file extension and content using centralized registry"""
+        """Detect programming language from file extension using centralized registry."""
+        cached = self._language_cache.get(file_path)
+        if cached is not None:
+            return cached
+
         try:
-            # Use centralized language detection
             language = _detect_language_centralized(file_path)
             if language:
+                self._language_cache[file_path] = language
                 return language
 
             # Fallback to MIME type detection
             mime_type, _ = mimetypes.guess_type(file_path)
             if mime_type:
                 if 'text' in mime_type:
-                    return 'text'
+                    result = 'text'
                 elif 'application/json' in mime_type:
-                    return 'json'
+                    result = 'json'
                 elif 'application/xml' in mime_type:
-                    return 'xml'
+                    result = 'xml'
+                else:
+                    result = 'unknown'
+                self._language_cache[file_path] = result
+                return result
 
-            # Default to unknown
+            self._language_cache[file_path] = 'unknown'
             return 'unknown'
 
         except Exception as e:
             logger.error(f"Error detecting language for {file_path}: {e}")
             return 'unknown'
 
-    def _get_dependency_analyzer(self, language: str) -> DependencyAnalyzer | None:
+    async def _get_dependency_analyzer(self, language: str) -> DependencyAnalyzer | None:
         """Get the appropriate dependency analyzer for a language"""
         try:
             if language not in self._dependency_analyzers:
@@ -631,15 +485,16 @@ class FileGrouper:
                         file_content_cache=self.file_content_cache,
                         config=config.dependency_config
                     )
+                    await self._dependency_analyzers[language].initialize()
                 else:
                     # Use default dependency analyzer
-                    self._dependency_analyzers[language] = self.dependency_analyzer
+                    self._dependency_analyzers[language] = self.default_dependency_analyzer
             return self._dependency_analyzers.get(language)
         except Exception as e:
             logger.error(f"Error getting dependency analyzer for {language}: {e}", exc_info=True)
             return None
 
-    def _get_import_analyzer(self, language: str) -> ImportAnalyzer | None:
+    async def _get_import_analyzer(self, language: str) -> ImportAnalyzer | None:
         """Get the appropriate import analyzer for a language"""
         try:
             if language not in self._import_analyzers:
@@ -649,9 +504,10 @@ class FileGrouper:
                         file_content_cache=self.file_content_cache,
                         config=config.import_config
                     )
+                    await self._import_analyzers[language].initialize()
                 else:
                     # Use default import analyzer
-                    self._import_analyzers[language] = self.import_analyzer
+                    self._import_analyzers[language] = self.default_import_analyzer
             return self._import_analyzers.get(language)
         except Exception as e:
             logger.error(f"Error getting import analyzer: {e}", exc_info=True)
@@ -686,11 +542,13 @@ class FileGrouper:
             if not graph:
                 return False
 
+            polymathera = await get_initialized_polymathera()
+
             # Apply updates
             for file_pair, relationship in new_file_relationships.items():
                 source, target = file_pair
-                source = await get_polymathera().normalize_file_path(source)
-                target = await get_polymathera().normalize_file_path(target)
+                source = await polymathera.normalize_file_path(source)
+                target = await polymathera.normalize_file_path(target)
                 if graph.has_edge(source, target):
                     edge_data = graph.get_edge_data(source, target)
                     edge_data["llm_weight"] = relationship.get("weight", 0.5)
@@ -733,35 +591,28 @@ class FileGrouper:
             3. Preserving cross-language bindings (imports, dependencies)
             4. Using language-aware community detection
         """
-        logger.info(f"________ group_files: [{group_id}] Starting group_files for {len(files)} files")
+        graph = None
         try:
-            # Ensure caches are initialized
             await self._ensure_caches_initialized()
-            logger.info(f"________ group_files: [{group_id}] Caches initialized.")
 
             start_time = time.time()
             commit_hash = repo.head.commit.hexsha
 
-            # Get language configs for all files
+            # Detect languages for all files (populates cache)
             file_languages = {file: self._detect_language(file) for file in files}
-            # logger.info(f"________ group_files: file_languages={json.dumps(file_languages, indent=4)}")
 
             # Try to get cached graph
-            logger.info(f"________ group_files: [{group_id}] Attempting to get cached graph for commit {commit_hash}.")
             graph = await self.file_graph_cache.get(
                 key=f"{group_id}:{commit_hash}", version=self._get_graph_version(files)
             )
-            logger.info(f"________ group_files: [{group_id}] Cached graph is {'found' if graph else 'not found'}.")
 
             # Track files with known cross-language bindings
             cross_lang_bindings = set()
 
             if graph is None:
-                logger.info(f"________ group_files: [{group_id}] Building new graph.")
                 graph = await self._build_graph(
                     repo, files, cross_lang_bindings
                 )
-                logger.info(f"________ group_files: [{group_id}] Finished building graph. Caching it now.")
 
                 # Store cross-language bindings in graph metadata
                 graph.graph["cross_lang_bindings"] = list(cross_lang_bindings)
@@ -772,7 +623,6 @@ class FileGrouper:
                     graph=graph,
                     version=self._get_graph_version(files),
                 )
-                logger.info(f"________ group_files: [{group_id}] Finished caching graph.")
             else:
                 # Reconstruct cross-language bindings from graph
                 cross_lang_bindings = set(graph.graph.get("cross_lang_bindings", []))
@@ -792,23 +642,18 @@ class FileGrouper:
                         cross_lang_bindings.add(target)
 
             # Find initial groups using language-aware community detection
-            logger.info(f"________ group_files: [{group_id}] Clustering files.")
             initial_groups = await self._cluster_files_with_languages(
                 graph, cross_lang_bindings
             )
-            logger.info(f"[{group_id}] Finished clustering. Found {len(initial_groups)} initial groups.")
 
             # Apply language-specific optimizations while preserving cross-language relationships
-            logger.info(f"________ group_files: [{group_id}] Optimizing groups.")
             optimized_groups = await self._optimize_groups_with_languages(
                 initial_groups, cross_lang_bindings
             )
-            logger.info(f"[{group_id}] Finished optimizing groups. Found {len(optimized_groups)} final groups.")
 
             duration = time.time() - start_time
             self.metrics.grouping_duration.labels(strategy="grouping").observe(duration)
-
-            logger.info(f"________ group_files: [{group_id}] group_files completed successfully in {duration:.2f} seconds.")
+            logger.info(f"[{group_id}] Grouped {len(files)} files into {len(optimized_groups)} groups in {duration:.2f}s")
             return optimized_groups
 
         except Exception as e:
@@ -832,60 +677,30 @@ class FileGrouper:
         cross_lang_bindings: set[str],
     ) -> nx.DiGraph:
         """Build a relationship graph for a list of files"""
-        logger.info(f"_________build_graph: [{repo.working_dir}] _build_graph started for {len(files)} files.")
-        # Initialize relationship graph
         graph = nx.DiGraph()
 
-        # Concurrent analysis tasks
-        logger.info(f"_________build_graph: [{repo.working_dir}] Starting concurrent analysis tasks.")
+        enabled = self.config.strategies
         async with asyncio.TaskGroup() as tg:
-            tasks = []
-
-            if self.config.strategies & FileGroupingStrategy.IMPORTS:
-                logger.info(f"_________build_graph: [{repo.working_dir}] Creating imports analysis task.")
-                # Analyze all imports, including cross-language ones
-                tasks.append(
-                    tg.create_task(
-                        self._add_import_relationships(
-                            graph, files, cross_lang_bindings
-                        )
-                    )
+            if enabled & FileGroupingStrategy.IMPORTS:
+                tg.create_task(
+                    self._add_import_relationships(graph, files, cross_lang_bindings)
                 )
-
-            if self.config.strategies & FileGroupingStrategy.DEPENDENCIES:
-                logger.info(f"_________build_graph: [{repo.working_dir}] Creating dependencies analysis task.")
-                # Analyze dependencies across languages
-                tasks.append(
-                    tg.create_task(
-                        self._add_dependency_relationships(
-                            graph, files, cross_lang_bindings
-                        )
-                    )
+            if enabled & FileGroupingStrategy.DEPENDENCIES:
+                tg.create_task(
+                    self._add_dependency_relationships(graph, files, cross_lang_bindings)
                 )
-
-            if self.config.strategies & FileGroupingStrategy.COMMIT_HISTORY:
-                logger.info(f"_________build_graph: [{repo.working_dir}] Creating commit history analysis task.")
-                tasks.append(
-                    tg.create_task(self._add_commit_relationships(graph, repo, files))
+            if enabled & FileGroupingStrategy.COMMIT_HISTORY:
+                tg.create_task(
+                    self._add_commit_relationships(graph, repo, files)
                 )
-
-            if self.config.strategies & FileGroupingStrategy.SEMANTIC:
-                logger.info(f"_________build_graph: [{repo.working_dir}] Creating semantic analysis task.")
-                tasks.append(
-                    tg.create_task(
-                        self._add_semantic_relationships(
-                            graph, files, cross_lang_bindings
-                        )
-                    )
+            if enabled & FileGroupingStrategy.SEMANTIC:
+                tg.create_task(
+                    self._add_semantic_relationships(graph, files, cross_lang_bindings)
                 )
-
-            if self.config.strategies & FileGroupingStrategy.DIRECTORY:
-                logger.info(f"_________build_graph: [{repo.working_dir}] Creating directory analysis task.")
-                tasks.append(
-                    tg.create_task(self._add_directory_relationships(graph, files))
+            if enabled & FileGroupingStrategy.DIRECTORY:
+                tg.create_task(
+                    self._add_directory_relationships(graph, files)
                 )
-
-        logger.info(f"_________build_graph: [{repo.working_dir}] Finished concurrent analysis tasks.")
 
         # Detect circular dependencies before grouping
         cycles = self._detect_circular_dependencies(graph)
@@ -901,38 +716,73 @@ class FileGrouper:
         return graph
 
     def _print_graph_summary(self, graph: nx.DiGraph):
-        """Print graph summary"""
-        # Print graph summary
-        logger.info(f"________ _print_graph_summary: Graph summary - Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}")
+        """Log a concise graph summary at DEBUG level."""
+        n_nodes = graph.number_of_nodes()
+        n_edges = graph.number_of_edges()
+        if n_nodes == 0:
+            logger.debug("Relationship graph is empty")
+            return
 
-        # Print graph structure details
-        if graph.number_of_nodes() > 0:
-            # Show some example nodes and their connections
-            sample_nodes = list(graph.nodes())[:5]  # First 5 nodes
-            logger.info(f"________ _print_graph_summary: Sample nodes: {json.dumps(sample_nodes, indent=4)}")
-
-            # Show some example edges with weights
-            sample_edges = list(graph.edges(data=True))[:5]  # First 5 edges
-            logger.info(f"________ _print_graph_summary: Sample edges: {json.dumps(sample_edges, indent=4)}")
-
-            # Show graph density and connectivity
-            density = nx.density(graph)
-            logger.info(f"________ _print_graph_summary: Graph density: {density:.4f}")
-
-            # Show connected components
-            components = list(nx.strongly_connected_components(graph))
-            logger.info(f"________ _print_graph_summary: Strongly connected components: {len(components)}")
-            if components:
-                largest_component = max(components, key=len)
-                logger.info(f"________ _print_graph_summary: Largest component size: {len(largest_component)}")
+        density = nx.density(graph)
+        components = list(nx.strongly_connected_components(graph))
+        largest = max(len(c) for c in components) if components else 0
+        logger.debug(
+            f"Relationship graph: {n_nodes} nodes, {n_edges} edges, "
+            f"density={density:.4f}, {len(components)} SCCs (largest={largest})"
+        )
 
     def _get_graph_version(self, files: list[str]) -> str:
-        """Generate version string for graph caching"""
+        """Generate version string for graph caching.
+
+        Includes both file paths and modification times so that the cache
+        is invalidated when any file's content changes (even if paths are
+        unchanged).  The graph is also keyed by commit hash in ``group_files``,
+        which provides a further layer of invalidation for committed changes.
+        """
         if xxhash is None:
             return "unknown"
-        # Hash file paths and modification times
-        paths = sorted(files)
-        return xxhash.xxh64(json.dumps(paths).encode()).hexdigest()
+        hasher = xxhash.xxh64()
+        for fpath in sorted(files):
+            hasher.update(fpath.encode())
+            try:
+                mtime = os.path.getmtime(fpath)
+                hasher.update(str(mtime).encode())
+            except OSError:
+                pass
+        return hasher.hexdigest()
+
+    def _merge_edge_into_graph(
+        self,
+        graph: nx.DiGraph,
+        source: str,
+        target: str,
+        weight: float,
+        relationship_type: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Add or merge an edge into the graph.
+
+        If the edge already exists (from a different analyzer), the
+        relationship data is merged: types are accumulated and the
+        maximum weight across all relationships is kept.
+        """
+        if graph.has_edge(source, target):
+            edge = graph.edges[source, target]
+            if relationship_type not in edge["relationship_types"]:
+                edge["relationship_types"].append(relationship_type)
+            edge["weight"] = max(edge["weight"], weight)
+            # Merge metadata — keep existing keys, add new ones
+            for k, v in metadata.items():
+                if k not in edge["metadata"]:
+                    edge["metadata"][k] = v
+        else:
+            graph.add_edge(
+                source,
+                target,
+                weight=weight,
+                relationship_types=[relationship_type],
+                metadata=metadata,
+            )
 
     def _fallback_split(self, files: list[str]) -> list[FileGroup]:
         """Simple size-based splitting as ultimate fallback"""
@@ -964,48 +814,23 @@ class FileGrouper:
             ]
 
     async def _optimize_cross_language_group(self, group: FileGroup) -> list[FileGroup]:
-        """Optimize groups containing cross-language relationships"""
-        try:
-            # Identify language clusters within the group
-            lang_clusters = defaultdict(list)
-            for file in group.files:
-                lang = self._detect_language(file)
-                lang_clusters[lang].append(file)
+        """Optimize groups containing cross-language relationships.
 
-            # If only one language, treat as regular group
-            if len(lang_clusters) == 1:
+        Cross-language groups are kept together (that's the whole point of
+        detecting cross-language bindings). Only split if the group exceeds
+        max_group_size — and even then, split by token budget rather than
+        by language, to preserve cross-language co-location.
+        """
+        try:
+            if len(group.files) <= self.config.max_group_size:
                 return [group]
 
-            # Create language-based subgroups while preserving strong relationships
-            subgroups = []
+            # Group is too large — split by token budget, which preserves
+            # relationships better than splitting by language.
+            if self.token_manager:
+                return await self._split_by_tokens(group)
 
-            # For each language cluster, create a subgroup
-            for language, files in lang_clusters.items():
-                if len(files) <= self.config.max_group_size:
-                    subgroups.append(
-                        FileGroup(
-                            files=files,
-                            relationship_score=group.relationship_score * 0.9,  # Slight penalty for splitting
-                            group_type="cross_language_optimized",
-                            metadata={
-                                "parent_group": id(group),
-                                "language": language,
-                                "cross_language": True,
-                            },
-                        )
-                    )
-                else:
-                    # Split large language clusters
-                    split_groups = self._fallback_split(files)
-                    for sg in split_groups:
-                        sg.group_type = "cross_language_split"
-                        sg.metadata.update({
-                            "parent_group": id(group),
-                            "language": language,
-                        })
-                    subgroups.extend(split_groups)
-
-            return subgroups
+            return self._fallback_split(group.files)
 
         except Exception as e:
             logger.error(f"Error optimizing cross-language group: {e}")
@@ -1141,6 +966,8 @@ class FileGrouper:
         try:
             start_time = time.time()
 
+            polymathera = await get_initialized_polymathera()
+
             async def process_file(source_fpath: str):
                 try:
                     async with self.semaphore:
@@ -1153,10 +980,11 @@ class FileGrouper:
                             return
 
                         # Get import analysis with metadata
-                        imports = await self._get_import_analyzer(source_language).analyze_file(
+                        import_analyzer = await self._get_import_analyzer(source_language)
+                        imports = await import_analyzer.analyze_file(
                             source_fpath, content, source_language
                         )
-                        logger.info(f"________ _add_import_relationships for {source_fpath}: {json.dumps(imports, indent=4, default=list)}")
+                        logger.debug(f"Import analysis for {source_fpath}: {len(imports) - 1} categories")
 
                         # Add edges with metadata
                         external_imports = defaultdict(set)
@@ -1171,8 +999,8 @@ class FileGrouper:
                                 target_language = self._detect_language(target_fpath)
                                 is_cross_lang = target_language and target_language != source_language
 
-                                normalized_source_fpath = await get_polymathera().normalize_file_path(source_fpath)
-                                normalized_target_fpath = await get_polymathera().normalize_file_path(target_fpath)
+                                normalized_source_fpath = await polymathera.normalize_file_path(source_fpath)
+                                normalized_target_fpath = await polymathera.normalize_file_path(target_fpath)
 
                                 if is_cross_lang:
                                     cross_lang_bindings.add(normalized_source_fpath)
@@ -1191,7 +1019,8 @@ class FileGrouper:
                                     target_language or 'unknown',
                                 )
 
-                                graph.add_edge(
+                                self._merge_edge_into_graph(
+                                    graph,
                                     normalized_source_fpath,
                                     normalized_target_fpath,
                                     weight=weight,
@@ -1204,7 +1033,8 @@ class FileGrouper:
                                     },
                                 )
 
-                        logger.info(f"________ _add_import_relationships External Imports for {source_fpath}:{json.dumps(external_imports, indent=4, default=list)}")
+                        if external_imports:
+                            logger.debug(f"External imports for {source_fpath}: {sum(len(v) for v in external_imports.values())} paths")
 
                 except Exception as e:
                     logger.error(
@@ -1261,69 +1091,120 @@ class FileGrouper:
 
         return min(weight, 1.0)  # Ensure weight doesn't exceed 1.0
 
+    def _calculate_dependency_weight(
+        self,
+        dep_info: dict[str, Any],
+        source_lang: str,
+        target_lang: str | None,
+    ) -> float:
+        """Calculate weight for a dependency relationship.
+
+        Args:
+            dep_info: Dependency metadata from DependencyAnalyzer (keys like
+                      "type", "confidence", "cross_language").
+            source_lang: Programming language of the source file.
+            target_lang: Programming language of the target file (may be None).
+        """
+        type_multipliers = {
+            "class": 1.0,
+            "function": 0.9,
+            "type": 0.8,
+            "interface": 0.95,
+            "inheritance": 1.0,
+            "module": 0.85,
+        }
+        dep_type = dep_info.get("type", "unknown")
+        weight = self.config.dependency_weight * type_multipliers.get(dep_type, 0.6)
+
+        # Factor in analyzer confidence if available
+        confidence = dep_info.get("confidence")
+        if confidence is not None:
+            weight *= float(confidence)
+
+        # Cross-language modifier
+        is_cross_lang = target_lang and target_lang != source_lang
+        if is_cross_lang:
+            lang_pair = frozenset([source_lang, target_lang])
+            if lang_pair in STRONG_LANGUAGE_BINDINGS:
+                weight *= self.config.cross_lang_weight_multiplier
+            else:
+                weight *= 0.8
+
+        return min(weight, 1.0)
+
     async def _add_dependency_relationships(
         self,
         graph: nx.DiGraph,
         files: list[str],
         cross_lang_bindings: set[str],
     ):
-        """Add edges based on dependencies, including cross-language dependencies"""
+        """Add edges based on dependencies, including cross-language dependencies."""
         try:
-            async with self.semaphore:
-                with self.metrics.analysis_duration.labels(strategy="dependencies").time():
-                    for source_fpath in files:
-                        source_language = self._detect_language(source_fpath)
-                        dependency_analyzer = self._get_dependency_analyzer(source_language)
-                        if not dependency_analyzer:
-                            continue
+            start_time = time.time()
+            polymathera = await get_initialized_polymathera()
+            files_set = set(files)
 
-                        # Check cache
+            async def process_file(source_fpath: str):
+                try:
+                    async with self.semaphore:
+                        source_language = self._detect_language(source_fpath)
+                        dependency_analyzer = await self._get_dependency_analyzer(source_language)
+                        if not dependency_analyzer:
+                            return
+
                         cache_key = f"deps:{source_fpath}"
                         deps = await self.dependency_cache.get(cache_key)
 
                         if deps is None:
-                            # Analyze dependencies including cross-language ones
                             deps = await dependency_analyzer.analyze_file(
                                 source_fpath,
-                                content=None, # Let it read the file. It will use the file content cache.
+                                content=None,
                                 language=source_language,
-                                cross_language=True
+                                cross_language=True,
                             )
                             await self.dependency_cache.set(cache_key, deps)
                         else:
                             self.metrics.cache_hits.labels(cache_type="dependencies").inc()
 
-                        # Add edges for each dependency
                         for target_fpath, dep_info in deps.items():
-                            if target_fpath not in files:
-                                logger.info(f"________ _add_dependency_relationships:\n\t{source_fpath} -> {target_fpath} is not in repo files")
+                            if target_fpath not in files_set:
                                 continue
                             target_language = self._detect_language(target_fpath)
                             is_cross_lang = target_language and target_language != source_language
 
-                            normalized_source_fpath = await get_polymathera().normalize_file_path(source_fpath)
-                            normalized_target_fpath = await get_polymathera().normalize_file_path(target_fpath)
+                            normalized_source = await polymathera.normalize_file_path(source_fpath)
+                            normalized_target = await polymathera.normalize_file_path(target_fpath)
 
                             if is_cross_lang:
-                                cross_lang_bindings.add(normalized_source_fpath)
-                                cross_lang_bindings.add(normalized_target_fpath)
+                                cross_lang_bindings.add(normalized_source)
+                                cross_lang_bindings.add(normalized_target)
 
                             weight = self._calculate_dependency_weight(
                                 dep_info, source_language, target_language
                             )
-
-                            graph.add_edge(
-                                normalized_source_fpath,
-                                normalized_target_fpath,
+                            self._merge_edge_into_graph(
+                                graph,
+                                normalized_source,
+                                normalized_target,
                                 weight=weight,
                                 relationship_type="dependency",
                                 metadata={
                                     **dep_info,
                                     "is_cross_language": is_cross_lang,
                                     "source_language": source_language,
-                                    "target_language": target_language or 'unknown',
+                                    "target_language": target_language or "unknown",
                                 },
                             )
+                except Exception as e:
+                    logger.error(f"Error processing dependencies for {source_fpath}: {e}", exc_info=True)
+                    self.metrics.errors.labels(error_type="dependency_analysis").inc()
+
+            async with asyncio.TaskGroup() as tg:
+                for source_fpath in files:
+                    tg.create_task(process_file(source_fpath))
+
+            duration = time.time() - start_time
+            self.metrics.analysis_duration.labels(strategy="dependencies").observe(duration)
 
         except Exception as e:
             logger.error(
@@ -1334,31 +1215,72 @@ class FileGrouper:
             self.metrics.errors.labels(error_type="dependencies").inc()
 
     async def _add_directory_relationships(self, graph: nx.DiGraph, files: list[str]):
-        """Add edges based on directory proximity asynchronously"""
+        """Add edges based on directory proximity.
+
+        Instead of comparing every O(n²) file pair, group files by directory
+        and only create edges between files that share a directory ancestor.
+        Files in the same directory get the strongest score; cousins get less.
+        """
         try:
-            async with self.semaphore:
-                with self.metrics.analysis_duration.labels(strategy="directory").time():
-                    self.metrics.active_analyzers.labels(type="directory").inc()
+            start_time = time.time()
+            polymathera = await get_initialized_polymathera()
 
-                    # Process files in batches to avoid memory issues with large repos
-                    batch_size = 1000  # Configurable
-                    for i in range(0, len(files), batch_size):
-                        batch = files[i : i + batch_size]
-                        paths = [Path(f) for f in batch]
-                        common = Path(os.path.commonpath(paths))
+            # Group files by their parent directory
+            dir_to_files: dict[str, list[str]] = defaultdict(list)
+            for fpath in files:
+                dir_to_files[str(Path(fpath).parent)].append(fpath)
 
-                        # Process file pairs concurrently within batch
-                        async with asyncio.TaskGroup() as batch_tg:
-                            # for path1, path2 in itertools.combinations(paths, 2): # TODO: Quadratic complexity
-                            for j in range(len(paths)):
-                                for k in range(j + 1, len(paths)):
-                                    batch_tg.create_task(
-                                        self._process_directory_pair(
-                                            graph, paths[j], paths[k], common
-                                        )
-                                    )
+            # Add edges between files in the same directory (score = directory_weight)
+            for dir_path, dir_files in dir_to_files.items():
+                if len(dir_files) < 2:
+                    continue
+                normalized = {}
+                for f in dir_files:
+                    normalized[f] = await polymathera.normalize_file_path(f)
 
-                    self.metrics.active_analyzers.labels(type="directory").dec()
+                for j in range(len(dir_files)):
+                    for k in range(j + 1, len(dir_files)):
+                        score = self.config.directory_weight
+                        if score >= self.config.min_relationship_score:
+                            self._merge_edge_into_graph(
+                                graph,
+                                normalized[dir_files[j]],
+                                normalized[dir_files[k]],
+                                weight=score,
+                                relationship_type="directory",
+                                metadata={},
+                            )
+
+            # Add weaker edges between sibling directories (one level up)
+            parent_to_dirs: dict[str, list[str]] = defaultdict(list)
+            for dir_path in dir_to_files:
+                parent = str(Path(dir_path).parent)
+                parent_to_dirs[parent].append(dir_path)
+
+            for parent, child_dirs in parent_to_dirs.items():
+                if len(child_dirs) < 2:
+                    continue
+                # Cross-directory score: half of directory_weight
+                score = self.config.directory_weight * 0.5
+                if score < self.config.min_relationship_score:
+                    continue
+
+                for j in range(len(child_dirs)):
+                    for k in range(j + 1, len(child_dirs)):
+                        # Pick one representative file from each directory
+                        f1 = dir_to_files[child_dirs[j]][0]
+                        f2 = dir_to_files[child_dirs[k]][0]
+                        n1 = await polymathera.normalize_file_path(f1)
+                        n2 = await polymathera.normalize_file_path(f2)
+                        self._merge_edge_into_graph(
+                            graph, n1, n2,
+                            weight=score,
+                            relationship_type="directory",
+                            metadata={},
+                        )
+
+            duration = time.time() - start_time
+            self.metrics.analysis_duration.labels(strategy="directory").observe(duration)
 
         except Exception as e:
             logger.error(
@@ -1368,108 +1290,20 @@ class FileGrouper:
             )
             self.metrics.errors.labels(error_type="directory").inc()
 
-    async def _process_directory_pair(
-        self, graph: nx.DiGraph, path1: Path, path2: Path, common: Path
-    ):
-        """Process a pair of files for directory relationships"""
-        try:
-            # Calculate proximity score based on shared path components
-            rel1 = path1.relative_to(common)
-            rel2 = path2.relative_to(common)
-            shared = len(Path(os.path.commonpath([str(rel1), str(rel2)])).parts)
-            max_depth = max(len(rel1.parts), len(rel2.parts))
-
-            if max_depth > 0:
-                score = shared / max_depth * self.config.directory_weight
-                if score >= self.config.min_relationship_score:
-                    normalized_fpath1 = await get_polymathera().normalize_file_path(str(path1))
-                    normalized_fpath2 = await get_polymathera().normalize_file_path(str(path2))
-                    graph.add_edge(
-                        normalized_fpath1,
-                        normalized_fpath2,
-                        weight=score,
-                        relationship_type="directory",
-                        metadata={},
-                    )
-
-        except Exception as e:
-            logger.error(
-                f"Error processing directory pair: {e}",
-                exc_info=True,
-                extra={"path1": str(path1), "path2": str(path2)},
-            )
-
-    async def _cluster_files(self, graph: nx.DiGraph) -> list[FileGroup]:
-        """Find optimal file groupings using community detection"""
-        try:
-            # Convert directed graph to undirected for community detection
-            undirected_graph = graph.to_undirected()
-
-            # Find communities
-            communities = community.best_partition(undirected_graph)
-
-            # Group files by community
-            groups = defaultdict(list)
-            scores = defaultdict(float)
-
-            for file_path, community_id in communities.items():
-                groups[community_id].append(file_path)
-
-                # Calculate average relationship score
-                out_edges: Iterable[tuple[str, str, dict[str, Any]]] = graph.edges(file_path, data=True)
-                if out_edges:
-                    total_weight = sum(e[2]["weight"] for e in out_edges)
-                    scores[community_id] += total_weight / len(out_edges)
-
-            # Create FileGroup objects
-            result = []
-            for community_id, files in groups.items():
-                # Skip groups that are too large
-                if len(files) > self.config.max_group_size:
-                    # Split into smaller groups
-                    subgroups = self._split_large_group(files, graph)
-                    result.extend(subgroups)
-                else:
-                    result.append(
-                        FileGroup(
-                            files=files,
-                            relationship_score=scores[community_id] / len(files),
-                            group_type="community",
-                            metadata={
-                                "community_id": community_id,
-                                "edge_types": self._get_edge_types(graph, files),
-                            },
-                        )
-                    )
-
-            # Record metrics
-            for group in result:
-                self.metrics.group_sizes.observe(len(group.files))
-                self.metrics.relationship_scores.observe(group.relationship_score)
-
-            return result
-
-        except Exception as e:
-            logger.error(f"Error clustering files: {e}")
-            self.metrics.errors.labels(error_type="clustering").inc()
-            return self._fallback_grouping(list(graph.nodes()))
-
     def _split_large_group(
         self, files: list[str], graph: nx.DiGraph
     ) -> list[FileGroup]:
         """Split large groups while preserving strong relationships"""
         try:
-            # Create subgraph for these files
-            subgraph = graph.subgraph(files).copy()
+            # Create undirected subgraph for these files (connected_components
+            # requires an undirected graph)
+            subgraph = graph.subgraph(files).to_undirected()
 
             # Calculate edge betweenness centrality
             edge_centrality = nx.edge_betweenness_centrality(subgraph)
 
             # Remove edges with high centrality until we get suitable sized components
-            while True:
-                if not edge_centrality:
-                    break
-
+            while edge_centrality:
                 # Remove edge with highest centrality
                 edge = max(edge_centrality.items(), key=lambda x: x[1])[0]
                 subgraph.remove_edge(*edge)
@@ -1531,51 +1365,19 @@ class FileGrouper:
             return 0.0
 
     def _get_edge_types(self, graph: nx.DiGraph, files: list[str]) -> dict[str, int]:
-        """Get distribution of relationship types in a group - OPTIMIZED"""
+        """Get distribution of relationship types in a group."""
         try:
             type_counts = defaultdict(int)
-            ### for file1, file2 in itertools.combinations(files, 2):
-            ###     if graph.has_edge(file1, file2):
-            ###         edge_type = graph.get_edge_data(file1, file2)["type"]
-            ###         type_counts[edge_type] += 1
-            # Optimized: only check actual edges in subgraph
             subgraph = graph.subgraph(files)
             for _, _, data in subgraph.edges(data=True):
-                edge_type = data.get("relationship_type", "unknown")
-                type_counts[edge_type] += 1
+                for edge_type in data.get("relationship_types", []):
+                    type_counts[edge_type] += 1
 
             return dict(type_counts)
 
         except Exception as e:
             logger.error(f"Error getting edge types: {e}")
             return {}
-
-    async def _optimize_groups(self, groups: list[FileGroup]) -> list[FileGroup]:
-        """Optimize groups based on token limits and relationship strength"""
-        try:
-            if not self.config.enable_dynamic_sizing:
-                return groups
-
-            optimized_groups = []
-            for group in groups:
-                # Check token count if token manager is available
-                if self.token_manager:
-                    total_tokens = await self._get_group_tokens(group.files)
-
-                    if total_tokens > self.config.max_group_tokens:
-                        # Split based on tokens
-                        subgroups = await self._split_by_tokens(group)
-                        optimized_groups.extend(subgroups)
-                        continue
-
-                # Add original group if no splitting needed
-                optimized_groups.append(group)
-
-            return optimized_groups
-
-        except Exception as e:
-            logger.error(f"Error optimizing groups: {e}")
-            return groups
 
     async def _get_group_tokens(self, files: list[str]) -> int:
         """Get total token count for a group of files"""
@@ -1759,18 +1561,21 @@ class FileGrouper:
                             lang1 = self._detect_language(file1)
                             lang2 = self._detect_language(file2)
                             is_cross_lang = lang1 != lang2
-                            normalized_file1 = await get_polymathera().normalize_file_path(file1)
-                            normalized_file2 = await get_polymathera().normalize_file_path(file2)
+
+                            polymathera = await get_initialized_polymathera()
+                            normalized_file1 = await polymathera.normalize_file_path(file1)
+                            normalized_file2 = await polymathera.normalize_file_path(file2)
 
                             # Track strong cross-language semantic relationships
                             if is_cross_lang and similarity >= self.config.semantic_cross_lang_threshold:
                                 cross_lang_bindings.add(normalized_file1)
                                 cross_lang_bindings.add(normalized_file2)
 
-                            graph.add_edge(
+                            self._merge_edge_into_graph(
+                                graph,
                                 normalized_file1,
                                 normalized_file2,
-                                weight=self._calculate_semantic_weight(lang1, lang2),
+                                weight=self._calculate_semantic_weight(similarity, lang1, lang2),
                                 relationship_type="semantic",
                                 metadata={
                                     "is_cross_language": is_cross_lang,
@@ -1805,21 +1610,28 @@ class FileGrouper:
         # Higher threshold for unusual language combinations
         return self.config.semantic_cross_lang_threshold * 1.2
 
-    def _calculate_semantic_weight(self, lang1: str, lang2: str) -> float:
-        """Calculate relationship weight for semantic similarity based on languages"""
-        base_weight = self.config.semantic_weight
+    def _calculate_semantic_weight(self, similarity: float, lang1: str, lang2: str) -> float:
+        """Calculate relationship weight for semantic similarity.
 
-        # Adjust weight for cross-language relationships
+        Args:
+            similarity: Cosine similarity score (0.0-1.0) from the semantic analyzer.
+            lang1: Language of file 1.
+            lang2: Language of file 2.
+        """
+        # Start from similarity score scaled by the configured semantic weight
+        weight = similarity * self.config.semantic_weight
+
+        # Adjust for cross-language relationships
         if lang1 != lang2:
             lang_pair = frozenset([lang1, lang2])
             if lang_pair in STRONG_LANGUAGE_BINDINGS:
                 # Boost weight for common language pairs
-                base_weight *= self.config.cross_lang_weight_multiplier
+                weight *= self.config.cross_lang_weight_multiplier
             else:
                 # Reduce weight for unusual combinations
-                base_weight *= 0.8
+                weight *= 0.8
 
-        return min(base_weight, 1.0)
+        return min(weight, 1.0)
 
     async def _add_commit_relationships(
         self, graph: nx.DiGraph, repo: git.Repo, files: list[str]
@@ -1838,9 +1650,11 @@ class FileGrouper:
                     # Add edges for co-committed files
                     for file1, file2, score in commit_patterns:
                         if score >= self.config.min_relationship_score:
-                            normalized_file1 = await get_polymathera().normalize_file_path(file1)
-                            normalized_file2 = await get_polymathera().normalize_file_path(file2)
-                            graph.add_edge(
+                            polymathera = await get_initialized_polymathera()
+                            normalized_file1 = await polymathera.normalize_file_path(file1)
+                            normalized_file2 = await polymathera.normalize_file_path(file2)
+                            self._merge_edge_into_graph(
+                                graph,
                                 normalized_file1,
                                 normalized_file2,
                                 weight=score * self.config.commit_weight,
@@ -1853,15 +1667,6 @@ class FileGrouper:
         except Exception as e:
             logger.error(f"Error analyzing commit history: {e}")
             self.metrics.errors.labels(error_type="commits").inc()
-
-    def _group_by_language(self, files: list[str]) -> dict[str, list[str]]:
-        """Group files by programming language"""
-        groups = defaultdict(list)
-        for file in files:
-            ext = Path(file).suffix.lower()
-            if ext:  # Skip files without extension
-                groups[ext].append(file)
-        return dict(groups)
 
     async def _cluster_files_with_languages(
         self,
@@ -1890,27 +1695,33 @@ class FileGrouper:
                 resolution=self.config.community_resolution,
                 random_state=42,  # For reproducibility
             )
-            logger.info(f"________ _cluster_files_with_languages: communities={json.dumps(communities, indent=4)}")
+            logger.debug(f"Community detection: {len(set(communities.values()))} communities from {len(communities)} files")
 
-            # Group files by community
-            groups = defaultdict(list)
+            # Group files by community — track both denormalized (for FileGroup)
+            # and normalized (for graph queries / cross_lang_bindings comparison)
+            groups = defaultdict(list)           # community_id → [denormalized paths]
+            normalized_groups = defaultdict(list)  # community_id → [normalized paths]
             scores = defaultdict(float)
             languages = defaultdict(set)
 
+            polymathera = await get_initialized_polymathera()
+
             for normalized_fpath, community_id in communities.items():
-                fpath = await get_polymathera().denormalize_file_path(normalized_fpath)
+                fpath = await polymathera.denormalize_file_path(normalized_fpath)
                 groups[community_id].append(fpath)
+                normalized_groups[community_id].append(normalized_fpath)
                 languages[community_id].add(self._detect_language(fpath))
 
                 # Calculate average relationship score
-                out_edges: Iterable[tuple[str, str, dict[str, Any]]] = graph.edges(normalized_fpath, data=True)
-                if out_edges:
-                    total_weight = sum(e[2]["weight"] for e in out_edges)
-                    scores[community_id] += total_weight / len(out_edges)
+                edges = list(graph.edges(normalized_fpath, data=True))
+                if edges:
+                    total_weight = sum(e[2]["weight"] for e in edges)
+                    scores[community_id] += total_weight / len(edges)
 
             # Create FileGroup objects with language metadata
             result = []
             for community_id, files in groups.items():
+                norm_files = normalized_groups[community_id]
                 result.append(
                     FileGroup(
                         files=files,
@@ -1920,13 +1731,12 @@ class FileGrouper:
                             "community_id": community_id,
                             "languages": list(languages[community_id]),
                             "cross_language_bindings": len(
-                                set(files) & cross_lang_bindings
+                                set(norm_files) & cross_lang_bindings
                             ),
-                            "edge_types": self._get_edge_types(graph, files),
+                            "edge_types": self._get_edge_types(graph, norm_files),
                         },
                     )
                 )
-                logger.info(f"________ _cluster_files_with_languages: file group={result[-1].model_dump_json(indent=4)}")
 
             return result
 
@@ -1984,7 +1794,7 @@ class FileGrouper:
             logger.error(f"Error optimizing groups: {e}", exc_info=True)
             return groups
 
-    def _detect_circular_dependencies(self, graph: nx.DiGraph) -> list[list[str]]:
+    def _detect_circular_dependencies(self, graph: nx.DiGraph) -> list[dict[str, Any]]:
         """Detect and analyze circular dependencies"""
         try:
             # Find all cycles in the graph
@@ -2006,7 +1816,7 @@ class FileGrouper:
                     dst = cycle[(i + 1) % len(cycle)]
                     edge_data: dict[str, Any] = graph.edges[src, dst]
 
-                    cycle_info["types"].add(edge_data["relationship_type"])
+                    cycle_info["types"].update(edge_data.get("relationship_types", []))
                     cycle_info["languages"].add(self._detect_language(src))
 
                 analyzed_cycles.append(cycle_info)
@@ -2033,14 +1843,13 @@ class FileGrouper:
                 )
                 / len(cycle),
                 "cross_language": len(set(self._detect_language(f) for f in cycle)) > 1,
-                "relationship_types": len(
-                    set(
-                        graph.edges[cycle[i], cycle[(i + 1) % len(cycle)]][
-                            "relationship_type"
-                        ]
-                        for i in range(len(cycle))
+                "relationship_types": len({
+                    rt
+                    for i in range(len(cycle))
+                    for rt in graph.edges[cycle[i], cycle[(i + 1) % len(cycle)]].get(
+                        "relationship_types", []
                     )
-                ),
+                }),
             }
 
             # Calculate weighted severity score
@@ -2136,51 +1945,15 @@ class FileGrouper:
     async def _optimize_module_based(
         self, group: FileGroup, lang_config: LanguageConfig
     ) -> list[FileGroup]:
-        """Optimize groups based on module relationships"""
-        try:
-            # Analyze module dependencies
-            module_deps = {}
-            for file in group.files:
-                analysis = await self._analyze_language_specific(
-                    file, await self.file_content_cache.read_file(file), lang_config
-                )
-                module_deps[file] = analysis.get("imports", set())
+        """Optimize groups for module-based languages.
 
-            # Build module graph
-            graph = nx.DiGraph()
-            for file, imports in module_deps.items():
-                normalized_file = await get_polymathera().normalize_file_path(file)
-                graph.add_node(normalized_file)
-                for imp in imports:
-                    if imp in group.files:
-                        normalized_imp = await get_polymathera().normalize_file_path(imp)
-                        graph.add_edge(
-                            normalized_file,
-                            normalized_imp,
-                            weight=1.0,
-                            relationship_type="import",
-                            metadata={},
-                        )
-
-            # Find strongly connected components
-            components = list(nx.strongly_connected_components(graph))
-
-            # Create groups from components
-            return [
-                FileGroup(
-                    files=list(component),
-                    relationship_score=group.relationship_score,
-                    group_type="module_based",
-                    metadata={
-                        "parent_group": id(group),
-                        "module_deps": len(nx.edges(graph.subgraph(component))),
-                    },
-                )
-                for component in components
-            ]
-
-        except Exception as e:
-            logger.error(f"Error in module-based optimization: {e}")
+        Module relationships are already captured in the main relationship
+        graph (via ``_add_import_relationships``), and the community detection
+        step groups files by those relationships. This method only needs to
+        enforce size limits.
+        """
+        if len(group.files) <= self.config.max_group_size:
             return [group]
+        return self._fallback_split(group.files)
 
 

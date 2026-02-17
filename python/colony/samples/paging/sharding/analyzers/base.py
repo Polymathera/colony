@@ -297,7 +297,7 @@ class BaseAnalyzer(ABC):
 
     async def cleanup(self):
         """Cleanup any resources used by the analyzer"""
-        from ....utils import cleanup_dynamic_asyncio_tasks
+        from .....utils import cleanup_dynamic_asyncio_tasks
 
         try:
             await cleanup_dynamic_asyncio_tasks(self, raise_exceptions=False)
@@ -367,29 +367,8 @@ class BaseAnalyzer(ABC):
         """Return safe fallback result on error"""
         pass
 
-    # def _make_cache_key(self, file_path: str, content_hash: str, **kwargs: Any) -> str:
-    #     """Generate cache key for analysis results"""
-    #     # Include relevant kwargs in cache key
-    #     key_parts = [
-    #         # self.analyzer_type, # This is already included in the cache namespace
-    #         file_path,
-    #         content_hash,
-    #     ]
-    #     key_parts.extend(f"{k}:{v}" for k, v in sorted(kwargs.items()))
-    #     return ":".join(key_parts)
-
     def _make_cache_key(self, *args: Any, **kwargs: Any) -> str:
         """Generate cache key for analysis results"""
         key_parts = list(args)
         key_parts.extend(f"{k}:{v}" for k, v in sorted(kwargs.items()))
         return ":".join(key_parts)
-
-    def _generate_cache_key(self, file_path: str, content: str) -> str:
-        """Generate cache key for import analysis results"""
-        try:
-            # Combine file path and content hash
-            return f"imports:{file_path}:{content_hash}"
-
-        except Exception as e:
-            logger.error(f"Cache key generation error: {e}")
-            return f"imports:fallback:{time.time()}"

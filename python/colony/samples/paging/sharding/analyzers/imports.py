@@ -142,7 +142,7 @@ class ImportAnalyzer(BaseAnalyzer):
     def __init__(self, file_content_cache: FileContentCache, config: ImportConfig | None = None):
         super().__init__("imports", file_content_cache)
         self.config = config
-        self._compile_patterns()
+        self.patterns: dict = {}
         self.metrics = ImportAnalyzerMetricsMonitor()
 
         # Create resolver map
@@ -159,6 +159,7 @@ class ImportAnalyzer(BaseAnalyzer):
 
     async def initialize(self):
         self.config = await ImportConfig.check_or_get_component(self.config)
+        self._compile_patterns()
         await super().initialize()
 
     def _compile_patterns(self):

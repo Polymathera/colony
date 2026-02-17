@@ -8,8 +8,12 @@ to pass through to containers.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from .config import DeployConfig
+
+# .env file location (same directory as .env.template)
+_ENV_FILE = Path(__file__).parent / ".env"
 
 
 def build_container_env(config: DeployConfig) -> dict[str, str]:
@@ -27,14 +31,45 @@ def build_container_env(config: DeployConfig) -> dict[str, str]:
 
 
 def collect_passthrough_env(config: DeployConfig) -> dict[str, str]:
-    """Collect API keys and other env vars from the host to pass into containers.
+    """Collect API keys and other env vars from the host **environment** to pass into containers.
 
     These are passed via `docker exec -e` when running polymath.py.
-    Only includes vars that are actually set on the host.
+    Only includes vars that are actually exported in the current process
+    environment.  For keys in a .env file that were not exported, use
+    :func:`load_dotenv` instead.
     """
     env = {}
     for key in config.api_key_env_vars:
         val = os.environ.get(key)
         if val:
+            env[key] = val
+    return env
+
+
+def load_dotenv(config: DeployConfig) -> dict[str, str]:
+    """Read API keys from the deploy/.env file.
+
+    Returns only the keys listed in ``config.api_key_env_vars`` that are
+    present in the .env file with a non-empty value.  This allows users
+    to put keys in the .env file without needing to ``export`` them.
+
+    Format: one ``KEY=VALUE`` per line.  Lines starting with ``#`` and
+    blank lines are skipped.  Quotes around values are stripped.
+    """
+    if not _ENV_FILE.is_file():
+        return {}
+
+    allowed = set(config.api_key_env_vars)
+    env: dict[str, str] = {}
+    for line in _ENV_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip("'\"")
+        if key in allowed and val:
             env[key] = val
     return env

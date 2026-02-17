@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
 from ..config import DeployConfig
-from ..env import collect_passthrough_env
+from ..env import collect_passthrough_env, load_dotenv
 from ..health import (
     docker_container_healthy,
     docker_container_running,
@@ -20,6 +21,8 @@ from .base import DeploymentProvider, ProviderStatus, ServiceInfo
 
 # Path to docker-compose.yml relative to this file
 _COMPOSE_FILE = Path(__file__).parent.parent / "docker" / "docker-compose.yml"
+# User .env file for API keys (same directory as .env.template)
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 
 
 class DockerComposeProvider(DeploymentProvider):
@@ -29,8 +32,17 @@ class DockerComposeProvider(DeploymentProvider):
         self._config = config
 
     def _compose_cmd(self, *args: str) -> list[str]:
-        """Build a docker compose command with the correct file path."""
-        return ["docker", "compose", "-f", str(_COMPOSE_FILE), *args]
+        """Build a docker compose command with the correct file path.
+
+        If a .env file exists (next to .env.template), passes it via
+        --env-file so Docker Compose can substitute API keys into the
+        compose YAML — regardless of whether the user exported them.
+        """
+        cmd = ["docker", "compose", "-f", str(_COMPOSE_FILE)]
+        if _ENV_FILE.is_file():
+            cmd.extend(["--env-file", str(_ENV_FILE)])
+        cmd.extend(args)
+        return cmd
 
     async def _exec(self, *args: str, capture: bool = True) -> tuple[int, str, str]:
         """Run a subprocess and return (returncode, stdout, stderr)."""
@@ -227,8 +239,11 @@ class DockerComposeProvider(DeploymentProvider):
         # Build docker exec command
         cmd = ["docker", "exec"]
 
-        # Pass through API keys and any extra env vars
-        passthrough = collect_passthrough_env(self._config)
+        # Pass through API keys and any extra env vars.
+        # load_dotenv() reads the .env file directly so keys are available
+        # even if the user didn't `export` them in their shell.
+        passthrough = load_dotenv(self._config)
+        passthrough.update(collect_passthrough_env(self._config))
         if extra_env:
             passthrough.update(extra_env)
         for key, val in passthrough.items():

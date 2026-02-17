@@ -167,7 +167,7 @@ class CommitHistoryAnalyzer(BaseAnalyzer):
 
     def __init__(self, file_content_cache: FileContentCache, config: CommitAnalysisConfig | None = None):
         super().__init__("commit_history", file_content_cache)
-        self.config = config
+        self.config: CommitAnalysisConfig | None = config
         self.thread_pool = None
         self.metrics = CommitHistoryAnalyzerMetricsMonitor()
         self._rate_limiter = None
@@ -177,11 +177,12 @@ class CommitHistoryAnalyzer(BaseAnalyzer):
         self._local_cache: dict[str, Any] | None = None
 
         # Precompute temporal decay weights
-        self._temporal_weights = self._precompute_temporal_weights()
+        self._temporal_weights = None
 
     async def initialize(self):
         self.config = await CommitAnalysisConfig.check_or_get_component(self.config)
         await super().initialize()
+        self._temporal_weights = self._precompute_temporal_weights()
         self.thread_pool = ThreadPoolExecutor(max_workers=self.config.max_workers)
         self._rate_limiter = asyncio.Semaphore(
             self.config.commits_per_second if self.config.commits_per_second else 1000
