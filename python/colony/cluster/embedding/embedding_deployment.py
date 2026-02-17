@@ -80,7 +80,7 @@ configured for embedding generation.
   ---
   Summary Table
 
-  | Feature         | EmbeddingClient (SentenceTransformer)   | EmbeddingDeployment (vLLM)           |
+  | Feature         | SentenceTransformerEmbeddingDeployment (SentenceTransformer)   | EmbeddingDeployment (vLLM)           |
   |-----------------|-----------------------------------------|--------------------------------------|
   | Model Size      | Small-medium (100M-400M params)         | Large (1B-10B+ params)               |
   | Technology      | SentenceTransformer/PyTorch             | vLLM AsyncLLMEngine                  |
@@ -105,12 +105,12 @@ import uuid
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine, PoolingParams, PoolingOutput
 
-from .gpus import GPUMetricsCollector
-from ..distributed.ray_utils import serving
-from .circuit_breakers import inference_circuit
-from .model_loader import S3ModelLoader
-from .models import LLMClientId, LLMClientState
-from .registry import ModelRegistry
+from ..gpus import GPUMetricsCollector
+from ...distributed.ray_utils import serving
+from ..circuit_breakers import inference_circuit
+from ..model_loader import S3ModelLoader
+from ..models import LLMClientId, LLMClientState
+from ..registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
 

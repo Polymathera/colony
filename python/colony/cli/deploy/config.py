@@ -42,6 +42,8 @@ class DeployConfig:
         default_factory=lambda: [
             "ANTHROPIC_API_KEY",
             "OPENROUTER_API_KEY",
+            "OPENAI_API_KEY",
+            "GOOGLE_API_KEY",
             "HUGGING_FACE_HUB_TOKEN",
         ]
     )

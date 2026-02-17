@@ -424,6 +424,22 @@ class RemoteDeploymentYAMLConfig:
 
 
 @dataclass
+class RemoteEmbeddingYAMLConfig:
+    """YAML-friendly config for a remote API-based embedding deployment.
+
+    Parsed from the YAML cluster.remote_embedding_config section and converted
+    to RemoteEmbeddingConfig when building the PolymatheraCluster.
+    """
+    model_name: str = "text-embedding-3-small"
+    provider: str = "openrouter"  # "openai", "gemini", or "openrouter"
+    api_key_env_var: str | None = None  # Defaults per provider
+    dimensions: int | None = None
+    max_batch_size: int = 2048
+    max_concurrent_requests: int = 10
+    num_replicas: int = 1
+
+
+@dataclass
 class VCMYAMLConfig:
     """YAML-friendly config for VirtualContextManager.
 
@@ -456,13 +472,14 @@ class LLMClusterYAMLConfig:
 
     Controls which LLM deployments are created.
     - Cloud mode (GPUs): specify vllm_deployments (and optional embedding_config)
-    - Local mode (no GPUs): specify remote_deployments only
+    - Local mode (no GPUs): specify remote_deployments and remote_embedding_config
     - Hybrid: both vllm_deployments and remote_deployments
     """
     app_name: str = "polymathera"
     vllm_deployments: list[VLLMDeploymentYAMLConfig] = field(default_factory=list)
     remote_deployments: list[RemoteDeploymentYAMLConfig] = field(default_factory=list)
     embedding_config: VLLMDeploymentYAMLConfig | None = None
+    remote_embedding_config: RemoteEmbeddingYAMLConfig | None = None
     cleanup_on_init: bool = True
 
 
@@ -578,11 +595,20 @@ def load_config_from_yaml(path: str) -> TestConfig:
             **{k: v for k, v in embedding_raw.items() if k in VLLMDeploymentYAMLConfig.__dataclass_fields__},
         )
 
+    remote_embedding_raw = cluster_raw.get("remote_embedding_config")
+    remote_embedding_cfg = None
+    if remote_embedding_raw:
+        remote_embedding_cfg = RemoteEmbeddingYAMLConfig(
+            **{k: v for k, v in remote_embedding_raw.items()
+               if k in RemoteEmbeddingYAMLConfig.__dataclass_fields__},
+        )
+
     cluster = LLMClusterYAMLConfig(
         app_name=cluster_raw.get("app_name", "polymathera"),
         vllm_deployments=vllm_deps,
         remote_deployments=remote_deps,
         embedding_config=embedding_cfg,
+        remote_embedding_config=remote_embedding_cfg,
         cleanup_on_init=cluster_raw.get("cleanup_on_init", True),
     )
 
@@ -653,12 +679,22 @@ cluster:
   #     quantization: null         # "awq", "gptq", "fp8", or null
   #     s3_bucket: null            # S3 bucket for model weights
 
-  # --- Embedding model (requires GPU) ---
+  # --- Embedding model (GPU-based, requires GPU) ---
   # embedding_config:
   #   model_name: "intfloat/e5-small-v2"
   #   tensor_parallel_size: 1
   #   gpu_memory_utilization: 0.5
   #   num_replicas: 1
+
+  # --- Remote embedding (API-based, no GPU required) ---
+  # Mutually exclusive with embedding_config above.
+  # remote_embedding_config:
+  #   model_name: "text-embedding-3-small"
+  #   provider: "openai"           # "openai", "gemini", or "openrouter"
+  #   # api_key_env_var: "OPENAI_API_KEY"  # Auto-detected from provider
+  #   # dimensions: null           # null = model default (1536 for small)
+  #   # max_batch_size: 2048       # OpenAI: 2048, Gemini: 100
+  #   # num_replicas: 1
 
   # --- Remote LLM deployments (no GPUs required) ---
   remote_deployments:
@@ -1057,6 +1093,8 @@ async def run_integration_test(
             rd.api_key_env_var
             for rd in config.cluster.remote_deployments
         }
+        if config.cluster.remote_embedding_config and config.cluster.remote_embedding_config.api_key_env_var:
+            api_key_vars.add(config.cluster.remote_embedding_config.api_key_env_var)
         worker_env_vars = {
             k: v for k, v in os.environ.items()
             if k.startswith(env_prefixes) or k in api_key_vars
@@ -1121,10 +1159,27 @@ async def run_integration_test(
             num_replicas=ec.num_replicas,
         )
 
+    # Build remote embedding config from YAML (if specified)
+    from colony.cluster.embedding import RemoteEmbeddingConfig
+
+    remote_embedding_deployment_config = None
+    if config.cluster.remote_embedding_config is not None:
+        rec = config.cluster.remote_embedding_config
+        remote_embedding_deployment_config = RemoteEmbeddingConfig(
+            model_name=rec.model_name,
+            provider=rec.provider,
+            **({"api_key_env_var": rec.api_key_env_var} if rec.api_key_env_var else {}),
+            dimensions=rec.dimensions,
+            max_batch_size=rec.max_batch_size,
+            max_concurrent_requests=rec.max_concurrent_requests,
+            num_replicas=rec.num_replicas,
+        )
+
     cluster_config = ClusterConfig(
         app_name=effective_app_name,
         vllm_deployments=vllm_deployment_configs,
         embedding_config=embedding_deployment_config,
+        remote_embedding_config=remote_embedding_deployment_config,
         remote_deployments=remote_deployment_configs,
         cleanup_on_init=config.cluster.cleanup_on_init,
     )
@@ -1167,6 +1222,12 @@ async def run_integration_test(
     if embedding_deployment_config:
         deploy_lines.append(
             f"  Embed:  {embedding_deployment_config.model_name} ({embedding_deployment_config.num_replicas} replica(s))"
+        )
+    if remote_embedding_deployment_config:
+        deploy_lines.append(
+            f"  Embed:  {remote_embedding_deployment_config.model_name} "
+            f"({remote_embedding_deployment_config.provider}, API, "
+            f"{remote_embedding_deployment_config.num_replicas} replica(s))"
         )
     if not vllm_deployment_configs and not remote_deployment_configs:
         deploy_lines.append("  [yellow]WARNING: No LLM deployments configured[/yellow]")

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from enum import Enum
 from typing import Any, ClassVar
 from pydantic import Field
 from overrides import override
@@ -13,11 +12,8 @@ from colony.distributed.config import register_polymathera_config, ConfigCompone
 from colony.distributed import get_polymathera
 from colony.distributed.caching.simple import CacheConfig
 from colony.distributed.metrics.common import BaseMetricsMonitor
-from ....vectors.algos import get_similar_pairs
-from ....llms.inference.cluster.embedding import (
-    TextChunkerBase,
-    TextPreprocessorBase,
-)
+from colony.cluster.embedding import TextChunkerBase
+from colony.system import get_llm_cluster
 from colony.utils import setup_logger, cleanup_dynamic_asyncio_tasks
 
 from .base import AnalyzerConfig, BaseAnalyzer, FileContentCache
@@ -53,7 +49,7 @@ class ChunkingConfig(ConfigComponent):
             "typescript": r"(class|interface|function|const.*=>)\s+\w+.*{$",
             "go": r"func\s+\w+.*{$",
             # TODO: Add more languages
-            # TODO: Reuse code from raypolymath.llms.sharding.code_splitting
+            # TODO: Reuse code from colony.samples.paging.sharding.code_splitting
         }
     )
 
@@ -118,26 +114,6 @@ class SemanticAnalyzerConfig(AnalyzerConfig):
 #    - Cross-chunk relationships
 #    - Chunk importance scoring
 
-
-class LanguageAwareTextPreprocessor(TextPreprocessorBase):
-    def __init__(self, language: str, max_content_length: int, min_content_length: int):
-        self.language = language
-        self.max_content_length = max_content_length
-        self.min_content_length = min_content_length
-
-    @override
-    async def preprocess_content(self, content: str) -> str:
-        """Preprocess content with language awareness and length constraints"""
-        # Basic preprocessing - truncate if too long, return empty if too short
-        if not content or len(content) < self.min_content_length:
-            return ""  # Return empty string instead of None
-
-        # Truncate if too long
-        if len(content) > self.max_content_length:
-            content = content[:self.max_content_length]
-
-        # TODO: Add language-specific preprocessing (comment removal, code normalization, etc.)
-        return content.strip()
 
 
 class LanguageAwareTextChunker(TextChunkerBase):
@@ -291,41 +267,29 @@ class SemanticAnalyzer(BaseAnalyzer):
     async def get_file_embedding(self, file_path: str, language: str | None = None) -> np.ndarray:
         """Generate embedding for file content"""
         content = await self.file_content_cache.read_file(file_path)
-        embedding_client = await get_polymathera().get_embedding_client()
-        return await embedding_client.get_embedding(
-            content,
+        embedder = get_llm_cluster()
+        return await embedder.embed(
+            [content],
             chunker=LanguageAwareTextChunker(language, self.config.chunking) if self.config.chunk_large_files else None,
-            preprocessor=LanguageAwareTextPreprocessor(
-                language,
-                self.config.max_content_length,
-                self.config.min_content_length
-            )
-        )
+        )[0]
 
     @override
     async def _analyze_file_impl(
         self, file_path: str, content: str, language: str | None = None, **kwargs
     ) -> dict[str, Any]:
         """Generate embeddings for file content"""
-        embedding_client = await get_polymathera().get_embedding_client()
-        result = await embedding_client.get_embedding_with_metadata(
-            content,
+        embedder = get_llm_cluster()
+        embedding = await embedder.embed(
+            [content],
             chunker=LanguageAwareTextChunker(language, self.config.chunking) if self.config.chunk_large_files else None,
-            preprocessor=LanguageAwareTextPreprocessor(
-                language,
-                self.config.max_content_length,
-                self.config.min_content_length
-            )
-        )
+        )[0]
         content_hash = await self.file_content_cache.get_file_hash(file_path)
 
         result = {
-            "embedding": result.embedding,
+            "embedding": embedding,
             "language": language,
             "file_path": file_path,
             "content_hash": content_hash,
-            "num_chunks": result.num_chunks,
-            "models_used": list(result.models_used)
         }
 
         return result
@@ -367,7 +331,5 @@ class SemanticAnalyzer(BaseAnalyzer):
             )
             await self.semantic_cache.set(cache_key, embedding)
         return embedding
-
-
 
 

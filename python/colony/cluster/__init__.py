@@ -77,13 +77,19 @@ from .remote_config import RemoteLLMDeploymentConfig
 from .remote_deployment import RemoteLLMDeployment
 from .anthropic_deployment import AnthropicLLMDeployment
 from .openrouter_deployment import OpenRouterLLMDeployment
+from .embedding import (
+    RemoteEmbeddingConfig,
+    GeminiEmbeddingDeployment,
+    OpenAICompatibleEmbeddingDeployment,
+    RemoteEmbeddingDeployment,
+)
 from .routing import ContextAwareRouter, PageAffinityRouter
 
 # VLLMDeployment and EmbeddingDeployment depend on vllm (GPU optional dep).
 # Lazy-loaded via __getattr__ so CPU-only environments work.
 _VLLM_NAMES = {
     "VLLMDeployment": ".vllm_deployment",
-    "EmbeddingDeployment": ".embedding_deployment",
+    "EmbeddingDeployment": ".embedding",
 }
 
 __all__ = [
@@ -95,12 +101,16 @@ __all__ = [
     "LLMDeploymentConfig",
     "LoRAAdapterConfig",
     "RemoteLLMDeploymentConfig",
+    "RemoteEmbeddingConfig",
     # Deployments
     "VLLMDeployment",
     "EmbeddingDeployment",
     "RemoteLLMDeployment",
+    "RemoteEmbeddingDeployment",
     "AnthropicLLMDeployment",
     "OpenRouterLLMDeployment",
+    "OpenAICompatibleEmbeddingDeployment",
+    "GeminiEmbeddingDeployment",
     # Routing
     "ContextAwareRouter",
     "PageAffinityRouter",

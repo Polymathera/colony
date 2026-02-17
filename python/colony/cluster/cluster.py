@@ -264,8 +264,8 @@ class LLMCluster:
             )
             logger.debug(f"Connected to remote deployment: {deployment_name}")
 
-        # Get embedding deployment handle if configured
-        if self.config.embedding_config:
+        # Get embedding deployment handle if configured (GPU or API-based)
+        if self.config.embedding_config or self.config.remote_embedding_config:
             self.embedding_deployment_handle = get_embedding_deployment(self.app_name)
             logger.debug("Connected to embedding deployment")
 

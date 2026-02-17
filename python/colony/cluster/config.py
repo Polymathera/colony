@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 from .registry import ModelRegistry
 from .remote_config import RemoteLLMDeploymentConfig
+from .embedding import RemoteEmbeddingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -414,10 +415,14 @@ class ClusterConfig(BaseModel):
         description="List of remote LLM deployment configurations (no GPUs required)"
     )
 
-    # Optional embedding deployment
+    # Optional embedding deployment (GPU-based OR API-based, mutually exclusive)
     embedding_config: LLMDeploymentConfig | None = Field(
         default=None,
-        description="Optional configuration for embedding model deployment"
+        description="Optional configuration for GPU-based embedding model deployment (vLLM)"
+    )
+    remote_embedding_config: RemoteEmbeddingConfig | None = Field(
+        default=None,
+        description="Optional configuration for API-based embedding deployment (OpenAI/Gemini/OpenRouter)"
     )
 
     # Deployment-level routing (which deployment to use)
@@ -554,11 +559,19 @@ class ClusterConfig(BaseModel):
                 },
             )
 
-        # Add embedding deployment if configured (import only when needed — vllm is optional)
+        # Add embedding deployment if configured.
+        # GPU-based (embedding_config) and API-based (remote_embedding_config)
+        # are mutually exclusive — both register under the name "embedding".
+        if self.embedding_config and self.remote_embedding_config:
+            raise ValueError(
+                "Cannot configure both embedding_config (GPU) and "
+                "remote_embedding_config (API) — they are mutually exclusive"
+            )
+
         if self.embedding_config:
-            from .embedding_deployment import EmbeddingDeployment
+            from .embedding.embedding_deployment import EmbeddingDeployment
             econf = self.embedding_config
-            logger.info(f"Adding embedding deployment: {econf.model_name}")
+            logger.info(f"Adding GPU embedding deployment: {econf.model_name}")
             app.add_deployment(
                 EmbeddingDeployment.bind(
                     model_name=econf.model_name,
@@ -573,5 +586,36 @@ class ClusterConfig(BaseModel):
                 name="embedding",
                 ray_actor_options={
                     "num_gpus": econf.tensor_parallel_size,
+                },
+            )
+
+        if self.remote_embedding_config:
+            from .embedding import (
+                GeminiEmbeddingDeployment,
+                OpenAICompatibleEmbeddingDeployment,
+            )
+            reconf = self.remote_embedding_config
+            logger.info(
+                f"Adding remote embedding deployment: "
+                f"{reconf.model_name} ({reconf.provider})"
+            )
+
+            if reconf.provider in ("openai", "openrouter"):
+                deployment_cls = OpenAICompatibleEmbeddingDeployment
+            elif reconf.provider == "gemini":
+                deployment_cls = GeminiEmbeddingDeployment
+            else:
+                raise ValueError(f"Unknown embedding provider: {reconf.provider}")
+
+            app.add_deployment(
+                deployment_cls.bind(config=reconf),
+                name="embedding",
+                autoscaling_config={
+                    "min_replicas": reconf.min_replicas,
+                    "max_replicas": reconf.max_replicas,
+                    "target_queue_length": reconf.target_queue_length,
+                },
+                ray_actor_options={
+                    "num_gpus": 0,
                 },
             )

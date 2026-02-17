@@ -649,7 +649,7 @@ class DeploymentProxyRayActor:
                 runtime_env = actor_options.get("runtime_env", {})
                 env_vars = {
                     k: v for k, v in os.environ.items()
-                    if k.startswith(("POLYMATH", "RAY_", "REDIS_", "ANTHROPIC_", "OPENROUTER_", "HUGGING_FACE_")) and v
+                    if k.startswith(("POLYMATH", "RAY_", "REDIS_", "ANTHROPIC_", "OPENROUTER_", "OPENAI_", "GOOGLE_", "HUGGING_FACE_")) and v
                 }
                 env_vars.update(runtime_env.get("env_vars", {}))
                 env_vars["POLYMATHERA_SERVING_CURRENT_APP"] = self.app_name
