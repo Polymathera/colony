@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 from .registry import ModelRegistry
 from .remote_config import RemoteLLMDeploymentConfig
-from .embedding import RemoteEmbeddingConfig
+from .embedding import RemoteEmbeddingConfig, STEmbeddingDeploymentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +424,10 @@ class ClusterConfig(BaseModel):
         default=None,
         description="Optional configuration for API-based embedding deployment (OpenAI/Gemini/OpenRouter)"
     )
+    st_embedding_config: STEmbeddingDeploymentConfig | None = Field(
+        default=None,
+        description="Optional configuration for SentenceTransformer embedding deployment (CPU/GPU)"
+    )
 
     # Deployment-level routing (which deployment to use)
     deployment_routing_policy: str = Field(
@@ -560,12 +564,17 @@ class ClusterConfig(BaseModel):
             )
 
         # Add embedding deployment if configured.
-        # GPU-based (embedding_config) and API-based (remote_embedding_config)
-        # are mutually exclusive — both register under the name "embedding".
-        if self.embedding_config and self.remote_embedding_config:
+        # GPU-based, API-based, and SentenceTransformer-based are mutually
+        # exclusive — all register under the deployment name "embedding".
+        embedding_options = sum(bool(x) for x in [
+            self.embedding_config,
+            self.remote_embedding_config,
+            self.st_embedding_config,
+        ])
+        if embedding_options > 1:
             raise ValueError(
-                "Cannot configure both embedding_config (GPU) and "
-                "remote_embedding_config (API) — they are mutually exclusive"
+                "Only one embedding config may be set: embedding_config (GPU/vLLM), "
+                "remote_embedding_config (API), or st_embedding_config (SentenceTransformer)"
             )
 
         if self.embedding_config:
@@ -617,5 +626,21 @@ class ClusterConfig(BaseModel):
                 },
                 ray_actor_options={
                     "num_gpus": 0,
+                },
+            )
+
+        if self.st_embedding_config:
+            from .embedding import STEmbeddingDeployment
+            stconf = self.st_embedding_config
+            logger.info(
+                f"Adding SentenceTransformer embedding deployment: "
+                f"{stconf.model_name.value}"
+            )
+            num_gpus = 1 if stconf.enable_gpu else 0
+            app.add_deployment(
+                STEmbeddingDeployment.bind(config=stconf),
+                name="embedding",
+                ray_actor_options={
+                    "num_gpus": num_gpus,
                 },
             )

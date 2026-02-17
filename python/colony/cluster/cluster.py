@@ -128,10 +128,11 @@ class LLMCluster:
 
     @serving.initialize_deployment
     async def initialize(self):
-        """Initialize LLMCluster when deployed (top_level=False).
+        """Initialize LLMCluster self-contained state (top_level=False).
 
-        This runs after the application starts and discovers VLLM deployment handles.
-        Only runs when LLMCluster is deployed as a deployment, not when top_level=True.
+        Sets up state managers and local resources. Cross-deployment handle
+        discovery is deferred to on_ready() via @on_app_ready, which runs
+        after all sibling deployments have been started.
         """
         if self.top_level:
             # When top_level=True, deploy() handles rest of initialization
@@ -141,7 +142,7 @@ class LLMCluster:
         self.app_name = serving.get_my_app_name()
         logger.info(f"Initializing LLMCluster deployment for app '{self.app_name}'")
 
-        # Initialize state managers
+        # Initialize state managers (self-contained — no cross-deployment calls)
         polymathera = get_polymathera()
         cluster_state_key = LLMClusterState.get_state_key(self.app_name)
         self.state_manager = await polymathera.get_state_manager(
@@ -149,11 +150,23 @@ class LLMCluster:
             state_key=cluster_state_key,
         )
 
-        # Discover deployment handles
+        logger.info(f"LLMCluster deployment initialized (awaiting app ready for handle discovery)")
+
+    @serving.on_app_ready
+    async def on_ready(self):
+        """Discover sibling deployment handles after all deployments are started.
+
+        This runs after every deployment in the application has been started,
+        so it is safe to call serving.get_deployment() for sibling deployments.
+        """
+        if self.top_level:
+            return
+
+        logger.info(f"LLMCluster app ready — discovering deployment handles")
         await self._discover_deployment_handles()
 
         logger.info(
-            f"LLMCluster deployment initialized: {len(self.vllm_deployment_handles)} VLLM deployments, "
+            f"LLMCluster handle discovery complete: {len(self.vllm_deployment_handles)} VLLM deployments, "
             f"{len(self.remote_deployment_handles)} remote deployments"
         )
 
@@ -264,8 +277,8 @@ class LLMCluster:
             )
             logger.debug(f"Connected to remote deployment: {deployment_name}")
 
-        # Get embedding deployment handle if configured (GPU or API-based)
-        if self.config.embedding_config or self.config.remote_embedding_config:
+        # Get embedding deployment handle if any embedding backend is configured (GPU, API, or SentenceTransformers)
+        if self.config.embedding_config or self.config.remote_embedding_config or self.config.st_embedding_config:
             self.embedding_deployment_handle = get_embedding_deployment(self.app_name)
             logger.debug("Connected to embedding deployment")
 

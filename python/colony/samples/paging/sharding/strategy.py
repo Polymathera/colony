@@ -700,8 +700,9 @@ class GitRepoShardingStrategy:
             grouper_config.max_group_tokens = self.config.target_tokens_per_shard
             logger.info(f"________ create_shards: 2.4 {grouper_config.max_group_tokens}")
 
+            token_manager = await self.get_token_manager()
             file_grouper = FileGrouperWithGraph(
-                token_manager=self.token_manager,
+                token_manager=token_manager,
                 config=grouper_config,
                 file_content_cache=self._file_content_cache,
             )

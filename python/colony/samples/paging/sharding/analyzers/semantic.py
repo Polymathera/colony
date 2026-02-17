@@ -213,6 +213,60 @@ class LanguageAwareTextChunker(TextChunkerBase):
             yield content[: self.config.max_chunk_size]
 
 
+def _combine_embeddings(embeddings: list[np.ndarray]) -> np.ndarray:
+    """Combine chunk embeddings via mean-pooling with L2 normalization."""
+    if not embeddings:
+        return np.zeros(768)
+    if len(embeddings) == 1:
+        return embeddings[0]
+    combined = np.mean(embeddings, axis=0)
+    norm = np.linalg.norm(combined)
+    if norm > 0:
+        combined = combined / norm
+    return combined
+
+
+def get_similar_pairs(
+    embeddings: dict[str, np.ndarray],
+    batch_size: int = 100,
+) -> dict[tuple[str, str], float]:
+    """Compute pairwise cosine similarities between file embeddings.
+
+    Args:
+        embeddings: Mapping of file path to embedding vector.
+        batch_size: Number of rows to process at once (controls peak memory).
+
+    Returns:
+        Dict mapping ``(file_a, file_b)`` to cosine similarity for every
+        unique pair (upper-triangle, ``file_a < file_b``).
+    """
+    if len(embeddings) < 2:
+        return {}
+
+    files = sorted(embeddings.keys())
+    n = len(files)
+
+    # Stack into matrix and L2-normalize rows for cosine similarity via dot product
+    matrix = np.array([embeddings[f] for f in files], dtype=np.float32)
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1.0, norms)  # avoid division by zero
+    matrix = matrix / norms
+
+    similarities: dict[tuple[str, str], float] = {}
+
+    # Process in row-batches to limit memory for large file sets
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        # (batch_rows, dim) @ (dim, n) -> (batch_rows, n)
+        sim_block = matrix[start:end] @ matrix.T
+        for i_local, i_global in enumerate(range(start, end)):
+            # Only upper triangle: j > i_global
+            for j in range(i_global + 1, n):
+                similarities[(files[i_global], files[j])] = float(sim_block[i_local, j])
+
+    return similarities
+
+
 class SemanticAnalyzerMetricsMonitor(BaseMetricsMonitor):
     """Base class for Prometheus metrics monitoring using node-global HTTP server."""
 
@@ -265,24 +319,34 @@ class SemanticAnalyzer(BaseAnalyzer):
             logger.warning(f"Error cleaning up SemanticAnalyzer: {e}")
 
     async def get_file_embedding(self, file_path: str, language: str | None = None) -> np.ndarray:
-        """Generate embedding for file content"""
+        """Generate embedding for file content, with optional chunking."""
         content = await self.file_content_cache.read_file(file_path)
+        return await self._embed_with_chunking(content, language)
+
+    async def _embed_with_chunking(self, content: str, language: str | None = None) -> np.ndarray:
+        """Embed text, chunking first if configured and content is long."""
         embedder = get_llm_cluster()
-        return await embedder.embed(
-            [content],
-            chunker=LanguageAwareTextChunker(language, self.config.chunking) if self.config.chunk_large_files else None,
-        )[0]
+
+        if self.config.chunk_large_files and len(content) > self.config.max_content_length:
+            chunker = LanguageAwareTextChunker(language, self.config.chunking)
+            await chunker.initialize()
+            chunks = list(chunker.chunk_content(content))
+            if not chunks:
+                return np.zeros(768)  # Fallback dimension
+            chunks = chunks[: self.config.chunking.max_chunks_per_file]
+            raw = await embedder.embed(chunks)
+            embeddings = [np.array(v) for v in raw]
+            return _combine_embeddings(embeddings)
+
+        raw = await embedder.embed([content])
+        return np.array(raw[0])
 
     @override
     async def _analyze_file_impl(
         self, file_path: str, content: str, language: str | None = None, **kwargs
     ) -> dict[str, Any]:
         """Generate embeddings for file content"""
-        embedder = get_llm_cluster()
-        embedding = await embedder.embed(
-            [content],
-            chunker=LanguageAwareTextChunker(language, self.config.chunking) if self.config.chunk_large_files else None,
-        )[0]
+        embedding = await self._embed_with_chunking(content, language)
         content_hash = await self.file_content_cache.get_file_hash(file_path)
 
         result = {
@@ -313,8 +377,8 @@ class SemanticAnalyzer(BaseAnalyzer):
             file: await self._get_embedding_cached(file, languages[i])
             for i, file in enumerate(file_paths)
         }
-        # Calculate similarities considering language pairs
-        return await get_similar_pairs(embeddings, batch_size)
+        # Calculate pairwise cosine similarities
+        return get_similar_pairs(embeddings, batch_size)
 
     async def _get_embedding_cached(self, file: str, language: str) -> np.ndarray:
         # Ensure caches are initialized

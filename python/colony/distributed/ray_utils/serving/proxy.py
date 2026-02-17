@@ -135,6 +135,9 @@ class DeploymentProxyRayActor:
         # Background tasks
         self._background_tasks: list[asyncio.Task] = []
 
+        # App-ready lifecycle state
+        self._app_ready = False
+
         logger.info(f"Initialized deployment proxy for {deployment_name}")
 
     async def initialize(self) -> None:
@@ -477,6 +480,66 @@ class DeploymentProxyRayActor:
                 )
                 # Don't re-raise - we still want to kill the replica even if cleanup fails
 
+    async def _call_app_ready_hooks(self, actor_handle: Any) -> None:
+        """Call @on_app_ready hooks on a replica.
+
+        This discovers and calls methods decorated with @on_app_ready.
+        Called after all deployments in the application have been started.
+
+        Args:
+            actor_handle: The Ray actor handle for the replica.
+        """
+        ready_methods = []
+
+        for attr_name in dir(self.deployment_class):
+            try:
+                attr = getattr(self.deployment_class, attr_name)
+                if callable(attr) and getattr(attr, "__on_app_ready__", False):
+                    ready_methods.append(attr_name)
+            except AttributeError:
+                pass
+
+        for method_name in ready_methods:
+            try:
+                logger.info(f"Calling @on_app_ready hook {method_name} on replica {actor_handle}")
+                method = getattr(actor_handle, method_name)
+                await method.remote()
+                logger.info(f"Completed @on_app_ready hook {method_name} on replica")
+            except Exception as e:
+                logger.error(
+                    f"Error calling @on_app_ready hook {method_name} on replica: {e}",
+                    exc_info=True
+                )
+                raise
+
+    async def notify_app_ready(self) -> None:
+        """Notify this deployment that all application deployments have started.
+
+        Called by Application.start() after all deployments are up. This triggers
+        @on_app_ready hooks on all existing replicas and marks the deployment so
+        that future replicas (from autoscaling) also receive the hooks.
+        """
+        if self._app_ready:
+            logger.debug(f"Deployment {self.deployment_name} already notified of app ready")
+            return
+
+        self._app_ready = True
+        logger.info(f"Notifying deployment {self.deployment_name} that application is ready")
+
+        async with self._replica_lock:
+            for replica in self.replicas:
+                if replica.is_healthy:
+                    try:
+                        await self._call_app_ready_hooks(replica.actor_handle)
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to call @on_app_ready hooks on replica "
+                            f"{replica.replica_id}: {e}",
+                            exc_info=True
+                        )
+
+        logger.info(f"Deployment {self.deployment_name} app-ready hooks complete")
+
     def _discover_periodic_health_checks(self) -> list[tuple[str, float]]:
         """Discover methods decorated with @periodic_health_check.
 
@@ -683,6 +746,10 @@ class DeploymentProxyRayActor:
 
                 # Call initialization lifecycle hooks on the replica
                 await self._call_lifecycle_hooks(actor_handle)
+
+                # If app is already ready (autoscaled replica), call app-ready hooks too
+                if self._app_ready:
+                    await self._call_app_ready_hooks(actor_handle)
 
                 # Create replica info
                 replica = DeploymentReplicaInfo(

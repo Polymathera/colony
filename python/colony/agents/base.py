@@ -2839,6 +2839,11 @@ class AgentManagerBase:
         self._blackboard = None
 
     async def initialize(self) -> None:
+        """Initialize self-contained state. Override in subclasses if needed."""
+        pass
+
+    async def discover_handles(self) -> None:
+        """Discover sibling deployment handles. Call from @on_app_ready."""
         from ..system import (
             get_agent_system,
             get_llm_cluster,

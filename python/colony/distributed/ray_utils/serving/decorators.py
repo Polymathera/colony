@@ -182,6 +182,58 @@ def initialize_deployment(func: Callable) -> Callable:
     return func
 
 
+def on_app_ready(func: Callable) -> Callable:
+    """Mark a method to run after all deployments in the application have started.
+
+    This decorator marks a method to be called automatically after every
+    deployment in the application has been started and its @initialize_deployment
+    hooks have completed. This is the right place to acquire handles to sibling
+    deployments, since all deployments are guaranteed to exist at this point.
+
+    The method will be called:
+    - After ALL deployments in the application have been started
+    - After @initialize_deployment hooks have run on all replicas
+    - For every replica (including autoscaled replicas added after app startup)
+
+    Use this for:
+    - Discovering handles to sibling deployments (via serving.get_deployment)
+    - Starting background tasks that depend on other deployments
+    - Cross-deployment wiring and coordination
+
+    Do NOT use this for:
+    - Self-contained initialization (use @initialize_deployment instead)
+    - Loading models or data (use @initialize_deployment instead)
+
+    Args:
+        func: The async method to run when the application is ready.
+
+    Returns:
+        The decorated method.
+
+    Example:
+        ```python
+        @serving.deployment()
+        class MyDeployment:
+            def __init__(self):
+                self.other_handle = None
+
+            @serving.initialize_deployment
+            async def initialize(self):
+                # Self-contained setup — no cross-deployment calls
+                self.state_manager = await get_state_manager()
+
+            @serving.on_app_ready
+            async def on_ready(self):
+                # Safe to discover sibling deployments here
+                self.other_handle = serving.get_deployment(
+                    serving.get_my_app_name(), "OtherDeployment"
+                )
+        ```
+    """
+    func.__on_app_ready__ = True  # type: ignore
+    return func
+
+
 def cleanup_deployment(func: Callable) -> Callable:
     """Mark a method to run before replica destruction.
 

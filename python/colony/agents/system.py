@@ -120,12 +120,11 @@ class AgentSystemDeployment:
 
     @serving.initialize_deployment
     async def initialize(self):
-        """Initialize state manager and handles."""
-        from ..system import (
-            get_vcm,
-            get_session_manager,
-        )
+        """Initialize self-contained state (state managers, background tasks).
 
+        Cross-deployment handle discovery (VCM, SessionManager) is deferred
+        to on_ready() via @on_app_ready.
+        """
         # Get app name from environment
         self.app_name = serving.get_my_app_name()
         logger.info(f"Initializing AgentSystemDeployment for app {self.app_name}")
@@ -139,7 +138,16 @@ class AgentSystemDeployment:
             state_key=AgentSystemState.get_state_key(self.app_name),
         )
 
-        # Try to discover VCM and SessionManager deployments in same app
+        logger.info("AgentSystemDeployment initialized (awaiting app ready for handle discovery)")
+
+    @serving.on_app_ready
+    async def on_ready(self):
+        """Discover sibling deployment handles after all deployments are started."""
+        from ..system import (
+            get_vcm,
+            get_session_manager,
+        )
+
         self.vcm_handle = get_vcm()
         try:
             self.session_manager_handle = get_session_manager()
@@ -151,7 +159,7 @@ class AgentSystemDeployment:
         self._resource_monitor_task = asyncio.create_task(self._resource_monitor_loop())
         logger.info("Started resource monitor loop for agent resumption")
 
-        logger.info("AgentSystemDeployment initialized")
+        logger.info("AgentSystemDeployment handle discovery complete")
 
     # === Agent Discovery ===
 

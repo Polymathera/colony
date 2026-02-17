@@ -45,5 +45,7 @@ class DeployConfig:
             "OPENAI_API_KEY",
             "GOOGLE_API_KEY",
             "HUGGING_FACE_HUB_TOKEN",
+            "GITHUB_TOKEN",
+            "GITLAB_TOKEN",
         ]
     )

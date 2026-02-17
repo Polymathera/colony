@@ -377,8 +377,14 @@ class VLLMDeployment(AgentManagerBase):
 
         logger.info(f"VLLMDeployment {self.client_id} initialized with state tracking")
 
-        # Initialize AgentManagerBase (agent discovery and setup)
+        # Initialize AgentManagerBase
         await super().initialize()
+
+    @serving.on_app_ready
+    async def on_ready(self):
+        """Discover sibling deployment handles after all deployments are started."""
+        await self.discover_handles()
+        logger.info(f"VLLMDeployment {self.client_id} handle discovery complete")
 
     @serving.endpoint
     @inference_circuit

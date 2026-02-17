@@ -1,18 +1,17 @@
 from __future__ import annotations
-import json
-from typing import ClassVar
-from typing import Any
 
 import asyncio
 import time
 from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any, ClassVar
 from abc import ABC, abstractmethod
 from enum import Enum
-from dataclasses import dataclass
+
 import numpy as np
-from sklearn.manifold import TSNE
 from circuitbreaker import circuit
-from sentence_transformers import SentenceTransformer
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 from ...distributed.ray_utils import serving
 from ...distributed.config import ConfigComponent, register_polymathera_config
@@ -111,13 +110,6 @@ class STEmbeddingClientMetricsMonitor(BaseMetricsMonitor):
         )
 
 
-@dataclass
-class EmbeddingResult:
-    embedding: np.ndarray
-    num_chunks: int
-    models_used: set[str]
-
-
 @serving.deployment
 class STEmbeddingDeployment:
     """Deployment for embedding text content using SentenceTransformer models.
@@ -208,52 +200,67 @@ class STEmbeddingDeployment:
 
     @serving.endpoint
     @inference_circuit
-    async def embed(
-        self,
-        texts: list[str],
-        chunker: TextChunkerBase | None = None,
-    ) -> list[np.ndarray]:
-        """Generate embeddings for input texts"""
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings for input texts.
 
-        results = []
+        If ``chunk_large_files`` is enabled, texts exceeding
+        ``max_content_length`` are split into chunks, embedded separately,
+        and combined via weighted average with normalization.
+
+        Args:
+            texts: List of text strings to embed.
+
+        Returns:
+            List of embedding vectors (one per input text).
+        """
+        if not texts:
+            return []
+
+        results: list[list[float]] = []
         for text in texts:
-            # Track content length
             self.metrics.content_length.observe(len(text))
 
             if not text:
                 embedding_dim = await self._get_embedding_dimension()
-                results.append(np.zeros(embedding_dim))
+                results.append([0.0] * embedding_dim)
                 continue
 
-            # Generate embedding
-            chunks = []
-            models_used = set()
-            if not self.config.chunk_large_files or not chunker:
-                final_embedding, model_used = await self._generate_embedding(text)
-                chunks = [text]
-                models_used.add(model_used)
-            else:
-                # Chunk content if needed
-                chunks = list(chunker.chunk_content(text))
+            if self.config.chunk_large_files and len(text) > self.config.max_content_length:
+                chunks = self._split_text(text)
                 if not chunks:
                     embedding_dim = await self._get_embedding_dimension()
-                    results.append(np.zeros(embedding_dim))
-                    return [ np.zeros(embedding_dim) for _ in texts ]
+                    results.append([0.0] * embedding_dim)
+                    continue
 
-                # Generate embeddings for chunks
                 chunk_embeddings = []
-                # Limit chunks to prevent memory issues - use reasonable default
-                max_chunks = min(len(chunks), self.config.max_chunks_per_file)
-                for chunk in chunks[:max_chunks]:
-                    embedding, model_used = await self._generate_embedding(chunk)
-                    models_used.add(model_used)
+                for chunk in chunks[: self.config.max_chunks_per_file]:
+                    embedding, _ = await self._generate_embedding(chunk)
                     chunk_embeddings.append(embedding)
+                final = await self._combine_chunk_embeddings(chunk_embeddings)
+            else:
+                final, _ = await self._generate_embedding(text)
 
-                # Combine chunk embeddings
-                final_embedding = await self._combine_chunk_embeddings(chunk_embeddings)
-                results.append(final_embedding)
+            results.append(final.tolist())
 
         return results
+
+    def _split_text(self, text: str) -> list[str]:
+        """Split text into chunks, breaking at newlines when possible."""
+        max_len = self.config.max_content_length
+        min_len = self.config.min_content_length
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + max_len
+            if end < len(text):
+                break_point = text.rfind("\n", start, end)
+                if break_point > start:
+                    end = break_point
+            chunk = text[start:end]
+            if len(chunk) >= min_len:
+                chunks.append(chunk)
+            start = end
+        return chunks
 
     async def _combine_chunk_embeddings(
         self, embeddings: list[np.ndarray]
@@ -343,7 +350,6 @@ class STEmbeddingDeployment:
                 logger.warning(f"Primary model failed: {e}")  # Fall through to fallback
 
             # Try fallback model
-            model_used = "fallback"
             self.metrics.model_fallbacks.inc()
 
             try:
@@ -429,18 +435,6 @@ class STEmbeddingDeployment:
 
             # Move less frequently used model to CPU if both are loaded
             if self._primary_model and self._fallback_model:
-                # Check usage metrics to decide which model to offload
-                global_primary_usage = (
-                    self.metrics.model_usage
-                    .labels(self.config.model_name.value)
-                    .get()
-                )
-                global_fallback_usage = (
-                    self.metrics.model_usage
-                    .labels(self.config.fallback_model.value)
-                    .get()
-                )
-                # Check usage stats to decide which model to offload
                 primary_usage = self.local_model_usage_stats["primary"]
                 fallback_usage = self.local_model_usage_stats["fallback"]
 
@@ -458,12 +452,14 @@ class STEmbeddingDeployment:
         self, model_name: str
     ) -> SentenceTransformer | None:
         """Load model to appropriate device with memory management"""
+        from sentence_transformers import SentenceTransformer as _ST
+
         try:
             # Check GPU memory before loading
             await self._manage_gpu_memory()
 
             # Load model
-            model = await asyncio.to_thread(lambda: SentenceTransformer(model_name))
+            model = await asyncio.to_thread(lambda: _ST(model_name))
 
             # Move to appropriate device
             if self.device == "cuda":
@@ -503,7 +499,3 @@ class STEmbeddingDeployment:
                 clear_gpu_cache()
         except Exception as e:
             logger.error(f"Error cleaning up GPU memory: {e}")
-
-
-
-

@@ -440,6 +440,23 @@ class RemoteEmbeddingYAMLConfig:
 
 
 @dataclass
+class STEmbeddingYAMLConfig:
+    """YAML-friendly config for a SentenceTransformer embedding deployment.
+
+    Parsed from the YAML cluster.st_embedding_config section and converted
+    to STEmbeddingDeploymentConfig when building the PolymatheraCluster.
+    """
+    model_name: str = "all-MiniLM-L6-v2"  # STEmbeddingModel enum value
+    fallback_model: str = "all-MiniLM-L6-v2"
+    enable_gpu: bool = False
+    batch_size: int = 32
+    max_concurrent_embeddings: int = 8
+    max_content_length: int = 2048
+    chunk_large_files: bool = True
+    max_chunks_per_file: int = 10
+
+
+@dataclass
 class VCMYAMLConfig:
     """YAML-friendly config for VirtualContextManager.
 
@@ -480,6 +497,7 @@ class LLMClusterYAMLConfig:
     remote_deployments: list[RemoteDeploymentYAMLConfig] = field(default_factory=list)
     embedding_config: VLLMDeploymentYAMLConfig | None = None
     remote_embedding_config: RemoteEmbeddingYAMLConfig | None = None
+    st_embedding_config: STEmbeddingYAMLConfig | None = None
     cleanup_on_init: bool = True
 
 
@@ -603,12 +621,21 @@ def load_config_from_yaml(path: str) -> TestConfig:
                if k in RemoteEmbeddingYAMLConfig.__dataclass_fields__},
         )
 
+    st_embedding_raw = cluster_raw.get("st_embedding_config")
+    st_embedding_cfg = None
+    if st_embedding_raw:
+        st_embedding_cfg = STEmbeddingYAMLConfig(
+            **{k: v for k, v in st_embedding_raw.items()
+               if k in STEmbeddingYAMLConfig.__dataclass_fields__},
+        )
+
     cluster = LLMClusterYAMLConfig(
         app_name=cluster_raw.get("app_name", "polymathera"),
         vllm_deployments=vllm_deps,
         remote_deployments=remote_deps,
         embedding_config=embedding_cfg,
         remote_embedding_config=remote_embedding_cfg,
+        st_embedding_config=st_embedding_cfg,
         cleanup_on_init=cluster_raw.get("cleanup_on_init", True),
     )
 
@@ -687,7 +714,7 @@ cluster:
   #   num_replicas: 1
 
   # --- Remote embedding (API-based, no GPU required) ---
-  # Mutually exclusive with embedding_config above.
+  # Mutually exclusive with embedding_config and st_embedding_config.
   # remote_embedding_config:
   #   model_name: "text-embedding-3-small"
   #   provider: "openai"           # "openai", "gemini", or "openrouter"
@@ -695,6 +722,15 @@ cluster:
   #   # dimensions: null           # null = model default (1536 for small)
   #   # max_batch_size: 2048       # OpenAI: 2048, Gemini: 100
   #   # num_replicas: 1
+
+  # --- SentenceTransformer embedding (CPU or GPU, no API key needed) ---
+  # Mutually exclusive with embedding_config and remote_embedding_config.
+  # st_embedding_config:
+  #   model_name: "all-MiniLM-L6-v2"      # See STEmbeddingModel enum for options
+  #   # fallback_model: "all-MiniLM-L6-v2"
+  #   # enable_gpu: false
+  #   # max_content_length: 2048
+  #   # chunk_large_files: true
 
   # --- Remote LLM deployments (no GPUs required) ---
   remote_deployments:
@@ -1160,7 +1196,7 @@ async def run_integration_test(
         )
 
     # Build remote embedding config from YAML (if specified)
-    from colony.cluster.embedding import RemoteEmbeddingConfig
+    from colony.cluster.embedding import RemoteEmbeddingConfig, STEmbeddingDeploymentConfig, STEmbeddingModel
 
     remote_embedding_deployment_config = None
     if config.cluster.remote_embedding_config is not None:
@@ -1175,11 +1211,27 @@ async def run_integration_test(
             num_replicas=rec.num_replicas,
         )
 
+    # Build SentenceTransformer embedding config from YAML (if specified)
+    st_embedding_deployment_config = None
+    if config.cluster.st_embedding_config is not None:
+        stc = config.cluster.st_embedding_config
+        st_embedding_deployment_config = STEmbeddingDeploymentConfig(
+            model_name=STEmbeddingModel(stc.model_name),
+            fallback_model=STEmbeddingModel(stc.fallback_model),
+            enable_gpu=stc.enable_gpu,
+            batch_size=stc.batch_size,
+            max_concurrent_embeddings=stc.max_concurrent_embeddings,
+            max_content_length=stc.max_content_length,
+            chunk_large_files=stc.chunk_large_files,
+            max_chunks_per_file=stc.max_chunks_per_file,
+        )
+
     cluster_config = ClusterConfig(
         app_name=effective_app_name,
         vllm_deployments=vllm_deployment_configs,
         embedding_config=embedding_deployment_config,
         remote_embedding_config=remote_embedding_deployment_config,
+        st_embedding_config=st_embedding_deployment_config,
         remote_deployments=remote_deployment_configs,
         cleanup_on_init=config.cluster.cleanup_on_init,
     )
@@ -1228,6 +1280,12 @@ async def run_integration_test(
             f"  Embed:  {remote_embedding_deployment_config.model_name} "
             f"({remote_embedding_deployment_config.provider}, API, "
             f"{remote_embedding_deployment_config.num_replicas} replica(s))"
+        )
+    if st_embedding_deployment_config:
+        device = "GPU" if st_embedding_deployment_config.enable_gpu else "CPU"
+        deploy_lines.append(
+            f"  Embed:  {st_embedding_deployment_config.model_name.value} "
+            f"(SentenceTransformer, {device})"
         )
     if not vllm_deployment_configs and not remote_deployment_configs:
         deploy_lines.append("  [yellow]WARNING: No LLM deployments configured[/yellow]")

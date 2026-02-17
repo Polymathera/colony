@@ -46,6 +46,7 @@ from .decorators import (
     endpoint,
     replica_property,
     initialize_deployment,
+    on_app_ready,
     cleanup_deployment,
     periodic_health_check,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "endpoint",
     "replica_property",
     "initialize_deployment",
+    "on_app_ready",
     "cleanup_deployment",
     "periodic_health_check",
     # Application

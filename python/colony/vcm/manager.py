@@ -141,7 +141,11 @@ class VirtualContextManager:
 
     @serving.initialize_deployment
     async def initialize(self):
-        """Initialize state manager and components after deployment starts."""
+        """Initialize self-contained state after deployment starts.
+
+        Cross-deployment handle discovery (LLMCluster) and event subscriptions
+        are deferred to on_ready() via @on_app_ready.
+        """
         # Get app name from environment
         self.app_name = serving.get_my_app_name()
         logger.info(f"Initializing VirtualContextManager for app {self.app_name}")
@@ -149,16 +153,6 @@ class VirtualContextManager:
         # Initialize page table
         self.page_table = VirtualPageTable()
         await self.page_table.initialize()
-
-        # Get LLMCluster handle for allocation decisions and page loading
-        # NOTE: Imported here (not at module level) to break the circular import
-        # chain: cluster/models → vcm/__init__ → vcm/manager → system → agents → cluster/models
-        from ..system import get_llm_cluster
-        try:
-            self.llm_cluster_handle = get_llm_cluster()
-            logger.info("Connected to LLMCluster deployment")
-        except Exception as e:
-            logger.warning(f"LLMCluster deployment not found (allocation will use default strategies): {e}")
 
         # Initialize allocation strategy
         if self.allocation_strategy is None:
@@ -180,13 +174,11 @@ class VirtualContextManager:
         await self.page_storage.initialize()
         logger.info("Initialized PageStorage with EFS backend")
 
-        # Initialize Redis and event subscriptions
+        # Initialize Redis client (used later by event subscriptions)
         try:
             self.redis_client = await polymathera.get_redis_client()
-            await self._subscribe_to_page_events()
-            logger.info("Initialized Redis event subscriptions for page state reconciliation")
         except Exception as e:
-            logger.warning(f"Failed to initialize Redis event subscriptions: {e}. Layer 2 reconciliation will rely on periodic scans only.")
+            logger.warning(f"Failed to initialize Redis client: {e}. Event subscriptions will be skipped.")
             self.redis_client = None
 
         # Materialize any existing scope mappings from shared state
@@ -201,8 +193,33 @@ class VirtualContextManager:
 
         logger.info(
             f"VirtualContextManager initialized with caching_policy={self.caching_policy}, "
-            f"allocation_strategy={type(self.allocation_strategy).__name__}"
+            f"allocation_strategy={type(self.allocation_strategy).__name__} "
+            f"(awaiting app ready for LLMCluster handle)"
         )
+
+    @serving.on_app_ready
+    async def on_ready(self):
+        """Connect to sibling deployments after all deployments are started.
+
+        Acquires the LLMCluster handle and subscribes to page lifecycle events.
+        """
+        # Get LLMCluster handle for allocation decisions and page loading
+        # NOTE: Imported here (not at module level) to break the circular import
+        # chain: cluster/models → vcm/__init__ → vcm/manager → system → agents → cluster/models
+        from ..system import get_llm_cluster
+        try:
+            self.llm_cluster_handle = get_llm_cluster()
+            logger.info("Connected to LLMCluster deployment")
+        except Exception as e:
+            logger.warning(f"LLMCluster deployment not found (allocation will use default strategies): {e}")
+
+        # Subscribe to page lifecycle events from deployments
+        if self.redis_client:
+            try:
+                await self._subscribe_to_page_events()
+                logger.info("Initialized Redis event subscriptions for page state reconciliation")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Redis event subscriptions: {e}. Layer 2 reconciliation will rely on periodic scans only.")
 
     # === Page Management API ===
     @serving.endpoint
@@ -2185,6 +2202,9 @@ class VirtualContextManager:
         Returns:
             Dictionary mapping deployment_name to VLLMDeploymentState
         """
+        if not self.llm_cluster_handle:
+            return {}
+
         deployment_states = {}
         deployment_names = await self.llm_cluster_handle.get_all_deployment_names()
 

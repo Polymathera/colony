@@ -275,6 +275,20 @@ class Application:
             registry.register_app(app_info)
             logger.info(f"Registered application '{self.name}' in distributed state")
 
+        # Notify all deployments that the application is ready.
+        # This triggers @on_app_ready hooks, which can safely discover
+        # sibling deployment handles since all proxies are now running.
+        logger.info(f"Notifying all deployments that application '{self.name}' is ready")
+        for deployment_info in self.deployments:
+            if deployment_info.proxy_actor_handle is not None:
+                try:
+                    await deployment_info.proxy_actor_handle.notify_app_ready.remote()
+                except Exception as e:
+                    logger.error(
+                        f"Error notifying deployment '{deployment_info.name}' of app ready: {e}",
+                        exc_info=True,
+                    )
+
         # Start health monitoring background task
         self._health_monitor_task = asyncio.create_task(self._health_monitor_loop())
         logger.info(f"Started health monitor for application '{self.name}'")

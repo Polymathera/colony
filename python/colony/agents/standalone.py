@@ -43,17 +43,16 @@ class StandaloneAgentDeployment(AgentManagerBase):
 
     @serving.initialize_deployment
     async def initialize(self):
-        """Initialize handles after deployment starts.
-
-        All service discovery is handled by AgentManagerBase.initialize(),
-        which discovers: LLMCluster, VCM, AgentSystem, ToolManager, ConsciousnessManager.
-        """
+        """Initialize self-contained state after deployment starts."""
         logger.info("Initializing StandaloneAgentDeployment")
-
-        # Call parent initialize for service discovery
         await super().initialize()
+        logger.info("StandaloneAgentDeployment initialized (awaiting app ready for handle discovery)")
 
-        logger.info("StandaloneAgentDeployment initialized")
+    @serving.on_app_ready
+    async def on_ready(self):
+        """Discover sibling deployment handles after all deployments are started: LLMCluster, VCM, AgentSystem, ToolManager, ConsciousnessManager."""
+        await self.discover_handles()
+        logger.info("StandaloneAgentDeployment handle discovery complete")
 
     def _get_deployment_replica_id(self) -> str:
         """Get deployment replica ID for this manager."""

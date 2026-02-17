@@ -114,7 +114,7 @@ class SessionManagerDeployment:
 
     @serving.initialize_deployment
     async def initialize(self):
-        """Initialize session manager."""
+        """Initialize self-contained state (state managers)."""
         self.app_name = serving.get_my_app_name()
         polymathera = await get_initialized_polymathera()
 
@@ -124,12 +124,15 @@ class SessionManagerDeployment:
             state_key=SessionSystemState.get_state_key(self.app_name),
         )
 
-        # Get VCM handle for branch operations
+        logger.info("SessionManagerDeployment initialized (awaiting app ready for handle discovery)")
+
+    @serving.on_app_ready
+    async def on_ready(self):
+        """Discover sibling deployment handles after all deployments are started."""
         from ...system import get_vcm
 
         self.vcm_handle = get_vcm()
-
-        logger.info("SessionManagerDeployment initialized")
+        logger.info("SessionManagerDeployment handle discovery complete")
 
     # =========================================================================
     # Session Lifecycle
