@@ -1,7 +1,6 @@
 """Domain-agnostic patterns for distributed agent action policies."""
 
 from .policies import (
-    ReasoningIterationResult,
     ActionExecutor,
     MethodWrapperActionExecutor,
     ActionDispatcher,
@@ -26,7 +25,6 @@ from .backing_store import (
 
 __all__ = [
     # Policies
-    "ReasoningIterationResult",
     "ActionExecutor",
     "MethodWrapperActionExecutor",
     "ActionDispatcher",

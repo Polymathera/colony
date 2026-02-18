@@ -7,6 +7,110 @@ from pydantic import BaseModel, Field
 from .scope import AnalysisScope
 
 
+
+class Critique(BaseModel):
+    """Result of critique of action result quality.
+
+    Example:
+        ```python
+        critique = Critique(
+            quality_score=0.7,
+            issues=["Incomplete coverage", "Missing error handling"],
+            suggestions=["Analyze error paths", "Check edge cases"],
+            requires_replanning=True
+        )
+        ```
+    """
+
+    critique_id: str = Field(
+        default_factory=lambda: f"critique_{time.time_ns()}",
+        description="Unique identifier for this critique"
+    )
+    valid_conclusions: list[str] = Field(
+        default_factory=list,
+        description="Conclusions that are logically sound"
+    )
+    invalid_conclusions: list[str] = Field(
+        default_factory=list,
+        description="Conclusions that don't follow from premises"
+    )
+    missing_premises: list[str] = Field(
+        default_factory=list,
+        description="Premises that should have been considered"
+    )
+    unsupported_claims: list[str] = Field(
+        default_factory=list,
+        description="Claims made without sufficient evidence"
+    )
+    issues: list[str] = Field(
+        default_factory=list,
+        description="General problems or concerns"
+    )
+    quality_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Overall quality (0.0-1.0)"
+    )
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="How confident in this critique?"
+    )
+    requires_replanning: bool = Field(
+        default=False,
+        description="Should we revise plan?"
+    )
+    requires_revision: bool = Field(
+        default=False,
+        description="Whether output should be revised"
+    )
+    suggestions: list[str] = Field(
+        default_factory=list,
+        description="Specific improvement suggestions"
+    )
+    reasoning: str | None = Field(
+        default=None,
+        description="Explanation of critique"
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional metadata about the critique"
+    )
+    created_at: float = Field(
+        default_factory=time.time,
+        description="When this critique was created"
+    )
+
+    # -------------------------------------------------------------------------
+    # Memory System Integration
+    # -------------------------------------------------------------------------
+
+    def get_blackboard_key(self, scope_id: str) -> str:
+        """Generate blackboard key for storing this critique in memory.
+
+        Args:
+            scope_id: Memory scope ID (e.g., "agent:abc123:stm")
+
+        Returns:
+            Key like "agent:abc123:stm:critique:critique_123456789"
+        """
+        return f"{scope_id}:critique:{self.critique_id}"
+
+    @staticmethod
+    def get_key_pattern(scope_id: str) -> str:
+        """Pattern for matching all critiques in a scope.
+
+        Args:
+            scope_id: Memory scope ID
+
+        Returns:
+            Pattern like "agent:abc123:stm:critique:*"
+        """
+        return f"{scope_id}:critique:*"
+
+
+
 class Reflection(BaseModel):
     """Reflection on action execution.
 

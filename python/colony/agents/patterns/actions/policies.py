@@ -47,7 +47,6 @@ from ...models import (
     PlanStatus,
     ActionSharedDataDependency,
 )
-from ...patterns import Critique, Reflection
 from ...base import Agent, ActionPolicy, ActionPolicyIterationResult, AgentCapability
 from ...blackboard import BlackboardEvent
 from ..hooks import hookable
@@ -57,7 +56,6 @@ from ..planning import (
     ActionPlanner,
     PlanBlackboard,
     PlanningStrategyPolicy,
-    PlanningParameters,
     CacheAwarePlanningPolicy,
     LearningPlanningPolicy,
     CoordinationPlanningPolicy,
@@ -81,18 +79,6 @@ logger = setup_logger(__name__)
 # handles. The dispatcher only needs to validate dependency versions and execute the
 # action within the dependency transactor contexts.
 
-
-@dataclass
-class ReasoningIterationResult:
-    """Result of one reasoning loop iteration."""
-
-    iteration_num: int
-    action: Action
-    result: ActionResult
-    reflection: Reflection
-    critique: Critique
-    plan_updated: bool
-    timestamp: float = field(default_factory=time.time)
 
 
 

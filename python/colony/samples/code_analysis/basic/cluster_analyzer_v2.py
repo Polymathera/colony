@@ -17,32 +17,33 @@ import logging
 from typing import Any
 from overrides import override
 
-from ....agents.base import Agent, AgentCapability
-from ....agents.models import (
+from colony.agents.base import Agent, AgentCapability
+from colony.agents.models import (
     ActionType,
     ActionResult,
     AgentSuspensionState,
     AttentionContext,
 )
-from ....cluster.models import InferenceResponse
-from ....agents.patterns.actions.policies import (
+from colony.cluster.models import InferenceResponse
+from colony.agents.patterns.actions.policies import (
     create_default_action_policy,
     action_executor,
 )
-from ....agents.patterns.capabilities.reflection import ReflectionCapability
-from ....agents.patterns.capabilities.critique import CriticCapability
-from ....agents.patterns.capabilities.result import ResultCapability
-from ....agents.patterns.capabilities.query_attention import QueryAttentionCapability
-from ....agents.patterns import Critique
-from ....agents.patterns.attention import (
+from colony.agents.patterns.capabilities.reflection import ReflectionCapability
+from colony.agents.patterns.capabilities.critique import CriticCapability
+from colony.agents.patterns.capabilities.result import ResultCapability
+from colony.agents.patterns.capabilities.query_attention import QueryAttentionCapability
+from colony.agents.patterns.models import Critique
+from colony.agents.patterns.attention import (
     PageKey,
     QueryGenerator,
     DependencyQueryGenerator,
     HybridKeyGenerator,
 )
-from ....agents.patterns.attention.key_registry import GlobalPageKeyRegistry
-from ....agents.patterns.attention.query_routing import PageQueryRoutingPolicy, create_page_query_router2
-from ....vcm.sources import PageCluster
+from colony.agents.patterns.attention.key_registry import GlobalPageKeyRegistry
+from colony.agents.patterns.attention.query_routing import PageQueryRoutingPolicy, create_page_query_router2
+from colony.vcm.sources import PageCluster
+
 from .config import ClusterAnalyzerConfig
 
 logger = logging.getLogger(__name__)

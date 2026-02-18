@@ -10,47 +10,42 @@ from overrides import override
 import itertools
 
 
-from ....agents.patterns import (
+from colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
     Relationship,
     RelationshipGraph,
     Hypothesis,
 )
-from ....agents.patterns.capabilities.synthesis import SynthesisCapability
-from ....agents.patterns.capabilities.merge import MergePolicy, MergeContext
-from ....agents.patterns.capabilities.validation import ValidationResult
-from ....agents.patterns.capabilities.critique import CriticCapability
-from ....agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
-from ....agents.base import Agent, AgentCapability
-from ....agents.patterns.actions.policies import action_executor
-from ....agents.patterns.planning.policies import CacheAwarePlanningPolicy
-from ....agents.patterns.planning.strategies import ModelPredictiveControlStrategy
-from ....agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
-from ....agents.patterns.games.coalition_formation import find_optimal_coalition_structure
-from ....agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
-from ....agents.patterns.events import event_handler, EventProcessingResult
-from ....agents.patterns.capabilities import WorkingSetCapability, AgentPoolCapability
-from ....agents.patterns.capabilities.page_graph import PageGraphCapability
-from ....agents.patterns.capabilities.batching import (
+from colony.agents.patterns.capabilities.synthesis import SynthesisCapability
+from colony.agents.patterns.capabilities.merge import MergePolicy, MergeContext
+from colony.agents.patterns.capabilities.validation import ValidationResult
+from colony.agents.patterns.capabilities.critique import CriticCapability
+from colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
+from colony.agents.base import Agent, AgentCapability
+from colony.agents.patterns.actions.policies import action_executor
+from colony.agents.patterns.planning.policies import CacheAwarePlanningPolicy
+from colony.agents.patterns.planning.strategies import ModelPredictiveControlStrategy
+from colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
+from colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
+from colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
+from colony.agents.patterns.events import event_handler, EventProcessingResult
+from colony.agents.patterns.capabilities import WorkingSetCapability, AgentPoolCapability
+from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
+from colony.agents.patterns.capabilities.batching import (
     BatchingPolicy,
     ClusteringBatchPolicy,
     HybridBatchPolicy,
     ContinuousBatchPolicy,
 )
-from ....agents.models import (
+from colony.agents.models import (
     Action,
-    ActionResult,
     ActionType,
-    AgentResourceRequirements,
-    AgentSpawnSpec,
     AgentSuspensionState,
-    PlanningParameters,
-    PlanningContext,
     RunContext,
     PolicyREPL,
 )
-from ....cluster.models import LLMClientRequirements
+from colony.cluster.models import LLMClientRequirements
 from .types import (
     CodeChange,
     ChangeType,

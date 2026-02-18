@@ -3011,8 +3011,8 @@ class AgentManagerBase:
                 bound_pages=bound_pages or [],
                 metadata=metadata or {},
                 resource_requirements=resource_requirements,
-                capabilities=capabilities or [],
-                action_policy_id=action_policy_id,
+                capability_class_ids=capabilities or [],
+                action_policy_class_id=action_policy_id,
             )
 
             # Attach manager reference for delegation

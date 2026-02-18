@@ -10,18 +10,16 @@ import logging
 import pickle
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 from overrides import override
 
 import networkx as nx
 
 from .base import Agent
 from .models import RunContext
-from .patterns.attention import (
-    PageQueryRoutingPolicy,
-    create_page_query_router1,
-    create_page_query_router2
-)
+
+if TYPE_CHECKING:
+    from .patterns.attention import PageQueryRoutingPolicy
 
 
 logger = logging.getLogger(__name__)
@@ -346,6 +344,10 @@ async def create_default_cache_aware_coordination_policy(
     """
      Max pages in working set is determined by job quota
     """
+    # Lazy import to break circular dependency:
+    # attention → actions/policies → patterns → capabilities → working_set → here
+    from .patterns.attention import create_page_query_router1
+
     # Create query routing policy
     query_router: PageQueryRoutingPolicy = await create_page_query_router1(
         agent=agent,

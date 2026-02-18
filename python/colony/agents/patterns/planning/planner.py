@@ -31,7 +31,7 @@ from .policies import (
     CoordinationPlanningPolicy,
 )
 from .blackboard import PlanBlackboard
-from .. import Critique
+from ..models import Critique
 
 
 logger = logging.getLogger(__name__)
@@ -114,27 +114,27 @@ class SequentialPlanner(ActionPlanner):
         self.planning_params = planning_params
 
     @override
-    async def create_plan(self, context: PlanningContext) -> ActionPlan:
+    async def create_plan(self, planning_context: PlanningContext) -> ActionPlan:
         """Create manually-specified sequential plan."""
-        if not context.manual_plan:
+        if not planning_context.manual_plan:
             raise ValueError("manual_plan must be provided in context for manual plan creation")
 
         return ActionPlan(
             plan_id=f"plan_{self.agent.agent_id}_{int(time.time() * 1000)}",
             agent_id=self.agent.agent_id,
-            goals=context.goals,
-            constraints=context.constraints,
+            goals=planning_context.goals,
+            constraints=planning_context.constraints,
             generation_method="manual",
             strategy="sequential",
-            actions=[Action(**a) for a in context.manual_plan.actions],
+            actions=[Action(**a) for a in planning_context.manual_plan.actions],
             planning_horizon=self.planning_params.planning_horizon,
             replan_every_n_steps=self.planning_params.replan_every_n_steps,
-            parent_plan_id=context.parent_plan_id,
+            parent_plan_id=planning_context.parent_plan_id,
         )
 
     @override
     async def revise_plan(
-        self, current_plan: ActionPlan, context: PlanningContext, critique: Critique
+        self, current_plan: ActionPlan, planning_context: PlanningContext, critique: Critique
     ) -> ActionPlan:
         """Revise plan by appending corrective actions."""
         # Simple strategy: add actions based on critique suggestions

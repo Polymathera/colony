@@ -19,6 +19,11 @@ Core patterns:
 
 All patterns follow policy-based design for pluggability and customization.
 """
+from .scope import (
+    AnalysisScope,
+    ScopeAwareResult,
+    merge_scopes,
+)
 
 # ---------------------------------------------------------------------------
 # ALL imports are deferred via __getattr__ to break circular dependencies:
@@ -186,12 +191,7 @@ __all__ = [
 # Lazy import registry: name → relative module path
 # ---------------------------------------------------------------------------
 _LAZY_IMPORTS = {
-    # .scope
-    "AnalysisScope": ".scope",
-    "ScopeAwareResult": ".scope",
-    "merge_scopes": ".scope",
     # .capabilities.critique
-    "Critique": ".capabilities.critique",
     "CritiqueContext": ".capabilities.critique",
     "CritiquePolicy": ".capabilities.critique",
     "CriticCapability": ".capabilities.critique",
@@ -279,6 +279,7 @@ _LAZY_IMPORTS = {
     "SynthesisCapability": ".capabilities.synthesis",
     "SynthesisUpdate": ".capabilities.synthesis",
     # .models
+    "Critique": ".models",
     "Reflection": ".models",
     "Hypothesis": ".models",
     # .capabilities.consciousness

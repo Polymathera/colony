@@ -15,7 +15,7 @@ Planning Strategies:
 
 Example:
     ```python
-    from polymathera.colony.agents.planning import (
+    from polymathera.colony.agents import (
         Agent,
         PlanningParameters,
         PlanningStrategy,
