@@ -208,15 +208,28 @@ class FileGrouperContextPageSource(ContextPageSource):
             logger.info(f"Stored {len(result.shards)} pages to PageStorage")
 
             # Persist graph and mappings
-            await self.page_storage.store_page_graph(self.page_graph)
-            await self.page_storage.store_page_graph_level_data(
-                tenant_id=self.tenant_id, group_id=self.group_id, key="file_to_page", value=self.file_to_page
+            await self.page_storage.store_page_graph(
+                tenant_id=self.tenant_id,
+                group_id=self.group_id,
+                graph_data=self.page_graph
             )
             await self.page_storage.store_page_graph_level_data(
-                tenant_id=self.tenant_id, group_id=self.group_id, key="page_to_file", value=self.page_to_file
+                tenant_id=self.tenant_id,
+                group_id=self.group_id,
+                data_key="file_to_page",
+                graph_data=self.file_to_page
             )
             await self.page_storage.store_page_graph_level_data(
-                tenant_id=self.tenant_id, group_id=self.group_id, key="page_keys", value=self.page_keys
+                tenant_id=self.tenant_id,
+                group_id=self.group_id,
+                data_key="page_to_file",
+                graph_data=self.page_to_file
+            )
+            await self.page_storage.store_page_graph_level_data(
+                tenant_id=self.tenant_id,
+                group_id=self.group_id,
+                data_key="page_keys",
+                graph_data=self.page_keys
             )
 
             logger.info(

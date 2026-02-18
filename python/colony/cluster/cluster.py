@@ -586,10 +586,14 @@ class LLMCluster:
         Returns:
             List of deployment names
         """
-        if not self.app:
+        if self.top_level and not self.app:
             raise RuntimeError("Cluster not deployed. Call deploy() first.")
 
-        return list(self.vllm_deployment_handles.keys()) + list(self.remote_deployment_handles.keys())
+        handles = list(self.vllm_deployment_handles.keys()) + list(self.remote_deployment_handles.keys())
+        if not self.top_level and len(handles):
+            raise RuntimeError("Cluster's @on_app_ready endpoint must be called to discover deployment handles.")
+
+        return handles
 
     @serving.endpoint
     async def get_all_client_states(self) -> dict[str, dict[str, dict[str, any]]]:

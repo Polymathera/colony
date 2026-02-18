@@ -524,7 +524,7 @@ class PolymatheraConfig(ConfigComponent):
                     raise ValueError(
                         f"Required env var {env_var} for field {field_name} not found."
                     )
-                logger.warning(
+                logger.debug(
                     f"Optional environment variable for field {field_name} not found."
                 )
                 continue

@@ -837,6 +837,7 @@ class AgentHandle:
         soft_affinity: bool = True,
         suspend_agents: bool = False,
         default_capability_type: type[AgentCapability] | None = None,
+        app_name: str | None = None
     ) -> "AgentHandle":
         """Spawn an agent by type and return handle.
 
@@ -849,6 +850,9 @@ class AgentHandle:
             soft_affinity: Whether to use soft affinity routing
             suspend_agents: Whether to suspend other agents if needed
             default_capability_type: Default capability for run/stream
+            app_name: The `serving.Application` name where the agent system resides.
+                This is required when `from_agent_type` is called from outside any
+                `serving.deployment`.
 
         Returns:
             AgentHandle for the spawned agent
@@ -864,6 +868,7 @@ class AgentHandle:
             run_id=run_id or agent_spec.metadata.run_id,
             soft_affinity=soft_affinity,
             suspend_agents=suspend_agents,
+            app_name=app_name
         )
         agent_id = child_ids[0]
 
@@ -2971,7 +2976,7 @@ class AgentManagerBase:
                         f"(agent needs {resource_requirements.gpu_memory_mb})"
                     )
 
-            if any(needed_cpu > 0, needed_memory > 0, needed_gpu > 0, needed_gpu_memory > 0):
+            if any([needed_cpu > 0, needed_memory > 0, needed_gpu > 0, needed_gpu_memory > 0]):
                 # Suspend agents until we have enough CPU/memory
                 await self._suspend_agents_for_resources(
                     needed_cpu=needed_cpu,
@@ -2985,12 +2990,12 @@ class AgentManagerBase:
                 new_memory = self._used_memory_mb + resource_requirements.memory_mb
                 new_gpu = self._used_gpu_cores + resource_requirements.gpu_cores
                 new_gpu_memory = self._used_gpu_memory_mb + resource_requirements.gpu_memory_mb
-                if any(
+                if any([
                     new_cpu > self.max_cpu_cores,
                     new_memory > self.max_memory_mb,
                     new_gpu > self.max_gpu_cores,
                     new_gpu_memory > self.max_gpu_memory_mb,
-                ):
+                ]):
                     raise ResourceExhausted(
                         f"CPU/Memory/GPU/GPU memory capacity exceeded even after suspension:\n"
                         f"{new_cpu:.2f}/{self.max_cpu_cores} cores\n"
@@ -3015,9 +3020,6 @@ class AgentManagerBase:
 
             # Initialize agent
             await agent.initialize()
-
-            # Initialize mailbox for agent
-            await self._ensure_mailbox(agent_id)
 
             # Store agent
             self._agents[agent_id] = agent

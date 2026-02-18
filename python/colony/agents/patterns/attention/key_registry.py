@@ -319,7 +319,7 @@ class GlobalPageKeyRegistry:
         try:
             await self.page_storage.store_page_graph_level_data(  # TODO: Page keys are not really graph-level data, we should add a separate method for page-level data
                 tenant_id=self.agent.tenant_id,
-                group_id=self.agent.group_id if self.agent else None,
+                group_id=self.agent.group_id,
                 data_key=self._get_page_graph_group_id(page_id),
                 graph_data=page_key,
             )

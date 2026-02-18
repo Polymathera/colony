@@ -78,7 +78,11 @@ class PageGraphCapability(AgentCapability):
             # TODO - FIXME: This can introduce race conditions if multiple updates happen concurrently.
             # We may need a more robust graph storage/update mechanism for large graphs.
             page_storage = await self.agent.get_page_storage()
-            await page_storage.store_page_graph(self._page_graph)
+            await page_storage.store_page_graph(
+                tenant_id=self.agent.tenant_id,
+                group_id=self.agent.group_id,
+                graph_data=self._page_graph
+            )
 
     # === Action Executors ===
 

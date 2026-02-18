@@ -1269,7 +1269,9 @@ class PageStorage:
 
         # Persist to storage
         await self.store_page_graph(
-            graph_data=graph,
+            tenant_id=tenant_id,
+            group_id=group_id,
+            graph_data=graph
         )
         logger.info(f"Persisted page graph for {tenant_id}:{group_id}")
 

@@ -347,6 +347,7 @@ async def spawn_agents(
     run_id: str | None = None,
     soft_affinity: bool = True,
     suspend_agents: bool = False,
+    app_name: str | None = None
 ) -> list[str]:
     """Spawn agents by calling the agent system.
     This is a convenience wrapper around the agent system's spawn_agents method.
@@ -361,11 +362,14 @@ async def spawn_agents(
         run_id: Optional run ID to associate with spawned agents
         soft_affinity: Whether to use soft affinity for agent placement
         suspend_agents: Whether to start agents in suspended state
+        app_name: The `serving.Application` name where the agent system resides.
+            This is required when `spawn_agents` is called from outside any
+            `serving.deployment`.
 
     Returns:
         List of spawned agent IDs
     """
-    agent_system = get_agent_system()
+    agent_system = get_agent_system(app_name)
     agent_ids = await agent_system.spawn_agents(
         agent_specs=agent_specs,
         session_id=session_id,

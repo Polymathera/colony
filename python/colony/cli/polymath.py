@@ -1440,6 +1440,7 @@ async def run_integration_test(
                 agent_spec=spec,
                 session_id=config.session_id,
                 run_id=config.run_id,
+                app_name=effective_app_name
             )
 
         console.print(f"    [dim]agent_id: {handle.agent_id}[/dim]")
