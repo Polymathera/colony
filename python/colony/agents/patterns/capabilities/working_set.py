@@ -532,14 +532,12 @@ class WorkingSetCapability(AgentCapability):
     @action_executor()
     async def initialize_from_policy(
         self,
-        page_graph: nx.DiGraph | None = None,
         available_pages: list[str] | None = None,
         run_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Initialize cluster-wide working set using coordination policy.
 
         Args:
-            page_graph: Page graph (loads from page storage if None)
             available_pages: Available page IDs (loads from page storage if None)
             run_context: Analysis goal and context
 
@@ -551,9 +549,8 @@ class WorkingSetCapability(AgentCapability):
         if self.coordination_policy is None:
             return {"initialized": False, "reason": "no_coordination_policy"}
 
-        # Load page graph if not provided
-        if page_graph is None:
-            page_graph = await self.agent.load_page_graph()
+        # Load page graph
+        page_graph: nx.DiGraph | None = await self.agent.load_page_graph()
 
         # Get available pages if not provided
         if available_pages is None:

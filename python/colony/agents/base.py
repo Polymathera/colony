@@ -1738,13 +1738,21 @@ class Agent(BaseModel):
         """
         return capability_name in self._capabilities
 
-    def get_capabilities(self) -> list[str]:
-        """Get agent's capabilities for discovery.
+    def get_capability_names(self) -> list[str]:
+        """Get agent's capability names for discovery.
 
         Returns:
             List of capability strings
         """
         return list(self._capabilities.keys())
+
+    def get_capabilities(self) -> list[AgentCapability]:
+        """Get agent's capabilities for discovery.
+
+        Returns:
+            List of capabilities
+        """
+        return list(self._capabilities.values())
 
     # === Tool Usage (Delegated to manager) ===
 

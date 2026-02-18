@@ -27,7 +27,7 @@ from enum import Enum
 from typing import Any, Callable, get_type_hints, get_origin, get_args
 from contextlib import AsyncExitStack
 from overrides import override
-from pydantic import BaseModel, Field, ValidationError, create_model
+from pydantic import BaseModel, ConfigDict, Field, PydanticSchemaGenerationError, ValidationError, create_model
 
 from ....utils import setup_logger
 from ...models import (
@@ -377,8 +377,12 @@ def _infer_input_schema(func: Callable) -> type[BaseModel] | None:
     if not fields:
         return None
 
-    # Create dynamic Pydantic model
-    return create_model(f"{func.__name__}_Input", **fields)
+    # Create dynamic Pydantic model — validate that all parameter types
+    # are JSON-serializable since action executors are called by the LLM planner.
+    try:
+        return create_model(f"{func.__name__}_Input", **fields)
+    except PydanticSchemaGenerationError:
+        _raise_non_serializable_error(func, fields)
 
 
 def _infer_input_schema_excluding_first(func: Callable) -> type[BaseModel] | None:
@@ -416,8 +420,37 @@ def _infer_input_schema_excluding_first(func: Callable) -> type[BaseModel] | Non
     if not fields:
         return None
 
-    # Create dynamic Pydantic model
-    return create_model(f"{func.__name__}_Input", **fields)
+    try:
+        return create_model(f"{func.__name__}_Input", **fields)
+    except PydanticSchemaGenerationError:
+        _raise_non_serializable_error(func, fields)
+
+
+def _raise_non_serializable_error(
+    func: Callable,
+    fields: dict[str, tuple],
+) -> None:
+    """Identify which parameters have non-serializable types and raise a clear error.
+
+    Called when create_model() fails with PydanticSchemaGenerationError.
+    Tests each field individually to pinpoint the offending parameter(s).
+    """
+    bad_params = []
+    for name, (field_type, *_) in fields.items():
+        try:
+            create_model("_TypeCheck", **{name: (field_type, ...)})
+        except PydanticSchemaGenerationError:
+            bad_params.append((name, field_type))
+
+    detail = ", ".join(f"'{n}' (type: {t})" for n, t in bad_params)
+    raise TypeError(
+        f"@action_executor '{func.__qualname__}' has parameters with non-serializable "
+        f"types: {detail}. "
+        f"Since action executors are called by the LLM planner, all parameters must be "
+        f"JSON-serializable Pydantic types (str, int, float, bool, list, dict, BaseModel "
+        f"subclass, enum, etc.) or 'Any'. Either change the type annotation or remove the "
+        f"parameter and load the data internally."
+    ) from None
 
 
 def _infer_output_schema(func: Callable) -> type[BaseModel] | None:
@@ -536,6 +569,8 @@ class ActionGroup(BaseModel):
     from different providers of the same type but different roles (e.g.,
     multiple MemoryCapability instances at different memory levels).
     """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     description: str = Field(description="Description of the action group.")
     executors: dict[str, ActionExecutor] = Field(default_factory=dict)
 
@@ -588,7 +623,7 @@ class ActionDispatcher:
         if not self._repl_discovered:
             self._repl_discovered = True
             # Try to find REPLCapability on the agent
-            for cap in self.agent.capabilities.values():
+            for cap in self.agent.get_capabilities():
                 if isinstance(cap, REPLCapability):
                     self._repl = cap.repl
                     break

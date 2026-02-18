@@ -11,8 +11,8 @@ from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ..scope import ScopeAwareResult
 from ...models import QueryContext, ActionPolicyIO
 from ...base import Agent, AgentCapability
-from ...patterns.attention import PageQuery
-from ...patterns.actions.policies import (
+from .attention import PageQuery
+from ..actions.policies import (
     CacheAwareActionPolicy,
     action_executor,
 )
