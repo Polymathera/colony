@@ -955,7 +955,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             raise RuntimeError("GameProtocolCapability not initialized. Call initialize() first.")
         return self._blackboard
 
-    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern())
+    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern()) # TODO: Check if this pattern matches only relevant game states (e.g., by game_id in key or metadata)
     async def handle_game_event(
         self,
         event: BlackboardEvent,
@@ -1069,7 +1069,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         """
         return {}
 
-    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern())
+    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern()) # TODO: Check if this pattern matches only relevant game states (e.g., by game_id in key or metadata)
     async def _get_rule_based_action(
         self,
         event: BlackboardEvent,

@@ -12,7 +12,7 @@ distributed multi-agent execution strategies.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import networkx as nx
 

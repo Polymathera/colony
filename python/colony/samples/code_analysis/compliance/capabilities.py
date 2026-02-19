@@ -5,7 +5,7 @@ import itertools
 import logging
 from typing import Any
 
-from ....agents.patterns import (
+from colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
     MergePolicy,
@@ -13,19 +13,19 @@ from ....agents.patterns import (
     MergeCapability,
     ValidationResult,
 )
-from ....agents.patterns.capabilities.agent_pool import AgentPoolCapability
-from ....agents.patterns.capabilities.result import ResultCapability
-from ....agents.patterns.capabilities.page_graph import PageGraphCapability
-from ....agents.patterns.capabilities.batching import BatchingPolicy
-from ....agents.patterns.capabilities.vcm_analysis import VCMAnalysisCapability
-from ....agents.patterns.actions import action_executor
-from ....agents.patterns.events import event_handler, EventProcessingResult
-from ....agents.blackboard import EnhancedBlackboard, ObligationGraph, BlackboardEvent
-from ....agents.base import Agent, AgentCapability, CapabilityResultFuture, AgentHandle
-from ....agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
-from ....agents.patterns.games.coalition_formation import find_optimal_coalition_structure
-from ....agents.models import Action, PolicyREPL, AgentResourceRequirements
-from ....cluster.models import LLMClientRequirements
+from colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
+from colony.agents.patterns.capabilities.result import ResultCapability
+from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
+from colony.agents.patterns.capabilities.batching import BatchingPolicy
+from colony.agents.patterns.capabilities.vcm_analysis import VCMAnalysisCapability
+from colony.agents.patterns.actions import action_executor
+from colony.agents.patterns.events import event_handler, EventProcessingResult
+from colony.agents.blackboard import EnhancedBlackboard, ObligationGraph, BlackboardEvent
+from colony.agents.base import Agent, AgentCapability, CapabilityResultFuture, AgentHandle
+from colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
+from colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
+from colony.agents.models import Action, AgentMetadata, PolicyREPL, AgentResourceRequirements
+from colony.cluster.models import LLMClientRequirements
 
 from .types import (
     ComplianceRequirement,
@@ -1490,7 +1490,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern="analysis:compliance:result:*")
+    @event_handler(pattern="analysis:compliance:result:*")  # TODO: Use a more specific pattern or namespace for worker results (e.g., include scope_id and agent_id)
     async def handle_worker_result(
         self,
         event: BlackboardEvent,
@@ -1607,10 +1607,10 @@ class ComplianceCoordinatorCapability(AgentCapability):
                     gpu_cores=0.0,
                     gpu_memory_mb=0
                 ),
-                metadata={
+                metadata=AgentMetadata(parameters={
                     "page_id": page_id,
                     "compliance_types": [ct.value for ct in (compliance_types or [])]
-                },
+                }),
             )
 
             self._page_agents[page_id] = agent_id

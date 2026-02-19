@@ -191,6 +191,8 @@ class ImpactPath(BaseModel):
 class ChangeImpactReport(BaseModel):
     """Complete change impact analysis report."""
 
+    model_config = {"arbitrary_types_allowed": True}
+
     source_page_id: str | None = Field(
         default=None,
         description="VCM page ID that produced this report (for single-page reports)"

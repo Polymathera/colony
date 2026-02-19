@@ -709,10 +709,19 @@ class DeploymentProxyRayActor:
                 # Inherit env vars from the proxy's os.environ (which includes
                 # the driver's runtime_env vars such as API keys) so replicas
                 # can access them even though we set an explicit runtime_env.
+                # Exclude node-specific Ray internal env vars that are set by
+                # the local raylet - propagating them to actors on other nodes
+                # causes workers to monitor wrong PIDs and crash.
+                _ray_internal_vars = {
+                    "RAY_RAYLET_PID", "RAY_JOB_ID", "RAY_LD_PRELOAD_ON_WORKERS",
+                    "RAY_NODE_MANAGER_PORT", "RAY_OBJECT_STORE_MEMORY",
+                    "RAY_RAYLET_SOCKET_NAME",
+                }
                 runtime_env = actor_options.get("runtime_env", {})
                 env_vars = {
                     k: v for k, v in os.environ.items()
-                    if k.startswith(("POLYMATH", "RAY_", "REDIS_", "ANTHROPIC_", "OPENROUTER_", "OPENAI_", "GOOGLE_", "HUGGING_FACE_")) and v
+                    if k.startswith(("POLYMATH", "RAY_", "REDIS_", "ANTHROPIC_", "OPENROUTER_", "OPENAI_", "GOOGLE_", "HUGGING_FACE_"))
+                    and v and k not in _ray_internal_vars
                 }
                 env_vars.update(runtime_env.get("env_vars", {}))
                 env_vars["POLYMATHERA_SERVING_CURRENT_APP"] = self.app_name

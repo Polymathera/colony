@@ -18,9 +18,9 @@ from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, Field
 
-from .scope import ScopeAwareResult
-from ..base import Agent, AgentCapability
-from .actions import action_executor
+from ..scope import ScopeAwareResult
+from ...base import Agent, AgentCapability
+from ..actions import action_executor
 
 
 T = TypeVar('T')

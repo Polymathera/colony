@@ -24,6 +24,7 @@ from ..distributed.state_management import SharedState, StateManager
 from ..distributed.ray_utils import serving
 from .base import Agent, AgentState, ResourceExhausted
 from .models import (
+    AgentMetadata,
     AgentResourceRequirements,
     AgentSpawnSpec,
     AgentSuspensionState,
@@ -308,14 +309,14 @@ class AgentSystemDeployment:
             agent_id = spec.agent_id or f"agent-{uuid.uuid4().hex[:8]}"
 
             # Add session_id and run_id to metadata for tracking
-            metadata = spec.metadata.model_copy().model_dump()  # Start with spec metadata
+            metadata = spec.metadata.model_copy()  # Start with spec metadata
             if session_id:
-                metadata["session_id"] = session_id
+                metadata.session_id = session_id
             if run_id:
-                metadata["run_id"] = run_id
+                metadata.run_id = run_id
 
             # Check tenant quota if tenant_id is present
-            tenant_id = metadata.get("tenant_id")
+            tenant_id = metadata.tenant_id
             if tenant_id:
                 try:
                     await self._check_tenant_quota(tenant_id, spec.resource_requirements)
@@ -641,7 +642,7 @@ class AgentSystemDeployment:
                 state_key=state_key,
             )
 
-            suspension_state = None
+            suspension_state: AgentSuspensionState | None = None
             async for state in state_manager.read_transaction():
                 suspension_state = state
                 break
@@ -677,18 +678,20 @@ class AgentSystemDeployment:
             )
 
         # Build metadata for resumed agent
-        metadata = {
-            "resuming_from_suspension": True,
-            "suspended_agent_id": agent_id,
-            "suspension_reason": suspension_state.suspension_reason,
-            "suspension_count": suspension_state.suspension_count,
-        }
+        metadata = AgentMetadata(
+            parameters={
+                "resuming_from_suspension": True,
+                "suspended_agent_id": agent_id,
+                "suspension_reason": suspension_state.suspension_reason,
+                "suspension_count": suspension_state.suspension_count,
+            }
+        )
 
         # Add parent/role info if present (for child agents)
         if suspension_state.parent_agent_id:
-            metadata["parent_agent_id"] = suspension_state.parent_agent_id
+            metadata.parent_agent_id = suspension_state.parent_agent_id
         if suspension_state.role:
-            metadata["role"] = suspension_state.role
+            metadata.role = suspension_state.role
 
         # Build resource requirements
         resource_requirements = AgentResourceRequirements(

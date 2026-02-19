@@ -347,7 +347,14 @@ Respond with a structured analysis."""
         # TODO: This should be cached in the ConsciousnessCapability which
         # should be called by the ActionPolicy to get self-concept info into context.
         try:
-            self_concept: AgentSelfConcept | None = await AgentSelfConcept.download(self.agent.agent_id)
+            from .self_concept import AgentSelfConcept
+            from .consciousness import ConsciousnessCapability
+            consciousness: ConsciousnessCapability | None = (
+                self.agent.get_capability(ConsciousnessCapability.get_capability_name())
+            )
+            self_concept: AgentSelfConcept | None = (
+                await consciousness.get_self_concept() if consciousness else None
+            )
         except Exception:
             self_concept = None
 

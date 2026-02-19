@@ -28,28 +28,28 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ....agents.patterns import (
+from colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
 )
-from ....agents.patterns.capabilities.merge import MergePolicy, MergeContext, MergeCapability
-from ....agents.patterns.capabilities.validation import ValidationResult
-from ....agents.patterns.capabilities.synthesis import SynthesisCapability
-from ....agents.patterns.capabilities.agent_pool import AgentPoolCapability
-from ....agents.patterns.capabilities.result import ResultCapability
-from ....agents.patterns.capabilities.page_graph import PageGraphCapability
-from ....agents.patterns.capabilities.batching import BatchingPolicy
-from ....agents.patterns.capabilities.vcm_analysis import VCMAnalysisCapability
-
-from ....agents.patterns.actions import action_executor
-from ....agents.patterns.events import event_handler, EventProcessingResult
-from ....agents.blackboard import TaskGraph, BlackboardEvent
-from ....agents.base import Agent, AgentCapability, CapabilityResultFuture
-from ....agents.models import Action, ActionType, PolicyREPL, AgentResourceRequirements
-from ....agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
-from ....cluster.models import LLMClientRequirements
-from ....agents.patterns.games.coalition_formation import find_optimal_coalition_structure
-from ....agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
+from colony.agents.patterns.capabilities.merge import MergePolicy, MergeContext, MergeCapability
+from colony.agents.patterns.capabilities.validation import ValidationResult
+from colony.agents.patterns.capabilities.synthesis import SynthesisCapability
+from colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
+from colony.agents.patterns.capabilities.result import ResultCapability
+from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
+from colony.agents.patterns.capabilities.batching import BatchingPolicy
+from colony.agents.patterns.capabilities.vcm_analysis import VCMAnalysisCapability
+from colony.agents.patterns.actions import action_executor
+from colony.agents.patterns.events import event_handler, EventProcessingResult
+from colony.agents.patterns.models import Hypothesis
+from colony.agents.blackboard import TaskGraph, BlackboardEvent
+from colony.agents.base import Agent, AgentCapability, CapabilityResultFuture
+from colony.agents.models import Action, ActionType, AgentMetadata, PolicyREPL, AgentResourceRequirements
+from colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
+from colony.cluster.models import LLMClientRequirements
+from colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
+from colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
 
 from .types import (
     Contract,
@@ -1261,7 +1261,7 @@ class ContractCoordinatorCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern="*:result:*")
+    @event_handler(pattern="*:result:*") # TODO: Use a more specific pattern to only listen to worker results
     async def handle_worker_result(
         self,
         event: BlackboardEvent,
@@ -1492,10 +1492,10 @@ class ContractCoordinatorCapability(AgentCapability):
                     gpu_cores=0.0,
                     gpu_memory_mb=0
                 ),
-                metadata={
+                metadata=AgentMetadata(parameters={
                     "page_id": page_id,
                     "formalism": "semi_formal"
-                },
+                }),
             )
             self._worker_handles[page_id] = handle
 

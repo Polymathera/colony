@@ -25,12 +25,14 @@ from __future__ import annotations
 import time
 from typing import Any
 from enum import Enum
+from overrides import override
 
 from pydantic import BaseModel, Field
 
 from .acl import ACLMessage, Performative
 from .state import GameState, GamePhase, GameOutcome, GameProtocolCapability, GameEventType
 from ...base import Agent
+from ..actions.policies import action_executor
 
 class VotingMethod(str, Enum):
     """Voting aggregation method."""
@@ -125,6 +127,31 @@ class ConsensusGameRole(str, Enum):
     OBSERVER = "observer"  # Must be present in every game to allow passive observation
 
 
+class ConsensusGameData(BaseModel):
+    """Game-specific data for consensus game."""
+
+    question: str = Field(
+        default="",
+        description="Question being decided"
+    )
+
+    options: list[str] = Field(
+        default_factory=list,
+        description="List of proposed options"
+    )
+
+    votes: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="List of votes (stored as dicts for serialization)"
+    )
+
+    consensus_result: dict[str, Any] | None = Field(
+        default=None,
+        description="Final consensus result (stored as dict for serialization)"
+    )
+
+
+
 class ConsensusGameProtocol(GameProtocolCapability[ConsensusGameData, ConsensusGameRole]):
     """Protocol for consensus building through voting.
 
@@ -152,12 +179,15 @@ class ConsensusGameProtocol(GameProtocolCapability[ConsensusGameData, ConsensusG
         super().__init__(agent, game_id=game_id, role=role, game_type="consensus_game")
         self.voting_method = voting_method
 
+    @override
+    @action_executor(exclude_from_planning=True)
     async def start_game(
         self,
-        participants: dict[str, str],
+        participants: dict[str, str],  # agent_id -> role
         initial_data: dict[str, Any],
+        game_id: str | None = None,
         config: dict[str, Any] | None = None
-    ) -> str:
+    ) -> GameState:
         """Start consensus game.
 
         Args:
@@ -166,7 +196,7 @@ class ConsensusGameProtocol(GameProtocolCapability[ConsensusGameData, ConsensusG
             config: Optional configuration
 
         Returns:
-            Game ID
+            GameState
         """
         # Validate aggregator exists
         if "aggregator" not in participants.values():
@@ -179,29 +209,25 @@ class ConsensusGameProtocol(GameProtocolCapability[ConsensusGameData, ConsensusG
             participants=list(participants.keys()),
             roles=participants,
             phase=GamePhase.NOMINATE,
-            game_data={
-                "question": initial_data.get("question", ""),
-                "options": initial_data.get("options", []),
-                "votes": [],
-                "consensus_result": None
-            },
+            game_data=ConsensusGameData().model_dump(),
             config=config or {"voting_method": self.voting_method.value}
         )
 
         await self.save_game_state(state, GameEventType.GAME_STARTED.value, move=None)
-        return state.game_id
+        return state
 
+    @override
     async def validate_move(
         self,
         agent_id: str,
-        message: ACLMessage,
+        move: ACLMessage,
         state: GameState
     ) -> tuple[bool, str]:
         """Validate move.
 
         Args:
             agent_id: Agent making move
-            message: ACLMessage
+            move: ACLMessage
             state: Current state
 
         Returns:
@@ -213,13 +239,13 @@ class ConsensusGameProtocol(GameProtocolCapability[ConsensusGameData, ConsensusG
         role = state.get_role(agent_id)
 
         if state.phase == GamePhase.NOMINATE:
-            if message.performative != Performative.PROPOSE:
+            if move.performative != Performative.PROPOSE:
                 return (False, "NOMINATE requires PROPOSE")
 
         elif state.phase == GamePhase.VOTE:
             if role != "voter":
                 return (False, "Only voters can vote")
-            if message.performative != Performative.INFORM:
+            if move.performative != Performative.INFORM:
                 return (False, "VOTE requires INFORM with vote content")
 
         elif state.phase == GamePhase.COUNT:
@@ -231,20 +257,20 @@ class ConsensusGameProtocol(GameProtocolCapability[ConsensusGameData, ConsensusG
     async def apply_move(
         self,
         state: GameState,
-        message: ACLMessage
+        move: ACLMessage
     ) -> GameState:
         """Transition state.
 
         Args:
             state: Current state
-            message: ACLMessage
+            move: ACLMessage
 
         Returns:
             New state
         """
         if state.phase == GamePhase.NOMINATE:
             # Add option
-            option = message.get_payload().get("option")
+            option = move.get_payload().get("option")
             if option:
                 if "options" not in state.game_data:
                     state.game_data["options"] = []
@@ -255,7 +281,7 @@ class ConsensusGameProtocol(GameProtocolCapability[ConsensusGameData, ConsensusG
 
         elif state.phase == GamePhase.VOTE:
             # Collect vote
-            vote_data = message.get_payload()
+            vote_data = move.get_payload()
             vote = Vote(**vote_data)
             state.game_data["votes"].append(vote.model_dump())
 
@@ -281,6 +307,7 @@ class ConsensusGameProtocol(GameProtocolCapability[ConsensusGameData, ConsensusG
 
         return state
 
+    @override
     async def is_terminal(self, state: GameState) -> bool:
         """Check if terminal.
 
@@ -292,6 +319,7 @@ class ConsensusGameProtocol(GameProtocolCapability[ConsensusGameData, ConsensusG
         """
         return state.phase == GamePhase.TERMINAL
 
+    @override
     async def compute_outcome(self, state: GameState) -> GameOutcome:
         """Compute outcome.
 

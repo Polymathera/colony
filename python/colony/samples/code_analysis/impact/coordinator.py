@@ -22,7 +22,7 @@ from colony.agents.patterns.capabilities.merge import MergePolicy, MergeContext
 from colony.agents.patterns.capabilities.validation import ValidationResult
 from colony.agents.patterns.capabilities.critique import CriticCapability
 from colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
-from colony.agents.base import Agent, AgentCapability
+from colony.agents.base import Agent, AgentCapability, AgentMetadata
 from colony.agents.patterns.actions.policies import action_executor
 from colony.agents.patterns.planning.policies import CacheAwarePlanningPolicy
 from colony.agents.patterns.planning.strategies import ModelPredictiveControlStrategy
@@ -369,11 +369,11 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         self.max_depth: int = 5  # Max depth for impact propagation
         self._current_changes: list[CodeChange] = []  # Changes being analyzed
         # Get configuration from agent metadata
-        self.group_id = self.agent.metadata.get("group_id")
-        self.tenant_id = self.agent.metadata.get("tenant_id")
-        self.prefetch_depth = self.agent.metadata.get("prefetch_depth", 2)
-        self.prefetch_test_pages = self.agent.metadata.get("prefetch_test_pages", True)
-        self.max_agents = self.agent.metadata.get("max_agents", 10)
+        self.group_id = self.agent.metadata.group_id
+        self.tenant_id = self.agent.metadata.tenant_id
+        self.prefetch_depth = self.agent.metadata.parameters.get("prefetch_depth", 2)
+        self.prefetch_test_pages = self.agent.metadata.parameters.get("prefetch_test_pages", True)
+        self.max_agents = self.agent.metadata.parameters.get("max_agents", 10)
 
     async def initialize(self) -> None:
         """Initialize capability with cache-aware components."""
@@ -384,8 +384,8 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         # Initialize cache-aware planning policy
         self.cache_policy = CacheAwarePlanningPolicy(
             agent=self.agent,
-            cache_capacity=self.agent.metadata.get("cache_capacity", 50),
-            query_vcm_state=self.agent.metadata.get("query_vcm_state", False)
+            cache_capacity=self.agent.metadata.parameters.get("cache_capacity", 50),
+            query_vcm_state=self.agent.metadata.parameters.get("query_vcm_state", False)
         )
         await self.cache_policy.initialize()
 
@@ -403,7 +403,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         # NOTE: Impact analysis uses custom scoring that includes centrality weighting,
         # which is not supported by the standard BatchingPolicy. The policy is provided
         # for future integration but spawn_next_batch() currently uses custom logic.
-        batching_policy_config = self.agent.metadata.get("batching_policy", {})
+        batching_policy_config = self.agent.metadata.parameters.get("batching_policy", {})
         self.batching_policy: BatchingPolicy = self._create_batching_policy(batching_policy_config)
 
         # Initialize page graph capability for standardized graph operations
@@ -559,7 +559,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     # EVENT HANDLERS - Replace manual blackboard subscriptions
     # ============================================================================
 
-    @event_handler(pattern="*:analysis_complete")
+    @event_handler(pattern="*:analysis_complete") # TODO: Use a more specific pattern to avoid conflicts (e.g., include scope_id or use a structured event type)
     async def on_child_complete(
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:
@@ -600,7 +600,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             await self.working_set_cap.release_pages(page_ids=list(completed_pages))
 
         # Spawn next batch if there are pending pages
-        max_agents = self.agent.metadata.get("max_agents", 10)
+        max_agents = self.agent.metadata.parameters.get("max_agents", 10)
         if self.pending_pages and len(self.page_agents) < max_agents:
             await self.spawn_next_batch(self._current_changes[0].description if self._current_changes else "")
 
@@ -611,7 +611,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             )
         return None
 
-    @event_handler(pattern="error:*")
+    @event_handler(pattern="error:*") # TODO: Use a more specific pattern to avoid conflicts (e.g., include scope_id or use a structured event type)
     async def on_child_error(
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:
@@ -689,7 +689,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         # TODO: Write this summary to agent memory to be used by the action policy
 
         # Phase 1: Initialize working set from page graph
-        run_id = self.agent.metadata.get("run_id")
+        run_id = self.agent.metadata.run_id
         await self.working_set_cap.initialize_from_policy(
             page_graph=page_graph,
             available_pages=page_ids,
@@ -1084,23 +1084,24 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
                 agent_type="polymathera.colony.samples.code_analysis.impact.ChangeImpactAnalysisAgent",
                 capabilities=["ChangeImpactAnalysisCapability"],
                 bound_pages=[page_id],  # Single page
-                metadata={
-                    "page_id": page_id,
-                    # Pass actual changes, not just description
-                    "changes": changes_data,
-                    "change_description": change_description,
-                    # Pass config for agents to load page graph dynamically
-                    "parent_agent_id": self.agent.agent_id,
-                    "group_id": self.agent.metadata.get("group_id"),
-                    "tenant_id": self.agent.metadata.get("tenant_id"),
-                    "quality_threshold": self.agent.metadata.get("quality_threshold", 0.7),
-                    "max_iterations": self.agent.metadata.get("max_iterations", 3),
-                    "prefetch_depth": self.agent.metadata.get("prefetch_depth", 2),
-                    "prefetch_test_pages": self.agent.metadata.get("prefetch_test_pages", True),
-                    "session_id": self.agent.metadata.get("session_id"),
-                    "run_id": self.agent.metadata.get("run_id"),
-                },
                 role=role,
+                metadata=AgentMetadata(
+                    page_id=page_id,
+                    parent_agent_id=self.agent.agent_id,
+                    group_id=self.agent.metadata.group_id,
+                    tenant_id=self.agent.metadata.tenant_id,
+                    session_id=self.agent.metadata.session_id,
+                    run_id=self.agent.metadata.run_id,
+                    parameters={
+                        "quality_threshold": self.agent.metadata.parameters.get("quality_threshold", 0.7),
+                        "max_iterations": self.agent.metadata.parameters.get("max_iterations", 3),
+                        "prefetch_depth": self.agent.metadata.parameters.get("prefetch_depth", 2),
+                        "prefetch_test_pages": self.agent.metadata.parameters.get("prefetch_test_pages", True),
+                        # Pass actual changes, not just description
+                        "changes": changes_data,
+                        "change_description": change_description,
+                    }
+                ),
             )
 
             if result.get("created"):
@@ -1516,22 +1517,18 @@ class ChangeImpactAnalysisCoordinator(Agent):
 
     def __init__(
         self,
-        agent_id: str,
-        agent_type: str = "impact_coordinator",
-        max_agents: int = 10
+        *,
+        max_agents: int = 10,
+        **kwargs
     ):
         """Initialize coordinator.
 
         Args:
-            agent_id: Coordinator ID
             max_agents: Maximum concurrent page agents
         """
-        super().__init__(
-            agent_id=agent_id,
-            agent_type=agent_type
-        )
+        super().__init__(**kwargs)
         # Store max_agents in metadata for capability to access
-        self.metadata["max_agents"] = max_agents
+        self.metadata.parameters["max_agents"] = max_agents
         self.coordinator_capability: ChangeImpactAnalysisCoordinatorCapability | None = None
 
     async def initialize(self) -> None:
@@ -1540,7 +1537,7 @@ class ChangeImpactAnalysisCoordinator(Agent):
 
         # Add WorkingSetCapability for cache-aware coordination
         if not self.has_capability(WorkingSetCapability.get_capability_name()):
-            job_quota = self.metadata.get("job_quota", self.metadata.get("max_agents", 10) * 5)
+            job_quota = self.metadata.parameters.get("job_quota", self.metadata.parameters.get("max_agents", 10) * 5)
             working_set_cap = WorkingSetCapability(
                 agent=self,
                 working_set_size=job_quota,

@@ -24,30 +24,30 @@ import logging
 import itertools
 from typing import Any
 
-from ....agents.patterns import (
+from colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
     ConfidenceTracker,
 )
-from ....agents.patterns.capabilities.merge import (
+from colony.agents.patterns.capabilities.merge import (
     MergePolicy,
     MergeContext,
     MergeCapability,
 )
-from ....agents.patterns.capabilities.validation import ValidationResult
-from ....agents.patterns.capabilities.agent_pool import AgentPoolCapability
-from ....agents.patterns.capabilities.result import ResultCapability
-from ....agents.patterns.capabilities.page_graph import PageGraphCapability
-from ....agents.patterns.capabilities.batching import BatchingPolicy
-from ....agents.patterns.capabilities.vcm_analysis import VCMAnalysisCapability
-from ....agents.patterns.actions import action_executor
-from ....agents.patterns.events import event_handler, EventProcessingResult
-from ....agents.blackboard import BlackboardEvent
-from ....agents.base import Agent, AgentCapability, AgentHandle
-from ....agents.models import Action, PolicyREPL, AgentResourceRequirements
-from ....agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
-from ....agents.patterns.games.coalition_formation import find_optimal_coalition_structure
-from ....cluster.models import LLMClientRequirements
+from colony.agents.patterns.capabilities.validation import ValidationResult
+from colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
+from colony.agents.patterns.capabilities.result import ResultCapability
+from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
+from colony.agents.patterns.capabilities.batching import BatchingPolicy
+from colony.agents.patterns.capabilities.vcm_analysis import VCMAnalysisCapability
+from colony.agents.patterns.actions import action_executor
+from colony.agents.patterns.events import event_handler, EventProcessingResult
+from colony.agents.blackboard import BlackboardEvent
+from colony.agents.base import Agent, AgentCapability, AgentHandle, AgentMetadata
+from colony.agents.models import Action, PolicyREPL, AgentResourceRequirements
+from colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
+from colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
+from colony.cluster.models import LLMClientRequirements
 
 from .types import (
     IntentCategory,
@@ -1205,7 +1205,7 @@ class IntentCoordinatorCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern="*:result:*")
+    @event_handler(pattern="*:result:*") # TODO: Use more specific pattern to target worker results
     async def handle_worker_result(
         self,
         event: BlackboardEvent,
@@ -1301,7 +1301,7 @@ class IntentCoordinatorCapability(AgentCapability):
             handle = await self._agent_pool_cap.create_agent(
                 agent_type="polymathera.colony.samples.code_analysis.intent.IntentInferenceAgent",
                 bound_pages=[page_id],
-                capability_types=[IntentInferenceCapability],
+                capabilities=[IntentInferenceCapability],
                 requirements=LLMClientRequirements(
                     model_family="llama",  # TODO: Make configurable
                     min_context_window=32000,  # TODO: Make configurable
@@ -1312,7 +1312,9 @@ class IntentCoordinatorCapability(AgentCapability):
                     gpu_cores=0.0,
                     gpu_memory_mb=0
                 ),
-                metadata={"page_id": page_id, "granularity": granularity},
+                metadata=AgentMetadata(
+                    parameters={"page_id": page_id, "granularity": granularity}
+                ),
             )
             self._worker_handles[page_id] = handle
 

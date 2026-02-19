@@ -107,11 +107,11 @@ class GroundingRequest(BaseModel):
 
     @staticmethod
     def get_blackboard_key(requesting_agent_id: str, claim_id: str) -> str:
-        return f"{requesting_agent_id}:grounding_request:{claim_id}:performative:inform",
+        return f"{requesting_agent_id}:grounding_request:{claim_id}:performative:inform"
 
     @staticmethod
     def get_key_pattern() -> str:
-        return f"*:grounding_request:*:performative:inform",
+        return f"*:grounding_request:*:performative:inform"
 
 
 class GroundingResult(BaseModel):

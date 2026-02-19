@@ -427,14 +427,14 @@ class NegotiationGameProtocol(GameProtocolCapability):
         self._received_offers: list[Offer] = []
 
     @override
-    @action_executor(writes=["game_id"], exclude_from_planning=True)
+    @action_executor(exclude_from_planning=True)
     async def start_game(
         self,
-        participants: dict[str, str],
+        participants: dict[str, str],  # agent_id -> role
         initial_data: dict[str, Any],
         game_id: str | None = None,
         config: dict[str, Any] | None = None
-    ) -> str:
+    ) -> GameState:
         """Start negotiation game.
 
         Args:
@@ -444,7 +444,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
             config: Optional configuration
 
         Returns:
-            Game ID
+            GameState
         """
         # Check permissions using base class method
         can_start, reason = self.can_start_game(self.agent.agent_id, participants)
@@ -479,7 +479,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
             "message": f"Negotiation initialized by {state.roles[state.participants[0]]}"
         })
         await self.save_game_state(state, GameEventType.GAME_STARTED.value, move=None)
-        return state.game_id
+        return state
 
     @override
     async def validate_move(
@@ -527,12 +527,12 @@ class NegotiationGameProtocol(GameProtocolCapability):
     async def apply_move(
         self,
         state: GameState,
-        message: ACLMessage
+        move: ACLMessage
     ) -> GameState:
         """Transition state based on message.
 
         Args:
-            message: ACL message from agent
+            move: ACL message from agent
 
         Returns:
             Updated game state
@@ -547,10 +547,10 @@ class NegotiationGameProtocol(GameProtocolCapability):
         # Mapping: OFFER (initial), COUNTER_OFFER, EVALUATE (mediation), AGREE (acceptance), TERMINAL
 
         if phase == GamePhase.OFFER:
-            if message.performative == Performative.PROPOSE:
+            if move.performative == Performative.PROPOSE:
                 # First party makes offer
-                offer = self._extract_offer(message, data)
-                data.current_offers[message.sender] = offer
+                offer = self._extract_offer(move, data)
+                data.current_offers[move.sender] = offer
 
                 # Move to counter-offer phase
                 state.phase = GamePhase.COUNTER_OFFER
@@ -561,10 +561,10 @@ class NegotiationGameProtocol(GameProtocolCapability):
                 })
 
         elif phase == GamePhase.COUNTER_OFFER:
-            if message.performative == Performative.PROPOSE:
+            if move.performative == Performative.PROPOSE:
                 # Agent makes counter-offer
-                offer = self._extract_offer(message, data)
-                data.current_offers[message.sender] = offer
+                offer = self._extract_offer(move, data)
+                data.current_offers[move.sender] = offer
 
                 # Check if all parties have made offers
                 if len(data.current_offers) == len(data.issue.parties):
@@ -586,9 +586,9 @@ class NegotiationGameProtocol(GameProtocolCapability):
                             )
                     # else: stay in counter-offer for another round
 
-            elif message.performative == Performative.ACCEPT:
+            elif move.performative == Performative.ACCEPT:
                 # Agent accepts current offer
-                data.final_agreement = data.current_offers.get(message.in_reply_to)
+                data.final_agreement = data.current_offers.get(move.in_reply_to)
                 state.phase = GamePhase.TERMINAL  # NegotiationPhase.COMPLETE
                 state.outcome = GameOutcome(
                     success=True,
@@ -597,9 +597,9 @@ class NegotiationGameProtocol(GameProtocolCapability):
 
         elif phase == GamePhase.EVALUATE:
             # Mediation phase
-            if message.sender == data.mediator and message.performative == Performative.PROPOSE:
+            if move.sender == data.mediator and move.performative == Performative.PROPOSE:
                 # Mediator proposes solution
-                mediated_offer = self._extract_offer(message, data)
+                mediated_offer = self._extract_offer(move, data)
                 data.current_offers["mediator"] = mediated_offer
 
                 # Move to acceptance
@@ -607,7 +607,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
 
         elif phase == GamePhase.AGREE:
             # Acceptance phase
-            if message.performative == Performative.ACCEPT:
+            if move.performative == Performative.ACCEPT:
                 # Check if all parties accept
                 # For now, simplified: any acceptance completes
                 data.final_agreement = data.current_offers.get("mediator") or list(data.current_offers.values())[0]
@@ -617,7 +617,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
                     result={"agreement": data.final_agreement.model_dump()}
                 )
 
-            elif message.performative == Performative.REJECT:
+            elif move.performative == Performative.REJECT:
                 # Rejection, back to counter-offer
                 state.phase = GamePhase.COUNTER_OFFER  # NegotiationPhase.COUNTER_OFFER
                 data.deadlock_count = 0  # Reset deadlock counter
@@ -628,21 +628,21 @@ class NegotiationGameProtocol(GameProtocolCapability):
 
         return state
 
-    def _extract_offer(self, message: ACLMessage, data: NegotiationGameData) -> Offer:
+    def _extract_offer(self, move: ACLMessage, data: NegotiationGameData) -> Offer:
         """Extract offer from ACL message.
 
         Args:
-            message: ACL message
+            move: ACL message
             data: Current game data
 
         Returns:
             Offer object
         """
-        content = message.content.get("payload", {}) if isinstance(message.content, dict) else {}
+        content = move.content.get("payload", {}) if isinstance(move.content, dict) else {}
 
         return Offer(
-            offer_id=content.get("offer_id", f"offer_{message.message_id}"),
-            proposer=message.sender,
+            offer_id=content.get("offer_id", f"offer_{move.message_id}"),
+            proposer=move.sender,
             terms=content.get("terms", {}),
             utility=content.get("utility", 0.0),
             concessions=content.get("concessions", {}),
@@ -764,7 +764,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
                 summary=f"Negotiation failed after {data.deadlock_count} deadlocks"
             )
 
-    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern())
+    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern()) # TODO: Ensure this pattern correctly captures the game state updates for this protocol (e.g., by game_id)
     async def _populate_game_specific_scope(
         self,
         event: BlackboardEvent,
@@ -936,7 +936,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
     # Event Handler Overrides
     # =========================================================================
 
-    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern())
+    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern())  # TODO: Ensure this pattern correctly captures the game state updates for this protocol (e.g., by game_id)
     async def _get_additional_context(
         self,
         event: BlackboardEvent,

@@ -23,7 +23,7 @@ from ..models import Reflection, Critique
 from ...base import Agent, AgentCapability
 from ..actions import action_executor
 from ..events import event_handler, EventProcessingResult, PROCESSED
-from .. import KeyPatternFilter, BlackboardEvent
+from ...blackboard import KeyPatternFilter, BlackboardEvent
 
 
 logger = logging.getLogger(__name__)

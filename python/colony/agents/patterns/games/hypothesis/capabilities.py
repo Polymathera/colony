@@ -83,11 +83,12 @@ from ..state import (
     LLMReasoningConfig,
 )
 from ..roles import GameRole, HYPOTHESIS_GAME_ROLES
-from .. import Hypothesis
+from ...models import Hypothesis
 from ....patterns.capabilities.validation import ValidationResult, ValidationCapability
 from ....patterns.capabilities.agent_pool import AgentPoolCapability
 from ....models import (
     Action,
+    AgentMetadata,
     PolicyREPL,
 )
 from ...actions.policies import action_executor
@@ -512,7 +513,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
 
             result = await pool.create_agent(
                 agent_type=agent_type,
-                metadata={"game_id": self.game_id, "role": role},
+                metadata=AgentMetadata(parameters={"game_id": self.game_id}, role=role),
                 role=role,
             )
             if result.get("created"):
@@ -524,14 +525,14 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
         return spawned
 
     @override
-    @action_executor(writes=["game_id"], exclude_from_planning=True)
+    @action_executor(exclude_from_planning=True)
     async def start_game(
         self,
         participants: dict[str, str],  # agent_id -> role
         initial_data: dict[str, Any],
         game_id: str | None = None,
         config: dict[str, Any] | None = None
-    ) -> str:
+    ) -> GameState:
         """Start a new hypothesis game.
 
         Args:
@@ -543,7 +544,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
             config: Optional configuration (timeouts, etc.)
 
         Returns:
-            Game ID
+            GameState
         """
         # Check permissions using base class method
         can_start, reason = self.can_start_game(self.agent.agent_id, participants)
@@ -597,7 +598,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
         # Save initial state (emits GAME_STARTED event)
         await self.save_game_state(state, GameEventType.GAME_STARTED.value, move=None)
 
-        return state.game_id
+        return state
 
     @override
     async def validate_move(
@@ -653,13 +654,13 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
     async def apply_move(
         self,
         state: GameState,
-        message: ACLMessage
+        move: ACLMessage
     ) -> GameState:
         """Transition game state based on message.
 
         Args:
             state: Current state
-            message: ACLMessage causing transition
+            move: ACLMessage causing transition
 
         Returns:
             New state
@@ -672,14 +673,14 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
             state.phase = GamePhase.CHALLENGE
 
         elif state.phase == GamePhase.CHALLENGE:
-            if message.performative == Performative.CHALLENGE:
+            if move.performative == Performative.CHALLENGE:
                 # Record challenge
                 challenge = ChallengeRecord(
                     challenge_id=f"challenge_{len(game_data.challenges)}",
-                    skeptic_id=message.sender,
-                    challenged_aspect=message.get_payload().get("challenged_claim", ""),
-                    reason=message.get_payload().get("reason", ""),
-                    counter_evidence=message.get_payload().get("counter_evidence", [])
+                    skeptic_id=move.sender,
+                    challenged_aspect=move.get_payload().get("challenged_claim", ""),
+                    reason=move.get_payload().get("reason", ""),
+                    counter_evidence=move.get_payload().get("counter_evidence", [])
                 )
                 game_data.challenges.append(challenge)
                 state.game_data = game_data.model_dump()
@@ -688,13 +689,13 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
                 # OR move to GROUND if evidence requested
                 # For now, stay in CHALLENGE
 
-            elif message.performative == Performative.ACCEPT:
+            elif move.performative == Performative.ACCEPT:
                 # No challenges, move to ARBITRATE
                 state.phase = GamePhase.ARBITRATE
 
         elif state.phase == GamePhase.GROUND:
             # Grounder provided evidence
-            evidence = message.get_payload().get("evidence", [])
+            evidence = move.get_payload().get("evidence", [])
             game_data.additional_evidence.extend(evidence)
             state.game_data = game_data.model_dump()
 
@@ -703,10 +704,10 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
 
         elif state.phase == GamePhase.DEFEND:
             # Proposer defended or revised
-            if message.performative == Performative.PROPOSE:
+            if move.performative == Performative.PROPOSE:
                 # Hypothesis revised
                 game_data.revision_count += 1
-                revised_data = message.get_payload().get("revised_hypothesis", message.get_payload())
+                revised_data = move.get_payload().get("revised_hypothesis", move.get_payload())
                 revised_hypothesis = Hypothesis(**revised_data) if isinstance(revised_data, dict) else revised_data
                 # Update current hypothesis in the list
                 if game_data.hypotheses and 0 <= game_data.current_hypothesis_index < len(game_data.hypotheses):
@@ -721,9 +722,9 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
             current_hyp = game_data.hypothesis
             hyp_id = current_hyp.hypothesis_id if current_hyp else "unknown"
 
-            if message.performative == Performative.ACCEPT:
+            if move.performative == Performative.ACCEPT:
                 game_data.arbiter_decisions[hyp_id] = "accept"
-                game_data.arbiter_reasoning = message.get_payload().get("reasoning", "")
+                game_data.arbiter_reasoning = move.get_payload().get("reasoning", "")
                 state.game_data = game_data.model_dump()
 
                 # Check if more hypotheses to process
@@ -736,9 +737,9 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
                 else:
                     state.phase = GamePhase.TERMINAL
 
-            elif message.performative == Performative.REJECT:
+            elif move.performative == Performative.REJECT:
                 game_data.arbiter_decisions[hyp_id] = "reject"
-                game_data.arbiter_reasoning = message.get_payload().get("reasoning", "")
+                game_data.arbiter_reasoning = move.get_payload().get("reasoning", "")
                 state.game_data = game_data.model_dump()
 
                 # Check if more hypotheses to process
@@ -750,7 +751,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
                 else:
                     state.phase = GamePhase.TERMINAL
 
-            elif message.performative == Performative.REQUEST:
+            elif move.performative == Performative.REQUEST:
                 # Request more info - back to GROUND or DEFEND
                 state.phase = GamePhase.GROUND
 
@@ -854,7 +855,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
     # Event Handler Overrides
     # =========================================================================
 
-    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern())
+    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern()) # TODO: Make sure this pattern correctly captures all relevant game events for this protocol (e.g., by game_id)
     async def _get_additional_context(
         self,
         event: BlackboardEvent,

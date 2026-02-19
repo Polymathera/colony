@@ -16,9 +16,7 @@ import functools
 from pydantic import BaseModel, Field
 from typing import Any, Callable, TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from ..blackboard.types import BlackboardEvent
-    from ..models import Action, PolicyREPL
+from ..models import Action
 
 
 class EventProcessingResult(BaseModel):
@@ -90,7 +88,12 @@ class EventProcessingResult(BaseModel):
 PROCESSED = EventProcessingResult(context_key="processed")
 
 
-def _resolve_pattern(pattern: str, capability: Any) -> str:
+def _is_callable(obj: Any) -> bool:
+    """Check if an object is callable, including built-in callables that may not be detected by callable()"""
+    return callable(obj) or hasattr(obj, "__call__")
+
+
+def _resolve_pattern(pattern: str | Callable, capability: Any) -> str:
     """Resolve pattern template variables from capability instance.
 
     Supports:
@@ -98,13 +101,16 @@ def _resolve_pattern(pattern: str, capability: Any) -> str:
     - {agent_id} - replaced with capability.agent.agent_id
 
     Args:
-        pattern: Pattern template string
+        pattern: Pattern template string or callable that returns a pattern string. If callable, it will be called with the capability instance to get the pattern.
         capability: Capability instance (self)
 
     Returns:
         Resolved pattern with variables substituted
     """
-    resolved = pattern
+    if _is_callable(pattern):
+        resolved = pattern(capability)
+    else:
+        resolved = pattern
 
     # Resolve {scope_id}
     if "{scope_id}" in resolved:

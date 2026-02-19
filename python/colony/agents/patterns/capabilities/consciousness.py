@@ -4,12 +4,9 @@ Provides:
 - SystemDocumentation for system-level documentation storage
 - ConsciousnessCapability for agent self-awareness
 - AgentSelfConcept integration
-- Conscious experience tracking
 - Performance monitoring
 
 This module focuses on self-awareness (self-concept, system docs, metrics).
-
-This module adapts the existing consciousness.py to work with the new architecture.
 """
 
 from __future__ import annotations
@@ -24,7 +21,7 @@ from pydantic import Field
 
 from ....distributed import get_polymathera
 from ....distributed.state_management import SharedState, StateManager
-from .consciousness_stream import AgentSelfConcept, Consciousness
+from .self_concept import AgentSelfConcept
 from ...base import AgentCapability, CapabilityResultFuture
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ..actions.policies import action_executor
@@ -152,9 +149,8 @@ class ConsciousnessCapability(AgentCapability):
         self._tenant_id = tenant_id
         self._session_id = session_id
 
-        # Cached self-concept and consciousness (loaded lazily)
+        # Cached self-concept (loaded lazily)
         self._self_concept: AgentSelfConcept | None = None
-        self._consciousness: Consciousness | None = None
 
         # StateManager for system documentation (created lazily)
         self._state_managers: dict[str, StateManager[SystemDocumentation]] = {}
@@ -166,11 +162,11 @@ class ConsciousnessCapability(AgentCapability):
         """
         # Try to load existing self-concept
         try:
-            self._self_concept = await self._load_self_concept(self.scope_id)
+            self._self_concept = await self._load_self_concept()
             if self._self_concept:
-                logger.info(f"Loaded self-concept for agent {self.scope_id}")
+                logger.info(f"Loaded self-concept for agent {self.agent.agent_id}")
         except Exception as e:
-            logger.debug(f"No existing self-concept for {self.scope_id}: {e}")
+            logger.debug(f"No existing self-concept for agent {self.agent.agent_id}: {e}")
 
     @property
     def tenant_id(self) -> str:
@@ -209,17 +205,32 @@ class ConsciousnessCapability(AgentCapability):
 
         return self._state_managers[state_key]
 
-    async def _load_self_concept(self, agent_id: str) -> AgentSelfConcept | None:
+    async def _load_self_concept(self) -> AgentSelfConcept | None:
         """Load agent's self-concept from storage."""
         try:
-            return await AgentSelfConcept.download(agent_id)
+            storage = await get_polymathera().get_storage()
+            d = await storage.load_json(
+                metadata={
+                    "type": "self_concept",
+                    "agent_id": self.agent.agent_id
+                }
+            )
+            d.update({"agent_id": self.agent.agent_id})
+            return AgentSelfConcept.from_dict(d)
         except Exception as e:
-            logger.warning(f"Could not load self-concept for agent {agent_id}: {e}")
+            logger.warning(f"Could not load self-concept for agent {self.agent.agent_id}: {e}")
             return None
 
     async def _save_self_concept(self, self_concept: AgentSelfConcept) -> None:
         """Save agent's self-concept to storage."""
-        await self_concept.upload()
+        storage = await get_polymathera().get_storage()
+        await storage.save_json(
+            self_concept.to_dict(),
+            metadata={
+                "type": "self_concept",
+                "agent_id": self.agent.agent_id
+            },
+        )
         logger.info(f"Saved self-concept for agent {self_concept.agent_id}")
 
     async def _create_default_self_concept(
@@ -244,7 +255,7 @@ class ConsciousnessCapability(AgentCapability):
             goals=metadata.get("goals", []),
         )
 
-        await self_concept.upload()
+        await self._save_self_concept(self_concept)
         logger.info(f"Created default self-concept for agent {agent_id}")
         return self_concept
 
@@ -265,30 +276,6 @@ class ConsciousnessCapability(AgentCapability):
             "supervisor": "a supervisor agent coordinating and managing other agents",
         }
         return _DEFAULT_AGENT_ROLES.get(agent_type, "an autonomous computational agent")
-
-    async def _get_consciousness_stream(self, agent_id: str) -> Consciousness | None:
-        """Get agent's consciousness stream from storage.
-
-        Args:
-            agent_id: Agent identifier
-
-        Returns:
-            Consciousness if exists, None otherwise
-        """
-        try:
-            return await Consciousness.download(agent_id)
-        except Exception as e:
-            logger.warning(f"Could not load consciousness for agent {agent_id}: {e}")
-            return None
-
-    async def _save_consciousness_stream(self, consciousness: Consciousness) -> None:
-        """Save agent's consciousness stream to storage.
-
-        Args:
-            consciousness: Consciousness to save
-        """
-        await consciousness.upload()
-        logger.info(f"Saved consciousness stream for agent {consciousness.agent_id}")
 
     # =========================================================================
     # AgentCapability Abstract Method Implementations
@@ -394,10 +381,8 @@ class ConsciousnessCapability(AgentCapability):
         """
         # Store metrics in agent metadata if attached
         if self._agent is not None:
-            if "performance_metrics" not in self._agent.metadata:
-                self._agent.metadata["performance_metrics"] = {}
-            self._agent.metadata["performance_metrics"].update(metrics)
-            self._agent.metadata["performance_last_updated"] = time.time()
+            self._agent.metadata.performance_metrics.update(metrics)
+            self._agent.metadata.performance_last_updated = time.time()
 
         # Write metrics to blackboard for event streaming
         metrics_entry = {
@@ -424,7 +409,7 @@ class ConsciousnessCapability(AgentCapability):
             AgentSelfConcept if exists, None otherwise
         """
         if self._self_concept is None:
-            self._self_concept = await self._load_self_concept(self.scope_id)
+            self._self_concept = await self._load_self_concept()
         return self._self_concept
 
     @action_executor(action_key="consciousness_update_self_concept")
@@ -442,7 +427,7 @@ class ConsciousnessCapability(AgentCapability):
         """
         # Load current self-concept or create default
         if self._self_concept is None:
-            self._self_concept = await self._load_self_concept(self.scope_id)
+            self._self_concept = await self._load_self_concept()
 
         if self._self_concept is None:
             # Create default self-concept
@@ -478,26 +463,4 @@ class ConsciousnessCapability(AgentCapability):
         )
 
         return self._self_concept
-
-    @action_executor(action_key="consciousness_get_stream")
-    async def get_consciousness_stream(self) -> Consciousness | None:
-        """Get the agent's consciousness stream.
-
-        Returns:
-            Consciousness if exists, None otherwise
-        """
-        if self._consciousness is None:
-            self._consciousness = await self._load_consciousness_stream(self.scope_id)
-        return self._consciousness
-
-    @action_executor(action_key="consciousness_save_stream")
-    async def save_consciousness_stream(self) -> None:
-        """Save the agent's consciousness stream to storage."""
-        if self._consciousness is None:
-            logger.warning(
-                f"No consciousness stream to save for agent {self.scope_id}"
-            )
-            return
-
-        await self._save_consciousness_stream(self._consciousness)
 

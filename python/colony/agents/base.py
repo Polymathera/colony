@@ -2444,11 +2444,8 @@ class Agent(BaseModel):
 
         try:
             # Store metrics in metadata
-            if "performance_metrics" not in self.metadata:
-                self.metadata["performance_metrics"] = {}
-
-            self.metadata["performance_metrics"].update(metrics)
-            self.metadata["performance_last_updated"] = time.time()
+            self.metadata.performance_metrics.update(metrics)
+            self.metadata.performance_last_updated = time.time()
 
         except Exception as e:
             raise

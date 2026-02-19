@@ -24,12 +24,14 @@ import itertools
 import time
 from enum import Enum
 from typing import Any
+from overrides import override
 
 from pydantic import BaseModel, Field
 
 from .acl import ACLMessage, Performative
 from ..capabilities.reputation import AgentReputation, ReputationTracker
 from .state import GamePhase, GameProtocolCapability, GameState, GameOutcome, GameEventType
+from ..actions.policies import action_executor
 
 
 class CoalitionPhase(str, Enum):
@@ -263,12 +265,15 @@ class CoalitionFormationProtocol(GameProtocolCapability[CoalitionFormationData, 
         """
         super().__init__(agent, game_type="coalition_formation")
 
+    @override
+    @action_executor(exclude_from_planning=True)
     async def start_game(
         self,
-        participants: dict[str, str],
+        participants: dict[str, str],  # agent_id -> role
         initial_data: dict[str, Any],
+        game_id: str | None = None,
         config: dict[str, Any] | None = None
-    ) -> str:
+    ) -> GameState:
         """Start coalition formation game.
 
         Args:
@@ -305,12 +310,13 @@ class CoalitionFormationProtocol(GameProtocolCapability[CoalitionFormationData, 
         )
 
         await self.save_game_state(state, GameEventType.GAME_STARTED.value, move=None)
-        return state.game_id
+        return state
 
+    @override
     async def validate_move(
         self,
         agent_id: str,
-        message: ACLMessage,
+        move: ACLMessage,
         state: GameState
     ) -> tuple[bool, str]:
         """Validate move legality."""
@@ -318,21 +324,22 @@ class CoalitionFormationProtocol(GameProtocolCapability[CoalitionFormationData, 
             return False, "Agent not a participant"
 
         if state.phase == GamePhase.PROPOSE:
-            if message.performative not in [Performative.PROPOSE, Performative.INFORM]:
+            if move.performative not in [Performative.PROPOSE, Performative.INFORM]:
                 return False, "PROPOSE phase requires PROPOSE or INFORM"
 
         return True, "Valid move"
 
+    @override
     async def apply_move(
         self,
         state: GameState,
-        message: ACLMessage
+        move: ACLMessage
     ) -> GameState:
-        """Transition state based on message."""
+        """Transition state based on move."""
         data = CoalitionFormationData(**state.game_data)
 
-        if message.performative == Performative.PROPOSE:
-            proposal = self._extract_proposal(message, data)
+        if move.performative == Performative.PROPOSE:
+            proposal = self._extract_proposal(move, data)
             data.proposals.append(proposal)
 
             # Check if we have enough proposals
@@ -342,23 +349,25 @@ class CoalitionFormationProtocol(GameProtocolCapability[CoalitionFormationData, 
                     data.current_coalitions = best_proposal.coalitions
                     state.phase = GamePhase.TERMINAL
 
-        elif message.performative == Performative.INFORM:
+        elif move.performative == Performative.INFORM:
             # Vote on proposals
-            content = message.content.get("payload", {}) if isinstance(message.content, dict) else {}
+            content = move.content.get("payload", {}) if isinstance(move.content, dict) else {}
             proposal_id = content.get("proposal_id")
             vote = content.get("vote", False)
 
             for proposal in data.proposals:
                 if proposal.proposal_id == proposal_id:
-                    proposal.votes[message.sender] = vote
+                    proposal.votes[move.sender] = vote
 
         state.game_data = data.model_dump()
         return state
 
+    @override
     async def is_terminal(self, state: GameState) -> bool:
         """Check if terminal."""
         return state.phase == GamePhase.TERMINAL
 
+    @override
     async def compute_outcome(self, state: GameState) -> GameOutcome:
         """Compute outcome."""
         data = CoalitionFormationData(**state.game_data)

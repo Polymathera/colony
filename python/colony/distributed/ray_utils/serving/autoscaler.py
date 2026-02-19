@@ -103,6 +103,13 @@ class DeploymentAutoscaler:
         # Only consider healthy replicas for load calculation
         healthy_replicas = [r for r in replicas if r.is_healthy]
         if not healthy_replicas:
+            # If we have fewer total replicas than minimum, trigger recovery.
+            if current_replica_count < self.config.min_replicas:
+                logger.warning(
+                    f"No healthy replicas for {self.deployment_name}, "
+                    f"recovering to min_replicas={self.config.min_replicas}"
+                )
+                return self.config.min_replicas
             logger.warning(f"No healthy replicas for {self.deployment_name}")
             return None
 

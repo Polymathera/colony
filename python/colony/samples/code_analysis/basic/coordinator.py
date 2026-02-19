@@ -14,32 +14,33 @@ from abc import ABC, abstractmethod
 from overrides import override
 import time
 
-from ....agents.base import Agent, AgentState, AgentCapability
-from ....agents.models import (
+from colony.agents.base import Agent, AgentState, AgentCapability
+from colony.agents.models import (
     Action,
     ActionResult,
+    AgentMetadata,
     AgentSpawnSpec,
     AgentResourceRequirements,
     AgentSuspensionState,
     RunContext,
     PolicyREPL,
 )
-from ....system import get_agent_system
-from ....vcm.sources import PageCluster
-from ....agents.patterns.capabilities.critique import (
+from colony.system import get_agent_system
+from colony.vcm.sources import PageCluster
+from colony.agents.patterns.capabilities.critique import (
     CriticCapability,
     CritiqueContext,
     OutputRelationship,
 )
-from ....agents.blackboard import KeyPatternFilter, BlackboardEvent
-from ....agents.patterns.attention import HierarchicalAttentionRouting
-from ....agents.patterns.actions.policies import action_executor
-from ....agents.patterns.events import event_handler, EventProcessingResult
-from ....agents.patterns.capabilities.working_set import WorkingSetCapability
-from ....agents.patterns.capabilities.agent_pool import AgentPoolCapability
-from ....agents.patterns.capabilities.result import ResultCapability
-from ....agents.patterns.capabilities.page_graph import PageGraphCapability
-from ....agents.patterns.capabilities.batching import (
+from colony.agents.blackboard import KeyPatternFilter, BlackboardEvent
+from colony.agents.patterns.attention import HierarchicalAttentionRouting
+from colony.agents.patterns.actions.policies import action_executor
+from colony.agents.patterns.events import event_handler, EventProcessingResult
+from colony.agents.patterns.capabilities.working_set import WorkingSetCapability
+from colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
+from colony.agents.patterns.capabilities.result import ResultCapability
+from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
+from colony.agents.patterns.capabilities.batching import (
     BatchingPolicy,
     ClusteringBatchPolicy,
     HybridBatchPolicy,
@@ -81,7 +82,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         """Spawn ClusterAnalyzer agents (strategy-specific)."""
         raise NotImplementedError
 
-    @event_handler(pattern="*:cluster_analysis_complete")
+    @event_handler(pattern="*:cluster_analysis_complete")  # TODO: Use a more specific pattern to avoid conflicts (e.g., include scope_id or use a structured event type)
     async def on_child_complete(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult | None:
         agent_id = event.key.split(":")[0]
         role = None
@@ -154,7 +155,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
             )
         return None
 
-    @event_handler(pattern="error:*")
+    @event_handler(pattern="error:*") # TODO: Use a more specific pattern to avoid conflicts (e.g., include scope_id or use a structured event type)
     async def on_child_error(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult | None:
         agent_id = event.key.split(":")[1]
         role = None
@@ -667,14 +668,16 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
                 agent_type="polymathera.colony.samples.code_analysis.ClusterAnalyzerV2",
                 capabilities=["ClusterAnalyzerCapabilityV2"],
                 bound_pages=cluster.page_ids,
-                metadata={
-                    "parent_id": self.agent.agent_id,
-                    "cluster": cluster.model_dump(),
-                    "query_router_type": "cache_aware",
-                    "cache_boost_factor": self.agent.metadata.get("cache_boost_factor", 1.5),
-                    "session_id": self.agent.metadata.get("session_id"),
-                    "run_id": self.agent.metadata.get("run_id"),
-                },
+                metadata=AgentMetadata(
+                    session_id=self.agent.metadata.session_id,
+                    run_id=self.agent.metadata.run_id,
+                    parent_agent_id=self.agent.agent_id,
+                    parameters={
+                        "cluster": cluster.model_dump(),
+                        "query_router_type": "cache_aware",
+                        "cache_boost_factor": self.agent.metadata.get("cache_boost_factor", 1.5),
+                    }
+                ),
                 role=role,
             )
 

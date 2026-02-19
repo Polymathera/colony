@@ -48,26 +48,25 @@ import uuid
 from typing import Any
 from overrides import override
 
-from ....agents.patterns import (
+from colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
     RelationshipGraph,
 )
-
-from ....agents.patterns.capabilities.critique import CriticCapability
-from ....agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
-from ....agents.base import Agent, AgentCapability
-from ....agents.patterns.actions.policies import action_executor
-from ....agents.patterns.capabilities.reflection import ReflectionCapability
-from ....agents.patterns.events import event_handler, EventProcessingResult
-
-from ....agents.models import (
+from colony.agents.patterns.capabilities.critique import CriticCapability
+from colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
+from colony.agents.base import Agent, AgentCapability
+from colony.agents.patterns.actions.policies import action_executor
+from colony.agents.patterns.capabilities.reflection import ReflectionCapability
+from colony.agents.patterns.events import event_handler, EventProcessingResult
+from colony.agents.models import (
     ActionResult,
     ActionType,
     PolicyREPL,
     AgentSuspensionState,
 )
-from ....agents.patterns.games.hypothesis.agents import HypothesisGameAgent
+from colony.agents.patterns.games.hypothesis.agents import HypothesisGameAgent
+
 from .types import (
     CodeChange,
     ChangeType,
@@ -848,7 +847,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
             }
         )
 
-    @action_executor(action_key=ActionType.QUERY)
+    @action_executor(action_key="execute_query")
     async def execute_query(
         self,
         query: str,
@@ -876,7 +875,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
             output={"response": response.generated_text}
         )
 
-    @action_executor(action_key=ActionType.CUSTOM)
+    @action_executor(action_key="execute_custom")
     async def execute_custom(
         self,
         custom_type: str | None = None,
@@ -971,7 +970,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
     # EVENT HANDLERS
     # ============================================================================
 
-    @event_handler(pattern="*:dependency_query")
+    @event_handler(pattern="*:dependency_query") # TODO: Use a more specific pattern or namespace for impact analysis events
     async def on_dependency_query(
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:

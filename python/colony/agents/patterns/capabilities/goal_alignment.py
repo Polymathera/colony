@@ -323,7 +323,9 @@ class ObjectiveGuardCapability(AgentCapability):
     # Capability-Specific Request Methods
     # -------------------------------------------------------------------------
 
-    @event_handler(pattern="{scope_id}:" + GoalAlignmentRequest.get_key_pattern())
+    @event_handler(
+        pattern=lambda self: f"{self.scope_id}:{GoalAlignmentRequest.get_key_pattern(self.scope_id)}"
+    )
     async def handle_goal_alignment_request(
         self,
         event: BlackboardEvent,
@@ -342,7 +344,9 @@ class ObjectiveGuardCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern="{scope_id}:" + JointGoalRegistration.get_key_pattern())
+    @event_handler(
+        pattern=lambda self: f"{self.scope_id}:{JointGoalRegistration.get_key_pattern(self.scope_id)}"
+    )
     async def handle_joint_goal_registration(
         self,
         event: BlackboardEvent,

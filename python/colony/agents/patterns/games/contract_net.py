@@ -154,6 +154,17 @@ class ContractNetGameRole(str, Enum):
     OBSERVER = "observer"  # Must be present in every game to allow passive observation
 
 
+class ContractGameData(BaseModel):
+    """Game data structure for contract net."""
+
+    task: dict[str, Any]
+    bids: list[TaskBid] = []
+    award: ContractAward | None = None
+    execution_result: dict[str, Any] | None = None
+    validation_result: dict[str, Any] | None = None
+
+
+
 class ContractNetGameCapability(GameProtocolCapability[ContractGameData, ContractNetGameRole]):
     """Protocol for contract net task allocation.
 
@@ -245,12 +256,14 @@ class ContractNetGameCapability(GameProtocolCapability[ContractGameData, Contrac
     @override
     async def validate_move(
         self,
-        state: GameState,
-        move: ACLMessage
+        agent_id: str,
+        move: ACLMessage,
+        state: GameState
     ) -> tuple[bool, str]:
         """Validate move legality.
 
         Args:
+            agent_id: Agent making the move
             state: Current game state
             move: Move to validate
 
@@ -373,6 +386,7 @@ class ContractNetGameCapability(GameProtocolCapability[ContractGameData, Contrac
 
         return state
 
+    @override
     async def is_terminal(self, state: GameState) -> bool:
         """Check if terminal.
 
@@ -384,6 +398,7 @@ class ContractNetGameCapability(GameProtocolCapability[ContractGameData, Contrac
         """
         return state.phase == GamePhase.TERMINAL
 
+    @override
     async def compute_outcome(self, state: GameState) -> GameOutcome:
         """Compute game outcome.
 

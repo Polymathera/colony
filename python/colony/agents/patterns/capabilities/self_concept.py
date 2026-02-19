@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 from pydantic import BaseModel, Field, PrivateAttr
-
-from ....distributed import get_polymathera
-from ..schema.goals import ExplorationGoal
-from .types import ConsciousExperience, ActionOutcome, ReasoningStep
 
 
 class Persona(BaseModel):
@@ -233,66 +228,6 @@ class AgentSelfConcept(BaseModel):
     _include_history: bool = PrivateAttr(default=True)
     _include_metrics: bool = PrivateAttr(default=True)
 
-    async def upload(self):
-        storage = await get_polymathera().get_storage()
-        await storage.save_json(
-            self.to_dict(),
-            metadata={
-                "type": "self_concept",
-                "agent_id": self.agent_id
-            },
-        )
-
-    @staticmethod
-    async def download(agent_id: str):
-        storage = await get_polymathera().get_storage()
-        d = await storage.load_json(
-            metadata={
-                "type": "self_concept",
-                "agent_id": agent_id
-            }
-        )
-        d.update({"agent_id": agent_id})
-        return AgentSelfConcept.from_dict(d)
-
-    async def get_embedding(self, field: str) -> Any:
-        """Get cached embedding for a field"""
-        cache_key = f"agents:self-concept:embedding:{field}"
-        cache = await get_polymathera().get_shared_simple_cache()
-        return cache.get(cache_key)
-
-    async def clear_embedding_cache(self, field: str | None = None):
-        """Clear embedding cache for a specific field or all fields"""
-        cache = await get_polymathera().get_shared_simple_cache()
-        if field:
-            cache_key = f"self-concept:embedding:{field}"
-            cache.delete(cache_key)
-        else:
-            cache_keys = cache.keys("self-concept:embedding:*") # TODO: Fix
-            for key in cache_keys:
-                cache.delete(key)
-
-    def to_dict(self):
-        """Exclude private cache attributes"""
-        return self.model_dump(exclude={})
-
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> AgentSelfConcept:
-        """Initialize with empty cache"""
-        return AgentSelfConcept(**d)
-
-    def get_description(self):
-        return f"Name: {self.name}\nRole: {self.role}\nGoals: {self.goals}\nBeliefs: {self.beliefs}"
-
-    def update(self, **kwargs: Any):
-        """Update with cache invalidation"""
-        success = super().update(**kwargs)
-        if success:
-            # Invalidate cache for updated fields
-            for field in kwargs:
-                self.clear_embedding_cache(field)
-        return success
-
     def update(self, **kwargs: Any):
         """
         Update the self-concept while enforcing evolution constraints.
@@ -365,10 +300,12 @@ class AgentSelfConcept(BaseModel):
         )
 
     def to_dict(self):
-        return self.model_dump()
+        """Exclude private cache attributes"""
+        return self.model_dump(exclude={})
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> AgentSelfConcept:
+        """Initialize with empty cache"""
         return AgentSelfConcept(**d)
 
     def to_json(self):
@@ -422,9 +359,9 @@ class AgentSelfConcept(BaseModel):
 
         # Attempt merge of non-conflicting fields
         updates = {}
-        for field in self.model_fields:
-            if getattr(self, field) != getattr(other, field):
-                updates[field] = getattr(other, field)
+        for field_name, field in AgentSelfConcept.model_fields.items():
+            if getattr(self, field_name) != getattr(other, field_name):
+                updates[field_name] = getattr(other, field_name)
 
         # Apply updates through normal constraint checking
         if updates:
@@ -438,233 +375,3 @@ class AgentSelfConcept(BaseModel):
 
 AgentProfile = AgentSelfConcept
 
-
-class Consciousness(BaseModel):
-    """
-    A model of consciousness as the cognitive history of the agent, including all of the
-    thoughts, reasoning, and plans that the agent has tried and the outcomes of those thoughts and plans.
-    It contains both positive and negative experiences that can be used to improve the
-    agent's decision-making processes through both online and offline learning and reflection.
-    TODO: Use the stream of consciousness both for online and offline learning.
-    """
-    agent_id: str = Field(
-        description="The ID of the agent that this consciousness belongs to.",
-    )
-    stream_of_consciousness: list[ConsciousExperience] = PrivateAttr(
-        default_factory=list,
-        description="""
-          A partially ordered list of conscious experiences that the agent recently went through.
-          This stream is intentionally represented explicitly as a list of strings to allow for
-          recursive self-reflection (i.e., first-order and higher-order reflection) as well as
-          inspection and analysis by humans. Once experiences of first-order reflection are
-          part of the stream, they can be reflected on in the same way that other experiences are,
-          and so on recursively, giving rise to an infinite ladder or regress of reflective thought.
-          This is the stage where the agent projects its percepts, thoughts, and feelings and
-          reasons about them.
-        """,
-    )
-    max_stream_length: int = Field(
-        description="The maximum length of the stream of consciousness.", default=100
-    )
-
-    def append(self, experience: ConsciousExperience):
-        """
-        Append an experience to the stream of consciousness.
-        """
-        if len(self.stream_of_consciousness) >= self.max_stream_length:
-            experience_to_retire = self.select_experience_to_retire() # TODO: Implement this method
-            self.stream_of_consciousness.remove(experience_to_retire)
-            self.store_in_memory(experience_to_retire) # TODO: Implement this method
-        self.stream_of_consciousness.append(experience)
-
-    def __getitem__(
-        self, index: int | slice
-    ) -> ConsciousExperience | list[ConsciousExperience]:
-        """
-        Access consciousness stream by index or slice.
-        Returns a single ConsciousExperience for integer index or a list for slice.
-        """
-        return self.stream_of_consciousness[index]
-
-    def __len__(self) -> int:
-        return len(self.stream_of_consciousness)
-
-    def __iter__(self) -> Iterator[ConsciousExperience]:
-        return iter(self.stream_of_consciousness)
-
-    def __reversed__(self) -> Iterator[ConsciousExperience]:
-        return reversed(self.stream_of_consciousness)
-
-    def __contains__(self, experience: ConsciousExperience) -> bool:
-        return experience in self.stream_of_consciousness
-
-    def __getitem__(self, index: int) -> ConsciousExperience:
-        return self.stream_of_consciousness[index]
-
-    def __setitem__(self, index: int, experience: ConsciousExperience):
-        self.stream_of_consciousness[index] = experience
-
-    def __delitem__(self, index: int):
-        del self.stream_of_consciousness[index]
-
-    def empty(self) -> bool:
-        return len(self.stream_of_consciousness) == 0
-
-    def __bool__(self) -> bool:
-        """
-        Allow consciousness to be used in boolean expressions.
-        Returns True if there are any experiences in the stream of consciousness,
-        False otherwise.
-        """
-        return not self.empty()
-
-    def filter_stream_of_consciousness(
-        self, filter_fn: Callable[[ConsciousExperience], bool]
-    ) -> list[ConsciousExperience]:
-        """
-        Filter the stream of consciousness to include only experiences that satisfy the given condition.
-        """
-        return [
-            experience
-            for experience in self.stream_of_consciousness
-            if filter_fn(experience)
-        ]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "stream_of_consciousness": [
-                experience.to_dict() for experience in self.stream_of_consciousness
-            ],
-            "max_stream_length": self.max_stream_length,
-        }
-
-    async def upload(self):
-        storage = await get_polymathera().get_storage()
-        await storage.save_json(
-            self.to_dict(),
-            metadata={
-                "type": "consciousness",
-                "agent_id": self.agent_id
-            },
-        )
-
-    @staticmethod
-    async def download(agent_id: str, max_stream_length: int = 100) -> Consciousness:
-        storage = await get_polymathera().get_storage()
-        d = await storage.load_json(
-            metadata={
-                "type": "consciousness",
-                "agent_id": agent_id
-            }
-        )
-        d.update({"agent_id": agent_id, "max_stream_length": max_stream_length})
-        experience_map = {
-            experience["id"]: ConsciousExperience.from_dict(experience)
-            for experience in d["stream_of_consciousness"]
-        }
-        for experience_dict in d["stream_of_consciousness"]:
-            experience = experience_map[experience_dict["id"]]
-            experience.rewire(experience_dict, experience_map)
-        stream_of_consciousness = list(experience_map.values())
-        return Consciousness(
-            stream_of_consciousness=stream_of_consciousness,
-            max_stream_length=d.get("max_stream_length", max_stream_length),
-        )
-
-    def __init__(self, agent_id: str):
-        self.agent_id = agent_id
-        self.current_experience: ConsciousExperience | None = None
-        self.experience_history: list[ConsciousExperience] = []
-
-    async def start_experience(self, goals: list[ExplorationGoal], memories: list[KnowledgeItem]) -> ConsciousExperience:
-        """Begin a new conscious experience"""
-        # Create new experience
-        self.current_experience = ConsciousExperience(
-            agent_id=self.agent_id,
-            goals=goals,
-            retrieved_memories=memories,
-            predecessors=[
-                exp.id for exp in self.experience_history[-3:] # TODO: Handle dependencies better
-            ],  # Link to recent history
-        )
-
-        return self.current_experience
-
-    async def update_experience(
-        self,
-        reasoning: ReasoningStep | None = None,
-        action: Action | None = None,
-        observations: dict[str, Any] | None = None,
-    ):
-        """Update current experience with new information"""
-        if reasoning:
-            self.current_experience.reasoning.append(reasoning)
-        if action:
-            self.current_experience.action = action
-        if observations:
-            self.current_experience.observations = observations
-
-    async def complete_experience(self, outcome: ActionOutcome):
-        """Complete current experience and process it into memory"""
-        self.current_experience.outcome = outcome
-
-        # Generate memories from experience
-        memories = await self._generate_memories(self.current_experience)
-        self.current_experience.generated_memories = memories
-
-        # Add to experience history
-        self.experience_history.append(self.current_experience)
-
-        # Process memories through layers
-        knowledge_system = await get_polymathera().get_knowledge_system()
-        await knowledge_system.process_input(memories)
-
-        # Clear current experience
-        self.current_experience = None
-
-    async def _generate_memories(
-        self, experience: ConsciousExperience
-    ) -> list[KnowledgeItem]:
-        """Generate different types of memories from an experience"""
-        memories = []
-
-        # Episodic memory of the experience itself
-        memories.append(
-            KnowledgeItem(
-                content=experience,
-                metadata={
-                    "type": "episodic",
-                    "abstraction_level": 0,  # Concrete experience
-                    "agent_id": self.agent_id,
-                },
-            )
-        )
-
-        # Procedural memory from successful actions
-        if experience.outcome and experience.outcome.success:
-            memories.append(
-                KnowledgeItem(
-                    content={
-                        "goal": experience.goal,
-                        "action": experience.action,
-                        "conditions": experience.observations,
-                        "outcome": experience.outcome,
-                    },
-                    metadata={"type": "procedural", "abstraction_level": 1},
-                )
-            )
-
-        # Immediate insights/patterns
-        if experience.reasoning:
-            memories.append(
-                KnowledgeItem(
-                    content={
-                        "context": experience.observations,
-                        "insights": [step.conclusion for step in experience.reasoning],
-                        "confidence": experience.confidence,
-                    },
-                    metadata={"type": "semantic", "abstraction_level": 2},
-                )
-            )
-
-        return memories
