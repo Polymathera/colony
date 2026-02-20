@@ -24,10 +24,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, TYPE_CHECKING
-
+from overrides import override
 import networkx as nx
 
 from ...base import AgentCapability
+from ...models import AgentSuspensionState
 from ..actions.policies import action_executor
 
 if TYPE_CHECKING:
@@ -83,6 +84,18 @@ class PageGraphCapability(AgentCapability):
                 group_id=self.agent.group_id,
                 graph_data=self._page_graph
             )
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for PageGraphCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for PageGraphCapability")
+        pass
 
     # === Action Executors ===
 

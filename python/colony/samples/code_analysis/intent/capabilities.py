@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import itertools
 from typing import Any
+from overrides import override
 
 from colony.agents.patterns import (
     AnalysisScope,
@@ -44,7 +45,7 @@ from colony.agents.patterns.actions import action_executor
 from colony.agents.patterns.events import event_handler, EventProcessingResult
 from colony.agents.blackboard import BlackboardEvent
 from colony.agents.base import Agent, AgentCapability, AgentHandle, AgentMetadata
-from colony.agents.models import Action, PolicyREPL, AgentResourceRequirements
+from colony.agents.models import Action, PolicyREPL, AgentResourceRequirements, AgentSuspensionState
 from colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
 from colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
 from colony.cluster.models import LLMClientRequirements
@@ -120,6 +121,18 @@ class IntentInferenceCapability(AgentCapability):
     def _get_merge_capability(self) -> MergeCapability | None:
         """Get MergeCapability from agent dynamically."""
         return self.agent.get_capability_by_type(MergeCapability)
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for IntentInferenceCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for IntentInferenceCapability")
+        pass
 
     @event_handler(pattern="{scope_id}:request:*")
     async def handle_analysis_request(
@@ -1175,6 +1188,18 @@ class IntentCoordinatorCapability(AgentCapability):
     def _get_merge_capability(self) -> MergeCapability | None:
         """Get MergeCapability from agent dynamically."""
         return self.agent.get_capability_by_type(MergeCapability)
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for IntentCoordinatorCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for IntentCoordinatorCapability")
+        pass
 
     @event_handler(pattern="{scope_id}:request:*")
     async def handle_analysis_request(

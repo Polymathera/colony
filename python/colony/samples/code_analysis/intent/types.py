@@ -25,7 +25,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from ....agents.patterns import ScopeAwareResult
+from colony.agents.patterns import ScopeAwareResult
 
 logger = logging.getLogger(__name__)
 

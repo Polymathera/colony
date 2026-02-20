@@ -15,12 +15,16 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Generic, TypeVar
-
+from overrides import override
 from pydantic import BaseModel, Field
 
 from ..scope import ScopeAwareResult
 from ...base import Agent, AgentCapability
+from ...models import AgentSuspensionState
+from ....utils import setup_logger
 from ..actions import action_executor
+
+logger = setup_logger(__name__)
 
 
 T = TypeVar('T')
@@ -643,6 +647,18 @@ class RefinementCapability(AgentCapability):
                 f"Configure with a RefinementPolicy implementation."
             )
         return self.refinement_policy
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for RefinementCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for RefinementCapability")
+        pass
 
     @action_executor()
     async def should_refine(

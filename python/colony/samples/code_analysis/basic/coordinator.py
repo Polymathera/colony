@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 import logging
 from abc import ABC, abstractmethod
 from overrides import override
+from pydantic import BaseModel, Field
 import time
 
 from colony.agents.base import Agent, AgentState, AgentCapability
@@ -111,7 +112,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         )
 
         # Write critique to blackboard for child to see
-        blackboard = await self.get_blackboard(scope="shared", scope_id=self.scope_id)
+        blackboard = await self.get_blackboard()
         await blackboard.write(
             f"{agent_id}:critique",
             critique.model_dump(),
@@ -180,7 +181,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         retry_count = error_data.get("context", {}).get("retry_count", 0)
         if retry_count < 1:
             logger.info(f"Retrying child {agent_id}")
-            blackboard = await self.get_blackboard(scope="shared", scope_id=self.scope_id)
+            blackboard = await self.get_blackboard()
             await blackboard.delete(f"error:{agent_id}")
 
             # TODO: In future, use LLM inference to decide best retry strategy
@@ -481,7 +482,7 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
         # TODO: The page graph is dynamic. Should be loaded when needed.
         # await self.agent.load_page_graph()
 
-        job_quota = self.agent.metadata.get("job_quota", 50)  # Max pages in working set
+        job_quota = self.agent.metadata.parameters.get("job_quota", 50)  # Max pages in working set
 
         # Initialize working set manager
         self.working_set_cap: WorkingSetCapability = await self.agent.get_capability_by_type(WorkingSetCapability)
@@ -495,7 +496,7 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
 
         # Initialize batching policy for cache-aware batch selection
         # Can be overridden via agent metadata or by subclasses
-        batching_policy_config = self.agent.metadata.get("batching_policy", {})
+        batching_policy_config = self.agent.metadata.parameters.get("batching_policy", {})
         self.batching_policy: BatchingPolicy = self._create_batching_policy(batching_policy_config)
 
         # Initialize result capability for cluster-wide result visibility
@@ -537,8 +538,8 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
             Configured BatchingPolicy instance
         """
         policy_type = config.get("type", "hybrid")
-        overlap_threshold = config.get("overlap_threshold", self.agent.metadata.get("overlap_threshold", 0.3))
-        batch_size = config.get("batch_size", self.agent.metadata.get("batch_size", 5))
+        overlap_threshold = config.get("overlap_threshold", self.agent.metadata.parameters.get("overlap_threshold", 0.3))
+        batch_size = config.get("batch_size", self.agent.metadata.parameters.get("batch_size", 5))
         max_concurrent = config.get("max_concurrent", 10)
 
         if policy_type == "clustering":
@@ -575,8 +576,8 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
             async for cluster in page_storage.get_all_clusters(
                 self.agent.tenant_id,
                 self.agent.group_id,
-                max_cluster_size=self.agent.metadata.get("max_cluster_size", 10),
-                min_cluster_size=self.agent.metadata.get("min_cluster_size", 2)
+                max_cluster_size=self.agent.metadata.parameters.get("max_cluster_size", 10),
+                min_cluster_size=self.agent.metadata.parameters.get("min_cluster_size", 2)
             ):
                 all_clusters.append(cluster)
 
@@ -599,8 +600,8 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
                 page_graph=page_graph,
                 available_pages=all_page_ids,
                 run_context=RunContext(
-                    goal=self.agent.metadata.get("goal", "code analysis"),
-                    run_id=self.agent.metadata.get("run_id"),  # TODO: Get it from session context instead of metadata --- IGNORE ---
+                    goal=self.agent.metadata.parameters.get("goal", "code analysis"),
+                    run_id=self.agent.metadata.run_id,  # TODO: Get it from session context instead of metadata --- IGNORE ---
                 )
             )
 
@@ -675,7 +676,7 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
                     parameters={
                         "cluster": cluster.model_dump(),
                         "query_router_type": "cache_aware",
-                        "cache_boost_factor": self.agent.metadata.get("cache_boost_factor", 1.5),
+                        "cache_boost_factor": self.agent.metadata.parameters.get("cache_boost_factor", 1.5),
                     }
                 ),
                 role=role,
@@ -734,19 +735,21 @@ class BaseCodeAnalysisCoordinator(Agent):
     - Event-driven monitoring
     - Global synthesis
     """
+    critic_capability: CriticCapability | None = Field(default=None)
+    coordinator_capability: BaseCodeAnalysisCoordinatorCapability | None = Field(default=None)
 
     async def initialize(self) -> None:
         """Initialize coordinator."""
-        await super().initialize()
-
         # Add CriticCapability for critique handling
         # CriticCapability initializes policies from agent metadata
-        if not self.has_capability(CriticCapability.get_capability_name()):
-            critic_cap = CriticCapability(self)
-            self.add_capability(critic_cap)
+        self.add_capability_classes([
+            CriticCapability
+        ])
+
+        await super().initialize()
+
         self.critic_capability: CriticCapability = self.get_capability(CriticCapability.get_capability_name())
 
-        self.coordinator_capability: BaseCodeAnalysisCoordinatorCapability | None = None
 
 
 class CodeAnalysisCoordinator(BaseCodeAnalysisCoordinator):
@@ -767,10 +770,11 @@ class CodeAnalysisCoordinator(BaseCodeAnalysisCoordinator):
 
     async def initialize(self) -> None:
         """Initialize coordinator and attach capability."""
+        self.add_capability_classes([
+            CodeAnalysisCoordinatorCapability
+        ])
         await super().initialize()
-        if not self.has_capability(CodeAnalysisCoordinatorCapability.get_capability_name()):
-            capability = CodeAnalysisCoordinatorCapability(self)
-            self.add_capability(capability)
+
         self.coordinator_capability = self.get_capability(CodeAnalysisCoordinatorCapability.get_capability_name())
 
     # NOTE: request_critique_from_peer
@@ -792,11 +796,11 @@ class CodeAnalysisCoordinatorV2(BaseCodeAnalysisCoordinator):
 
     async def initialize(self) -> None:
         """Initialize cache-aware coordinator."""
+        self.add_capability_classes([
+            CodeAnalysisCoordinatorV2Capability
+        ])
         await super().initialize()
 
-        if not self.has_capability(CodeAnalysisCoordinatorV2Capability.get_capability_name()):
-            capability = CodeAnalysisCoordinatorV2Capability(self)
-            self.add_capability(capability)
         self.coordinator_capability = self.get_capability(CodeAnalysisCoordinatorV2Capability.get_capability_name())
 
 

@@ -663,7 +663,6 @@ class AgentCapability(ABC):
             return []
         return auto_register_hooks(self, owner=self)
 
-
     @abstractmethod
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         """Serialize capability-specific state.
@@ -893,7 +892,7 @@ class AgentHandle:
             "default_capability": agent_info.metadata.get("default_capability"),
         }
 
-    async def _get_blackboard(
+    async def _get_child_blackboard(
         self,
         backend_type: str = "redis",
         enable_events: bool = True,
@@ -918,6 +917,7 @@ class AgentHandle:
             backend_type=backend_type,
             enable_events=enable_events,
         )
+        await self._blackboard.initialize()
         return self._blackboard
 
     # =========================================================================
@@ -1012,8 +1012,7 @@ class AgentHandle:
                 print(run.output_data)
             ```
         """
-        blackboard = await self._get_blackboard()
-        await blackboard.initialize()
+        blackboard = await self._get_child_blackboard()
 
         # Get session context if available
         from .sessions.context import get_current_session_id
@@ -1176,11 +1175,9 @@ class AgentHandle:
         from .sessions.context import get_current_session_id
         from ..system import get_session_manager
 
-        blackboard = await self._get_blackboard()
-        await blackboard.initialize()
+        blackboard = await self._get_child_blackboard()
 
         # Get session context if available
-        from .sessions.context import get_current_session_id
         effective_session_id = session_id or get_current_session_id()
 
         # Create AgentRun via SessionManager if we have a session
@@ -1540,12 +1537,12 @@ class Agent(BaseModel):
     """
 
     agent_id: str
-    agent_type: str = "general"  # "specialized", "general", "service", "supervisor"
+    agent_type: str = Field(default="general", description="Type of agent: specialized, general, service, supervisor, service.memory_management")
     state: AgentState = Field(default=AgentState.INITIALIZED)
 
-    tenant_id: str = "default"  # Tenant/namespace for multi-tenant deployments
+    tenant_id: str = Field(default="system", description="Tenant/namespace for multi-tenant deployments")
     # TODO: Replace group_id with vmr_id or colony_id once we have virtual monorepo support in place.
-    group_id: str = "default"  # Group ID for grouping related context sources (e.g., all repos in a virtual monorepo, and all VCM-mapped blackboard scopes)
+    group_id: str = Field(default="default", description="Group ID for grouping related context sources (e.g., all repos in a virtual monorepo, and all VCM-mapped blackboard scopes)")
 
     # Optional page binding
     bound_pages: list[str] = Field(default_factory=list)
@@ -1619,6 +1616,21 @@ class Agent(BaseModel):
         if self._hook_registry is None:
             self._hook_registry = AgentHookRegistry(self)
         return self._hook_registry
+
+    def add_capability_classes(
+        self,
+        capability_classes: list[type[AgentCapability]],
+    ) -> None:
+        """Add multiple capability classes to the agent.
+        Typically, this method is called in an agent subclass
+        initialize() method before calling super().initialize().
+
+        Args:
+            capability_classes: The capability classes to add
+        """
+        for capability_class in capability_classes:
+            if capability_class not in self.capability_classes:
+                self.capability_classes.append(capability_class)
 
     def add_capability(
         self,
@@ -1850,13 +1862,11 @@ class Agent(BaseModel):
 
         # Reconstruct or create PageStorage
         vcm_handle = get_vcm()
-        config: PageStorageConfig | None = vcm_handle.get_page_storage_config()
+        config: PageStorageConfig | None = await vcm_handle.get_page_storage_config()
         if not config:
             raise ValueError("Missing PageStorageConfig in VCM")
 
         self.page_storage = PageStorage(
-            group_id = self.metadata.group_id,
-            tenant_id = self.metadata.tenant_id,
             backend_type=config.backend_type,
             storage_path=config.storage_path,
             s3_bucket=config.s3_bucket,
@@ -1872,8 +1882,6 @@ class Agent(BaseModel):
     async def _create_action_policy(self) -> None:
         if self.action_policy:
             return  # Already set
-        elif not self.action_policy_class:
-            raise ValueError("Agent must have action_policy or action_policy_class defined")
 
         for cap_class in self.capability_classes:
             if not self.has_capability(cap_class.get_capability_name()):
@@ -1887,16 +1895,33 @@ class Agent(BaseModel):
                     events_only=False,
                 )
 
-        self.action_policy = self.action_policy_class(
-            agent=self,
-            action_providers=list(self._capabilities.values()),
-            # TODO: Allow configuring IO schemas
-            # io=ActionPolicyIO(
-            #     inputs={"context": QueryContext, "queries": list},
-            #     outputs={"analysis": ScopeAwareResult, "next_queries": list},
-            # ),
-            **self.metadata.action_policy_config
-        )
+        if not self.action_policy_class:
+            logger.warning("Agent does not have action_policy or action_policy_class defined. We will create a default ActionPolicy, but consider defining a custom one for better performance and capabilities.")
+            from .patterns.actions.policies import create_default_action_policy
+            self.action_policy = await create_default_action_policy(
+                agent=self,
+                action_map={},  # Action executors are discovered from capabilities
+                action_providers=list(self._capabilities.values()),
+                max_iterations=self.metadata.max_iterations,
+                # TODO: Allow configuring IO schemas
+                # io=ActionPolicyIO(
+                #     inputs={"context": QueryContext, "queries": list},
+                #     outputs={"analysis": ScopeAwareResult, "next_queries": list},
+                # ),
+                **self.metadata.action_policy_config
+            )
+        else:
+            self.action_policy = self.action_policy_class(
+                agent=self,
+                action_providers=list(self._capabilities.values()),
+                # TODO: Allow configuring IO schemas
+                # io=ActionPolicyIO(
+                #     inputs={"context": QueryContext, "queries": list},
+                #     outputs={"analysis": ScopeAwareResult, "next_queries": list},
+                # ),
+                **self.metadata.action_policy_config
+            )
+
         self.action_policy.use_agent_capabilities([cap.get_capability_name() for cap in self.capability_classes])
         await self.action_policy.initialize()
 
@@ -3275,7 +3300,7 @@ class AgentManagerBase:
             # Get shared blackboard for plan coordination
             blackboard = await self.get_blackboard(
                 scope="shared",
-                scope_id="plan_coordination"
+                scope_id="plan_coordination"  # TODO: Use actual plan ID if available instead of generic "plan_coordination"
             )
 
             # Subscribe to specific child plan completions

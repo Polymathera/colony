@@ -23,6 +23,7 @@ from ....distributed import get_polymathera
 from ....distributed.state_management import SharedState, StateManager
 from .self_concept import AgentSelfConcept
 from ...base import AgentCapability, CapabilityResultFuture
+from ...models import AgentSuspensionState
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ..actions.policies import action_executor
 
@@ -185,6 +186,18 @@ class ConsciousnessCapability(AgentCapability):
         if self.agent is not None:
             return self.agent.metadata.session_id
         return None
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for ConsciousnessCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for ConsciousnessCapability")
+        pass
 
     # =========================================================================
     # Internal Helpers (Direct Storage Access)
@@ -434,11 +447,12 @@ class ConsciousnessCapability(AgentCapability):
             agent_type = "general"
             metadata: dict[str, Any] = {}
             if self._agent is not None:
-                agent_type = self._agent.metadata.get("agent_type", "general")
+                agent_type = self._agent.agent_type
                 metadata = {
-                    "capabilities": self._agent.metadata.get("capabilities", []),
-                    "goals": self._agent.metadata.get("goals", []),
+                    "capabilities": self._agent.metadata.parameters.get("capabilities", []), # TODO: This is not where capabilities can be found.
+                    "goals": self._agent.metadata.parameters.get("goals", []), # TODO: This is not where goals can be found.
                 }
+
             self._self_concept = await self._create_default_self_concept(
                 agent_id=self.scope_id,
                 agent_type=agent_type,

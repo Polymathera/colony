@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, TYPE_CHECKING
+from overrides import override
 
 from ...base import AgentCapability
 from ..attention.attention import (
@@ -39,7 +40,7 @@ from ..attention.attention import (
     AttentionScoringMechanism,
 )
 from ..attention.query_routing import PageQueryRoutingPolicy
-from ...models import AttentionContext
+from ...models import AttentionContext, AgentSuspensionState
 from ..actions.policies import action_executor
 
 if TYPE_CHECKING:
@@ -86,6 +87,18 @@ class QueryAttentionCapability(AgentCapability):
         self.query_generator = query_generator
         self.routing_policy = routing_policy
         self.attention_mechanism = attention_mechanism
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for QueryAttentionCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for QueryAttentionCapability")
+        pass
 
     # === Action Executors ===
 

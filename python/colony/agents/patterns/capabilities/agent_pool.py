@@ -29,9 +29,10 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, TYPE_CHECKING
+from overrides import override
 
 from ...base import AgentCapability, AgentHandle
-from ...models import AgentSpawnSpec, AgentMetadata
+from ...models import AgentSpawnSpec, AgentMetadata, AgentSuspensionState
 from ..actions.policies import action_executor
 
 if TYPE_CHECKING:
@@ -68,6 +69,18 @@ class AgentPoolCapability(AgentCapability):
         self._agent_handles: dict[str, AgentHandle] = {}
         self._agent_work: dict[str, dict[str, Any]] = {}  # agent_id -> current work
         self._agent_results: dict[str, list[dict[str, Any]]] = {}  # agent_id -> results
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for AgentPoolCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for AgentPoolCapability")
+        pass
 
     # === Action Executors ===
 

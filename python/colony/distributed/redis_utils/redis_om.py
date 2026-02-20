@@ -605,7 +605,7 @@ class DistributedStateUpdate(BaseModel):
     data: dict[str, Any]
 
 
-class DistributedStateSubscriber(BaseModel):
+class DistributedStateSubscriber:
     """
     A subscriber for state updates of an inference job.
     """
@@ -2877,7 +2877,7 @@ class RedisOM:
         # These topic list must be stored in Redis and must be updated atomically
         # because the subscriber and publisher may be on different nodes.
         channel = self._build_state_update_channel(topic_name)
-        return DistributedStateSubscriber(self.redis_config, channel)
+        return DistributedStateSubscriber(self.redis_client, channel)
 
     async def update_state_topic(
         self,

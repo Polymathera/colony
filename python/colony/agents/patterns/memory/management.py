@@ -33,9 +33,11 @@ import asyncio
 import logging
 import time
 from typing import Any
+from pydantic import PrivateAttr
 from overrides import override
 
 from ...base import Agent, AgentCapability, AgentState, CapabilityResultFuture
+from ...models import AgentSuspensionState
 from ...blackboard.types import BlackboardEntry, BlackboardEvent, KeyPatternFilter
 from ..actions.policies import action_executor
 from .scopes import MemoryScope
@@ -65,17 +67,14 @@ class AgentMemoryRecycler(AgentCapability):
         self,
         agent: Agent,
         scope_id: str,
-        managed_tenant_id: str | None = None,
     ):
         """Initialize memory recycler.
 
         Args:
             agent: The MemoryManagementAgent that owns this capability
             scope_id: Scope ID for this capability
-            managed_tenant_id: Tenant to manage (None = system-level)
         """
         super().__init__(agent=agent, scope_id=scope_id)
-        self.managed_tenant_id = managed_tenant_id
         self._monitor_task: asyncio.Task | None = None
         self._initialized = False
 
@@ -89,7 +88,7 @@ class AgentMemoryRecycler(AgentCapability):
         self._initialized = True
 
         logger.info(
-            f"AgentMemoryRecycler initialized for tenant={self.managed_tenant_id or 'system'}"
+            f"AgentMemoryRecycler initialized for tenant={self.agent.tenant_id}"
         )
 
     async def shutdown(self) -> None:
@@ -120,6 +119,18 @@ class AgentMemoryRecycler(AgentCapability):
             "AgentMemoryRecycler is a persistent service."
         )
 
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for AgentMemoryRecycler")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for AgentMemoryRecycler")
+        pass
+
     # -------------------------------------------------------------------------
     # Lifecycle Event Monitoring
     # -------------------------------------------------------------------------
@@ -131,7 +142,7 @@ class AgentMemoryRecycler(AgentCapability):
         automatically handles subscription/unsubscription lifecycle.
         """
         lifecycle_scope = MemoryScope.control_plane(
-            self.managed_tenant_id,
+            self.agent.tenant_id,
             "lifecycle",
         )
 
@@ -359,7 +370,7 @@ class AgentMemoryRecycler(AgentCapability):
         """Mark a termination event as processed."""
         # Update the event with processing result
         lifecycle_scope = MemoryScope.control_plane(
-            self.managed_tenant_id,
+            self.agent.tenant_id,
             "lifecycle",
         )
 
@@ -407,17 +418,14 @@ class CollectiveMemoryInitializer(AgentCapability):
         self,
         agent: Agent,
         scope_id: str,
-        managed_tenant_id: str | None = None,
     ):
         """Initialize collective memory initializer.
 
         Args:
             agent: The MemoryManagementAgent that owns this capability
             scope_id: Scope ID for this capability
-            managed_tenant_id: Tenant to manage (None = system-level)
         """
         super().__init__(agent=agent, scope_id=scope_id)
-        self.managed_tenant_id = managed_tenant_id
         self._monitor_task: asyncio.Task | None = None
         self._initialized = False
 
@@ -431,7 +439,7 @@ class CollectiveMemoryInitializer(AgentCapability):
         self._initialized = True
 
         logger.info(
-            f"CollectiveMemoryInitializer initialized for tenant={self.managed_tenant_id or 'system'}"
+            f"CollectiveMemoryInitializer initialized for tenant={self.agent.tenant_id}"
         )
 
     async def shutdown(self) -> None:
@@ -462,6 +470,18 @@ class CollectiveMemoryInitializer(AgentCapability):
             "CollectiveMemoryInitializer is a persistent service."
         )
 
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for CollectiveMemoryInitializer")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for CollectiveMemoryInitializer")
+        pass
+
     # -------------------------------------------------------------------------
     # Creation Event Monitoring
     # -------------------------------------------------------------------------
@@ -473,7 +493,7 @@ class CollectiveMemoryInitializer(AgentCapability):
         automatically handles subscription/unsubscription lifecycle.
         """
         lifecycle_scope = MemoryScope.control_plane(
-            self.managed_tenant_id,
+            self.agent.tenant_id,
             "lifecycle",
         )
 
@@ -670,16 +690,14 @@ class CollectiveMemoryMaintainer(AgentCapability):
         self,
         agent: Agent,
         scope_id: str,
-        managed_tenant_id: str | None = None,
     ):
         super().__init__(agent=agent, scope_id=scope_id)
-        self.managed_tenant_id = managed_tenant_id
 
     async def initialize(self) -> None:
         """Initialize maintainer."""
         # TODO: Start periodic maintenance task
         logger.info(
-            f"CollectiveMemoryMaintainer initialized for tenant={self.managed_tenant_id or 'system'}"
+            f"CollectiveMemoryMaintainer initialized for tenant={self.agent.tenant_id}"
         )
 
     async def stream_events_to_queue(
@@ -693,11 +711,24 @@ class CollectiveMemoryMaintainer(AgentCapability):
             KeyPatternFilter(pattern=f"{self.scope_id}:*"),
         )
 
+    @override
     async def get_result_future(self) -> CapabilityResultFuture:
         """Maintainer is a persistent service."""
         raise NotImplementedError(
             "CollectiveMemoryMaintainer is a persistent service."
         )
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for CollectiveMemoryMaintainer")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for CollectiveMemoryMaintainer")
+        pass
 
     @action_executor(action_key="maintain_collective_memory")
     async def maintain(
@@ -801,7 +832,8 @@ class MemoryManagementAgent(Agent):
             AgentSpawnSpec(
                 agent_type="polymathera.colony.agents.patterns.memory.management.MemoryManagementAgent",
                 agent_id="memory_mgmt_tenant_acme",
-                metadata={"managed_tenant_id": "acme_corp"},
+                tenant_id="acme_corp",
+                metadata={},
             ),
         ])
 
@@ -810,7 +842,8 @@ class MemoryManagementAgent(Agent):
             AgentSpawnSpec(
                 agent_type="polymathera.colony.agents.patterns.memory.management.MemoryManagementAgent",
                 agent_id="memory_mgmt_system",
-                metadata={"managed_tenant_id": None},  # System-level
+                tenant_id=None,  # System-level
+                metadata={},  # System-level
             ),
         ])
         ```
@@ -826,56 +859,13 @@ class MemoryManagementAgent(Agent):
         - On termination: Recycles agent's LTM to collective, cleans up
     """
 
-    # Override agent_type to indicate this is a service agent
-    agent_type: str = "service.memory_management"
-
-    # Tenant this agent manages (None = system-level)
-    managed_tenant_id: str | None = None
-
     # Capabilities - created during initialize
-    _recycler: AgentMemoryRecycler | None = None
-    _initializer: CollectiveMemoryInitializer | None = None
-    _maintainer: CollectiveMemoryMaintainer | None = None
+    _recycler: AgentMemoryRecycler | None = PrivateAttr(default=None)
+    _initializer: CollectiveMemoryInitializer | None = PrivateAttr(default=None)
+    _maintainer: CollectiveMemoryMaintainer | None = PrivateAttr(default=None)
 
     # Running state
-    _stopped: bool = False
-
-    def __init__(
-        self,
-        agent_id: str,
-        managed_tenant_id: str | None = None,
-        metadata: Any = None,
-        **kwargs,
-    ):
-        """Initialize memory management agent.
-
-        Args:
-            agent_id: Unique identifier for this agent
-            managed_tenant_id: Tenant to manage (None = system-level).
-                Can also be passed via metadata["managed_tenant_id"] when
-                spawned via AgentSystemDeployment.spawn_agents().
-            metadata: Agent metadata (may contain managed_tenant_id)
-            **kwargs: Additional Agent arguments
-        """
-        # Extract managed_tenant_id from metadata if not provided directly
-        # This supports spawning via AgentSystemDeployment.spawn_agents()
-        if managed_tenant_id is None and metadata:
-            if hasattr(metadata, "get"):
-                managed_tenant_id = metadata.get("managed_tenant_id")
-            elif hasattr(metadata, "managed_tenant_id"):
-                managed_tenant_id = metadata.managed_tenant_id
-
-        # Set tenant_id based on managed scope
-        tenant_id = managed_tenant_id or "system"
-
-        super().__init__(
-            agent_id=agent_id,
-            agent_type="service.memory_management",
-            tenant_id=tenant_id,
-            metadata=metadata,
-            **kwargs,
-        )
-        self.managed_tenant_id = managed_tenant_id
+    _stopped: bool = PrivateAttr(default=False)
 
     async def initialize(self) -> None:
         """Initialize the memory management agent and its capabilities.
@@ -897,19 +887,16 @@ class MemoryManagementAgent(Agent):
         self._recycler = AgentMemoryRecycler(
             agent=self,
             scope_id=f"{base_scope}:recycler",
-            managed_tenant_id=self.managed_tenant_id,
         )
 
         self._initializer = CollectiveMemoryInitializer(
             agent=self,
             scope_id=f"{base_scope}:initializer",
-            managed_tenant_id=self.managed_tenant_id,
         )
 
         self._maintainer = CollectiveMemoryMaintainer(
             agent=self,
             scope_id=f"{base_scope}:maintainer",
-            managed_tenant_id=self.managed_tenant_id,
         )
 
         # Add capabilities to agent
@@ -924,7 +911,7 @@ class MemoryManagementAgent(Agent):
 
         logger.info(
             f"MemoryManagementAgent initialized: {self.agent_id} "
-            f"(tenant={self.managed_tenant_id or 'system'})"
+            f"(tenant={self.tenant_id})"
         )
 
     @hookable

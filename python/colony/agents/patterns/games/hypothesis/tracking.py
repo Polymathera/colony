@@ -12,16 +12,18 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, TYPE_CHECKING
-
+from overrides import override
 from pydantic import BaseModel, Field
 
 from ....base import AgentCapability
+from ....models import AgentSuspensionState
 from ...actions.policies import action_executor
 from .types import (
     HypothesisFilter,
     HypothesisStatus,
     HypothesisDomain,
 )
+from .....utils import setup_logger
 
 if TYPE_CHECKING:
     from ....base import Agent
@@ -30,7 +32,7 @@ if TYPE_CHECKING:
     from ...capabilities.validation import ValidationCapability, Contradiction
 
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 
 class TrackedHypothesis(BaseModel):
@@ -124,6 +126,18 @@ class HypothesisTrackingCapability(AgentCapability):
             self._game_mapping,
             created_by=self.agent.agent_id,
         )
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for HypothesisTrackingCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for HypothesisTrackingCapability")
+        pass
 
     @action_executor()
     async def register_hypothesis(

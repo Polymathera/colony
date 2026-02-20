@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from .consciousness import SystemDocumentation
 from ..models import Reflection
-from ...models import Action, ActionResult, ActionPlan
+from ...models import Action, ActionResult, ActionPlan, AgentSuspensionState
 from ...base import Agent, AgentCapability
 from ....distributed import get_polymathera
 from ..actions.policies import action_executor
@@ -150,6 +150,18 @@ class ReflectionCapability(AgentCapability):
         self._state_managers: dict[str, Any] = {}
 
     @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for ReflectionCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for ReflectionCapability")
+        pass
+
+    @override
     async def stream_events_to_queue(
         self, event_queue: asyncio.Queue[BlackboardEvent]
     ) -> None:
@@ -167,9 +179,7 @@ class ReflectionCapability(AgentCapability):
         # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
         # reflection updates can focus on specific categories.
         # TODO: Make scope configurable because agents that request reflection need not know the agent_id of the reflection agent (decoupling).
-        blackboard = await self.agent.get_blackboard(
-            scope="shared", scope_id=self.agent.agent_id
-        )
+        blackboard = await self.get_blackboard()
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(pattern=ReflectionRequest.get_key_pattern(scope_id=self.agent.agent_id)),

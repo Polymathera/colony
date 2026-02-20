@@ -81,20 +81,13 @@ class ReputationAgent(Agent):
         # Agent now monitors task_completed and game outcome events
     """
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
     async def initialize(self) -> None:
         """Initialize reputation agent with capability and policy."""
+        self.add_capability_classes([ReputationCapability])
+
         await super().initialize()
 
-        # Get or create reputation capability
-        if not self.has_capability(ReputationCapability.get_capability_name()):
-            capability = ReputationCapability(self)
-            await capability.initialize()
-            self.add_capability(capability)
-
-        if not self.has_capability(ReputationCapability.get_capability_name()):
+        if not self.has_capability(HypothesisGameProtocol.get_capability_name()):
             capability = HypothesisGameProtocol(
                 agent=self,
                 game_id=None, # TODO: Should this be set?

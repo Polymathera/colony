@@ -18,11 +18,16 @@ from overrides import override
 from pydantic import BaseModel, Field
 
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
-from ...models import QueryContext, ActionPolicyIO
+from ...models import AgentSuspensionState, QueryContext, ActionPolicyIO
 from ...base import Agent, AgentCapability
+from ....utils import setup_logger
 from ..actions.policies import CacheAwareActionPolicy, action_executor
 from .attention import PageQuery, AttentionScore
 from .query_routing import PageQueryRoutingPolicy
+
+
+logger = setup_logger(__name__)
+
 
 class MultiHopSearchResult(BaseModel):
     """Result of multi-hop search."""
@@ -88,6 +93,18 @@ class MultiHopSearchCapability(AgentCapability):
         self._hops: int = 0
 
     @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for MultiHopSearchCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for MultiHopSearchCapability")
+        pass
+
+    @override
     async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
         """Stream capability-specific events to the given queue.
 
@@ -101,7 +118,7 @@ class MultiHopSearchCapability(AgentCapability):
         # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
         # multi-hop search requests can focus on specific categories.
         # TODO: Make scope configurable because agents that send multi-hop search requests need not know the agent_id of the multi-hop search agent (decoupling).
-        blackboard = await self.agent.get_blackboard(scope="shared", scope_id=self.agent.agent_id)
+        blackboard = await self.get_blackboard()
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(

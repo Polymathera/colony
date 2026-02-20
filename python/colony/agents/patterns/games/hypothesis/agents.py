@@ -61,7 +61,7 @@ This implements ideas from:
 from __future__ import annotations
 
 import uuid
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 from logging import getLogger
 
 from ....base import Agent, CapabilityResultFuture
@@ -115,17 +115,16 @@ class HypothesisGameAgent(Agent):
     via @event_handler methods.
     """
 
-    def __init__(self, agent_id: str, role: HypothesisRole, **kwargs):
-        super().__init__(agent_id=agent_id, **kwargs)
-        self.role = role
-        self._game_config = HypothesisGameConfig(
-            **self.metadata.get("game_config", {})
-        )
+    role: HypothesisRole = Field(description="Role in the hypothesis game")
+    _game_config: HypothesisGameConfig | None = PrivateAttr(default=None)
 
     async def initialize(self) -> None:
         """Initialize hypothesis game agent."""
         await super().initialize()
 
+        self._game_config = HypothesisGameConfig(
+            **self.metadata.parameters.get("game_config", {})
+        )
         # Set up game protocol with role and LLM config
         capability = HypothesisGameProtocol(
             self,
@@ -154,15 +153,7 @@ class HypothesisProposerAgent(HypothesisGameAgent):
     Automatically sets up HypothesisGameProtocol capability with proposer role.
     """
 
-    def __init__(self, agent_id: str, role: HypothesisRole, **kwargs):
-        super().__init__(agent_id=agent_id, role=role, **kwargs)
-        self._game_config = HypothesisGameConfig(
-            **self.metadata.get("game_config", {})
-        )
-
-    async def initialize(self) -> None:
-        """Initialize proposer agent."""
-        await super().initialize()
+    pass
 
 
 class HypothesisSkepticAgent(HypothesisGameAgent):
@@ -171,15 +162,7 @@ class HypothesisSkepticAgent(HypothesisGameAgent):
     Challenges unsupported claims in the hypothesis.
     """
 
-    def __init__(self, agent_id: str, role: HypothesisRole, **kwargs):
-        super().__init__(agent_id=agent_id, role=role, **kwargs)
-        self._game_config = HypothesisGameConfig(
-            **self.metadata.get("game_config", {})
-        )
-
-    async def initialize(self) -> None:
-        """Initialize skeptic agent."""
-        await super().initialize()
+    pass
 
 
 class HypothesisGrounderAgent(HypothesisGameAgent):
@@ -188,15 +171,7 @@ class HypothesisGrounderAgent(HypothesisGameAgent):
     Provides evidence to support or refute claims.
     """
 
-    def __init__(self, agent_id: str, role: HypothesisRole, **kwargs):
-        super().__init__(agent_id=agent_id, role=role, **kwargs)
-        self._game_config = HypothesisGameConfig(
-            **self.metadata.get("game_config", {})
-        )
-
-    async def initialize(self) -> None:
-        """Initialize grounder agent."""
-        await super().initialize()
+    pass
 
 
 class HypothesisArbiterAgent(HypothesisGameAgent):
@@ -205,15 +180,7 @@ class HypothesisArbiterAgent(HypothesisGameAgent):
     Makes final judgment on hypothesis validity.
     """
 
-    def __init__(self, agent_id: str, role: HypothesisRole, **kwargs):
-        super().__init__(agent_id=agent_id, role=role, **kwargs)
-        self._game_config = HypothesisGameConfig(
-            **self.metadata.get("game_config", {})
-        )
-
-    async def initialize(self) -> None:
-        """Initialize arbiter agent."""
-        await super().initialize()
+    pass
 
 
 class HypothesisCoordinatorAgent(Agent):
@@ -225,17 +192,16 @@ class HypothesisCoordinatorAgent(Agent):
     3. Monitors game events
     """
 
-    def __init__(self, agent_id: str, **kwargs):
-        super().__init__(agent_id=agent_id, **kwargs)
-        self._game_config = HypothesisGameConfig(
-            **self.metadata.get("game_config", {})
-        )
-        self._child_agent_ids: list[str] = []
+    _game_config: HypothesisGameConfig | None = PrivateAttr(default=None)
+    _child_agent_ids: list[str] = PrivateAttr(default_factory=list)
 
     async def initialize(self) -> None:
         """Initialize coordinator agent."""
         await super().initialize()
 
+        self._game_config = HypothesisGameConfig(
+            **self.metadata.parameters.get("game_config", {})
+        )
         capability = HypothesisGameProtocol(self, game_id=self._game_config.game_id)
         await capability.initialize()
         self.add_capability(capability)

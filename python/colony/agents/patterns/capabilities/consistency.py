@@ -52,7 +52,7 @@ from ..scope import ScopeAwareResult, AnalysisScope
 from ..actions.policies import (
     action_executor,
 )
-from ...models import Action, PolicyREPL
+from ...models import Action, PolicyREPL, AgentSuspensionState
 from ... import KeyPatternFilter, BlackboardEvent
 from ..games.epistemic import EpistemicLayer
 from ..events import event_handler, EventProcessingResult
@@ -231,6 +231,18 @@ class ConsistencyCapability(AgentCapability):
     def _get_event_pattern(self) -> str:
         """Get pattern for consistency events."""
         return f"{self.scope_id}:consistency:*"
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for ConsistencyCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for ConsistencyCapability")
+        pass
 
     # -------------------------------------------------------------------------
     # Abstract Method Implementations

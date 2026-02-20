@@ -18,9 +18,10 @@ from colony.agents.patterns import (
     Hypothesis,
 )
 from colony.agents.patterns.capabilities.synthesis import SynthesisCapability
-from colony.agents.patterns.capabilities.merge import MergePolicy, MergeContext
+from colony.agents.patterns.capabilities.merge import MergeCapability, MergePolicy, MergeContext
 from colony.agents.patterns.capabilities.validation import ValidationResult
 from colony.agents.patterns.capabilities.critique import CriticCapability
+from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
 from colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
 from colony.agents.base import Agent, AgentCapability, AgentMetadata
 from colony.agents.patterns.actions.policies import action_executor
@@ -379,7 +380,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         """Initialize capability with cache-aware components."""
         await super().initialize()
 
-        self.blackboard = await self.get_blackboard(scope="shared", scope_id=self.scope_id)
+        self.blackboard = await self.get_blackboard()
 
         # Initialize cache-aware planning policy
         self.cache_policy = CacheAwarePlanningPolicy(
@@ -1385,7 +1386,6 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
             impact_graph: Component-level impact graph
             results: Page reports (for component-to-page mapping)
         """
-        from ....agents.patterns.capabilities.page_graph import PageGraphCapability
 
         page_graph_cap = self.agent.get_capability_by_type(PageGraphCapability)
         if not page_graph_cap:
@@ -1515,24 +1515,19 @@ class ChangeImpactAnalysisCoordinator(Agent):
     Events are handled through @event_handler decorators on capabilities.
     """
 
-    def __init__(
-        self,
-        *,
-        max_agents: int = 10,
-        **kwargs
-    ):
-        """Initialize coordinator.
-
-        Args:
-            max_agents: Maximum concurrent page agents
-        """
-        super().__init__(**kwargs)
-        # Store max_agents in metadata for capability to access
-        self.metadata.parameters["max_agents"] = max_agents
-        self.coordinator_capability: ChangeImpactAnalysisCoordinatorCapability | None = None
+    coordinator_capability: ChangeImpactAnalysisCoordinatorCapability | None = None
 
     async def initialize(self) -> None:
         """Initialize coordinator and attach capability."""
+
+        self.add_capability_classes([
+            WorkingSetCapability, # TODO: Set working_set_size = self.metadata.parameters.get("job_quota", self.metadata.parameters.get("max_agents", 10) * 5)
+            CriticCapability,
+            ChangeImpactAnalysisCoordinatorCapability,
+            MergeCapability, # TODO: scope_id=f"{self.agent_id}:merged_change_impact_reports"
+            SynthesisCapability, # TODO: scope_id=f"{self.agent_id}:change_impact_analysis"
+        ])
+
         await super().initialize()
 
         # Add WorkingSetCapability for cache-aware coordination
@@ -1555,7 +1550,6 @@ class ChangeImpactAnalysisCoordinator(Agent):
             await capability.initialize()
             self.add_capability(capability)
 
-        from ....agents.patterns.capabilities.merge import MergeCapability
         if not self.has_capability(MergeCapability.get_capability_name()):
             capability = MergeCapability(
                 self, scope_id=f"{self.agent_id}:merged_change_impact_reports"

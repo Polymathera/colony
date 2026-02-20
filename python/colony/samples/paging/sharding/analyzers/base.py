@@ -297,7 +297,7 @@ class BaseAnalyzer(ABC):
 
     async def cleanup(self):
         """Cleanup any resources used by the analyzer"""
-        from .....utils import cleanup_dynamic_asyncio_tasks
+        from colony.utils import cleanup_dynamic_asyncio_tasks
 
         try:
             await cleanup_dynamic_asyncio_tasks(self, raise_exceptions=False)

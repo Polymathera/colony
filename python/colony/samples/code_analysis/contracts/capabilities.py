@@ -25,7 +25,7 @@ import itertools
 import uuid
 from enum import Enum
 from typing import Any
-
+from overrides import override
 from pydantic import BaseModel, Field
 
 from colony.agents.patterns import (
@@ -45,7 +45,7 @@ from colony.agents.patterns.events import event_handler, EventProcessingResult
 from colony.agents.patterns.models import Hypothesis
 from colony.agents.blackboard import TaskGraph, BlackboardEvent
 from colony.agents.base import Agent, AgentCapability, CapabilityResultFuture
-from colony.agents.models import Action, ActionType, AgentMetadata, PolicyREPL, AgentResourceRequirements
+from colony.agents.models import Action, ActionType, AgentMetadata, PolicyREPL, AgentResourceRequirements, AgentSuspensionState
 from colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
 from colony.cluster.models import LLMClientRequirements
 from colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
@@ -106,6 +106,18 @@ class ContractInferenceCapability(AgentCapability):
     def _get_merge_capability(self) -> MergeCapability | None:
         """Get MergeCapability from agent (optional)."""
         return self.agent.get_capability_by_type(MergeCapability)
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for ContractInferenceCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for ContractInferenceCapability")
+        pass
 
     # -------------------------------------------------------------------------
     # Event Handlers
@@ -1223,6 +1235,18 @@ class ContractCoordinatorCapability(AgentCapability):
             )
             await self._page_graph_cap.initialize()
             self.agent.add_capability(self._page_graph_cap)
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for ContractInferenceCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for ContractInferenceCapability")
+        pass
 
     # -------------------------------------------------------------------------
     # Event Handlers

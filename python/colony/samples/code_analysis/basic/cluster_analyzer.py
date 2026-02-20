@@ -16,18 +16,18 @@ import logging
 from collections import defaultdict
 from overrides import override
 
-from ....agents.base import Agent, AgentState, AgentCapability
-from ....agents.models import (
+from colony.agents.base import Agent, AgentState, AgentCapability
+from colony.agents.models import (
     AgentSuspensionState,
     AttentionContext,
 )
-from ....agents.patterns.attention import PageQuery
-from ....cluster import InferenceResponse
-from ....vcm.sources import PageCluster
-from ....agents.patterns.attention.query_routing import PageQueryRoutingPolicy, create_page_query_router2
+from colony.agents.patterns.attention import PageQuery
+from colony.cluster import InferenceResponse
+from colony.vcm.sources import PageCluster
+from colony.agents.patterns.attention.query_routing import PageQueryRoutingPolicy, create_page_query_router2
 
-from ....agents.patterns.scope import ScopeAwareResult
-from ....agents.patterns.actions.policies import (
+from colony.agents.patterns.scope import ScopeAwareResult
+from colony.agents.patterns.actions.policies import (
     action_executor,
 )
 
@@ -493,13 +493,10 @@ class ClusterAnalyzer(Agent):
 
     async def initialize(self) -> None:
         """Initialize cluster analyzer."""
+        self.add_capability_classes([
+            ClusterAnalyzerCapability
+        ])
         await super().initialize()
-
-        # Add ClusterAnalyzerCapability
-        if not self.has_capability(ClusterAnalyzerCapability.get_capability_name()):
-            capability = ClusterAnalyzerCapability(self)
-            await capability.initialize()
-            self.add_capability(capability)
 
         logger.info(f"ClusterAnalyzer {self.agent_id} initialized")
 

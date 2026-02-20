@@ -21,13 +21,15 @@ LLM Approach:
 from __future__ import annotations
 
 import logging
+from pydantic import BaseModel, Field
 
-from ....agents.patterns.capabilities.merge import (
+from colony.agents.patterns.capabilities.merge import (
     MergeCapability,
 )
-from ....agents.base import Agent
-from ....agents.patterns.capabilities.synthesis import SynthesisCapability
-from ....agents.patterns.games.consensus_game import ConsensusGameProtocol
+from colony.agents.base import Agent
+from colony.agents.patterns.capabilities.synthesis import SynthesisCapability
+from colony.agents.patterns.games.consensus_game import ConsensusGameProtocol
+
 from .capabilities import (
     IntentInferenceCapability,
     IntentAnalysisCapability,  # New VCMAnalysisCapability-based coordinator
@@ -35,7 +37,6 @@ from .capabilities import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 
 # ============================================================================
@@ -53,27 +54,16 @@ class IntentInferenceAgent(Agent):
 
     Uses capability_classes pattern - no run() method needed.
     """
-
-    def __init__(self, *args, **kwargs):
-        """Initialize intent inference agent with required capabilities."""
-        granularity = kwargs.pop("granularity", "function")
-
-        capability_classes = kwargs.pop("capability_classes", [])
-        if IntentInferenceCapability not in capability_classes:
-            capability_classes.append(IntentInferenceCapability)
-        if MergeCapability not in capability_classes:
-            capability_classes.append(MergeCapability)
-        # TODO: Participate in consensus games for intent alignment
-        if ConsensusGameProtocol not in capability_classes:
-            capability_classes.append(ConsensusGameProtocol)
-
-        kwargs["capability_classes"] = capability_classes
-        super().__init__(*args, **kwargs)
-
-        self._granularity = granularity
+    granularity: str = Field(default="function")
 
     async def initialize(self) -> None:
         """Initialize agent with capabilities configured."""
+        self.add_capability_classes([
+            IntentInferenceCapability,
+            MergeCapability,
+            # TODO: Participate in consensus games for intent alignment
+            ConsensusGameProtocol,
+        ])
         await super().initialize()
 
         # Configure MergeCapability with IntentMergePolicy
@@ -84,7 +74,7 @@ class IntentInferenceAgent(Agent):
         # Configure IntentInferenceCapability
         intent_cap = self.get_capability_by_type(IntentInferenceCapability)
         if intent_cap:
-            intent_cap.granularity = self._granularity
+            intent_cap.granularity = self.granularity
 
         logger.info(f"IntentInferenceAgent {self.agent_id} initialized")
         # NO run() method - agent is event-driven via IntentInferenceCapability
@@ -104,24 +94,13 @@ class IntentInferenceCoordinator(Agent):
     The coordinator is event-driven - no run() method needed.
     """
 
-    def __init__(self, *args, **kwargs):
-        """Initialize coordinator with required capabilities."""
-        # max_agents is advisory - LLM controls actual parallelism via spawn_workers(max_parallel=N)
-        self._max_agents = kwargs.pop("max_agents", 10)
-
-        capability_classes = kwargs.pop("capability_classes", [])
-        if IntentAnalysisCapability not in capability_classes:
-            capability_classes.append(IntentAnalysisCapability)
-        if MergeCapability not in capability_classes:
-            capability_classes.append(MergeCapability)
-        if SynthesisCapability not in capability_classes:
-            capability_classes.append(SynthesisCapability)
-
-        kwargs["capability_classes"] = capability_classes
-        super().__init__(*args, **kwargs)
-
     async def initialize(self) -> None:
         """Initialize coordinator with capabilities configured."""
+        self.add_capability_classes([
+            IntentAnalysisCapability,
+            MergeCapability,
+            SynthesisCapability,
+        ])
         await super().initialize()
 
         # Configure MergeCapability

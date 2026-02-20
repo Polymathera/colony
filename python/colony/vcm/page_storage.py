@@ -606,14 +606,10 @@ class PageStorage:
 
     Example:
         ```python
-        from polymathera.distributed import get_polymathera
-
-        polymathera = get_polymathera()
-        storage_backend = await polymathera.get_storage()
-
         page_storage = PageStorage(
-            storage_backend=storage_backend,
             backend_type="efs",  # or "s3"
+            storage_path=self.page_storage_path,
+            s3_bucket=self.page_storage_s3_bucket,
         )
         await page_storage.initialize()
 

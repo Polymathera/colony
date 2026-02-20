@@ -10,15 +10,19 @@ from __future__ import annotations
 
 import time
 from typing import Any, Generic, TypeVar
-
 from pydantic import BaseModel, Field
+from overrides import override
 
 from ..scope import ScopeAwareResult
 from .merge import MergePolicy, MergeContext
 from .refinement import RefinementPolicy, RefinementContext
 from ...base import Agent, AgentCapability
+from ...models import AgentSuspensionState
+from ....utils import setup_logger
 from ..actions import action_executor
 
+
+logger = setup_logger(__name__)
 
 T = TypeVar('T')
 
@@ -284,6 +288,18 @@ class SynthesisCapability(AgentCapability):
         """Get ValidationCapability from agent (optional)."""
         from .validation import ValidationCapability
         return self.agent.get_capability_by_type(ValidationCapability)
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for SynthesisCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for SynthesisCapability")
+        pass
 
     # -------------------------------------------------------------------------
     # Action Executors

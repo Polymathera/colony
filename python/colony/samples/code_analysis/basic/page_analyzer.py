@@ -13,11 +13,11 @@ import re
 import time
 from overrides import override
 
-from ....agents.base import Agent, AgentCapability
-from ....agents.models import AgentSuspensionState
-from ....cluster.models import InferenceResponse
-from ....agents.patterns.scope import ScopeAwareResult
-from ....agents.patterns.actions.policies import action_executor
+from colony.agents.base import Agent, AgentCapability
+from colony.agents.models import AgentSuspensionState
+from colony.cluster.models import InferenceResponse
+from colony.agents.patterns.scope import ScopeAwareResult
+from colony.agents.patterns.actions.policies import action_executor
 
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class PageAnalyzerCapability(AgentCapability):
         """Analyze the single bound page and produce compact summary."""
         # Load configuration from metadata
         from .config import PageAnalyzerConfig
-        config_data = self.agent.metadata.get("config", {})
+        config_data = self.agent.metadata.parameters.get("config", {})
         config = PageAnalyzerConfig(**config_data)
 
         # Request page load
@@ -211,7 +211,7 @@ Be concise. Focus on facts, not speculation."""
             return
 
         # Get shared blackboard with parent
-        blackboard = await self.get_blackboard(scope="shared", scope_id=parent_id)
+        blackboard = await self.agent.get_blackboard(scope="shared", scope_id=parent_id)
 
         # Write page summary to blackboard
         await blackboard.write(f"page_summary:{self.page_id}", self.summary)
@@ -286,10 +286,9 @@ class PageAnalyzer(Agent):
 
     async def initialize(self) -> None:
         """Initialize page analyzer."""
+        self.add_capability_classes([
+            PageAnalyzerCapability
+        ])
         await super().initialize()
 
-        if not self.has_capability(PageAnalyzerCapability.get_capability_name()):
-            capability = PageAnalyzerCapability(self)
-            await capability.initialize()
-            self.add_capability(capability)
 

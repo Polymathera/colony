@@ -35,7 +35,8 @@ from overrides import override
 
 import networkx as nx
 
-from ...base import AgentCapability, AgentSuspensionState
+from ...base import AgentCapability
+from ...models import AgentSuspensionState
 from ...cache_coordination import (
     CacheAwareCoordinationPolicy,
     PageScorer,
@@ -175,7 +176,7 @@ class WorkingSetCapability(AgentCapability):
         super().__init__(agent=agent, scope_id=scope_id)
         self.eviction_policy = eviction_policy or LRUEvictionPolicy()
         self.coordination_policy = coordination_policy
-        self.working_set_size = working_set_size
+        self.working_set_size: int = working_set_size
 
         # Local cache for performance (synced from blackboard)
         self._local_cache: dict[str, Any] | None = None

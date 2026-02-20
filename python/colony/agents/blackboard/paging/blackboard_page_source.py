@@ -759,8 +759,6 @@ class BlackboardContextPageSource(ContextPageSource):
             raise ValueError("Missing PageStorageConfig in VCM")
 
         self._page_storage = PageStorage(
-            group_id = self.scope_id,
-            tenant_id = self.tenant_id,
             backend_type=config.backend_type,
             storage_path=config.storage_path,
             s3_bucket=config.s3_bucket,

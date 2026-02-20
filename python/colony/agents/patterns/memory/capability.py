@@ -110,6 +110,7 @@ from overrides import override
 from pydantic import BaseModel
 
 from ...base import AgentCapability, CapabilityResultFuture
+from ...models import AgentSuspensionState
 from ...blackboard.types import BlackboardEntry, BlackboardEvent
 from ....vcm.models import MmapConfig
 from ....vcm.sources import BuilInContextPageSourceType
@@ -492,6 +493,18 @@ class MemoryCapability(AgentCapability):
     # =========================================================================
     # AgentCapability Abstract Methods
     # =========================================================================
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for MemoryCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for MemoryCapability")
+        pass
 
     @override
     async def stream_events_to_queue(

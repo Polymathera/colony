@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import logging
 import uuid
+from pydantic import BaseModel, Field
 
-from ....agents.base import Agent
-from ....agents.patterns.capabilities.merge import MergeCapability
-from ....agents.patterns.capabilities.synthesis import SynthesisCapability
-from ....agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
+from colony.agents.base import Agent
+from colony.agents.patterns.capabilities.merge import MergeCapability
+from colony.agents.patterns.capabilities.synthesis import SynthesisCapability
+from colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
 
 from .capabilities import (
     ContractMergePolicy,
@@ -51,41 +52,29 @@ class ContractInferenceAgent(Agent):
     3. Returns results via blackboard for AgentHandle.run() to receive
     4. Can participate in game protocols via HypothesisGameProtocol capability
     """
-
-    def __init__(self, *args, **kwargs):
-        """Initialize contract inference agent with required capabilities."""
-        # Extract custom kwargs
-        formalism = kwargs.pop("formalism", FormalismLevel.SEMI_FORMAL)
-
-        # Ensure required capabilities are included
-        capability_classes = kwargs.pop("capability_classes", [])
-        if ContractInferenceCapability not in capability_classes:
-            capability_classes.append(ContractInferenceCapability)
-        if MergeCapability not in capability_classes:
-            capability_classes.append(MergeCapability)
-        if HypothesisGameProtocol not in capability_classes:
-            capability_classes.append(HypothesisGameProtocol)
-
-        agent_id = kwargs.pop("agent_id", None) or f"contract_agent_{uuid.uuid4().hex[:8]}"
-        kwargs["capability_classes"] = capability_classes
-        super().__init__(agent_id=agent_id, *args, **kwargs)
-
-        # Store config for capability initialization
-        self._formalism = formalism
+    formalism: str = Field(
+        default=FormalismLevel.SEMI_FORMAL,
+        description="Formalism level for contract inference"
+    )
 
     async def initialize(self) -> None:
         """Initialize agent with capabilities configured."""
+        self.add_capability_classes([
+            ContractInferenceCapability,
+            MergeCapability,
+            HypothesisGameProtocol,
+        ])
         await super().initialize()
 
         # Configure MergeCapability with ContractMergePolicy
-        merge_cap = self.get_capability_by_type(MergeCapability)
+        merge_cap: MergeCapability | None = self.get_capability_by_type(MergeCapability)
         if merge_cap:
             merge_cap.set_policy(ContractMergePolicy())
 
         # Configure ContractInferenceCapability
         inference_cap = self.get_capability_by_type(ContractInferenceCapability)
         if inference_cap:
-            inference_cap.formalism = self._formalism
+            inference_cap.formalism = self.formalism
 
         logger.info(f"ContractInferenceAgent {self.agent_id} initialized")
 
@@ -106,28 +95,17 @@ class ContractInferenceCoordinator(Agent):
     The coordinator is event-driven - no run() method needed.
     """
 
-    def __init__(self, *args, **kwargs):
-        """Initialize coordinator with required capabilities."""
-        # max_agents is advisory - LLM controls actual parallelism via spawn_workers(max_parallel=N)
-        self._max_agents = kwargs.pop("max_agents", 10)
-
-        capability_classes = kwargs.pop("capability_classes", [])
-        if ContractAnalysisCapability not in capability_classes:
-            capability_classes.append(ContractAnalysisCapability)
-        if MergeCapability not in capability_classes:
-            capability_classes.append(MergeCapability)
-        if SynthesisCapability not in capability_classes:
-            capability_classes.append(SynthesisCapability)
-
-        kwargs["capability_classes"] = capability_classes
-        super().__init__(*args, **kwargs)
-
     async def initialize(self) -> None:
         """Initialize coordinator with capabilities configured."""
+        self.add_capability_classes([
+            ContractAnalysisCapability,
+            MergeCapability,
+            SynthesisCapability,
+        ])
         await super().initialize()
 
         # Configure MergeCapability
-        merge_cap = self.get_capability_by_type(MergeCapability)
+        merge_cap: MergeCapability | None = self.get_capability_by_type(MergeCapability)
         if merge_cap:
             merge_cap.set_policy(ContractMergePolicy())
 

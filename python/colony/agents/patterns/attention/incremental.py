@@ -22,10 +22,13 @@ from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ..scope import ScopeAwareResult, AnalysisScope
 from .attention import PageQuery, AttentionScore
 from .query_routing import PageQueryRoutingPolicy
-from ...models import QueryContext, ActionPolicyIO
+from ...models import AgentSuspensionState, QueryContext, ActionPolicyIO
 from ..models import QueryAnswer
 from ...base import Agent, AgentCapability
 from ..actions.policies import CacheAwareActionPolicy, action_executor
+from ....utils import setup_logger
+
+logger = setup_logger(__name__)
 
 
 class IncrementalQueryCapability(AgentCapability):
@@ -90,6 +93,18 @@ class IncrementalQueryCapability(AgentCapability):
         self._pages_used: set[str] = set()
 
     @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for IncrementalQueryCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for IncrementalQueryCapability")
+        pass
+
+    @override
     async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
         """Stream capability-specific events to the given queue.
 
@@ -103,7 +118,7 @@ class IncrementalQueryCapability(AgentCapability):
         # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
         # incremental query requests can focus on specific categories.
         # TODO: Make scope configurable because agents that send incremental query requests need not know the agent_id of the incremental query agent (decoupling).
-        blackboard = await self.agent.get_blackboard(scope="shared", scope_id=self.agent.agent_id)
+        blackboard = await self.get_blackboard()
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(

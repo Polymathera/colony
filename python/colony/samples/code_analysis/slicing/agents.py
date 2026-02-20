@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import logging
 
-from ....agents.patterns.capabilities.merge import MergeCapability
-from ....agents.base import Agent
+from colony.agents.patterns.capabilities.merge import MergeCapability
+from colony.agents.base import Agent
 from .capabilities import (
     SliceMergePolicy,
     ProgramSlicingCapability,
@@ -47,19 +47,12 @@ class ProgramSlicingAgent(Agent):
     Uses capability_classes pattern - no run() method needed.
     """
 
-    def __init__(self, *args, **kwargs):
-        """Initialize slicing agent with required capabilities."""
-        capability_classes = kwargs.pop("capability_classes", [])
-        if ProgramSlicingCapability not in capability_classes:
-            capability_classes.append(ProgramSlicingCapability)
-        if MergeCapability not in capability_classes:
-            capability_classes.append(MergeCapability)
-
-        kwargs["capability_classes"] = capability_classes
-        super().__init__(*args, **kwargs)
-
     async def initialize(self) -> None:
         """Initialize agent with capabilities configured."""
+        self.add_capability_classes([
+            ProgramSlicingCapability,
+            MergeCapability,
+        ])
         await super().initialize()
 
         # Configure MergeCapability with SliceMergePolicy
@@ -84,22 +77,12 @@ class ProgramSlicingCoordinator(Agent):
     The coordinator is event-driven - no run() method needed.
     """
 
-    def __init__(self, *args, **kwargs):
-        """Initialize coordinator with required capabilities."""
-        # max_agents is advisory - LLM controls actual parallelism via spawn_workers(max_parallel=N)
-        self._max_agents = kwargs.pop("max_agents", 10)
-
-        capability_classes = kwargs.pop("capability_classes", [])
-        if SlicingAnalysisCapability not in capability_classes:
-            capability_classes.append(SlicingAnalysisCapability)
-        if MergeCapability not in capability_classes:
-            capability_classes.append(MergeCapability)
-
-        kwargs["capability_classes"] = capability_classes
-        super().__init__(*args, **kwargs)
-
     async def initialize(self) -> None:
         """Initialize coordinator with capabilities configured."""
+        self.add_capability_classes([
+            SlicingAnalysisCapability,
+            MergeCapability,
+        ])
         await super().initialize()
 
         # Configure MergeCapability

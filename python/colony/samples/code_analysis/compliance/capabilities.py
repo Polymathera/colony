@@ -4,6 +4,7 @@ from __future__ import annotations
 import itertools
 import logging
 from typing import Any
+from overrides import override
 
 from colony.agents.patterns import (
     AnalysisScope,
@@ -24,7 +25,7 @@ from colony.agents.blackboard import EnhancedBlackboard, ObligationGraph, Blackb
 from colony.agents.base import Agent, AgentCapability, CapabilityResultFuture, AgentHandle
 from colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
 from colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
-from colony.agents.models import Action, AgentMetadata, PolicyREPL, AgentResourceRequirements
+from colony.agents.models import Action, AgentMetadata, PolicyREPL, AgentResourceRequirements, AgentSuspensionState
 from colony.cluster.models import LLMClientRequirements
 
 from .types import (
@@ -91,6 +92,18 @@ class ComplianceAnalysisCapability(AgentCapability):
                 namespace="compliance"
             )
         return self._obligation_graph
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for ComplianceAnalysisCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for ComplianceAnalysisCapability")
+        pass
 
     @event_handler(pattern="{scope_id}:request:*")
     async def handle_analysis_request(
@@ -1463,6 +1476,18 @@ class ComplianceCoordinatorCapability(AgentCapability):
                 namespace="compliance"
             )
         return self._obligation_graph
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for ComplianceCoordinatorCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for ComplianceCoordinatorCapability")
+        pass
 
     @event_handler(pattern="{scope_id}:request:*")
     async def handle_analysis_request(

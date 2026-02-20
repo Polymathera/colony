@@ -492,7 +492,8 @@ class AgentSystemDeployment:
                 state.agents_by_type[agent.agent_type].append(agent.agent_id)
 
             # Register capabilities if present
-            capabilities = agent.metadata.get("capabilities", [])
+            # TODO: This is not where agent capabilities can be found.
+            capabilities = agent.metadata.parameters.get("capabilities", [])
             for capability in capabilities:
                 if capability not in state.agents_by_capability:
                     state.agents_by_capability[capability] = []
@@ -502,7 +503,7 @@ class AgentSystemDeployment:
             logger.info(f"Registered agent {agent.agent_id} on deployment replica {deployment_replica_id}")
 
         # Update tenant resource usage if agent has tenant_id
-        tenant_id = agent.metadata.get("tenant_id")
+        tenant_id = agent.tenant_id
         if tenant_id and self.session_manager_handle:
             try:
                 # Increment resource usage (update via SessionManager)
@@ -546,7 +547,8 @@ class AgentSystemDeployment:
                         del state.agents_by_type[agent.agent_type]
 
                 # Remove from capability indices
-                capabilities = agent.metadata.get("capabilities", [])
+                # TODO: This is not where agent capabilities can be found. We need a more reliable way to track capabilities for unregistration.
+                capabilities = agent.metadata.parameters.get("capabilities", [])
                 for capability in capabilities:
                     if capability in state.agents_by_capability:
                         if agent_id in state.agents_by_capability[capability]:
@@ -562,7 +564,7 @@ class AgentSystemDeployment:
 
         # Update tenant resource usage if agent had tenant_id
         if agent:
-            tenant_id = agent.metadata.get("tenant_id")
+            tenant_id = agent.tenant_id
             if tenant_id and self.session_manager_handle:
                 try:
                     # Decrement resource usage (update via SessionManager)

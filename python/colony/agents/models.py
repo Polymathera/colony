@@ -2199,7 +2199,7 @@ class AgentSuspensionState(SharedState):
             # Communication state
             child_agents=agent.child_agents,
             child_progress=agent.child_progress,
-            parent_agent_id=agent.metadata.get("parent_agent_id"),
+            parent_agent_id=agent.metadata.parameters.get("parent_agent_id"),
 
             # Cache state
             working_set_pages=list(agent.working_set_manager.working_set),

@@ -454,7 +454,7 @@ Output format (JSON):
             ActionResult with cluster summary
         """
         import json
-        from ....cluster.models import InferenceResponse
+        from colony.cluster.models import InferenceResponse
 
         try:
             # Build synthesis prompt
@@ -831,7 +831,7 @@ Output ONLY valid JSON."""
                 # Try to reconstruct PageKey if possible, otherwise store as-is
                 if isinstance(v, dict) and 'page_id' in v:
                     try:
-                        from ....agents.patterns.attention import PageKey
+                        from colony.agents.patterns.attention import PageKey
                         self.page_keys[k] = PageKey(**v)
                     except Exception:
                         self.page_keys[k] = v
@@ -878,17 +878,11 @@ class ClusterAnalyzerV2(Agent):
 
     async def initialize(self) -> None:
         """Initialize cluster analyzer."""
-        await super().initialize()
-
-        self.action_policy = await create_default_action_policy(
-            agent=self,
-            action_map={},  # Action executors are discovered from capabilities
-            max_iterations=self.metadata.max_iterations,
-        )
-
-        await self.action_policy.use_agent_capability_types([
+        self.add_capability_classes([
             ReflectionCapability,
             CriticCapability,
             ClusterAnalyzerCapabilityV2
         ])
+        await super().initialize()
+        logger.info(f"ClusterAnalyzerV2 {self.agent_id} initialized")
 

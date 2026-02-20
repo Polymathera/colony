@@ -66,7 +66,7 @@ from ...base import (
 from ..attention import PageQuery
 from .validation import ValidationResult, ValidationIssue
 from ..actions.policies import action_executor
-from ...models import Action, PolicyREPL
+from ...models import Action, PolicyREPL, AgentSuspensionState
 from ... import KeyPatternFilter, BlackboardEvent
 from ..events import event_handler, EventProcessingResult
 
@@ -219,6 +219,18 @@ class GroundingCapability(AgentCapability):
     def _get_event_pattern(self) -> str:
         """Get pattern for grounding events."""
         return f"{self.scope_id}:grounding:*"
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for MultiHopSearchCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for MultiHopSearchCapability")
+        pass
 
     # -------------------------------------------------------------------------
     # Abstract Method Implementations

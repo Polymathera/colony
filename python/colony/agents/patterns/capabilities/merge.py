@@ -14,12 +14,16 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import statistics
 from typing import Any, Generic, TypeVar
-
+from overrides import override
 from pydantic import BaseModel, Field
 
 from ..scope import AnalysisScope, ScopeAwareResult, merge_scopes
 from ...base import Agent, AgentCapability
+from ...models import AgentSuspensionState
+from ....utils import setup_logger
 from ..actions import action_executor
+
+logger = setup_logger(__name__)
 
 
 T = TypeVar('T')
@@ -867,6 +871,18 @@ class MergeCapability(AgentCapability):
                 f"Configure with a MergePolicy implementation."
             )
         return self.merge_policy
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for MMergeCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for MergeCapability")
+        pass
 
     @action_executor()
     async def merge_results(

@@ -53,7 +53,7 @@ from ...base import (
 )
 from ..actions.policies import action_executor
 from ... import KeyPatternFilter, BlackboardEvent
-from ...models import Action, PolicyREPL
+from ...models import Action, PolicyREPL, AgentSuspensionState
 from ..events import event_handler, EventProcessingResult
 
 
@@ -273,6 +273,18 @@ class ObjectiveGuardCapability(AgentCapability):
         """
         super().__init__(agent, scope_id)
         self.active_goals: dict[str, JointGoal] = {}
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for ObjectiveGuardCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for ObjectiveGuardCapability")
+        pass
 
     # -------------------------------------------------------------------------
     # Abstract Method Implementations

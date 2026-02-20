@@ -26,8 +26,10 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, TYPE_CHECKING
+from overrides import override
 
 from ...base import AgentCapability
+from ...models import AgentSuspensionState
 from ..actions.policies import action_executor
 
 if TYPE_CHECKING:
@@ -71,6 +73,18 @@ class ResultCapability(AgentCapability):
     def _get_index_key(self) -> str:
         """Get blackboard key for results index."""
         return self.RESULTS_INDEX_KEY.format(tenant_id=self.agent.tenant_id)
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for ResultCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for ResultCapability")
+        pass
 
     # === Action Executors ===
 

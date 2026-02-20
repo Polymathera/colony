@@ -28,11 +28,11 @@ import asyncio
 import logging
 import time
 from typing import Any
-
 from overrides import override
 from pydantic import BaseModel, Field
 
 from ...base import AgentCapability, CapabilityResultFuture, Agent
+from ...models import AgentSuspensionState
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ..hooks.types import HookContext, HookType
 from ..hooks.pointcuts import Pointcut
@@ -104,6 +104,18 @@ class MemoryLifecycleHooks(AgentCapability):
         raise NotImplementedError(
             "MemoryLifecycleHooks is a persistent service without a single result."
         )
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for MemoryLifecycleHooks")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for MemoryLifecycleHooks")
+        pass
 
     # -------------------------------------------------------------------------
     # Lifecycle Hooks

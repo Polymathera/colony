@@ -7,6 +7,7 @@ from typing import Any
 from overrides import override
 
 from colony.utils import setup_logger
+from colony.utils.git.clients import GitHubClient, GitLabClient, GitClientBase
 
 from ..languages.dependency import DependencyConfig
 from .base import BaseAnalyzer, FileContentCache
@@ -552,9 +553,6 @@ class DependencyParser:
     def get_dependencies(self) -> list[str]:
         return self.dependencies
 
-
-
-from .....utils.git.clients import GitHubClient, GitLabClient, GitClientBase
 
 
 class GitDependencyCrawler:

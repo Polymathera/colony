@@ -69,7 +69,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from ..state import GameOutcome
 from ....base import CapabilityResultFuture
@@ -144,20 +144,15 @@ class NegotiationParticipantAgent(Agent):
         ```
     """
 
-    def __init__(
-        self,
-        agent_id: str,
-        **kwargs
-    ):
-        super().__init__(agent_id=agent_id, **kwargs)
-        self._game_config = NegotiationGameConfig(
-            **self.metadata.get("game_config", {})  # type: ignore
-        )
+    _game_config: NegotiationGameConfig | None = PrivateAttr(default=None)
 
     async def initialize(self) -> None:
         """Initialize participant agent with negotiation capability and policy."""
         await super().initialize()
 
+        self._game_config = NegotiationGameConfig(
+            **self.metadata.parameters.get("game_config", {})  # type: ignore
+        )
         # Create and register capability with game_id for shared scope
         capability = NegotiationGameProtocol(
             agent=self,
@@ -202,20 +197,15 @@ class NegotiationMediatorAgent(Agent):
         ```
     """
 
-    def __init__(
-        self,
-        agent_id: str,
-        **kwargs
-    ):
-        super().__init__(agent_id=agent_id, **kwargs)
-        self._game_config = NegotiationGameConfig(
-            **self.metadata.get("game_config", {})  # type: ignore
-        )
+    _game_config: NegotiationGameConfig | None = PrivateAttr(default=None)
 
     async def initialize(self) -> None:
         """Initialize mediator agent."""
         await super().initialize()
 
+        self._game_config = NegotiationGameConfig(
+            **self.metadata.parameters.get("game_config", {})  # type: ignore
+        )
         capability = NegotiationGameProtocol(self, game_id=self._game_config.game_id)
         await capability.initialize()
         self.add_capability(capability)
@@ -251,17 +241,9 @@ class NegotiationCoordinatorAgent(Agent):
         ```
     """
 
-    def __init__(
-        self,
-        agent_id: str,
-        **kwargs
-    ):
-        super().__init__(agent_id=agent_id, **kwargs)
-        self._game_config = NegotiationGameConfig(
-            **self.metadata.get("game_config", {})  # type: ignore
-        )
-        self._child_agent_ids: list[str] = []
-        self._result_future: asyncio.Future[GameOutcome | None] | None = None
+    _game_config: NegotiationGameConfig | None = PrivateAttr(default=None)
+    _child_agent_ids: list[str] = PrivateAttr(default_factory=list)
+    _result_future: asyncio.Future[GameOutcome | None] | None = PrivateAttr(default=None)
 
     async def initialize(self) -> None:
         """Initialize coordinator agent.
@@ -273,6 +255,9 @@ class NegotiationCoordinatorAgent(Agent):
         """
         await super().initialize()
 
+        self._game_config = NegotiationGameConfig(
+            **self.metadata.parameters.get("game_config", {})  # type: ignore
+        )
         capability = NegotiationGameProtocol(self, game_id=self._game_config.game_id)
         await capability.initialize()
         self.add_capability(capability)

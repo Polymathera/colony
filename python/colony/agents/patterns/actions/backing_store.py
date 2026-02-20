@@ -172,8 +172,8 @@ class BlackboardBackingStore:
         """Get or create blackboard instance."""
         if self._blackboard is None:
             self._blackboard = await self._agent.get_blackboard(
-                scope=self._scope,
-                scope_id=self._agent.agent_id,
+                scope="shared",
+                scope_id=f"{self._agent.agent_id}:{self._scope}",  # Namespaced by agent ID and scope
             )
         return self._blackboard
 

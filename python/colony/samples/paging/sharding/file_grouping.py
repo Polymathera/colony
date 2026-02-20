@@ -421,7 +421,7 @@ class FileGrouper:
 
     async def cleanup(self) -> None:
         """Cleanup background tasks and resources"""
-        from ....utils import cleanup_dynamic_asyncio_tasks
+        from colony.utils import cleanup_dynamic_asyncio_tasks
 
         try:
             await cleanup_dynamic_asyncio_tasks(self, raise_exceptions=False)

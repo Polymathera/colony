@@ -75,7 +75,7 @@ from ..actions.policies import (
     action_executor,
     ActionPolicyExecutionState,
 )
-from ...models import Action, PolicyREPL
+from ...models import Action, AgentSuspensionState, PolicyREPL
 from ... import KeyPatternFilter, BlackboardEvent
 from ..events import event_handler, EventProcessingResult
 from ...blackboard import BlackboardEvent
@@ -856,6 +856,18 @@ class ReputationCapability(AgentCapability):
     # -------------------------------------------------------------------------
     # Abstract Method Implementations
     # -------------------------------------------------------------------------
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for ReputationCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for ReputationCapability")
+        pass
 
     @override
     async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:

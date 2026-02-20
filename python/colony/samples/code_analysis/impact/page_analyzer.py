@@ -688,21 +688,21 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         """Initialize capability."""
         await super().initialize()
 
-        self.blackboard = await self.get_blackboard(scope="shared", scope_id=self.scope_id)
+        self.blackboard = await self.get_blackboard()
 
         # Load configuration from agent metadata
-        self.page_id = self.agent.metadata.get("page_id")
-        self.change_description = self.agent.metadata.get("change_description")
-        changes_data = self.agent.metadata.get("changes", [])
+        self.page_id = self.agent.metadata.parameters.get("page_id")
+        self.change_description = self.agent.metadata.parameters.get("change_description")
+        changes_data = self.agent.metadata.parameters.get("changes", [])
         self.changes = [CodeChange(**c) if isinstance(c, dict) else c for c in changes_data]
 
         # Initialize feedback predictor for cache-aware prefetching
         self.feedback_predictor = FeedbackLoopPredictor(
             agent=self.agent,
-            group_id=self.agent.metadata.get("group_id"),
-            tenant_id=self.agent.metadata.get("tenant_id"),
-            prefetch_depth=self.agent.metadata.get("prefetch_depth", 2),
-            prefetch_test_pages=self.agent.metadata.get("prefetch_test_pages", True)
+            group_id=self.agent.group_id,
+            tenant_id=self.agent.tenant_id,
+            prefetch_depth=self.agent.metadata.parameters.get("prefetch_depth", 2),
+            prefetch_test_pages=self.agent.metadata.parameters.get("prefetch_test_pages", True)
         )
 
         logger.info(f"ChangeImpactAnalysisCapability initialized for page {self.page_id}")
@@ -791,7 +791,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         # Get blackboard from agent
         blackboard = await self.agent.get_blackboard(
             scope="shared",
-            scope_id=self.agent.agent_id
+            scope_id=self.agent.agent_id  # TODO: Which blackboard scope is best for analysis results? Shared across agents or private to this agent?
         )
 
         # Create policy and analyze

@@ -372,7 +372,10 @@ class EpistemicLayer:
         """
         self.agent = agent
         self.namespace = f"{agent.tenant_id}:epistemic"
-        self.blackboard: EnhancedBlackboard = self.agent.get_blackboard(
+        self.blackboard: EnhancedBlackboard | None = None
+
+    async def initialize(self) -> None:
+        self.blackboard = await self.agent.get_blackboard(
             scope="shared", scope_id=self.namespace
         )
 

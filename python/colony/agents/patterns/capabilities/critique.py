@@ -18,7 +18,7 @@ import time
 import logging
 import asyncio
 
-from ...models import Action, ActionResult, PolicyREPL
+from ...models import Action, ActionResult, PolicyREPL, AgentSuspensionState
 from ..models import Reflection, Critique
 from ...base import Agent, AgentCapability
 from ..actions import action_executor
@@ -317,10 +317,22 @@ class CriticCapability(AgentCapability):
     def __init__(self, agent: Agent):
         super().__init__(agent=agent, scope_id=agent.agent_id)
         # Injected critique policies for different relationships
-        self.critique_policy_self: CritiquePolicy | None = self.agent.metadata.get("critique_policy_self")  # FIXME: Get the policy instances properly
-        self.critique_policy_child: CritiquePolicy | None = self.agent.metadata.get("critique_policy_child")  # FIXME: Get the policy instances properly
-        self.critique_policy_peer: CritiquePolicy | None = self.agent.metadata.get("critique_policy_peer")  # FIXME: Get the policy instances properly
-        self.critique_policy_parent: CritiquePolicy | None = self.agent.metadata.get("critique_policy_parent")  # FIXME: Get the policy instances properly
+        self.critique_policy_self: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_self")  # FIXME: Get the policy instances properly
+        self.critique_policy_child: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_child")  # FIXME: Get the policy instances properly
+        self.critique_policy_peer: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_peer")  # FIXME: Get the policy instances properly
+        self.critique_policy_parent: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_parent")  # FIXME: Get the policy instances properly
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for CriticCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for CriticCapability")
+        pass
 
     @override
     async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
@@ -336,7 +348,7 @@ class CriticCapability(AgentCapability):
         # reputation updates in the action policy.
         # TODO: Make scope configurable because agents that request critiques need not
         # know the agent_id of the critic agent (decoupling).
-        blackboard = await self.agent.get_blackboard(scope="shared", scope_id=self.agent.agent_id)
+        blackboard = await self.get_blackboard()
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(

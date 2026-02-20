@@ -24,19 +24,19 @@ import asyncio
 import logging
 from enum import Enum
 from typing import Any
-
+from overrides import override
 from pydantic import BaseModel, Field
 
-from ...patterns import (
+from colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
 )
-from ...patterns.capabilities.page_graph import PageGraphCapability
-from ...patterns.actions import action_executor
-from ...patterns.events import event_handler, EventProcessingResult
-from ...blackboard import EnhancedBlackboard, ObligationGraph, BlackboardEvent, ComplianceRelationship
-from ...base import Agent, AgentCapability, CapabilityResultFuture
-from ...models import Action, PolicyREPL
+from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
+from colony.agents.patterns.actions import action_executor
+from colony.agents.patterns.events import event_handler, EventProcessingResult
+from colony.agents.blackboard import EnhancedBlackboard, ObligationGraph, BlackboardEvent, ComplianceRelationship
+from colony.agents.base import Agent, AgentCapability, CapabilityResultFuture
+from colony.agents.models import Action, PolicyREPL, AgentSuspensionState
 from ..contracts.types import Contract, ContractType, FunctionContract
 
 logger = logging.getLogger(__name__)
@@ -375,6 +375,18 @@ class SpecificationComplianceCapability(AgentCapability):
                 namespace="spec_compliance"
             )
         return self.obligation_graph
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for SpecificationComplianceCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for SpecificationComplianceCapability")
+        pass
 
     @event_handler(pattern="{scope_id}:request:*")
     async def handle_compliance_request(

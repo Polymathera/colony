@@ -69,11 +69,9 @@ class ConsistencyAgent(Agent):
 
     def __init__(self, *args, **kwargs):
         capability_classes: list[type] = kwargs.pop("capability_classes", [])
-        if ConsistencyCapability not in capability_classes:
-            capability_classes.append(ConsistencyCapability)
-        if ValidationCapability not in capability_classes:
-            capability_classes.append(ValidationCapability)
-        kwargs["capability_classes"] = capability_classes
+        for cap in [ConsistencyCapability, ValidationCapability]:
+            if cap not in capability_classes:
+                capability_classes.append(cap)
         super().__init__(*args, **kwargs)
 
     async def initialize(self) -> None:

@@ -20,9 +20,10 @@ LLM Approach:
 from __future__ import annotations
 
 import logging
+from pydantic import BaseModel, Field
 
-from ....agents.patterns import MergeCapability
-from ....agents.base import Agent
+from colony.agents.patterns import MergeCapability
+from colony.agents.base import Agent
 from .types import ComplianceType
 from .capabilities import (
     ComplianceVCMCapability,  # New VCMAnalysisCapability-based coordinator
@@ -50,40 +51,20 @@ class ComplianceAnalysisAgent(Agent):
     This agent is event-driven - it does NOT have a run() method.
     Work is triggered via blackboard events handled by capabilities.
     """
-
-    def __init__(
-        self,
-        *args,
-        page_id: str | None = None,
-        compliance_types: list[ComplianceType] | None = None,
-        **kwargs
-    ):
-        """Initialize compliance analysis agent.
-
-        Args:
-            *args: Passed to parent Agent
-            page_id: VCM page ID to analyze
-            compliance_types: Types of compliance to check
-            **kwargs: Passed to parent Agent, including capability_classes
-        """
-        # Extract and set up capability classes
-        capability_classes = kwargs.pop("capability_classes", [])
-        if ComplianceAnalysisCapability not in capability_classes:
-            capability_classes.append(ComplianceAnalysisCapability)
-        if MergeCapability not in capability_classes:
-            capability_classes.append(MergeCapability)
-        kwargs["capability_classes"] = capability_classes
-
-        # Set bound_pages from page_id
-        if page_id and "bound_pages" not in kwargs:
-            kwargs["bound_pages"] = [page_id]
-
-        super().__init__(*args, **kwargs)
-        self._page_id = page_id
-        self._compliance_types = compliance_types or [ComplianceType.LICENSE, ComplianceType.SECURITY]
+    page_id: str | None = Field(default=None)
+    compliance_types: list[ComplianceType] | None = Field(default=[ComplianceType.LICENSE, ComplianceType.SECURITY])
 
     async def initialize(self) -> None:
         """Initialize agent and configure capabilities."""
+        # Extract and set up capability classes
+        self.add_capability_classes([
+            ComplianceVCMCapability, MergeCapability
+        ])
+
+        # Set bound_pages from page_id
+        if self.page_id and not self.bound_pages:
+            self.bound_pages = [self.page_id]
+
         await super().initialize()
 
         # Configure MergeCapability with ComplianceMergePolicy
@@ -109,33 +90,12 @@ class ComplianceAnalysisCoordinator(Agent):
     The coordinator is event-driven - no run() method needed.
     """
 
-    def __init__(
-        self,
-        *args,
-        max_agents: int = 10,
-        **kwargs
-    ):
-        """Initialize coordinator.
-
-        Args:
-            *args: Passed to parent Agent
-            max_agents: Maximum page agents (advisory - LLM controls actual parallelism)
-            **kwargs: Passed to parent Agent, including capability_classes
-        """
-        # Extract and set up capability classes
-        capability_classes = kwargs.pop("capability_classes", [])
-        if ComplianceVCMCapability not in capability_classes:
-            capability_classes.append(ComplianceVCMCapability)
-        if MergeCapability not in capability_classes:
-            capability_classes.append(MergeCapability)
-        kwargs["capability_classes"] = capability_classes
-
-        super().__init__(*args, **kwargs)
-        # max_agents is advisory - LLM controls actual parallelism via spawn_workers(max_parallel=N)
-        self._max_agents = max_agents
-
     async def initialize(self) -> None:
         """Initialize coordinator and configure capabilities."""
+        self.add_capability_classes([
+            ComplianceVCMCapability,
+            MergeCapability
+        ])
         await super().initialize()
 
         # Configure MergeCapability with ComplianceMergePolicy

@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from overrides import override
 
 from ...base import AgentCapability, CapabilityResultFuture
+from ...models import AgentSuspensionState
 from ...blackboard.types import BlackboardEntry, BlackboardEvent
 from ..actions.policies import action_executor
 from .types import (
@@ -141,6 +142,18 @@ class AgentContextEngine(AgentCapability):
     # -------------------------------------------------------------------------
     # AgentCapability Abstract Methods
     # -------------------------------------------------------------------------
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for AgentContextEngine")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for AgentContextEngine")
+        pass
 
     @override
     async def stream_events_to_queue(

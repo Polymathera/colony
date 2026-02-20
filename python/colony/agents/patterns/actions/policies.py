@@ -1236,7 +1236,7 @@ class ActionDispatcher:
             key = ".".join(remaining) if remaining else ""
             if not key:
                 raise ValueError(f"Blackboard reference missing key: {ref.path}")
-            board = await self.agent.get_blackboard()
+            board = await self.agent.get_blackboard()  # TODO: This is the agent's blackboard. Is this correct, or should there be a separate "global" blackboard for cross-agent shared state?
             entry = await board.read(key)
             return entry.value if entry else None
 
@@ -1939,7 +1939,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         if self.planner is None:
             # Get planning parameters from metadata
             planning_params = PlanningParameters(
-                **self.agent.metadata.get("planning_params", {})  # FIXME: Get the planning parameters properly
+                **self.agent.metadata.parameters.get("planning_params", {})  # FIXME: Get the planning parameters properly
             )
 
             # Get or create planning strategy

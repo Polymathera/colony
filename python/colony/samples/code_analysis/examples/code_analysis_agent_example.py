@@ -15,9 +15,9 @@ Prerequisites:
 import asyncio
 import logging
 
-from ....vcm.sources import BuilInContextPageSourceType
-from ....vcm.models import MmapConfig, MmapResult
-from ....agents.models import AgentSpawnSpec
+from colony.vcm.sources import BuilInContextPageSourceType
+from colony.vcm.models import MmapConfig, MmapResult
+from colony.agents.models import AgentSpawnSpec
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ async def analyze_repository(
     # 1. Create ContextPageSource
     logger.info("Creating ContextPageSource...")
     # Map the repository to VCM pages using the built-in file grouper source type
-    from ....system import get_agent_system, get_vcm
+    from colony.system import get_agent_system, get_vcm
     vcm_handle = get_vcm()
     mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
         scope_id="repo-123",
