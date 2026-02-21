@@ -50,6 +50,18 @@ class CachedPageEntry:
     ttl_expiry: float
     last_access: float
     access_count: int = 0
+    appended_tokens: list[int] = field(default_factory=list)
+    appended_size: int = 0
+    max_append_capacity: int = 0
+
+    def __post_init__(self):
+        self.max_append_capacity = self.page.size - len(self.page.tokens)
+
+    def can_append(self, num_tokens: int) -> bool:
+        return self.appended_size + num_tokens <= self.max_append_capacity
+
+    def has_appended_context(self) -> bool:
+        return self.appended_size > 0
 
 
 @dataclass
@@ -512,6 +524,285 @@ class RemoteLLMDeployment:
             )
 
         return current_state
+
+    @serving.endpoint
+    async def infer(self, request: InferenceRequest) -> InferenceResponse:
+        """Perform inference with automatic context page loading.
+
+        This endpoint mirrors VLLMDeployment.infer(). It checks which required
+        pages are loaded, builds the prompt from their cached text, and calls
+        the remote API.
+
+        Args:
+            request: Inference request with prompt and required page IDs
+
+        Returns:
+            Inference response with generated text and page fault info
+        """
+        start_time = time.time()
+        page_faults = []
+
+        try:
+            # Update state: increment pending requests
+            async for dep_state in self.state_manager.write_transaction():
+                client_state = dep_state.client_states.get(self.client_id)
+                if client_state:
+                    client_state.pending_requests += 1
+                    client_state.total_requests += 1
+
+                    for page_id in request.context_page_ids:
+                        if not client_state.has_page(page_id):
+                            page_faults.append(page_id)
+                            logger.warning(
+                                f"Page fault: {page_id} not loaded in {self.client_id}"
+                            )
+
+            # Build prompt from loaded page texts + request prompt
+            page_context_parts = []
+            for page_id in request.context_page_ids:
+                entry = self.loaded_pages.get(page_id)
+                if entry:
+                    page_context_parts.append(entry.text)
+                    entry.last_access = time.time()
+                    entry.ttl_expiry = time.time() + self.ttl_seconds
+                    entry.access_count += 1
+
+            prompt_text = request.prompt
+            if page_context_parts:
+                context_block = "\n\n".join(page_context_parts)
+                prompt_text = f"{context_block}\n\n{prompt_text}"
+
+            # Build messages (use _build_cached_messages with page context as prefix)
+            messages = self._build_cached_messages(
+                page_text="\n\n".join(page_context_parts) if page_context_parts else "",
+                suffix_text=request.prompt,
+                system_prompt=self.config.system_prompt,
+            )
+
+            # Call API with concurrency control
+            async with self._request_semaphore:
+                self._active_requests += 1
+                try:
+                    response = await self._call_api(
+                        messages,
+                        max_tokens=request.max_tokens,
+                        temperature=request.temperature,
+                        top_p=request.top_p,
+                        json_schema=request.json_schema,
+                    )
+                finally:
+                    self._active_requests -= 1
+
+            latency_ms = (time.time() - start_time) * 1000
+
+            result = InferenceResponse(
+                request_id=request.request_id,
+                generated_text=response.content,
+                tokens_generated=response.output_tokens,
+                page_faults=page_faults,
+                latency_ms=latency_ms,
+                metadata={
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "cache_read_tokens": response.cache_read_input_tokens,
+                    "cache_write_tokens": response.cache_creation_input_tokens,
+                    "cost_usd": response.cost_usd,
+                    "provider": self.config.provider,
+                    "model": self.config.model_name,
+                },
+            )
+
+            logger.info(
+                f"Inference completed: request_id={request.request_id}, "
+                f"tokens={response.output_tokens}, latency={latency_ms:.2f}ms, "
+                f"page_faults={len(page_faults)}, cost=${response.cost_usd:.4f}"
+            )
+
+            return result
+
+        except Exception as e:
+            async for dep_state in self.state_manager.write_transaction():
+                client_state = dep_state.client_states.get(self.client_id)
+                if client_state:
+                    client_state.error_count += 1
+                    client_state.last_error = str(e)
+            logger.error(
+                f"Inference failed for request {request.request_id}: {e}",
+                exc_info=True,
+            )
+            raise
+
+        finally:
+            async for dep_state in self.state_manager.write_transaction():
+                client_state = dep_state.client_states.get(self.client_id)
+                if client_state:
+                    client_state.pending_requests -= 1
+
+    @serving.endpoint
+    async def migrate_page(
+        self,
+        page_id: ContextPageId,
+        target_deployment_name: str,
+        target_client_id: LLMClientId,
+    ) -> bool:
+        """Migrate a page from this deployment to another deployment.
+
+        Loads the page in the target deployment, then evicts it from this one.
+        Same pattern as VLLMDeployment.migrate_page().
+
+        Args:
+            page_id: ID of page to migrate
+            target_deployment_name: Name of the target deployment
+            target_client_id: ID of target LLM client
+
+        Returns:
+            True if migration succeeded
+        """
+        try:
+            if page_id not in self.loaded_pages:
+                raise ValueError(f"Page {page_id} not loaded in {self.client_id}")
+
+            entry = self.loaded_pages[page_id]
+            page = entry.page
+
+            logger.info(
+                f"Migrating page {page_id} from {self.client_id} to {target_client_id}"
+            )
+
+            from ..system import get_llm_cluster
+            llm_cluster_handle = get_llm_cluster()
+
+            try:
+                success = await llm_cluster_handle.load_page(
+                    page=page,
+                    deployment_name=target_deployment_name,
+                    client_id=target_client_id,
+                )
+                if not success:
+                    raise RuntimeError("Target deployment failed to load page")
+            except Exception as e:
+                logger.error(f"Failed to load page in target deployment: {e}")
+                raise RuntimeError(f"Page migration failed: {e}") from e
+
+            await self.evict_page(page_id)
+
+            logger.info(
+                f"Successfully migrated page {page_id} from "
+                f"{self.client_id} to {target_client_id}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Error during page migration: {e}", exc_info=True)
+            raise
+
+    @serving.endpoint
+    async def append_context_to_page(
+        self,
+        page_id: ContextPageId,
+        tokens: list[int],
+    ) -> bool:
+        """Append task-specific context to a loaded page.
+
+        For remote deployments, appended tokens are tracked locally and composed
+        into messages during inference (unlike vLLM where they modify KV cache).
+
+        Args:
+            page_id: ID of the page to append to
+            tokens: Token IDs to append
+
+        Returns:
+            True if successful
+        """
+        try:
+            if page_id not in self.loaded_pages:
+                logger.error(f"Cannot append to page {page_id}: page not loaded")
+                return False
+
+            entry = self.loaded_pages[page_id]
+
+            if not entry.can_append(len(tokens)):
+                logger.error(
+                    f"Cannot append {len(tokens)} tokens to page {page_id}: "
+                    f"would exceed capacity (current: {entry.appended_size}, "
+                    f"max: {entry.max_append_capacity})"
+                )
+                return False
+
+            entry.appended_tokens.extend(tokens)
+            entry.appended_size += len(tokens)
+
+            logger.info(
+                f"Appended {len(tokens)} tokens to page {page_id} "
+                f"(total appended: {entry.appended_size}/{entry.max_append_capacity})"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                f"Failed to append context to page {page_id}: {e}", exc_info=True
+            )
+            return False
+
+    @serving.endpoint
+    async def remove_appended_context(
+        self,
+        page_id: ContextPageId,
+    ) -> bool:
+        """Remove appended context from a loaded page, resetting to base page.
+
+        Args:
+            page_id: ID of the page to reset
+
+        Returns:
+            True if successful
+        """
+        try:
+            if page_id not in self.loaded_pages:
+                logger.warning(
+                    f"Cannot remove appended context: page {page_id} not loaded"
+                )
+                return True
+
+            entry = self.loaded_pages[page_id]
+
+            if not entry.has_appended_context():
+                logger.debug(f"Page {page_id} has no appended context to remove")
+                return True
+
+            removed_size = entry.appended_size
+            entry.appended_tokens.clear()
+            entry.appended_size = 0
+
+            logger.info(
+                f"Removed {removed_size} appended tokens from page {page_id}, "
+                f"reset to base page ({entry.cached_tokens} tokens)"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                f"Failed to remove appended context from page {page_id}: {e}",
+                exc_info=True,
+            )
+            return False
+
+    @serving.endpoint
+    async def get_kv_metrics(self) -> KVCacheMetrics:
+        """Get current KV cache metrics.
+
+        Returns:
+            KVCacheMetrics with current statistics
+        """
+        async for dep_state in self.state_manager.read_transaction():
+            client_state = dep_state.client_states.get(self.client_id)
+            if client_state:
+                self.kv_metrics.update_kv_cache_usage(
+                    client_state.kv_cache_used,
+                    client_state.kv_cache_capacity,
+                )
+
+        return self.kv_metrics.model_copy(deep=True)
 
     # -------------------------------------------------------------------------
     # TTL management

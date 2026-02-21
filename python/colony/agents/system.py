@@ -23,6 +23,7 @@ from ..distributed import get_polymathera
 from ..distributed.state_management import SharedState, StateManager
 from ..distributed.ray_utils import serving
 from .base import Agent, AgentState, ResourceExhausted
+from .models import AgentRegistrationInfo
 from .models import (
     AgentMetadata,
     AgentResourceRequirements,
@@ -54,7 +55,7 @@ class AgentSystemState(SharedState):
     - Frequent updates (use local state)
 
     Attributes:
-        agents: All agents in the system (agent_id -> Agent)
+        agents: All agents in the system (agent_id -> AgentRegistrationInfo)
         agent_locations: Agent to deployment mapping (agent_id -> deployment_id)
         deployment_names: Deployment name mapping (deployment_id -> deployment_name)
         page_agents: Page-bound agents (page_id -> list of agent_ids)
@@ -64,7 +65,7 @@ class AgentSystemState(SharedState):
     """
 
     # Agent registry (updated only on spawn/terminate)
-    agents: dict[str, Agent] = Field(default_factory=dict)
+    agents: dict[str, AgentRegistrationInfo] = Field(default_factory=dict)
     agent_locations: dict[str, str] = Field(default_factory=dict)  # agent_id -> deployment_replica_id
     deployment_names: dict[str, str] = Field(default_factory=dict)  # deployment_replica_id -> deployment_name
 
@@ -175,7 +176,7 @@ class AgentSystemDeployment:
             return list(state.agents.keys())
 
     @serving.endpoint
-    async def get_agent_info(self, agent_id: str) -> Agent | None:
+    async def get_agent_info(self, agent_id: str) -> AgentRegistrationInfo | None:
         """Get agent information.
 
         Args:
@@ -463,58 +464,56 @@ class AgentSystemDeployment:
     # === Agent Registration ===
 
     @serving.endpoint
-    async def register_agent(self, agent: Agent, deployment_replica_id: str, deployment_name: str) -> None:
+    async def register_agent(self, agent_info: AgentRegistrationInfo, deployment_replica_id: str, deployment_name: str) -> None:
         """Register a new agent.
 
         Args:
-            agent: Agent instance
+            agent_info: Lightweight agent registration info (serializable)
             deployment_replica_id: Deployment replica hosting this agent (format: "app_name.deployment_name#replica_id")
             deployment_name: Deployment name
         """
         async for state in self.state_manager.write_transaction():
-            state.agents[agent.agent_id] = agent
-            state.agent_locations[agent.agent_id] = deployment_replica_id
+            state.agents[agent_info.agent_id] = agent_info
+            state.agent_locations[agent_info.agent_id] = deployment_replica_id
             if deployment_replica_id in state.deployment_names:
                 if state.deployment_names[deployment_replica_id] != deployment_name:
                     logger.warning(f"Deployment name mismatch for {deployment_replica_id}: {state.deployment_names[deployment_replica_id]} != {deployment_name}")
             state.deployment_names[deployment_replica_id] = deployment_name
             # Register page bindings
-            for page_id in agent.bound_pages:
+            for page_id in agent_info.bound_pages:
                 if page_id not in state.page_agents:
                     state.page_agents[page_id] = []
-                if agent.agent_id not in state.page_agents[page_id]:
-                    state.page_agents[page_id].append(agent.agent_id)
+                if agent_info.agent_id not in state.page_agents[page_id]:
+                    state.page_agents[page_id].append(agent_info.agent_id)
 
             # Register in type index
-            if agent.agent_type not in state.agents_by_type:
-                state.agents_by_type[agent.agent_type] = []
-            if agent.agent_id not in state.agents_by_type[agent.agent_type]:
-                state.agents_by_type[agent.agent_type].append(agent.agent_id)
+            if agent_info.agent_type not in state.agents_by_type:
+                state.agents_by_type[agent_info.agent_type] = []
+            if agent_info.agent_id not in state.agents_by_type[agent_info.agent_type]:
+                state.agents_by_type[agent_info.agent_type].append(agent_info.agent_id)
 
-            # Register capabilities if present
-            # TODO: This is not where agent capabilities can be found.
-            capabilities = agent.metadata.parameters.get("capabilities", [])
-            for capability in capabilities:
+            # Register capabilities for discovery
+            for capability in agent_info.capability_names:
                 if capability not in state.agents_by_capability:
                     state.agents_by_capability[capability] = []
-                if agent.agent_id not in state.agents_by_capability[capability]:
-                    state.agents_by_capability[capability].append(agent.agent_id)
+                if agent_info.agent_id not in state.agents_by_capability[capability]:
+                    state.agents_by_capability[capability].append(agent_info.agent_id)
 
-            logger.info(f"Registered agent {agent.agent_id} on deployment replica {deployment_replica_id}")
+            logger.info(f"Registered agent {agent_info.agent_id} on deployment replica {deployment_replica_id}")
 
         # Update tenant resource usage if agent has tenant_id
-        tenant_id = agent.tenant_id
+        tenant_id = agent_info.tenant_id
         if tenant_id and self.session_manager_handle:
             try:
                 # Increment resource usage (update via SessionManager)
                 await self.session_manager_handle.increment_tenant_resources(
                     tenant_id=tenant_id,
-                    cpu_cores=agent.resource_requirements.cpu_cores,
-                    memory_mb=agent.resource_requirements.memory_mb,
-                    gpu_cores=agent.resource_requirements.gpu_cores,
-                    gpu_memory_mb=agent.resource_requirements.gpu_memory_mb,
+                    cpu_cores=agent_info.resource_requirements.cpu_cores,
+                    memory_mb=agent_info.resource_requirements.memory_mb,
+                    gpu_cores=agent_info.resource_requirements.gpu_cores,
+                    gpu_memory_mb=agent_info.resource_requirements.gpu_memory_mb,
                 )
-                logger.debug(f"Updated tenant {tenant_id} resource usage after registering agent {agent.agent_id}")
+                logger.debug(f"Updated tenant {tenant_id} resource usage after registering agent {agent_info.agent_id}")
             except Exception as e:
                 logger.warning(f"Failed to update tenant resource usage for {tenant_id}: {e}")
 
@@ -547,9 +546,7 @@ class AgentSystemDeployment:
                         del state.agents_by_type[agent.agent_type]
 
                 # Remove from capability indices
-                # TODO: This is not where agent capabilities can be found. We need a more reliable way to track capabilities for unregistration.
-                capabilities = agent.metadata.parameters.get("capabilities", [])
-                for capability in capabilities:
+                for capability in agent.capability_names:
                     if capability in state.agents_by_capability:
                         if agent_id in state.agents_by_capability[capability]:
                             state.agents_by_capability[capability].remove(agent_id)

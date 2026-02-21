@@ -31,6 +31,7 @@ from .models import (
     AgentState,
     ActionPolicyIterationResult,
     ActionPolicyExecutionState,
+    AgentRegistrationInfo,
     AgentResourceRequirements,
     AgentSuspensionState,
     AgentSpawnSpec,
@@ -754,6 +755,7 @@ class AgentHandle:
         capability_types: list[type[AgentCapability]] | None = None,
         *,
         default_capability_type: type[AgentCapability] | None = None,
+        app_name: str | None = None
     ):
         """Initialize agent handle.
 
@@ -762,15 +764,18 @@ class AgentHandle:
             owner: Parent agent (None for detached mode)
             capability_types: Expected capability types (for validation)
             default_capability_type: Default capability for run/stream methods
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
         self.child_agent_id = child_agent_id
         self._owner = owner
         self._capability_types = capability_types or []
         self._capabilities: dict[str, AgentCapability] = {}
         self._default_capability_type = default_capability_type
+        self._app_name = app_name
 
         # For detached mode
-        self._agent_metadata: dict[str, Any] | None = None
+        self._agent_info: AgentRegistrationInfo | None = None
         self._blackboard: EnhancedBlackboard | None = None
 
     @property
@@ -792,6 +797,7 @@ class AgentHandle:
         cls,
         agent_id: str,
         default_capability_type: type[AgentCapability] | None = None,
+        app_name: str | None = None
     ) -> "AgentHandle":
         """Create a detached AgentHandle from an agent ID.
 
@@ -801,6 +807,7 @@ class AgentHandle:
         Args:
             agent_id: Target agent ID
             default_capability_type: Default capability for run/stream
+            app_name: The `serving.Application` name where the agent system resides.
 
         Returns:
             AgentHandle in detached mode
@@ -819,6 +826,7 @@ class AgentHandle:
             child_agent_id=agent_id,
             owner=None,
             default_capability_type=default_capability_type,
+            app_name=app_name
         )
 
         # Load agent metadata from AgentSystem
@@ -874,23 +882,29 @@ class AgentHandle:
         return await cls.from_agent_id(
             agent_id=agent_id,
             default_capability_type=default_capability_type,
+            app_name=app_name
         )
 
     async def _load_agent_metadata(self) -> None:
-        """Load agent metadata from AgentSystemDeployment."""
+        """Load agent registration info from AgentSystemDeployment."""
         from ..system import get_agent_system
 
-        agent_system = get_agent_system()
+        agent_system = get_agent_system(app_name=self._app_name)
         agent_info = await agent_system.get_agent_info(self.child_agent_id)
 
         if agent_info is None:
             raise ValueError(f"Agent {self.child_agent_id} not found")
 
-        self._agent_metadata = {
-            "agent_type": agent_info.agent_type,
-            "capabilities": agent_info.metadata.get("capabilities", []),
-            "default_capability": agent_info.metadata.get("default_capability"),
-        }
+        self._agent_info = agent_info
+
+    @property
+    def agent_info(self) -> AgentRegistrationInfo | None:
+        """Get the agent's registration info.
+
+        Available after creating handle via from_agent_id() or from_agent_type().
+        Contains agent_type, capability_names, state, bound_pages, etc.
+        """
+        return self._agent_info
 
     async def _get_child_blackboard(
         self,
@@ -1596,6 +1610,24 @@ class Agent(BaseModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
+    def to_registration_info(self) -> AgentRegistrationInfo:
+        """Create a lightweight, serializable registration info for the agent system.
+
+        This extracts only the fields needed for agent discovery and resource
+        tracking, avoiding non-serializable internals (capabilities, action
+        policies, weakrefs).
+        """
+        return AgentRegistrationInfo(
+            agent_id=self.agent_id,
+            agent_type=self.agent_type,
+            state=self.state,
+            tenant_id=self.tenant_id,
+            bound_pages=self.bound_pages,
+            metadata=self.metadata,
+            capability_names=self.get_capability_names(),
+            resource_requirements=self.resource_requirements,
+        )
+
     def set_manager(self, manager: AgentManagerBase) -> None:
         """Attach agent manager reference for delegation.
 
@@ -1883,10 +1915,13 @@ class Agent(BaseModel):
         if self.action_policy:
             return  # Already set
 
+        # First, create capabilities and add them to the agent. Do not initialize them yet,
+        # as some capabilities may discover each other during initialization and we want
+        # them all to be present in the agent before any initialize() calls.
         for cap_class in self.capability_classes:
             if not self.has_capability(cap_class.get_capability_name()):
                 capability = cap_class(self)
-                await capability.initialize()
+                # await capability.initialize()
                 # TODO: How to allow passing more add_capability params?
                 self.add_capability(
                     capability,
@@ -1894,6 +1929,12 @@ class Agent(BaseModel):
                     exclude_actions=[],
                     events_only=False,
                 )
+
+        # Initialize all capabilities. Snapshot via list() because a capability's
+        # initialize() may add pre-initialized sub-capabilities to the agent
+        # (e.g., AgentPoolCapability, PageGraphCapability), mutating the dict.
+        for capability in list(self._capabilities.values()):
+            await capability.initialize()
 
         if not self.action_policy_class:
             logger.warning("Agent does not have action_policy or action_policy_class defined. We will create a default ActionPolicy, but consider defining a custom one for better performance and capabilities.")
@@ -3072,7 +3113,7 @@ class AgentManagerBase:
                 try:
                     deployment_replica_id = self._get_deployment_replica_id()
                     await self._agent_system_handle.register_agent(
-                        agent=agent,
+                        agent_info=agent.to_registration_info(),
                         deployment_replica_id=deployment_replica_id,
                         deployment_name=serving.get_my_deployment_name(),
                     )

@@ -434,7 +434,6 @@ class MemoryCapability(AgentCapability):
                     scope_id=self.scope_id,
                     group_id=self._agent.group_id,
                     tenant_id=self._agent.tenant_id,
-                    source_type="blackboard",
                     source_type=BuilInContextPageSourceType.BLACKBOARD.value,
                     config=self.vcm_config or MmapConfig(),
                 )

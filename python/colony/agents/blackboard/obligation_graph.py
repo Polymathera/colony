@@ -26,6 +26,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .blackboard import EnhancedBlackboard
 
 class NodeType(str, Enum):
     """Type of node in obligation graph."""
@@ -328,7 +329,7 @@ class ObligationGraph:
     - Coverage metrics
     """
 
-    def __init__(self, blackboard: Any):
+    def __init__(self, blackboard: EnhancedBlackboard):
         """Initialize obligation graph.
 
         Args:
@@ -960,7 +961,7 @@ class ObligationGraph:
 async def create_requirement_from_spec(
     spec_text: str,
     spec_id: str,
-    blackboard: Any,
+    blackboard: EnhancedBlackboard,
     llm_client: Any
 ) -> ObligationNode:
     """Create requirement node from specification text.
@@ -998,7 +999,7 @@ async def create_requirement_from_spec(
 async def analyze_compliance(
     requirement_id: str,
     codebase_artifacts: list[dict[str, Any]],
-    blackboard: Any,
+    blackboard: EnhancedBlackboard,
     llm_client: Any
 ) -> list[ObligationEdge]:
     """Analyze which artifacts satisfy a requirement.

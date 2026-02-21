@@ -44,7 +44,9 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Type, TYPE_CHECKING
+from overrides import override
 
+from ...models import AgentSuspensionState
 from ...base import AgentCapability, AgentMetadata
 from ..actions.policies import action_executor
 from ..scope import ScopeAwareResult, AnalysisScope
@@ -115,6 +117,18 @@ class VCMAnalysisCapability(AgentCapability, ABC):
     # =========================================================================
     # ABSTRACT HOOKS - Domain-specific subclasses implement
     # =========================================================================
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        # TODO: Implement
+        logger.warning("serialize_suspension_state not implemented for ValidationCapability")
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        # TODO: Implement
+        logger.warning("deserialize_suspension_state not implemented for ValidationCapability")
+        pass
 
     @abstractmethod
     def get_worker_capability_class(self) -> Type[AgentCapability]:

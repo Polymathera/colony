@@ -2356,7 +2356,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             execution_context=execution_context,
             page_ids=list(self.agent.bound_pages) if hasattr(self.agent, 'bound_pages') else [],
             goals=goals,
-            action_descriptions=self.get_action_descriptions(),
+            action_descriptions=await self.get_action_descriptions(),
             recalled_memories=recalled_memories,
             custom_data=custom_data,
             # parent_plan_id=self.current_plan.parent_plan_id,
@@ -2370,7 +2370,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         Returns the created plan for hook-based capture.
         """
 
-        planning_context = self._get_planning_context(
+        planning_context = await self._get_planning_context(
             execution_context=PlanExecutionContext()
         )
 

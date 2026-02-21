@@ -658,7 +658,7 @@ class DistributedStateSubscriber:
                 if message is None:
                     continue
 
-                update = DistributedStateUpdate.model_validate_json(message)
+                update = DistributedStateUpdate.model_validate_json(message['data'])
                 if not self._callback(update, ex=None):
                     break
 
@@ -836,6 +836,7 @@ class RedisOM:
             await pipe.watch(obj_key, version_key)
 
             # Check if object exists
+            old_obj = None
             exists = await redis.exists(obj_key)
             if exists:
                 if not update_if_exists:
@@ -2887,6 +2888,7 @@ class RedisOM:
         pipe: Pipeline | None = None,
         replace_all: bool = False,
         update_type: Literal["update", "initialization"] = "update",
+        ttl: int = 3600,
     ) -> bool | None:
         """
         Atomic update of a state topic.
@@ -2894,6 +2896,7 @@ class RedisOM:
         Args:
             updates: dict of updated fields
             replace_all: If True, replace entire topic. If False, update only specified fields.
+            ttl: TTL in seconds for the topic key (default: 3600)
         """
 
         async def _update_state_topic(pipe: Pipeline) -> None:
@@ -2904,8 +2907,10 @@ class RedisOM:
                 # Otherwise, we update only specified fields
                 await pipe.delete(topic_key)
 
-            await pipe.hset(topic_key, mapping=updates)
-            await pipe.expire(topic_key, self.ttl)  # Refresh TTL
+            # Redis rejects hset with an empty mapping — skip if no fields to set
+            if updates:
+                await pipe.hset(topic_key, mapping=updates)
+                await pipe.expire(topic_key, ttl)
 
             # Publish update to be picked up by the InferenceJobTrackers
             await pipe.publish(

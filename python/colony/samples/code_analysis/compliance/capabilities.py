@@ -89,7 +89,6 @@ class ComplianceAnalysisCapability(AgentCapability):
             blackboard = await self.get_blackboard()
             self._obligation_graph = ObligationGraph(
                 blackboard=blackboard,
-                namespace="compliance"
             )
         return self._obligation_graph
 
@@ -1118,7 +1117,6 @@ class ComplianceVCMCapability(VCMAnalysisCapability):
         blackboard = await self.get_blackboard()
         self._obligation_graph = ObligationGraph(
             blackboard=blackboard,
-            namespace="compliance"
         )
 
     # =========================================================================
@@ -1473,7 +1471,6 @@ class ComplianceCoordinatorCapability(AgentCapability):
             blackboard = await self.get_blackboard()
             self._obligation_graph = ObligationGraph(
                 blackboard=blackboard,
-                namespace="compliance"
             )
         return self._obligation_graph
 

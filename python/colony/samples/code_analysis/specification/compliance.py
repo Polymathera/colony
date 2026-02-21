@@ -372,7 +372,6 @@ class SpecificationComplianceCapability(AgentCapability):
             # Initialize obligation graph for requirement tracking
             self.obligation_graph = ObligationGraph(
                 blackboard=blackboard,
-                namespace="spec_compliance"
             )
         return self.obligation_graph
 

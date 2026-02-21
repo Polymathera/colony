@@ -10,28 +10,28 @@ import asyncio
 from typing import Any
 
 # Import the fixed blackboard structures
-from polymathera.colony.agents.blackboard.workspace import (
+from colony.agents.blackboard.workspace import (
     Workspace,
     WorkspaceBranch,
     WorkspaceManager,
     create_project_workspace,
     create_experiment_branch,
 )
-from polymathera.colony.agents.blackboard.task_graph import (
+from colony.agents.blackboard.task_graph import (
     Task,
     TaskGraph,
     TaskStatus,
     TaskPriority,
     create_analysis_task,
 )
-from polymathera.colony.agents.blackboard.obligation_graph import (
+from colony.agents.blackboard.obligation_graph import (
     ObligationNode,
     ObligationEdge,
     ObligationGraph,
     NodeType,
     ComplianceRelationship,
 )
-from polymathera.colony.agents.blackboard.causality_timeline import (
+from colony.agents.blackboard.causality_timeline import (
     CausalEvent,
     CausalityTimeline,
     EventType,
@@ -39,7 +39,7 @@ from polymathera.colony.agents.blackboard.causality_timeline import (
 )
 
 # Import patterns that integrate with blackboard
-from polymathera.colony.agents.patterns.scope import (
+from colony.agents.patterns.scope import (
     AnalysisScope,
     ScopeAwareResult,
 )

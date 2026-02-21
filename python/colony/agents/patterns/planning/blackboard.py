@@ -58,8 +58,8 @@ class PlanBlackboard:
     async def get_plan(self, agent_id: str) -> ActionPlan | None:
         """Get plan for specific agent."""
         key = ActionPlan.get_plan_key(agent_id)
-        entry = await self.blackboard.read(key)
-        return ActionPlan(**entry.value) if entry else None
+        plan_dict = await self.blackboard.read(key)
+        return ActionPlan(**plan_dict) if plan_dict else None
 
     async def get_plan_by_id(self, plan_id: str) -> ActionPlan | None:
         """Get plan by plan_id (requires search across all plans)."""
@@ -109,6 +109,10 @@ class PlanBlackboard:
         if self.plan_access_policy:
             if not self.plan_access_policy.can_create_plan(requesting_agent_id, plan):
                 return False, "Permission denied: cannot create plan"
+
+        # Ensure status is set — planners may leave it as None
+        if plan.status is None:
+            plan.status = PlanStatus.PROPOSED
 
         # Store plan
         # TODO: Add tenant_id (necessary even if agent_id is unique, since we need scoped search in other places)

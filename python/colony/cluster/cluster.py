@@ -590,7 +590,7 @@ class LLMCluster:
             raise RuntimeError("Cluster not deployed. Call deploy() first.")
 
         handles = list(self.vllm_deployment_handles.keys()) + list(self.remote_deployment_handles.keys())
-        if not self.top_level and len(handles):
+        if not self.top_level and not handles:
             raise RuntimeError("Cluster's @on_app_ready endpoint must be called to discover deployment handles.")
 
         return handles

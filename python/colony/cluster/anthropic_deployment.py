@@ -101,6 +101,27 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         if "system" in messages:
             kwargs["system"] = messages["system"]
 
+        logger.info(
+            f"Anthropic API request: model={self.config.model_name}, "
+            f"max_tokens={max_tokens}, temp={temperature}, "
+            f"system_blocks={len(kwargs.get('system', []))}, "
+            f"user_blocks={sum(len(m.get('content', [])) if isinstance(m.get('content'), list) else 1 for m in kwargs['messages'])}"
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            for i, msg in enumerate(kwargs["messages"]):
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for j, block in enumerate(content):
+                        text = block.get("text", "")
+                        has_cache = "cache_control" in block
+                        logger.debug(
+                            f"  msg[{i}].content[{j}]: len={len(text)}, "
+                            f"cache_control={has_cache}, "
+                            f"preview={text[:200]!r}..."
+                        )
+                else:
+                    logger.debug(f"  msg[{i}]: {str(content)[:200]!r}...")
+
         response = await self._client.messages.create(**kwargs)
 
         # Extract usage information
@@ -122,6 +143,12 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         content = ""
         if response.content:
             content = response.content[0].text
+
+        logger.info(
+            f"Anthropic API response: input={input_tokens}, output={output_tokens}, "
+            f"cache_read={cache_read}, cache_write={cache_write}, "
+            f"cost=${cost_usd:.6f}, response_len={len(content)}"
+        )
 
         return APIResponse(
             content=content,
@@ -157,6 +184,20 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         ttl_value = self.config.ttl  # "5m" or "1h"
         prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
 
+        # Build user content blocks — only include page text if non-empty
+        # (Anthropic rejects cache_control on empty text blocks)
+        user_content = []
+        if page_text:
+            user_content.append({
+                "type": "text",
+                "text": page_text,
+                "cache_control": {"type": "ephemeral", "ttl": ttl_value},
+            })
+        user_content.append({
+            "type": "text",
+            "text": suffix_text,
+        })
+
         return {
             "system": [
                 {
@@ -168,21 +209,7 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
             "messages": [
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": page_text,
-                            "cache_control": {
-                                "type": "ephemeral",
-                                "ttl": ttl_value,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": suffix_text,
-                            # No cache_control — varies per request
-                        },
-                    ],
+                    "content": user_content,
                 }
             ],
         }

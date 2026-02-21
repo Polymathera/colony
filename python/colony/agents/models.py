@@ -2546,6 +2546,26 @@ class AgentMetadata(BaseModel):
                 setattr(self, key, value)
 
 
+class AgentRegistrationInfo(BaseModel):
+    """Lightweight, serializable agent info for the agent system registry.
+
+    Contains only the fields needed for agent discovery, resource tracking,
+    and state management. Unlike the full Agent object, this is safe to
+    send over Ray remote calls (no weakrefs, capabilities, or action policies).
+    """
+
+    agent_id: str
+    agent_type: str
+    state: AgentState = AgentState.INITIALIZED
+    tenant_id: str = "system"
+    bound_pages: list[str] = Field(default_factory=list)
+    metadata: AgentMetadata = Field(default_factory=AgentMetadata)
+    capability_names: list[str] = Field(default_factory=list)
+    resource_requirements: AgentResourceRequirements = Field(
+        default_factory=AgentResourceRequirements
+    )
+
+
 class AgentSpawnSpec(BaseModel):
     """Specification for spawning an agent.
 

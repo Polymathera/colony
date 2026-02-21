@@ -521,7 +521,7 @@ class CacheAwareActionPlanner(ActionPlanner):
 
         # Generate plan via strategy
         plan: ActionPlan = await self.planning_strategy.generate_plan(
-            context=planning_context,
+            planning_context=planning_context,
             params=self.planning_params,
             learned_patterns=learned_patterns,
             cache_context=cache_context,
@@ -649,10 +649,7 @@ async def create_cache_aware_planner(
     )
 
     # Create planning strategy (TopDown works well for code analysis)
-    planning_strategy = TopDownPlanningStrategy(
-        agent=agent,
-        params=planning_params,
-    )
+    planning_strategy = TopDownPlanningStrategy(agent=agent)
 
     # Create sophisticated planner with policies
     cache_aware_planner = CacheAwareActionPlanner(

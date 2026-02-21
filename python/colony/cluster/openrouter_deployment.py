@@ -118,6 +118,29 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
                 "json_schema": json_schema,
             }
 
+        logger.info(
+            f"OpenRouter API request: model={self.config.model_name}, "
+            f"max_tokens={max_tokens}, temp={temperature}, "
+            f"num_messages={len(kwargs['messages'])}"
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            for i, msg in enumerate(kwargs["messages"]):
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    for j, block in enumerate(content):
+                        text = block.get("text", "")
+                        has_cache = "cache_control" in block
+                        logger.debug(
+                            f"  msg[{i}] role={role} block[{j}]: len={len(text)}, "
+                            f"cache_control={has_cache}, "
+                            f"preview={text[:200]!r}..."
+                        )
+                else:
+                    logger.debug(
+                        f"  msg[{i}] role={role}: {str(content)[:200]!r}..."
+                    )
+
         response = await self._client.chat.completions.create(**kwargs)
 
         # Extract usage information
@@ -145,6 +168,12 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         content = ""
         if response.choices:
             content = response.choices[0].message.content or ""
+
+        logger.info(
+            f"OpenRouter API response: input={input_tokens}, output={output_tokens}, "
+            f"cache_read={cache_read}, cache_write={cache_write}, "
+            f"cost=${cost_usd:.6f}, response_len={len(content)}"
+        )
 
         return APIResponse(
             content=content,
@@ -189,25 +218,30 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         if self._is_claude_model:
             messages[0]["cache_control"] = {"type": "ephemeral"}
 
+            # Only include page text block if non-empty
+            # (cache_control on empty text blocks is rejected)
+            user_content = []
+            if page_text:
+                user_content.append({
+                    "type": "text",
+                    "text": page_text,
+                    "cache_control": {"type": "ephemeral"},
+                })
+            user_content.append({
+                "type": "text",
+                "text": suffix_text,
+            })
+
             messages.append({
                 "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": page_text,
-                        "cache_control": {"type": "ephemeral"},
-                    },
-                    {
-                        "type": "text",
-                        "text": suffix_text,
-                    },
-                ],
+                "content": user_content,
             })
         else:
             # Non-Claude models: simple text messages (no caching)
+            content = f"{page_text}\n\n{suffix_text}" if page_text else suffix_text
             messages.append({
                 "role": "user",
-                "content": f"{page_text}\n\n{suffix_text}",
+                "content": content,
             })
 
         return {"messages": messages}

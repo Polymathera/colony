@@ -449,8 +449,8 @@ class ConsciousnessCapability(AgentCapability):
             if self._agent is not None:
                 agent_type = self._agent.agent_type
                 metadata = {
-                    "capabilities": self._agent.metadata.parameters.get("capabilities", []), # TODO: This is not where capabilities can be found.
-                    "goals": self._agent.metadata.parameters.get("goals", []), # TODO: This is not where goals can be found.
+                    "capabilities": self._agent.get_capability_names(),
+                    "goals": self._agent.metadata.goals,
                 }
 
             self._self_concept = await self._create_default_self_concept(
