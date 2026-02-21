@@ -131,15 +131,15 @@ class StateManager(Generic[T]):
         retry_count = 0
 
         while True:
-            logger.info(
+            logger.debug(
                 f"StateManager.transaction: {self.state_key} {transaction_type} {retry_count}/{max_retries}"
             )
             try:
                 async with self.state_lock:
-                    logger.info("StateManager.transaction: lock acquired")
+                    logger.debug("StateManager.transaction: lock acquired")
                     # Load fresh state
                     current_state = await self._load_state()
-                    logger.info("StateManager.transaction: state loaded")
+                    logger.debug("StateManager.transaction: state loaded")
                     current_version = self._state_version
                     self._current_state = current_state.model_copy()
 
@@ -154,7 +154,7 @@ class StateManager(Generic[T]):
                     if transaction_type == StateTransactionType.READ:
                         break
 
-                    logger.info("StateManager.transaction: saving state")
+                    logger.debug("StateManager.transaction: saving state")
                     # For write transactions, try to save state with atomic compare-and-swap
                     success = await self.state_storage.compare_and_swap(
                         key=self.state_key,
@@ -163,12 +163,12 @@ class StateManager(Generic[T]):
                     )
 
                     if success:
-                        logger.info("StateManager.transaction: state saved")
+                        logger.debug("StateManager.transaction: state saved")
                         # Update version and exit
                         self._state_version += 1
                         break
 
-                    logger.info(
+                    logger.debug(
                         "StateManager.transaction: save failed, retry with fresh state"
                     )
                     # Save failed, retry with fresh state if attempts remain

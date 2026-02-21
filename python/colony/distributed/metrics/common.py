@@ -108,11 +108,11 @@ class BaseMetricsMonitor:
             import tempfile
             multiproc_dir = tempfile.mkdtemp(prefix='prometheus_multiproc_')
             os.environ['PROMETHEUS_MULTIPROC_DIR'] = multiproc_dir
-            self.logger.info(f"Created multiprocess directory: {multiproc_dir}")
+            self.logger.debug(f"Created multiprocess directory: {multiproc_dir}")
         elif not os.path.exists(multiproc_dir):
             os.makedirs(multiproc_dir, exist_ok=True)
         else:
-            self.logger.info(f"Using existing multiprocess directory: {multiproc_dir}")
+            self.logger.debug(f"Using existing multiprocess directory: {multiproc_dir}")
 
         # Start the HTTP server if requested
         if enable_http_server:

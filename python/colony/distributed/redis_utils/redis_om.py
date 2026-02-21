@@ -43,6 +43,24 @@ from ..metrics.redis_om import RedisOMMetricsMonitor
 
 logger = logging.getLogger(__name__)
 
+
+def _json_default(obj: Any) -> Any:
+    """JSON serializer for types not handled by the default encoder.
+
+    Pydantic's ``model_dump()`` can produce ``set``, ``datetime``, ``Enum``,
+    etc.  This fallback keeps ``json.dumps`` from raising on those types.
+    """
+    if isinstance(obj, set):
+        return list(obj)
+    if isinstance(obj, Enum):
+        return obj.value
+    if isinstance(obj, (datetime, timedelta)):
+        return str(obj)
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 # Some potential future improvements (added as TODOs):
 # 1. Add support for more complex optimizations:
 # - Optimize range queries on sorted sets
@@ -2907,9 +2925,13 @@ class RedisOM:
                 # Otherwise, we update only specified fields
                 await pipe.delete(topic_key)
 
-            # Redis rejects hset with an empty mapping — skip if no fields to set
+            # Redis rejects hset with an empty mapping — skip if no fields to set.
+            # Values must be JSON strings for get_state_topic to decode them.
             if updates:
-                await pipe.hset(topic_key, mapping=updates)
+                serialized = {
+                    k: json.dumps(v, default=_json_default) for k, v in updates.items()
+                }
+                await pipe.hset(topic_key, mapping=serialized)
                 await pipe.expire(topic_key, ttl)
 
             # Publish update to be picked up by the InferenceJobTrackers
@@ -2922,7 +2944,8 @@ class RedisOM:
                         type=update_type,
                         replace_all=replace_all,
                         data=updates,
-                    ).model_dump()
+                    ).model_dump(),
+                    default=_json_default,
                 ),
             )
 

@@ -15,12 +15,30 @@ from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
 from typing import Any
 import concurrent.futures
+from functools import wraps
 
 import docker
 from termcolor import colored
 
 from rich.logging import RichHandler
 from rich.console import Console
+
+
+def run_method_once(f):
+    """Runs an object method (successfully) only once for the lifetime of the object.
+    The method is allowed to run only once for each set of unique arguments. This can
+    be useful for logging deduplication, or for expensive initialization that should only happen once per unique input.
+    """
+    @wraps(f)
+    def wrapper(self, *args, **kwargs):
+        key = (f.__name__, args, frozenset(kwargs.items()))
+        if not hasattr(self, "_colony_method_run_cache"):
+            self._colony_method_run_cache = set()
+        if key not in self._colony_method_run_cache:
+            result = f(self, *args, **kwargs)
+            self._colony_method_run_cache.add(key)
+            return result
+    return wrapper
 
 
 def setup_logger(name: str, level: int = logging.INFO, use_rich: bool = False, capture_logs: bool = False) -> logging.Logger | tuple[logging.Logger, io.StringIO]:

@@ -62,7 +62,7 @@ class RedisConfig(ConfigComponent):
     )
     rdb_save_frequency: int = 3600  # How often to save RDB snapshots (seconds)
     aof_fsync: str = "everysec"  # AOF fsync mode ('always', 'everysec', 'no')
-    max_pool_size: int = 10  # Maximum number of connections in the pool
+    max_pool_size: int = 100  # Each agent pub/sub subscriber holds a connection permanently
     decode_responses: bool = False  # Keep raw bytes for pickle data
     redis_pool_timeout: int = 5  # Timeout for Redis connection pool
     retry_on_timeout: bool = True

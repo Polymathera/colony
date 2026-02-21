@@ -335,10 +335,22 @@ class ModelPredictiveControlStrategy(PlanningStrategyPolicy):
         )
 
         # Get LLM response using Agent.infer
+        logger.warning(
+            f"\n"
+            f"            ╔══════════════════════════════════════╗\n"
+            f"            ║  💬 MPC: agent.infer() — LLM CALL   ║\n"
+            f"            ║  prompt_len={len(prompt):<24}║\n"
+            f"            ║  max_tokens={params.max_planning_tokens:<24}║\n"
+            f"            ╚══════════════════════════════════════╝"
+        )
         response = await self.agent.infer(
             prompt=prompt,
             max_tokens=params.max_planning_tokens,
             json_schema=PlanGenerationResponse.model_json_schema(),
+        )
+        resp_text = response.generated_text if hasattr(response, "generated_text") else str(response)
+        logger.warning(
+            f"            💬 MPC: agent.infer() returned — response_len={len(resp_text)}"
         )
 
         # Parse into plan structure using pydantic

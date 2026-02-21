@@ -1520,7 +1520,15 @@ class BaseActionPolicy(ActionPolicy):
             await self._create_action_dispatcher()
 
             # Get next action from subclass (plan_step may update current_session_id)
+            logger.warning(
+                f"\n"
+                f"    ┌────────────────────────────────────────────┐\n"
+                f"    │  ⚙ EXEC_ITER: calling plan_step            │\n"
+                f"    │  agent={self.agent.agent_id:<38}│\n"
+                f"    └────────────────────────────────────────────┘"
+            )
             next_action = await self.plan_step(state)
+            logger.warning(f"    ⚙ EXEC_ITER: plan_step returned → {type(next_action).__name__}: {next_action}")
 
             # Re-check session_id in case plan_step updated it from a new event
             updated_session_id = state.custom.get("current_session_id")
@@ -1533,19 +1541,30 @@ class BaseActionPolicy(ActionPolicy):
             if next_action is None:
                 # Check if policy signaled completion
                 if state.custom.get("policy_complete"):
+                    logger.warning(f"    ⚙ EXEC_ITER: policy_complete=True → TERMINATING")
                     return ActionPolicyIterationResult(
                         success=True,
                         policy_completed=True
                     )
 
                 # Otherwise just skip this iteration (policy continues)
+                logger.warning(f"    ⚙ EXEC_ITER: next_action=None → skipping iteration")
                 return ActionPolicyIterationResult(
                     success=True,
                     policy_completed=False
                 )
 
             # dispatch is @hookable, memory captures action there
+            logger.warning(
+                f"\n"
+                f"    ╔════════════════════════════════════════════╗\n"
+                f"    ║  🚀 DISPATCHING ACTION                    ║\n"
+                f"    ║  id={next_action.action_id:<40}║\n"
+                f"    ║  type={next_action.action_type:<38}║\n"
+                f"    ╚════════════════════════════════════════════╝"
+            )
             result = await self.dispatch(next_action)
+            logger.warning(f"    🚀 DISPATCH returned: success={result.success}")
 
             return ActionPolicyIterationResult(
                 success=result.success,
@@ -2242,19 +2261,41 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         6. Return next action
         """
         # Process events first (calls event handlers, enriches context)
+        logger.warning(f"      📋 PLAN_STEP: checking events  agent={self.agent.agent_id}")
         event_action = await super().plan_step(state)
         if event_action:
+            logger.warning(f"      📋 PLAN_STEP: event produced immediate action → {event_action}")
             return event_action
         if state.custom.get("policy_complete"):
+            logger.warning(f"      📋 PLAN_STEP: policy_complete set by event handler")
             return None
-        
+
         # Get plan from blackboard
+        logger.warning(f"      📋 PLAN_STEP: fetching plan from blackboard  agent_id={self.agent.agent_id}")
         state.current_plan = await self.plan_blackboard.get_plan(self.agent.agent_id)
+        if state.current_plan:
+            logger.warning(
+                f"      📋 PLAN_STEP: got plan → {len(state.current_plan.actions)} actions, "
+                f"idx={state.current_plan.current_action_index}, status={state.current_plan.status}"
+            )
+        else:
+            logger.warning(f"      📋 PLAN_STEP: got plan → None")
 
         if not state.current_plan:
             # No plan - create initial plan
+            logger.warning(
+                f"\n"
+                f"      ╔════════════════════════════════════════════╗\n"
+                f"      ║  🧠 CREATING INITIAL PLAN (LLM call)      ║\n"
+                f"      ║  agent={self.agent.agent_id:<38}║\n"
+                f"      ╚════════════════════════════════════════════╝"
+            )
             await self._create_initial_plan()
             state.current_plan = self.current_plan
+            logger.warning(
+                f"      🧠 PLAN CREATED: id={self.current_plan.plan_id if self.current_plan else 'NONE!'} "
+                f"actions={len(self.current_plan.actions) if self.current_plan else 0}"
+            )
             return None  # Plan created, will get action on next call
 
         # Process result of previous action (from previous iteration)
@@ -2291,7 +2332,12 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             state.custom["last_action_id"] = None
 
         # Check if plan complete
+        logger.warning(
+            f"      📋 PLAN_STEP: idx={state.current_plan.current_action_index} / "
+            f"{len(state.current_plan.actions)} actions"
+        )
         if state.current_plan.current_action_index >= len(state.current_plan.actions):
+            logger.warning(f"      📋 PLAN_STEP: ★★★ PLAN COMPLETE ★★★")
             state.current_plan.status = PlanStatus.COMPLETED
             state.current_plan.completed_at = time.time()
             await self.plan_blackboard.update_plan(state.current_plan)
@@ -2304,11 +2350,13 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             return None
 
         # Check if replanning needed via policy (MPC)
+        logger.warning(f"      📋 PLAN_STEP: evaluating replanning need")
         decision = await self.replanning_policy.evaluate_replanning_need(
             plan=state.current_plan,
             last_result=last_result,
         )
         if decision.should_replan:
+            logger.warning(f"      📋 PLAN_STEP: !!! REPLANNING triggered: {decision.reason}")
             await self._replan_horizon(decision)
 
         # Get next action
@@ -2316,7 +2364,9 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         state.current_plan.current_action_index += 1
         state.custom["last_action_id"] = next_action.action_id
 
-        logger.info(f"Agent {self.agent.agent_id} executing action {next_action.action_id}")
+        logger.warning(
+            f"      📋 PLAN_STEP: returning action → id={next_action.action_id} type={next_action.action_type}"
+        )
         return next_action
 
     async def _get_plan_blackboard(self) -> PlanBlackboard:
@@ -2370,11 +2420,29 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         Returns the created plan for hook-based capture.
         """
 
+        logger.warning(f"        🧠 _create_initial_plan: building planning context...")
         planning_context = await self._get_planning_context(
             execution_context=PlanExecutionContext()
         )
+        logger.warning(
+            f"        🧠 _create_initial_plan: context ready — "
+            f"goals={planning_context.goals}, "
+            f"pages={len(planning_context.page_ids)}, "
+            f"actions={len(planning_context.action_descriptions)}"
+        )
 
+        logger.warning(
+            f"\n"
+            f"        ╔════════════════════════════════════════╗\n"
+            f"        ║  🔮 CALLING planner.create_plan()     ║\n"
+            f"        ║  (THIS IS THE LLM INFERENCE CALL)     ║\n"
+            f"        ╚════════════════════════════════════════╝"
+        )
         plan: ActionPlan = await self.planner.create_plan(planning_context)
+        logger.warning(
+            f"        🔮 planner.create_plan() returned: "
+            f"plan_id={plan.plan_id}, actions={len(plan.actions)}, status={plan.status}"
+        )
         plan.agent_id = self.agent.agent_id
 
         approved, msg = await self.plan_blackboard.propose_plan(plan, self.agent.agent_id)

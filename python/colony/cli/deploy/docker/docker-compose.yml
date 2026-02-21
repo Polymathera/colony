@@ -116,7 +116,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: colony-redis
-    command: redis-server --appendonly yes --protected-mode no
+    command: redis-server --appendonly yes --protected-mode no --maxclients 10000
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     ports:
       - "${COLONY_REDIS_PORT:-6379}:6379"
     volumes:

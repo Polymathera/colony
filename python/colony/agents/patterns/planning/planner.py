@@ -520,11 +520,22 @@ class CacheAwareActionPlanner(ActionPlanner):
             cache_context = await self.cache_policy.analyze_cache_requirements(planning_context)
 
         # Generate plan via strategy
+        logger.warning(
+            f"\n"
+            f"          ╔══════════════════════════════════════╗\n"
+            f"          ║  🎯 PLANNER: calling strategy        ║\n"
+            f"          ║  {self.planning_strategy.__class__.__name__:<36}║\n"
+            f"          ╚══════════════════════════════════════╝"
+        )
         plan: ActionPlan = await self.planning_strategy.generate_plan(
             planning_context=planning_context,
             params=self.planning_params,
             learned_patterns=learned_patterns,
             cache_context=cache_context,
+        )
+        logger.warning(
+            f"          🎯 PLANNER: strategy returned plan with "
+            f"{len(plan.actions)} actions, status={plan.status}"
         )
 
         # Set parent relationship

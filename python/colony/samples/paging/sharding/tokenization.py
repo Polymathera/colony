@@ -226,7 +226,7 @@ class TokenManager:
         return_tokens: bool = False,
     ) -> int | list[int]:
         """Get token count or tokens for a file with persistent caching and fallbacks"""
-        logger.info(f"________ get_file_tokens: getting file tokens for {repo_id}:{commit_hash}:{file_path}")
+        logger.debug(f"________ get_file_tokens: getting file tokens for {repo_id}:{commit_hash}:{file_path}")
         start_time = time.time()
         try:
             cache_key = self._make_cache_key(repo_id, file_path, commit_hash)
@@ -285,7 +285,7 @@ class TokenManager:
                 time.time() - start_time
             )
 
-            logger.info(
+            logger.debug(
                 "TokenManager.get_file_tokens: done path=%s elapsed=%.2fs",
                 file_path,
                 time.time() - start_time,

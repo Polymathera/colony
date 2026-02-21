@@ -922,7 +922,7 @@ class AgentHandle:
             )
 
         # Detached mode: create blackboard
-        app_name = serving.get_my_app_name()
+        app_name = self._app_name or serving.get_my_app_name()
 
         self._blackboard = EnhancedBlackboard(
             app_name=app_name,
@@ -1041,7 +1041,7 @@ class AgentHandle:
 
         if session_id:
             try:
-                session_manager_handle = get_session_manager()
+                session_manager_handle = get_session_manager(app_name=self._app_name)
 
                 run = await session_manager_handle.create_run(
                     session_id=effective_session_id,
@@ -1200,7 +1200,7 @@ class AgentHandle:
 
         if session_id:
             try:
-                session_manager_handle = get_session_manager()
+                session_manager_handle = get_session_manager(app_name=self._app_name)
 
                 run = await session_manager_handle.create_run(
                     session_id=session_id,
@@ -1370,7 +1370,7 @@ class AgentHandle:
         """Request the target agent to stop."""
         from ..system import get_agent_system
 
-        agent_system = get_agent_system()
+        agent_system = get_agent_system(app_name=self._app_name)
         await agent_system.stop_agent(self.child_agent_id)
 
 
@@ -2350,7 +2350,19 @@ class Agent(BaseModel):
             if self.action_policy_state is None:
                 self.action_policy_state = ActionPolicyExecutionState()
 
+            logger.warning(
+                f"\n"
+                f"  ┌──────────────────────────────────────────────┐\n"
+                f"  │  ▶ RUN_STEP: calling execute_iteration       │\n"
+                f"  │  agent={self.agent_id:<40}│\n"
+                f"  └──────────────────────────────────────────────┘"
+            )
             iteration_result = await self.action_policy.execute_iteration(self.action_policy_state)
+            logger.warning(
+                f"  ◀ RUN_STEP returned: success={iteration_result.success} "
+                f"completed={iteration_result.policy_completed} "
+                f"action={iteration_result.action_executed}"
+            )
             self.state = AgentState.STOPPED if iteration_result.policy_completed else self.state
             if self.state == AgentState.SUSPENDED:
                 logger.info(f"Agent {self.agent_id} has entered SUSPENDED state")
@@ -2443,12 +2455,25 @@ class Agent(BaseModel):
         if not self._manager:
             raise RuntimeError(f"Agent {self.agent_id} not attached to manager")
 
-        return await self._manager.agent_infer(
+        logger.warning(
+            f"\n"
+            f"              ╔══════════════════════════════════════╗\n"
+            f"              ║  📡 agent.infer() → manager         ║\n"
+            f"              ║  prompt_len={len(prompt or ''):<24}║\n"
+            f"              ║  pages={str(context_page_ids)[:30]:<30}║\n"
+            f"              ╚══════════════════════════════════════╝"
+        )
+        result = await self._manager.agent_infer(
             agent_id=self.agent_id,
             context_page_ids=context_page_ids,
             prompt=prompt,
             **kwargs
         )
+        resp_text = result.generated_text if hasattr(result, "generated_text") else ""
+        logger.warning(
+            f"              📡 agent.infer() returned — len={len(resp_text)}"
+        )
+        return result
 
     # === Blackboard (Delegated to manager) ===
 
@@ -3543,7 +3568,14 @@ class AgentManagerBase:
                     return
 
                 try:
-                    logger.debug(f"Agent {agent.agent_id} running iteration {iteration}")
+                    logger.warning(
+                        f"\n"
+                        f"╔══════════════════════════════════════════════════════════╗\n"
+                        f"║  🔄 AGENT LOOP  iter={iteration:<4}                          ║\n"
+                        f"║  agent={agent.agent_id:<48}║\n"
+                        f"║  state={str(agent.state):<20} stop_req={agent._stop_requested!s:<14}║\n"
+                        f"╚══════════════════════════════════════════════════════════╝"
+                    )
                     await agent.run_step()
                     iteration += 1
                 except Exception as e:
@@ -3823,14 +3855,18 @@ class AgentManagerBase:
             **kwargs
         )
 
-        logger.debug(
-            f"Agent {agent_id}: Submitting inference request with "
-            f"{len(context_page_ids or [])} context pages"
+        logger.warning(
+            f"              📡 agent_infer: submitting to LLM cluster — "
+            f"request_id={request.request_id}, pages={len(context_page_ids or [])}"
         )
 
         # Delegate to LLM cluster
         response = await self._llm_cluster_handle.infer(request)
 
+        logger.warning(
+            f"              📡 agent_infer: LLM cluster responded — "
+            f"len={len(response.generated_text) if hasattr(response, 'generated_text') else '?'}"
+        )
         return response
 
     async def agent_request_page(

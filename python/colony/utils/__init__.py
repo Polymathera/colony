@@ -6,6 +6,7 @@ This package provides various utility functions and modules.
 
 # Import everything from misc.py to maintain backward compatibility
 from .misc import (
+    run_method_once,
     setup_logger,
     get_ray_logger,
     async_partial,
@@ -34,6 +35,7 @@ from .retry import standard_retry, aggressive_retry, quick_retry
 
 __all__ = [
     # From misc.py
+    "run_method_once",
     "setup_logger",
     "get_ray_logger",
     "async_partial",

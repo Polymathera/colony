@@ -320,6 +320,18 @@ class VirtualPageTable:
         async for state in self.state_manager.write_transaction():
             return state.unlock_page(page_id)
 
+    async def cleanup_expired_locks(self, current_time: float | None = None) -> int:
+        """Remove expired locks from the state.
+
+        Args:
+            current_time: Optional current timestamp (defaults to now)
+
+        Returns:
+            Number of locks removed
+        """
+        async for state in self.state_manager.write_transaction():
+            return state.cleanup_expired_locks(current_time)
+
     async def update_page_access(
         self,
         page_id: str,

@@ -127,7 +127,7 @@ class FileContentCache:
 
                 path = Path(file_path)
                 if not path.exists():
-                    logger.warning(f"File not found: {file_path}")
+                    logger.debug(f"File not found: {file_path}")
                     return None
 
                 # Check file size

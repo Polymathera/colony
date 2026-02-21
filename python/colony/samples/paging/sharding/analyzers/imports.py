@@ -18,7 +18,7 @@ from overrides import override
 from colony.distributed.config import register_polymathera_config
 from colony.distributed import get_polymathera
 from colony.distributed.metrics.common import BaseMetricsMonitor
-from colony.utils import setup_logger
+from colony.utils import setup_logger, run_method_once
 
 from ..languages.imports import get_language_configs
 from ..languages.utils import detect_language, is_comment
@@ -229,6 +229,11 @@ class ImportAnalyzer(BaseAnalyzer):
 
         return imports
 
+    @run_method_once
+    def _warn_missing_language_patterns(self, language: str) -> None:
+        """Warn if no patterns are found for a language"""
+        logger.warning(f"No patterns found for language: {language}")
+
     async def _analyze_imports_uncached(
         self, content: str, language: str, file_path: str
     ) -> dict[str, set[str]]:
@@ -258,7 +263,7 @@ class ImportAnalyzer(BaseAnalyzer):
 
             lang_patterns = self.patterns.get(language, {})
             if not lang_patterns:
-                logger.warning(f"No patterns found for language: {language}")
+                self._warn_missing_language_patterns(language)
                 return imports
 
             # Collect metadata across all imports
@@ -365,7 +370,7 @@ class ImportAnalyzer(BaseAnalyzer):
 
             lang_patterns = self.patterns.get(language, {})
             if not lang_patterns:
-                logger.warning(f"No patterns found for language: {language}")
+                self._warn_missing_language_patterns(language)
                 return imports
 
             # Collect metadata across all imports

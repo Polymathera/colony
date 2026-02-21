@@ -254,9 +254,7 @@ class PolymatheraApp:
 
     async def initialize(self) -> None:
         """Initialize all subsystems"""
-        # logger.info(f"=========== Initializing Polymathera {'head' if self._head else 'worker'} node ===========")
         if self._initialized:
-            # logger.info(f"=========== Polymathera {'head' if self._head else 'worker'} node already initialized ===========")
             return
         logger.info(f"=========== Initializing Polymathera {'head' if self._head else 'worker'} node ===========")
         logger.info(f"Stack trace: {traceback.format_exc()}")
