@@ -2434,8 +2434,8 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         logger.warning(
             f"\n"
             f"        ╔════════════════════════════════════════╗\n"
-            f"        ║  🔮 CALLING planner.create_plan()     ║\n"
-            f"        ║  (THIS IS THE LLM INFERENCE CALL)     ║\n"
+            f"        ║  🔮 CALLING planner.create_plan()      ║\n"
+            f"        ║  (THIS IS THE LLM INFERENCE CALL)      ║\n"
             f"        ╚════════════════════════════════════════╝"
         )
         plan: ActionPlan = await self.planner.create_plan(planning_context)

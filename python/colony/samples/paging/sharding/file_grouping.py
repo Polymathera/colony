@@ -94,6 +94,10 @@ class FileGraphCache:
 
     async def initialize(self):
         self.config = await CacheConfig.check_or_get_component(self.config)
+        # FileGraphCache serializes via nx.node_link_data() which produces
+        # JSON-compatible dicts.  Override the default pickle format.
+        if self.config.serialization_format != "json":
+            self.config = self.config.model_copy(update={"serialization_format": "json"})
 
         # Use existing TokenizedFileCache with "graphs" type
         polymathera = await get_initialized_polymathera()

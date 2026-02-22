@@ -9,6 +9,7 @@ This module provides different strategies for generating plans:
 
 import json
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -151,12 +152,20 @@ class PlanningStrategyPolicy(ABC):
         """
         pass
 
+    @staticmethod
+    def _strip_markdown_fences(text: str) -> str:
+        """Strip markdown code fences (```json ... ```) from LLM responses."""
+        stripped = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
+        stripped = re.sub(r"\n?```\s*$", "", stripped)
+        return stripped.strip()
+
     def _parse_plan_response(self, response: Any) -> PlanGenerationResponse:
         """Parse LLM response into PlanGenerationResponse using pydantic."""
         text = (
             response.generated_text if hasattr(response, "generated_text") else str(response)
         )
         # Extract JSON from response
+        text = self._strip_markdown_fences(text)
         try:
             # TODO: Extract action parameters and populate ActionSpec properly
             return PlanGenerationResponse.model_validate_json(text)
@@ -175,6 +184,7 @@ class PlanningStrategyPolicy(ABC):
             response.generated_text if hasattr(response, "generated_text") else str(response)
         )
         # Extract JSON from response
+        text = self._strip_markdown_fences(text)
         try:
             # TODO: Extract action parameters and populate ActionSpec properly
             return ReplanningResponse.model_validate_json(text)

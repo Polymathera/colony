@@ -2458,8 +2458,8 @@ class Agent(BaseModel):
         logger.warning(
             f"\n"
             f"              ╔══════════════════════════════════════╗\n"
-            f"              ║  📡 agent.infer() → manager         ║\n"
-            f"              ║  prompt_len={len(prompt or ''):<24}║\n"
+            f"              ║  📡 agent.infer() → manager          ║\n"
+            f"              ║  prompt_len={len(prompt or ''):<24} ║\n"
             f"              ║  pages={str(context_page_ids)[:30]:<30}║\n"
             f"              ╚══════════════════════════════════════╝"
         )

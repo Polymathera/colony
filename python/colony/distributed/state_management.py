@@ -95,7 +95,7 @@ class StateManager(Generic[T]):
 
     async def write_transaction(self, max_retries: int = 3) -> AsyncIterator[T]:
         """Write transaction iterator"""
-        logger.info(f"StateManager.write_transaction: {self.state_key}")
+        logger.debug(f"StateManager.write_transaction: {self.state_key}")
         async for state in self.transaction(
             StateTransactionType.WRITE, max_retries=max_retries
         ):

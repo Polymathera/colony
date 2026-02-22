@@ -278,7 +278,13 @@ class Application:
         # Notify all deployments that the application is ready.
         # This triggers @on_app_ready hooks, which can safely discover
         # sibling deployment handles since all proxies are now running.
-        logger.info(f"Notifying all deployments that application '{self.name}' is ready")
+        logger.info(
+            f"\n"
+            f"        ╔══════════════════════════════════════════════════════╗\n"
+            f"        ║  🔮 Notifying all deployments that application       ║\n"
+            f"        ║  '{self.name}' is ready                              ║\n"
+            f"        ╚══════════════════════════════════════════════════════╝"
+        )
         for deployment_info in self.deployments:
             if deployment_info.proxy_actor_handle is not None:
                 try:

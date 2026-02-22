@@ -538,7 +538,7 @@ class GitRepoShardingStrategy:
         )
 
     def _get_repo_files(self, repo: git.Repo) -> list[str]:
-        """Get all files in the repository"""
+        """Get all files in the repository."""
         repo_path = Path(repo.working_dir)
         files = []
         for blob in repo.head.commit.tree.traverse():
@@ -548,7 +548,7 @@ class GitRepoShardingStrategy:
         return files
 
     def _get_group_blobs(self, repo: git.Repo, group: FileGroup) -> list[git.Blob]:
-        """Get blobs for files in a group"""
+        """Get blobs for files in a group."""
         repo_path = Path(repo.working_dir)
         blobs = [
             blob
@@ -594,7 +594,7 @@ class GitRepoShardingStrategy:
                 # Build file-to-page mapping for easy access
                 file_to_page = {}
                 for shard in shards:
-                    for segment in shard.file_segments:
+                    for segment in shard.metadata.file_segments:
                         file_to_page[segment.file_path] = shard.shard_id
 
                 logger.info(
@@ -813,7 +813,7 @@ class GitRepoShardingStrategy:
         # Build file-to-page mapping from shards
         file_to_page: dict[str, str] = {}
         for shard in shards:
-            for segment in shard.file_segments:
+            for segment in shard.metadata.file_segments:
                 file_to_page[segment.file_path] = shard.shard_id
 
         # Create page graph with nodes
@@ -822,9 +822,9 @@ class GitRepoShardingStrategy:
             page_graph.add_node(
                 shard.shard_id,
                 metadata={
-                    "file_count": len(shard.file_segments),
+                    "file_count": len(shard.metadata.file_segments),
                     "content_size": shard.metadata.content_size_bytes,
-                    "files": [seg.file_path for seg in shard.file_segments],
+                    "files": [seg.file_path for seg in shard.metadata.file_segments],
                 },
             )
 
@@ -957,6 +957,11 @@ class GitRepoShardingStrategy:
                 file_contents: list[tuple[str, str, str]] = []
                 binary_files: set[str] = set()
 
+                logger.debug(
+                    f"_process_file_group: blobs={len(blobs)} "
+                    f"group_id={group_id} repo_path={repo_path}"
+                )
+
                 # TODO: Use parallel processing
                 for blob in blobs:
                     blob_path = None
@@ -1043,6 +1048,11 @@ class GitRepoShardingStrategy:
                             logger.error(f"Consider running: git config --global --add safe.directory {repo_path}")
 
                         continue
+
+                logger.debug(
+                    f"_process_file_group: file_contents={len(file_contents)} "
+                    f"binary={len(binary_files)} total_blobs={len(blobs)}"
+                )
 
                 if not file_contents:
                     return []
