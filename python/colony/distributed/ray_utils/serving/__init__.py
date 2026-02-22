@@ -71,6 +71,7 @@ from .models import (
     DeploymentRequest,
     DeploymentResponse,
     DeploymentResponseStatus,
+    HealthCheckConfig,
     LoggingConfig,
     RoutingHints,
     # Routing (for custom routing policies)
@@ -108,6 +109,7 @@ __all__ = [
     "ApplicationRegistry",
     "AutoscalingConfig",
     "DeploymentProxyInfo",
+    "HealthCheckConfig",
     "LoggingConfig",
     "DeploymentRequest",
     "DeploymentResponse",

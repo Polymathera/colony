@@ -10,7 +10,7 @@ from typing import Any, Type
 import ray
 
 from .decorators import BoundDeployment
-from .models import ApplicationInfo, ApplicationRegistry, AutoscalingConfig, DeploymentProxyInfo, LoggingConfig, RequestRouter
+from .models import ApplicationInfo, ApplicationRegistry, AutoscalingConfig, DeploymentProxyInfo, HealthCheckConfig, LoggingConfig, RequestRouter
 from .proxy import DeploymentProxyRayActor
 from ...state_management import StateManager
 
@@ -34,6 +34,7 @@ class DeploymentInfo:
         ray_actor_options: dict[str, Any] | None = None,
         max_concurrency: int | None = None,
         logging_config: LoggingConfig | None = None,
+        health_check_config: dict[str, Any] | None = None,
     ):
         """Initialize deployment info.
 
@@ -45,6 +46,7 @@ class DeploymentInfo:
             ray_actor_options: Optional override for ray actor options.
             max_concurrency: Optional override for max concurrent requests per replica.
             logging_config: Optional override for logging configuration.
+            health_check_config: Optional override for health check config.
         """
         self.bound_deployment = bound_deployment
 
@@ -56,6 +58,7 @@ class DeploymentInfo:
             "ray_actor_options": ray_actor_options,
             "max_concurrency": max_concurrency,
             "logging_config": logging_config,
+            "health_check_config": health_check_config,
         }
 
         # Will be set when deployment is started
@@ -121,6 +124,14 @@ class DeploymentInfo:
 
         return AutoscalingConfig(**merged_autoscaling)
 
+    @property
+    def health_check_config(self) -> HealthCheckConfig:
+        """Get the effective health check config (merged base + overrides)."""
+        base_hc = self.base_config.health_check_config or {}
+        override_hc = self.instance_config_overrides.get("health_check_config") or {}
+        merged_hc = {**base_hc, **override_hc}
+        return HealthCheckConfig(**merged_hc)
+
 
 class Application:
     """Application that manages multiple deployments.
@@ -184,6 +195,7 @@ class Application:
         ray_actor_options: dict[str, Any] | None = None,
         max_concurrency: int | None = None,
         logging_config: LoggingConfig | None = None,
+        health_check_config: dict[str, Any] | None = None,
     ) -> Application:
         """Add a deployment to the application.
 
@@ -195,6 +207,7 @@ class Application:
             ray_actor_options: Optional override for ray actor options.
             max_concurrency: Optional override for max concurrent requests per replica.
             logging_config: Optional override for logging configuration.
+            health_check_config: Optional override for health check config.
 
         Returns:
             Self for chaining.
@@ -207,6 +220,7 @@ class Application:
             ray_actor_options=ray_actor_options,
             max_concurrency=max_concurrency,
             logging_config=logging_config,
+            health_check_config=health_check_config,
         )
         self.deployments.append(deployment_info)
         logger.info(f"Added deployment '{deployment_info.name}' to application '{self.name}'")
@@ -336,6 +350,7 @@ class Application:
                 autoscaling_config=deployment_info.autoscaling_config,
                 ray_actor_options=deployment_info.ray_actor_options,
                 logging_config=deployment_info.logging_config,
+                health_check_config=deployment_info.health_check_config,
             )
         )
 

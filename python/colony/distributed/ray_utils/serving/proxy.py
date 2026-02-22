@@ -17,6 +17,7 @@ from .models import (
     DeploymentReplicaInfo,
     DeploymentRequest,
     DeploymentResponse,
+    HealthCheckConfig,
     LoggingConfig,
     ApplicationRegistry,
     RoutingHints,
@@ -61,6 +62,7 @@ class DeploymentProxyRayActor:
         autoscaling_config: AutoscalingConfig | None = None,
         ray_actor_options: dict[str, Any] | None = None,
         logging_config: LoggingConfig | None = None,
+        health_check_config: HealthCheckConfig | None = None,
     ):
         """Initialize the deployment proxy.
 
@@ -74,6 +76,7 @@ class DeploymentProxyRayActor:
             autoscaling_config: Autoscaling configuration.
             ray_actor_options: Ray actor options for replicas.
             logging_config: Logging configuration for proxy and replicas.
+            health_check_config: Health check configuration (timeout, interval, etc.).
         """
         # Configure logging from LoggingConfig or fall back to environment variable
         if logging_config:
@@ -123,7 +126,13 @@ class DeploymentProxyRayActor:
         self._replica_health_check_tasks: dict[str, list[asyncio.Task]] = {}
 
         # Initialize health monitor
-        self.health_monitor = DeploymentHealthMonitor(deployment_name)
+        hc = health_check_config or HealthCheckConfig()
+        self.health_monitor = DeploymentHealthMonitor(
+            deployment_name,
+            health_check_interval_s=hc.interval_s,
+            health_check_timeout_s=hc.timeout_s,
+            max_consecutive_failures=hc.max_consecutive_failures,
+        )
 
         # Initialize autoscaler
         self.autoscaler = DeploymentAutoscaler(

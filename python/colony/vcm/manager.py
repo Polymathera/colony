@@ -79,7 +79,12 @@ class MappedScope:
 
 
 
-@serving.deployment
+@serving.deployment(
+    health_check_config={
+        "timeout_s": 30.0,
+        "interval_s": 15.0,
+    },
+)
 class VirtualContextManager:
     """Main VCM deployment - manages virtual context pages and routing to LLMCluster.
 

@@ -331,6 +331,20 @@ class AutoscalingConfig:
             raise ValueError("max_concurrency must be >= 1 or None")
 
 
+@dataclass
+class HealthCheckConfig:
+    """Configuration for deployment health checks."""
+
+    interval_s: float = 10.0
+    """Interval between health checks in seconds."""
+
+    timeout_s: float = 5.0
+    """Timeout for each health check ping in seconds."""
+
+    max_consecutive_failures: int = 3
+    """Number of consecutive failures before marking a replica unhealthy."""
+
+
 class DeploymentProxyInfo(BaseModel):
     """Information about a deployment proxy in an application."""
 

@@ -352,6 +352,7 @@ class DeploymentConfig:
         ray_actor_options: dict[str, Any] | None = None,
         max_concurrency: int | None = None,
         logging_config: LoggingConfig | None = None,
+        health_check_config: dict[str, Any] | None = None,
     ):
         self.name = name
         self.router_class = router_class
@@ -359,6 +360,7 @@ class DeploymentConfig:
         self.ray_actor_options = ray_actor_options
         self.max_concurrency = max_concurrency
         self.logging_config = logging_config
+        self.health_check_config = health_check_config
         # Endpoint metadata: method_name -> router_class
         self.endpoint_router_classes: dict[str, Type[RequestRouter] | None] = {}
         # Endpoint router kwargs: method_name -> router_kwargs
@@ -413,6 +415,7 @@ def deployment(
     ray_actor_options: dict[str, Any] | None = None,
     max_concurrency: int | None = None,
     logging_config: LoggingConfig | None = None,
+    health_check_config: dict[str, Any] | None = None,
 ) -> Callable[[Type[Any]], Type[Any]] | Type[Any]:
     """Decorator to mark a class as a deployment.
 
@@ -431,6 +434,8 @@ def deployment(
         ray_actor_options: Ray actor options dict.
         max_concurrency: Maximum concurrent requests per replica (None = unlimited).
         logging_config: Logging configuration for deployment actors.
+        health_check_config: Health check configuration dict
+            (keys: interval_s, timeout_s, max_consecutive_failures).
 
     Returns:
         Decorated class, or decorator function.
@@ -467,6 +472,7 @@ def deployment(
             ray_actor_options=ray_actor_options,
             max_concurrency=max_concurrency,
             logging_config=logging_config,
+            health_check_config=health_check_config,
         )
         cls.__deployment_config__ = config  # type: ignore
 
