@@ -597,13 +597,16 @@ class FileGrouper:
         """
         graph = None
         try:
+            logger.info(f"[{group_id}] group_files: starting for {len(files)} files")
             await self._ensure_caches_initialized()
+            logger.info(f"[{group_id}] group_files: caches initialized")
 
             start_time = time.time()
             commit_hash = repo.head.commit.hexsha
 
             # Detect languages for all files (populates cache)
             file_languages = {file: self._detect_language(file) for file in files}
+            logger.info(f"[{group_id}] group_files: detected languages for {len(file_languages)} files")
 
             # Try to get cached graph
             graph = await self.file_graph_cache.get(
@@ -614,8 +617,13 @@ class FileGrouper:
             cross_lang_bindings = set()
 
             if graph is None:
+                logger.info(f"[{group_id}] group_files: no cached graph, building from scratch")
                 graph = await self._build_graph(
                     repo, files, cross_lang_bindings
+                )
+                logger.info(
+                    f"[{group_id}] group_files: graph built: "
+                    f"{graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
                 )
 
                 # Store cross-language bindings in graph metadata
@@ -627,7 +635,12 @@ class FileGrouper:
                     graph=graph,
                     version=self._get_graph_version(files),
                 )
+                logger.info(f"[{group_id}] group_files: graph cached")
             else:
+                logger.info(
+                    f"[{group_id}] group_files: loaded cached graph: "
+                    f"{graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
+                )
                 # Reconstruct cross-language bindings from graph
                 cross_lang_bindings = set(graph.graph.get("cross_lang_bindings", []))
 
@@ -646,9 +659,11 @@ class FileGrouper:
                         cross_lang_bindings.add(target)
 
             # Find initial groups using language-aware community detection
+            logger.info(f"[{group_id}] group_files: clustering files into communities")
             initial_groups = await self._cluster_files_with_languages(
                 graph, cross_lang_bindings
             )
+            logger.info(f"[{group_id}] group_files: {len(initial_groups)} initial groups")
 
             # Apply language-specific optimizations while preserving cross-language relationships
             optimized_groups = await self._optimize_groups_with_languages(
@@ -684,37 +699,62 @@ class FileGrouper:
         graph = nx.DiGraph()
 
         enabled = self.config.strategies
+        # Per-strategy timeout: allow each strategy a generous but finite budget.
+        # This prevents any single strategy from hanging the whole pipeline.
+        strategy_timeout_s = self.config.analysis_timeout * len(files) / 10  # scale with file count
+        strategy_timeout_s = max(strategy_timeout_s, 60.0)  # at least 60s
+        strategy_timeout_s = min(strategy_timeout_s, 600.0)  # at most 10 minutes
+
+        async def _run_strategy(name: str, coro):
+            start = time.time()
+            logger.info(f"_build_graph: starting {name} strategy ({len(files)} files)")
+            try:
+                await asyncio.wait_for(coro, timeout=strategy_timeout_s)
+                elapsed = time.time() - start
+                logger.info(f"_build_graph: {name} completed in {elapsed:.1f}s")
+            except asyncio.TimeoutError:
+                elapsed = time.time() - start
+                logger.warning(
+                    f"_build_graph: {name} timed out after {elapsed:.1f}s "
+                    f"(limit={strategy_timeout_s:.0f}s), skipping"
+                )
+            except Exception as e:
+                elapsed = time.time() - start
+                logger.error(f"_build_graph: {name} failed after {elapsed:.1f}s: {e}")
+
         async with asyncio.TaskGroup() as tg:
             if enabled & FileGroupingStrategy.IMPORTS:
                 tg.create_task(
-                    self._add_import_relationships(graph, files, cross_lang_bindings)
+                    _run_strategy("imports", self._add_import_relationships(graph, files, cross_lang_bindings))
                 )
             if enabled & FileGroupingStrategy.DEPENDENCIES:
                 tg.create_task(
-                    self._add_dependency_relationships(graph, files, cross_lang_bindings)
+                    _run_strategy("dependencies", self._add_dependency_relationships(graph, files, cross_lang_bindings))
                 )
             if enabled & FileGroupingStrategy.COMMIT_HISTORY:
                 tg.create_task(
-                    self._add_commit_relationships(graph, repo, files)
+                    _run_strategy("commit_history", self._add_commit_relationships(graph, repo, files))
                 )
             if enabled & FileGroupingStrategy.SEMANTIC:
                 tg.create_task(
-                    self._add_semantic_relationships(graph, files, cross_lang_bindings)
+                    _run_strategy("semantic", self._add_semantic_relationships(graph, files, cross_lang_bindings))
                 )
             if enabled & FileGroupingStrategy.DIRECTORY:
                 tg.create_task(
-                    self._add_directory_relationships(graph, files)
+                    _run_strategy("directory", self._add_directory_relationships(graph, files))
                 )
 
-        # Detect circular dependencies before grouping
-        cycles = self._detect_circular_dependencies(graph)
-        if cycles:
-            logger.warning(
-                f"Detected {len(cycles)} circular dependencies",
-                extra={"cycles": cycles},
+        # Detect circular dependencies before grouping (CPU-bound, offload to thread with timeout)
+        try:
+            cycles = await asyncio.wait_for(
+                asyncio.to_thread(self._detect_circular_dependencies, graph),
+                timeout=30.0,
             )
-            # Optionally store cycles in graph metadata for later use
-            graph.graph["circular_dependencies"] = cycles
+            if cycles:
+                logger.warning(f"Detected {len(cycles)} circular dependencies")
+                graph.graph["circular_dependencies"] = cycles
+        except asyncio.TimeoutError:
+            logger.warning("Circular dependency detection timed out after 30s, skipping")
 
         self._print_graph_summary(graph)
         return graph
@@ -1693,13 +1733,14 @@ class FileGrouper:
             # Convert directed graph to undirected for community detection
             undirected_graph = graph_copy.to_undirected()
 
-            # Use language-aware community detection
-            communities = community.best_partition(
+            # Use language-aware community detection (CPU-bound, offload to thread)
+            communities = await asyncio.to_thread(
+                community.best_partition,
                 undirected_graph,
                 resolution=self.config.community_resolution,
                 random_state=42,  # For reproducibility
             )
-            logger.debug(f"Community detection: {len(set(communities.values()))} communities from {len(communities)} files")
+            logger.info(f"Community detection: {len(set(communities.values()))} communities from {len(communities)} files")
 
             # Group files by community — track both denormalized (for FileGroup)
             # and normalized (for graph queries / cross_lang_bindings comparison)
@@ -1801,8 +1842,11 @@ class FileGrouper:
     def _detect_circular_dependencies(self, graph: nx.DiGraph) -> list[dict[str, Any]]:
         """Detect and analyze circular dependencies"""
         try:
-            # Find all cycles in the graph
-            cycles: list[list[str]] = list(nx.simple_cycles(graph))
+            from itertools import islice
+            # Limit cycle enumeration — simple_cycles can produce an exponential
+            # number of cycles on dense graphs and hang forever.
+            max_cycles = 100
+            cycles: list[list[str]] = list(islice(nx.simple_cycles(graph), max_cycles))
 
             # Filter and categorize cycles
             analyzed_cycles: list[dict[str, Any]] = []

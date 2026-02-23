@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
+from sqlalchemy import Column, DateTime
 import sqlmodel as sqlm
 
 from ..distributed.state_management import SharedState
@@ -52,8 +53,14 @@ class VirtualContextPageMetadata(sqlm.SQLModel, table=True):
     page_id: str = sqlm.Field(primary_key=True, description="Unique page identifier")
     tenant_id: str = sqlm.Field(index=True, description="Tenant ID for multi-tenancy")
     source: str = sqlm.Field(index=True, description="Source identifier (e.g., git repo URL)")
-    created_at: datetime = sqlm.Field(default_factory=lambda: datetime.now(timezone.utc), description="Creation timestamp")
-    updated_at: datetime = sqlm.Field(default_factory=lambda: datetime.now(timezone.utc), description="Last update timestamp")
+    created_at: datetime = sqlm.Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = sqlm.Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
     size: int = sqlm.Field(description="Number of tokens in page")
     metadata_json: str = sqlm.Field(default="{}", description="JSON-encoded metadata")
     storage_location: str = sqlm.Field(description="Storage location (efs:// or s3://)")
@@ -62,7 +69,9 @@ class VirtualContextPageMetadata(sqlm.SQLModel, table=True):
     # Optional fields from VirtualContextPage
     group_id: Optional[str] = sqlm.Field(None, index=True, description="Page group ID for spatial locality")
     created_by: Optional[str] = sqlm.Field(None, index=True, description="Creator ID for finer-grained tracking within tenant (agent_id, session_id, run_id, etc.)")
-    expires_at: Optional[datetime] = sqlm.Field(None, description="Optional expiration timestamp")
+    expires_at: Optional[datetime] = sqlm.Field(
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
 
 class VirtualContextPage(BaseModel):

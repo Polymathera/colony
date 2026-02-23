@@ -116,6 +116,8 @@ from typing import ClassVar
 
 import psutil
 from pydantic import Field
+from pygments.lexers import guess_lexer_for_filename
+from pygments.token import Token
 
 from colony.distributed.caching.simple import CacheConfig
 from colony.distributed.config import ConfigComponent, register_polymathera_config
@@ -782,7 +784,6 @@ class CodeSplitter:
     async def initialize(self):
         self.config = await CodeSplitterConfig.check_or_get_component(self.config)
         self.cache = await get_polymathera().create_distributed_simple_cache(
-            # list[ShardFileSegment],
             namespace="code_splitter:cache",  # TODO: Scope is global to all VMRs?
             config=self.config.cache_config,
         )
@@ -800,26 +801,6 @@ class CodeSplitter:
 
         self._setup_parsers()
         self.metrics.start_monitoring()
-
-    async def initialize(self):
-        self.config = await CodeSplitterConfig.check_or_get_component(self.config)
-
-        self.cache = await get_polymathera().create_distributed_simple_cache(
-            # list[ShardFileSegment],
-            namespace="code_splitter:cache",  # TODO: Scope is global to all VMRs?
-            config=self.config.cache_config,
-        )
-        self.parallel_processor = ParallelProcessor(
-            self.config.processing_config,
-            self.metrics
-        )
-        await self.parallel_processor.initialize()
-        self.worker_pool = AdaptiveWorkerPool(
-            initial_workers=self.config.initial_workers,
-            min_workers=self.config.min_workers,
-            max_workers=self.config.max_workers,
-            metrics=self.metrics,
-        )
 
     async def cleanup(self):
         await self.metrics.stop_monitoring()
@@ -981,8 +962,8 @@ class CodeSplitter:
             segment_lists = await asyncio.gather(*tasks)
             segments = [s for sublist in segment_lists for s in sublist]
         else:
-            for file_path, content in files:
-                file_segments = await self._split_single_file(file_path, content)
+            for file_path, content, mime_type in files:
+                file_segments = await self._split_single_file(file_path, content, mime_type)
                 segments.extend(file_segments)
 
         # Group related segments if configured
@@ -1287,7 +1268,7 @@ class CodeSplitter:
         current_size = 0
         start_pos = 0
 
-        def is_major_token(token_type: Token) -> bool:
+        def is_major_token(token_type) -> bool:
             """Check if token type indicates major structural element"""
             return (
                 token_type in Token.Keyword.Declaration
@@ -1443,7 +1424,7 @@ class CodeSplitter:
         return enhanced_matches
 
     def _find_rule_matches(
-        self, content: str, rules: list[CustomRule], file_path: str, mime_type: str
+        self, content: str, rules: list[CustomRule], file_path: str
     ) -> list[RuleMatch]:
         """Find all matches for given rules in content"""
         matches = []
@@ -1514,6 +1495,7 @@ class CodeSplitter:
                         self._split_by_size(
                             pre_content,
                             file_path,
+                            mime_type,
                             match.rule.max_size or lang_config.max_node_size,
                         )
                     )

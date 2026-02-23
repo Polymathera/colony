@@ -2473,6 +2473,7 @@ class Agent(BaseModel):
         logger.warning(
             f"              📡 agent.infer() returned — len={len(resp_text)}"
         )
+        logger.info(f"__________ Agent {self.agent_id} inference request:\n\tPrompt:{prompt}\n\tResult:{resp_text}")
         return result
 
     # === Blackboard (Delegated to manager) ===

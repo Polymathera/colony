@@ -26,7 +26,7 @@ from colony.utils.retry import standard_retry
 from .types import RepositoryShard, ShardFileSegment, ShardMetadata, ShardingError
 from .prompting import ShardedInferencePromptStrategy
 from .code_splitting import CodeSplitter, CodeSplitterConfig, SplitStrategy
-from .file_grouping import FileGrouper, FileGrouperConfig, FileGroup
+from .file_grouping import FileGrouperConfig
 from .file_grouping_wrapper import FileGrouperWithGraph
 from .tokenization import TokenizationConfig, TokenizationStrategy, TokenManager
 from .analyzers.base import FileContentCache
@@ -537,25 +537,20 @@ class GitRepoShardingStrategy:
             failure_threshold=3, recovery_timeout=15, name="shard_processing"
         )
 
-    def _get_repo_files(self, repo: git.Repo) -> list[str]:
-        """Get all files in the repository."""
-        repo_path = Path(repo.working_dir)
-        files = []
-        for blob in repo.head.commit.tree.traverse():
-            if blob.type != "blob":
-                continue
-            files.append(str(repo_path / blob.path))
-        return files
+    @staticmethod
+    def _get_repo_files_sync(repo_path: str) -> list[str]:
+        """Get all tracked files in the repository.
 
-    def _get_group_blobs(self, repo: git.Repo, group: FileGroup) -> list[git.Blob]:
-        """Get blobs for files in a group."""
-        repo_path = Path(repo.working_dir)
-        blobs = [
-            blob
+        Creates its own git.Repo instance so this can safely run in a
+        background thread without sharing the parent repo's git subprocess.
+        """
+        repo = git.Repo(repo_path)
+        base = Path(repo_path)
+        return [
+            str(base / blob.path)
             for blob in repo.head.commit.tree.traverse()
-            if blob.type == "blob" and str(repo_path / blob.path) in group.files
+            if blob.type == "blob"
         ]
-        return blobs
 
     @standard_retry(logger)
     async def create_shards_with_graph(
@@ -686,11 +681,15 @@ class GitRepoShardingStrategy:
                 # Return cached shards with file_grouper=None (no graph available from cache)
                 return cached_shards, None
 
-            # Get all files in repo
-            files = self._get_repo_files(repo)
-            logger.info(f"________ create_shards: 2 {len(files)} files")
+            # Get all tracked files.  Runs in a thread with its own git.Repo
+            # to avoid blocking the event loop (GitPython's repo object is NOT
+            # thread-safe — each instance needs its own git subprocess).
             repo_path = Path(repo.working_dir)
             logger.info(f"________ create_shards: 2.1 {repo_path}")
+            files = await asyncio.to_thread(
+                self._get_repo_files_sync, str(repo_path)
+            )
+            logger.info(f"________ create_shards: 2.2 {len(files)} files")
 
             # Initialize FileGrouper with appropriate config
             grouper_config = self.config.file_grouping_config
@@ -712,20 +711,18 @@ class GitRepoShardingStrategy:
             # TODO: Ensure this is cached
             file_groups = await file_grouper.group_files(group_id, repo, files)
             logger.info(f"________ create_shards: 4 {len(file_groups)} file groups")
-            # Process groups concurrently with bounded concurrency
+            # Process groups concurrently with bounded concurrency.
+            # Pass file paths directly from the group — no need to
+            # re-traverse the git tree per group.
             tasks = []
             async with asyncio.TaskGroup() as tg:
                 for group in file_groups:
-                    # Get blobs for files in group
-                    group_blobs = self._get_group_blobs(repo, group)
                     tasks.append(
                         tg.create_task(
                             self._process_file_group(
                                 group_id=group_id,
-                                blobs=group_blobs,
+                                file_paths=group.files,
                                 commit_hash=commit_hash,
-                                relationship_score=group.relationship_score,
-                                group_metadata=group.metadata,
                                 repo_path=repo_path,
                             )
                         )
@@ -940,15 +937,16 @@ class GitRepoShardingStrategy:
     async def _process_file_group(
         self,
         group_id: str,
-        blobs: list[git.Blob],
+        file_paths: list[str],
         commit_hash: str,
-        relationship_score: float,
-        group_metadata: dict[str, Any],
         repo_path: Path,
     ) -> list[RepositoryShard]:
         """
         Process a group of related files together, respecting token limits.
         Uses CodeSplitter for intelligent splitting and TokenManager for size control.
+
+        Reads file content from the filesystem directly (no git.Blob objects),
+        so there is no dependency on a shared git subprocess.
         """
         try:
             # Process files in group
@@ -958,47 +956,28 @@ class GitRepoShardingStrategy:
                 binary_files: set[str] = set()
 
                 logger.debug(
-                    f"_process_file_group: blobs={len(blobs)} "
+                    f"_process_file_group: files={len(file_paths)} "
                     f"group_id={group_id} repo_path={repo_path}"
                 )
 
-                # TODO: Use parallel processing
-                for blob in blobs:
-                    blob_path = None
+                for file_path in file_paths:
                     try:
-                        blob_path = str(repo_path / blob.path)
+                        fp = Path(file_path)
+                        if not fp.exists() or not fp.is_file():
+                            logger.warning(f"File not found: {file_path}, skipping")
+                            continue
 
-                        # Try to read blob content with better error handling
-                        try:
-                            content: bytes = await asyncio.to_thread(blob.data_stream.read)
-                        except Exception as blob_error:
-                            # If blob reading fails, try reading from filesystem as fallback
-                            logger.warning(f"Failed to read blob for {blob_path}: {blob_error}")
-                            logger.info(f"Attempting filesystem fallback for {blob_path}")
+                        content: bytes = await asyncio.to_thread(fp.read_bytes)
 
-                            try:
-                                # Fallback to reading from filesystem
-                                file_path = Path(blob_path)
-                                if file_path.exists() and file_path.is_file():
-                                    content = await asyncio.to_thread(file_path.read_bytes)
-                                    logger.info(f"Successfully read {blob_path} from filesystem")
-                                else:
-                                    logger.error(f"File not found on filesystem: {blob_path}")
-                                    continue
-                            except Exception as fs_error:
-                                logger.error(f"Filesystem fallback failed for {blob_path}: {fs_error}")
-                                continue
-
-                        # Validate content is not empty or corrupted
                         if not content:
-                            logger.warning(f"Empty content for {blob_path}, skipping")
+                            logger.warning(f"Empty content for {file_path}, skipping")
                             continue
 
                         mime_type: str = await asyncio.to_thread(
-                            lambda: magic.from_buffer(content[:1024], mime=True)
+                            lambda c=content: magic.from_buffer(c[:1024], mime=True)
                         )
 
-                        is_binary = self._is_binary_file(blob_path, content, mime_type)
+                        is_binary = self._is_binary_file(file_path, content, mime_type)
 
                         if is_binary:
                             self.metrics.binary_files.labels(repo_id=group_id).inc()
@@ -1009,49 +988,37 @@ class GitRepoShardingStrategy:
                                 and len(content) > self.config.binary_size_limit_bytes
                             ):
                                 continue
-                            binary_files.add(blob_path)
+                            binary_files.add(file_path)
                         else:
                             text_content = self._decode_content(content)
                             if text_content is None:
                                 logger.warning(
-                                    f"Could not decode {blob_path}, treating as binary"
+                                    f"Could not decode {file_path}, treating as binary"
                                 )
-                                binary_files.add(blob_path)
+                                binary_files.add(file_path)
                                 continue
 
                             # Get token count
                             token_manager = await self.get_token_manager()
                             token_count = await token_manager.get_file_token_count(
-                                blob_path, group_id, commit_hash
+                                file_path, group_id, commit_hash
                             )
 
                             if token_count > self.config.max_tokens_per_file:
                                 logger.warning(
-                                    f"File too large: {blob_path} ({token_count} tokens)"
+                                    f"File too large: {file_path} ({token_count} tokens)"
                                 )
                                 continue
 
-                            file_contents.append((blob_path, text_content, mime_type))
+                            file_contents.append((file_path, text_content, mime_type))
 
                     except Exception as e:
-                        # More specific error logging
-                        error_msg = str(e)
-                        if blob_path:
-                            logger.error(f"Error processing file {blob_path}: {error_msg}")
-                        else:
-                            logger.error(f"Error processing blob {blob}: {error_msg}")
-
-                        # Log additional context for debugging
-                        if "SHA" in error_msg or "dubious ownership" in error_msg:
-                            logger.error(f"Git repository may be corrupted or have ownership issues")
-                            logger.error(f"Repository path: {repo_path}")
-                            logger.error(f"Consider running: git config --global --add safe.directory {repo_path}")
-
+                        logger.error(f"Error processing file {file_path}: {e}")
                         continue
 
                 logger.debug(
                     f"_process_file_group: file_contents={len(file_contents)} "
-                    f"binary={len(binary_files)} total_blobs={len(blobs)}"
+                    f"binary={len(binary_files)} total_files={len(file_paths)}"
                 )
 
                 if not file_contents:

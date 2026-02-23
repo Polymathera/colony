@@ -711,7 +711,7 @@ class PageStorage:
                 self.backend_type
             )
 
-            logger.info(
+            logger.debug(
                 f"Stored page {page.page_id} "
                 f"(backend={self.backend_type}, size={page.size} tokens, "
                 f"has_text={page.text is not None}, location={storage_location})"

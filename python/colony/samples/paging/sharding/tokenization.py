@@ -226,7 +226,10 @@ class TokenManager:
         return_tokens: bool = False,
     ) -> int | list[int]:
         """Get token count or tokens for a file with persistent caching and fallbacks"""
-        logger.debug(f"________ get_file_tokens: getting file tokens for {repo_id}:{commit_hash}:{file_path}")
+        ### if not hasattr(self, "_file_count"):
+        ###     self._file_count = 0
+        ### self._file_count += 1
+        ### logger.info(f"________ get_file_tokens({repo_id}:{commit_hash}:{file_path}) [{self._file_count}:{self.file_content_cache.cache.currsize}]")
         start_time = time.time()
         try:
             cache_key = self._make_cache_key(repo_id, file_path, commit_hash)
@@ -256,16 +259,19 @@ class TokenManager:
                     [] if return_tokens else len(content) // 4
                 )  # TODO: Fallback approximation
 
-            if (
-                len(tokens) > self.config.max_tokens_per_file
-                and self.config.skip_large_files
-            ):
-                raise ValueError(f"File too large: {len(tokens)} tokens")
-
-            # Store both tokens and count
             token_count = len(tokens)
+
+            # Cache the count (and tokens) BEFORE the size check so that
+            # subsequent calls for the same file hit the cache instead of
+            # re-tokenizing and re-raising every time.
             await self.token_cache.set(cache_key, ",".join(str(t) for t in tokens))
             await self.count_cache.set(cache_key, str(token_count))
+
+            if (
+                token_count > self.config.max_tokens_per_file
+                and self.config.skip_large_files
+            ):
+                raise ValueError(f"File too large: {file_path} ({token_count} tokens)")
 
             # Update metrics
             self.metrics.token_counts.labels(detect_language(file_path)).observe(
@@ -293,7 +299,6 @@ class TokenManager:
 
     async def _get_tokens(self, content: str) -> list[int]:
         """Get tokens using tiktoken"""
-        logger.info(f"________ _get_tokens: ")
         async with self.semaphore:  # Limit concurrent tokenizations
             start_time = time.time()
             try:
@@ -301,7 +306,7 @@ class TokenManager:
                     self._encoder = tiktoken.get_encoding("cl100k_base")
                 # Disable special token checking to handle tokens like <|endoftext|> as normal text
                 tokens = self._encoder.encode(content, disallowed_special=())
-                logger.info(f"________ _get_tokens: tokens: {tokens[:10]}...")
+                logger.debug(f"________ _get_tokens: tokens: {tokens[:10]}...")
                 return tokens
             finally:
                 self.metrics.operation_duration.labels("tokenize").observe(
