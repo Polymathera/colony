@@ -70,6 +70,15 @@ class AgentPoolCapability(AgentCapability):
         self._agent_work: dict[str, dict[str, Any]] = {}  # agent_id -> current work
         self._agent_results: dict[str, list[dict[str, Any]]] = {}  # agent_id -> results
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Agent Pool — manages dynamic pool of worker agents. "
+            "create_agent is expensive (spawns new process with capability setup). "
+            "Supports bound_pages for cache-affine routing (agent placed near cached pages). "
+            "suspend/resume preserves full state including working set for efficient restart. "
+            "terminate is irreversible — use suspend if the agent may be needed again."
+        )
+
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement

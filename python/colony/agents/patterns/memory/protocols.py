@@ -24,8 +24,10 @@ import time
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable, Generic, TypeVar, TYPE_CHECKING
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
 
 if TYPE_CHECKING:
     from ...base import Agent
@@ -553,16 +555,6 @@ class FilteringTransformer(ConsolidationTransformer[TSource, TTarget]):
 # =============================================================================
 
 
-class MemoryIngestPolicy(BaseModel):
-    """Policy that determines what subscriptions to use and how to consolidate the data when ingesting.
-    """
-    trigger: MemoryIngestPolicyTrigger = Field(default_factory=lambda: OnDemandMemoryIngestPolicyTrigger())
-    subscriptions: list[MemorySubscription] = Field(default_factory=list)
-    """Subscriptions to use for ingestion."""
-    transformer: ConsolidationTransformer | None = Field(default_factory=IdentityConsolidationTransformer)
-    ingestion_check_interval_seconds: float = 30.0 # How often to check policy.
-
-
 class MemoryIngestPolicyTrigger(ABC):
     """Policy that determines when to trigger a transfer between memory scopes.
 
@@ -681,6 +673,16 @@ class CompositeMemoryIngestPolicyTrigger(MemoryIngestPolicyTrigger):
             return all(results)
         return any(results)
 
+
+@dataclass
+class MemoryIngestPolicy:
+    """Policy that determines what subscriptions to use and how to consolidate the data when ingesting.
+    """
+    trigger: MemoryIngestPolicyTrigger = field(default_factory=OnDemandMemoryIngestPolicyTrigger)
+    subscriptions: list[MemorySubscription] = field(default_factory=list)
+    """Subscriptions to use for ingestion."""
+    transformer: ConsolidationTransformer | None = field(default_factory=IdentityConsolidationTransformer)
+    ingestion_check_interval_seconds: float = 30.0
 
 
 # =============================================================================

@@ -54,6 +54,13 @@ class PageAnalyzerCapability(AgentCapability):
     3. Stop
     """
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Single Page Analysis — atomic leaf agent bound to exactly one page. "
+            "Produces a compact summary (1-2KB) that serves as the 'key' in attention. "
+            "Linear deterministic: load page → analyze → write result → stop. No iteration needed."
+        )
+
     async def initialize(self) -> None:
         """Initialize page analyzer."""
         await super().initialize()

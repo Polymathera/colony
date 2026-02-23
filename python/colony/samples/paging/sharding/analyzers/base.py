@@ -104,7 +104,7 @@ class FileContentCache:
             # Try with latin-1 encoding as fallback
             ### with open(file_path, 'r', encoding='latin-1') as f:
             ###     content = f.read()
-            logger.warning(f"Binary file skipped: {file_path}")
+            logger.debug(f"Binary file skipped: {file_path}")
             self.metrics.errors.labels("encoding").inc()
             return None
         except Exception as e:
@@ -137,7 +137,7 @@ class FileContentCache:
                 # Check file size
                 size_mb = path.stat().st_size / (1024 * 1024)
                 if size_mb > self.config.max_file_size_to_read_mb:
-                    logger.warning(f"File too large: {file_path} ({size_mb:.2f}MB)")
+                    logger.debug(f"File too large: {file_path} ({size_mb:.2f}MB)")
                     self.metrics.errors.labels("file_size").inc()
                     return None
 

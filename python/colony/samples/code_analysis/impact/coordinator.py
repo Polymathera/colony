@@ -376,6 +376,17 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         self.prefetch_test_pages = self.agent.metadata.parameters.get("prefetch_test_pages", True)
         self.max_agents = self.agent.metadata.parameters.get("max_agents", 10)
 
+    def get_action_group_description(self) -> str:
+        pages_info = f"{len(self.pending_pages)} pending pages" if self.pending_pages else "no pending pages"
+        return (
+            f"Change Impact Coordination ({pages_info}, max {self.max_agents} concurrent agents) — "
+            "orchestrates distributed impact analysis. "
+            "analyze_change_impact handles batching, agent spawning, result aggregation, and reporting. "
+            "Traces cross-page dependencies (max_depth=5). "
+            "Cache-aware batching via working set overlap. "
+            "Validates CRITICAL impacts through hypothesis game protocol."
+        )
+
     async def initialize(self) -> None:
         """Initialize capability with cache-aware components."""
         await super().initialize()

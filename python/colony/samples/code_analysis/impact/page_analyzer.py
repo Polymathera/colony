@@ -684,6 +684,13 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         # Components
         self.feedback_predictor: FeedbackLoopPredictor | None = None
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Change Impact Analysis (page-level) — analyzes change impact on a single bound page. "
+            "Uses FeedbackLoopPredictor for cache-aware prefetching of test page dependencies. "
+            "Supports cross-page queries for impact tracing and hypothesis game participation for validation."
+        )
+
     async def initialize(self) -> None:
         """Initialize capability."""
         await super().initialize()

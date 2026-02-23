@@ -100,6 +100,37 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         self._worker_pages: dict[str, str] = {}  # worker_agent_id -> page_id
         self._pending_work: list[dict[str, Any]] = []  # Work queue
 
+    def get_action_group_description(self) -> str:
+        analyzed = len(self._worker_ids)
+        pending = len(self._pending_work)
+        return (
+            f"Distributed VCM Analysis — composable primitives for distributed page analysis "
+            f"({analyzed} active workers, {pending} pending).\n"
+            "Action groups: worker lifecycle (spawn/terminate/status), work assignment "
+            "(assign/prioritize/queue), result collection (get/merge/synthesize/detect contradictions), "
+            "state queries (coverage/issues/outstanding queries), iteration (revisit/clear/reset).\n"
+            "Example strategy choices:\n"
+            "1. **Cluster-Based**: For related pages that benefit from being analyzed together\n"
+            "- Use page_graph.get_clusters() to find clusters\n"
+            "- Spawn workers with cache_affine=True for each cluster\n"
+            "- Merge results after each cluster completes\n"
+            "- Good when: Pages have clear dependency structure\n"
+            "2. **Query-Driven Continuous**: For exploratory analysis guided by questions\n"
+            "- Check get_outstanding_queries() for pending questions\n"
+            "- Spawn workers for pages that might answer top queries\n"
+            "- Detect contradictions as results come in\n"
+            "- Good when: Analysis is question-driven, not coverage-driven\n"
+            "3. **Opportunistic with Revisits**: For fast initial pass with refinement\n"
+            "- Spawn workers for all pages (with max_parallel limit)\n"
+            "- Check get_pages_with_issues() for low-confidence results\n"
+            "- Mark issues for revisit with new context\n"
+            "- Good when: Need fast initial results, can refine later\n"
+            "**Cache-awareness is EMERGENT from your choices:**\n"
+            "- Set cache_affine=True to place workers near cached pages\n"
+            "- Use working_set.request_pages() before spawn_workers() to pre-warm cache\n"
+            "- Use page_graph.get_clusters() to find pages that benefit from co-location\n"
+        )
+
     async def initialize(self) -> None:
         """Initialize capability and restore state from blackboard."""
         await super().initialize()

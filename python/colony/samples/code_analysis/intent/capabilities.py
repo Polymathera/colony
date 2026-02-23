@@ -118,6 +118,14 @@ class IntentInferenceCapability(AgentCapability):
         self.granularity = granularity
         self.confidence_tracker = ConfidenceTracker()
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Intent Inference — infers high-level purpose and business logic from code. "
+            f"Granularity: {self.granularity}. Detects code-intent misalignment. "
+            "Builds intent hierarchies across pages. Confidence-tracked inferences. "
+            "Supports local mode (single page) and remote mode (via AgentHandle)."
+        )
+
     def _get_merge_capability(self) -> MergeCapability | None:
         """Get MergeCapability from agent dynamically."""
         return self.agent.get_capability_by_type(MergeCapability)
@@ -1149,6 +1157,13 @@ class IntentCoordinatorCapability(AgentCapability):
         self._agent_pool_cap: AgentPoolCapability | None = None
         self._result_cap: ResultCapability | None = None
         self._page_graph_cap: PageGraphCapability | None = None
+
+    def get_action_group_description(self) -> str:
+        return (
+            "Intent Coordination (DEPRECATED) — distributes intent inference across pages. "
+            "Spawns agents via AgentPoolCapability, batches by cache affinity, "
+            "collects and merges into unified intent graph."
+        )
 
     async def initialize(self) -> None:
         """Initialize coordinator capability with Layer 0/1 capabilities."""

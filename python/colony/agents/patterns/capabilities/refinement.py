@@ -630,6 +630,15 @@ class RefinementCapability(AgentCapability):
         self.refinement_policy: RefinementPolicy | None = None
         self._refiner: IncrementalRefiner | None = None
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Iterative Refinement — improves results with new evidence via configurable policy. "
+            "Requires set_policy() before use. Check should_refine first (cheap) to avoid wasted work "
+            "— it tracks convergence and stops when max_steps reached, converged, or target confidence hit. "
+            "refine_result applies one refinement step. add_result_and_refine propagates "
+            "refinements to dependent results."
+        )
+
     def set_policy(self, policy: RefinementPolicy) -> None:
         """Configure the refinement policy after instantiation.
 

@@ -149,6 +149,15 @@ class ReflectionCapability(AgentCapability):
         super().__init__(agent=agent, scope_id=agent.agent_id)
         self._state_managers: dict[str, Any] = {}
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Self-Reflection — reflects on recent action results to identify learnings, "
+            "detect violated assumptions, and determine if more context is needed. "
+            "Queries memory for reflection-relevant context written by action executors "
+            "(via result.output['_reflection_learnings']). "
+            "Can request reflection from a peer agent for external perspective."
+        )
+
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement

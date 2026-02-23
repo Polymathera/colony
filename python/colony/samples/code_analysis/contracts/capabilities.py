@@ -103,6 +103,15 @@ class ContractInferenceCapability(AgentCapability):
         self.formalism = formalism
         self.use_examples = use_examples
 
+    def get_action_group_description(self) -> str:
+        return (
+            f"Contract Inference ({self.formalism} formalism) — derives preconditions, postconditions, "
+            "and loop invariants from code. Identifies implicit assumptions. "
+            "Critical contracts can be validated with evidence for higher confidence. "
+            "Security contract specialization available. "
+            "Supports local mode (single page) and remote mode (via AgentHandle)."
+        )
+
     def _get_merge_capability(self) -> MergeCapability | None:
         """Get MergeCapability from agent (optional)."""
         return self.agent.get_capability_by_type(MergeCapability)
@@ -1182,6 +1191,13 @@ class ContractCoordinatorCapability(AgentCapability):
         self._agent_pool_cap: AgentPoolCapability | None = None
         self._result_cap: ResultCapability | None = None
         self._page_graph_cap: PageGraphCapability | None = None
+
+    def get_action_group_description(self) -> str:
+        return (
+            "Contract Coordination (DEPRECATED — use ContractAnalysisCapability). "
+            "Distributes contract inference across pages with game-based validation "
+            "(hypothesis, negotiation, coalition). Merges via SynthesisCapability."
+        )
 
     def _get_merge_capability(self) -> MergeCapability | None:
         """Get MergeCapability from agent."""

@@ -87,6 +87,14 @@ class AdaptiveQueryGenerator(AgentCapability):
         self.successful_patterns: list[dict[str, Any]] = []
         self.failed_patterns: list[dict[str, Any]] = []
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Adaptive Query Generation — learns from query outcomes to improve strategy. "
+            "Tracks success/failure patterns. If success rate > 70%, generates similar queries; "
+            "otherwise tries a different approach. Run queries first, then generate next queries "
+            "based on learned patterns. Iterative: run → learn → generate → repeat."
+        )
+
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement

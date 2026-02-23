@@ -43,7 +43,14 @@ from pydantic import BaseModel
 from ...blackboard.types import BlackboardEntry
 from ..actions.policies import action_executor
 from .capability import MemoryCapability
-from .types import MemoryQuery, MaintenanceConfig, MemoryProducerConfig
+from .types import MemoryLens, MaintenanceConfig, MemoryProducerConfig
+from .protocols import (
+    StorageBackendFactory,
+    RetrievalStrategy,
+    MaintenancePolicy,
+    UtilityScorer,
+    MemoryIngestPolicy,
+)
 
 if TYPE_CHECKING:
     from ...base import Agent
@@ -70,24 +77,67 @@ class WorkingMemoryCapability(MemoryCapability):
         self,
         agent: "Agent",
         scope_id: str,
-        max_tokens: int = 8000,
-        compaction_threshold: float = 0.9,
+        *,
+        # === INGESTION (Pull data INTO this scope) ===
+        producers: list[MemoryProducerConfig] | None = None,
+        ingestion_policy: MemoryIngestPolicy | None = None,
+
+        # === STORAGE ===
         ttl_seconds: float | None = None,
         max_entries: int | None = None,
-        maintenance: MaintenanceConfig | None = None,
-        producers: list[MemoryProducerConfig] | None = None,
+        storage_backend_factory: StorageBackendFactory | None = None,
+
+        # === RETRIEVAL (Retrieval is the bottleneck) ===
+        retrieval_strategy: RetrievalStrategy | None = None,
+        lenses: list[MemoryLens] | None = None,
+
+        # === MAINTENANCE (Keep this scope healthy) ===
+        maintenance_policies: list[MaintenancePolicy] | None = None,
+        maintenance_interval_seconds: float = 60.0,
+
+        # === UTILITY SCORING (Memory as self-optimizing) ===
+        utility_scorer: UtilityScorer | None = None,
+
+        # === LEGACY COMPAT ===
+        maintenance: MaintenanceConfig | None = None,  # TODO: Remove
+
+        # === WORKING MEMORY CONFIG ===
+        max_tokens: int = 8000,
+        compaction_threshold: float = 0.9,
     ):
-        """Initialize working memory capability.
+        """Initialize memory capability.
 
         Args:
             agent: Agent that owns this capability
-            scope_id: Blackboard scope for working memory
+            scope_id: Blackboard scope for this memory level
+
+            producers: Hook-based memory capture configurations
+            ingestion_policy: Dataflow edges from other scopes, and
+                when to trigger ingestion (default: OnDemand) and
+                how to consolidate the entries. Each subscription listens
+                and collects entries into pending queue. ALL pending
+                entries are then transformed together before writing
+                to this scope. If transformer=None, entries stored as-is.
+
+            ttl_seconds: Default TTL for stored memories (None = no expiration)
+            max_entries: Maximum entries before eviction (None = no limit)
+            storage_backend_factory: Factory for creating storage backends for
+                any scope (e.g., this scope or other scopes). Defaults to
+                BlackboardStorageBackendFactory.
+
+            retrieval_strategy: Strategy for memory retrieval (default: RecencyRetrieval)
+            lenses: Named query configurations
+
+            maintenance_policies: List of maintenance policies to run
+                Use ConsolidationMaintenancePolicy for within-scope consolidation.
+            maintenance_interval_seconds: How often to run maintenance (default: 60s)
+
+            utility_scorer: Scorer for memory utility
+
+            maintenance: Legacy MaintenanceConfig (deprecated, use maintenance_policies)
+
             max_tokens: Token budget (default 8000)
             compaction_threshold: Fraction triggering compaction (default 0.9)
-            ttl_seconds: Default TTL (usually None for task-bounded)
-            max_entries: Max entries (usually None, token-bounded instead)
-            maintenance: Maintenance config (usually minimal for working memory)
-            producers: Hook-based memory capture configurations
         """
         # Use default maintenance config for working memory (no decay, no pruning)
         default_maintenance = MaintenanceConfig(
@@ -99,10 +149,19 @@ class WorkingMemoryCapability(MemoryCapability):
         super().__init__(
             agent=agent,
             scope_id=scope_id,
+            producers=producers,
+            ingestion_policy=ingestion_policy,
             ttl_seconds=ttl_seconds,
             max_entries=max_entries,
+            storage_backend_factory=storage_backend_factory,
+            retrieval_strategy=retrieval_strategy,
+            lenses=lenses,
+            maintenance_policies=maintenance_policies,
+            maintenance_interval_seconds=maintenance_interval_seconds,
+            utility_scorer=utility_scorer,
             maintenance=maintenance or default_maintenance,
-            producers=producers,
+            map_to_vcm=False,
+            vcm_config=None,
         )
         self.max_tokens = max_tokens
         self.compaction_threshold = compaction_threshold

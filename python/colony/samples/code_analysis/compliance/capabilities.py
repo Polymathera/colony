@@ -83,6 +83,14 @@ class ComplianceAnalysisCapability(AgentCapability):
         self.check_security = check_security
         self._obligation_graph: ObligationGraph | None = None
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Compliance Analysis — license detection, compatibility checking, regulatory verification. "
+            "Builds an ObligationGraph for requirement traceability. "
+            "analyze_compliance is the main entry point; query results via severity filter or risk assessment. "
+            "Configurable requirement sets (license, security, quality)."
+        )
+
     async def _ensure_obligation_graph(self) -> ObligationGraph:
         """Ensure obligation graph is initialized."""
         if self._obligation_graph is None:
@@ -1429,6 +1437,13 @@ class ComplianceCoordinatorCapability(AgentCapability):
         self._agent_pool_cap: AgentPoolCapability | None = None
         self._result_cap: ResultCapability | None = None
         self._page_graph_cap: PageGraphCapability | None = None
+
+    def get_action_group_description(self) -> str:
+        return (
+            "Compliance Coordination (DEPRECATED — use ComplianceVCMCapability). "
+            "Distributes compliance analysis across pages via AgentPoolCapability, "
+            "aggregates results, maintains ObligationGraph across agents."
+        )
 
     async def initialize(self) -> None:
         """Initialize coordinator capability with Layer 0/1 capabilities."""

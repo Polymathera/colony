@@ -61,6 +61,15 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
         self.query_generator: QueryGenerator | None = None
         self.query_router: PageQueryRoutingPolicy | None = None
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Cluster Analysis V2 (Iterative reasoning loop) — replaces FSM with LLM-driven planning. "
+            "PLAN → ACT → REFLECT → CRITIQUE → ADAPT cycle. "
+            "Agent reasons about what to analyze next, generates cross-page queries, "
+            "routes to relevant pages, and iterates until quality threshold is met. "
+            "Uses game protocols (hypothesis, negotiation) for advanced validation."
+        )
+
     async def initialize(self) -> None:
         """Initialize ClusterAnalyzerCapabilityV2."""
         await super().initialize()

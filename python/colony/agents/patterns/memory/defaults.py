@@ -455,14 +455,19 @@ async def create_default_memory_hierarchy(
     capabilities["lifecycle_hooks"] = lifecycle_hooks
 
     # -------------------------------------------------------------------------
-    # Initialize and Add to Agent
+    # Add to Agent, then Initialize
     # -------------------------------------------------------------------------
+    # Add all capabilities first so they can discover each other during
+    # initialization (e.g., AgentContextEngine discovers MemoryCapability
+    # instances on the agent).
+
+    if auto_add_to_agent:
+        for name, capability in capabilities.items():
+            agent.add_capability(capability)
 
     for name, capability in capabilities.items():
         try:
             await capability.initialize()
-            if auto_add_to_agent:
-                agent.add_capability(capability)
             logger.debug(f"Initialized memory capability: {name}")
         except Exception as e:
             logger.error(f"Failed to initialize {name}: {e}")
@@ -534,11 +539,13 @@ async def create_minimal_memory_hierarchy(
     context_engine = AgentContextEngine(agent=agent)
     capabilities["context_engine"] = context_engine
 
-    # Initialize
+    # Add all first, then initialize (so AgentContextEngine can discover others)
+    if auto_add_to_agent:
+        for name, capability in capabilities.items():
+            agent.add_capability(capability)
+
     for name, capability in capabilities.items():
         await capability.initialize()
-        if auto_add_to_agent:
-            agent.add_capability(capability)
 
     return capabilities
 

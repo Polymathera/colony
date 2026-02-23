@@ -265,6 +265,15 @@ class CoalitionFormationProtocol(GameProtocolCapability[CoalitionFormationData, 
         """
         super().__init__(agent, game_type="coalition_formation")
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Coalition Formation — team assembly via game-theoretic allocation. "
+            "Phases: INITIATION → PROPOSAL → EVALUATION → FORMATION. "
+            "Value allocation via Shapley values (marginal contribution averaging). "
+            "Coalition value = task_value - cost, adjusted by synergy bonus and reputation (0.8-1.2x). "
+            "Terminates when best proposal selected from >=2 proposals."
+        )
+
     @override
     @action_executor(exclude_from_planning=True)
     async def start_game(

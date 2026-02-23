@@ -726,6 +726,15 @@ class ValidationCapability(AgentCapability):
         self.contradiction_resolver: ContradictionResolver | None = None
         self._consensus_validator = ConsensusValidator()
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Analysis Result Validation — runs pluggable validators on results. "
+            "Requires set_validators() before use. Validators run sequentially on each result. "
+            "Can also check consensus across multiple results, detect contradictions between results, "
+            "and resolve contradictions using LLM-assisted evidence gathering. "
+            "Contradiction resolution is expensive (LLM call); detection is cheap."
+        )
+
     def set_validators(self, validators: list[AnalysisValidationPolicy]) -> None:
         """Configure validators after instantiation.
 

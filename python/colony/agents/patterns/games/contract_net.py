@@ -196,6 +196,15 @@ class ContractNetGameCapability(GameProtocolCapability[ContractGameData, Contrac
         super().__init__(agent, game_type="contract_net")
         self.reputation_tracker = reputation_tracker
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Contract Net — competitive task allocation via bidding. "
+            "Phases: ANNOUNCE → BID → AWARD → EXECUTE → VALIDATE. "
+            "Bid scoring: 50% reputation + 30% quality + 20% cost. "
+            "Poor execution lowers reputation; good execution raises it. "
+            "Requires coordinator (announces/awards) and at least one bidder."
+        )
+
     @override
     @action_executor(exclude_from_planning=True)
     async def start_game(

@@ -61,7 +61,6 @@ from ..planning import (
     CoordinationPlanningPolicy,
     HierarchicalAccessPolicy,
     CacheAwareActionPlanner,
-    LLMPlanner,
     get_default_planning_strategy,
     ReplanningPolicy,
     ReplanningDecision,
@@ -204,7 +203,7 @@ class MethodWrapperActionExecutor(ActionExecutor):
             return result
 
     async def get_action_description(self) -> str:
-        """Get human-readable description from method docstring."""
+        """Get human-readable description from the wrapped method's docstring."""
         docstring = inspect.getdoc(self.method)
         if not docstring:
             raise ValueError(
@@ -640,8 +639,10 @@ class ActionDispatcher:
         """Create default action executors based on agent type."""
         action_groups: list[ActionGroup] = []
 
-        action_groups.append(self._create_object_action_group(self.agent))
-        action_groups.append(self._create_object_action_group(self.action_policy))
+        for source in [self.agent, self.action_policy]:
+            group = self._create_object_action_group(source)
+            if group.executors:
+                action_groups.append(group)
 
         for provider in self.action_providers:
             # Check if provider is a standalone function decorated with @action_executor
@@ -654,7 +655,9 @@ class ActionDispatcher:
                     ))
             else:
                 # It's an object with methods
-                action_groups.append(self._create_object_action_group(provider))
+                group = self._create_object_action_group(provider)
+                if group.executors:
+                    action_groups.append(group)
 
         return action_groups
 
@@ -776,7 +779,7 @@ class ActionDispatcher:
 
         return ActionGroup(
             description=description,
-            actions=action_executors
+            executors=action_executors,
         )
 
     def get_plannable_actions(self) -> dict[str, ActionExecutor]:
@@ -1947,6 +1950,13 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         self.current_plan_id: str | None = None
         self.current_action_index: int | None = None
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Planning & Execution Control — manages the agent's plan lifecycle. "
+            "Handles plan creation, replanning on failure or periodic triggers, "
+            "and plan-level coordination with child agents via blackboard events."
+        )
+
     async def initialize(self) -> None:
         """Initialize planning agent."""
 
@@ -2523,7 +2533,6 @@ async def create_default_action_policy(
     quality_threshold: float = 0.9,
     planning_horizon: int = 5,
     ideal_cache_size: int = 10,
-    use_advanced_planning: bool = True,
 ) -> CacheAwareActionPolicy:
     """Create sophisticated action policy with cache-awareness and learning.
 
@@ -2532,20 +2541,13 @@ async def create_default_action_policy(
     """
     from ..planning.planner import create_cache_aware_planner
 
-    if use_advanced_planning:
-        # Use sophisticated planning with cache-awareness and learning
-        planner = await create_cache_aware_planner(
-            agent=agent,
-            max_iterations=max_iterations,
-            quality_threshold=quality_threshold,
-            planning_horizon=planning_horizon,
-            ideal_cache_size=ideal_cache_size,
-        )
-        logger.info(f"Using advanced planning framework for agent {agent.agent_id}")
-    else:
-        # Use simple LLM-driven reactive planning
-        planner = LLMPlanner(agent)
-        logger.info(f"Using simple LLM planner for agent {agent.agent_id}")
+    planner = await create_cache_aware_planner(
+        agent=agent,
+        max_iterations=max_iterations,
+        quality_threshold=quality_threshold,
+        planning_horizon=planning_horizon,
+        ideal_cache_size=ideal_cache_size,
+    )
 
     action_policy = CacheAwareActionPolicy(
         agent=agent,

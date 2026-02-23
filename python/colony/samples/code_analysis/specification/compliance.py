@@ -351,6 +351,14 @@ class SpecificationComplianceCapability(AgentCapability):
         # Layer 0/1 capability reference for page graph operations
         self._page_graph_cap: PageGraphCapability | None = None
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Specification Compliance — checks code against specifications using VCM long-context. "
+            "Single main action (check_compliance) covering: contract inference, invariant verification, "
+            "requirement tracing, obligation graphs, risk assessment. "
+            "Primary use case for LLM inference over extremely long context."
+        )
+
     async def initialize(self) -> None:
         """Initialize specification compliance capability."""
         await super().initialize()

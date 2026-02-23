@@ -322,6 +322,15 @@ class CriticCapability(AgentCapability):
         self.critique_policy_peer: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_peer")  # FIXME: Get the policy instances properly
         self.critique_policy_parent: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_parent")  # FIXME: Get the policy instances properly
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Critique — evaluates logical soundness of outputs independent of producer relationship. "
+            "Supports self-critique (cheapest), peer critique (async request/response via blackboard), "
+            "and parent critique. critique_action_result uses memory-gathered context for richer feedback. "
+            "Critique policies are configurable per relationship type (self/child/peer/parent). "
+            "Remote critiques involve a round-trip wait with configurable timeout."
+        )
+
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement

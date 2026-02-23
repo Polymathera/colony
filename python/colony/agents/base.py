@@ -1585,7 +1585,7 @@ class Agent(BaseModel):
 
     # Memory configuration
     enable_memory_hierarchy: bool = Field(
-        default=False,
+        default=True,
         description="Whether to auto-initialize the default memory hierarchy"
     )
     memory_config: dict[str, Any] = Field(
@@ -1609,6 +1609,12 @@ class Agent(BaseModel):
     _hook_registry: AgentHookRegistry | None = PrivateAttr(default=None)
 
     model_config = {"arbitrary_types_allowed": True}
+
+    def get_action_group_description(self) -> str:
+        return (
+            f"Agent-level actions for {self.__class__.__name__} ({self.agent_type}). "
+            "Direct agent actions outside of capabilities."
+        )
 
     def to_registration_info(self) -> AgentRegistrationInfo:
         """Create a lightweight, serializable registration info for the agent system.
@@ -1962,6 +1968,8 @@ class Agent(BaseModel):
                 # ),
                 **self.metadata.action_policy_config
             )
+
+        logger.info(f"________ Created action policy {self.action_policy.__class__.__name__} for agent {self.agent_id} with capabilities: {self.get_capability_names()}")
 
         self.action_policy.use_agent_capabilities([cap.get_capability_name() for cap in self.capability_classes])
         await self.action_policy.initialize()

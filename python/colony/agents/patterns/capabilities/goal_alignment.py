@@ -274,6 +274,14 @@ class ObjectiveGuardCapability(AgentCapability):
         super().__init__(agent, scope_id)
         self.active_goals: dict[str, JointGoal] = {}
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Objective Guard — monitors alignment with registered joint goals. "
+            "Register goals first, then check outputs against them. "
+            "Prevents drift from user-requested objectives. "
+            "Triggered by GoalAlignmentRequest and JointGoalRegistration events."
+        )
+
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement

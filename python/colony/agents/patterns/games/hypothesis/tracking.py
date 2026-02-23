@@ -77,6 +77,15 @@ class HypothesisTrackingCapability(AgentCapability):
         self._cache: dict[str, TrackedHypothesis] = {}
         self._game_mapping: dict[str, list[str]] = {}  # game_id -> hypothesis_ids
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Hypothesis Tracking — tracks hypothesis lifecycle across games. "
+            "Statuses: PENDING → SUPPORTED/REFUTED/UNCERTAIN. Confidence adjusts with outcomes. "
+            "Delegates contradiction detection to ValidationCapability. "
+            "should_retry_hypothesis returns true for UNCERTAIN (confidence>0.4) or REFUTED (confidence<0.3). "
+            "Blackboard-backed for persistence and cross-agent sharing via scope_id."
+        )
+
     def _get_validation_capability(self) -> ValidationCapability | None:
         """Get ValidationCapability for contradiction detection."""
         from ...capabilities.validation import ValidationCapability

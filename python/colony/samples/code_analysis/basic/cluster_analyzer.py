@@ -42,6 +42,14 @@ class ClusterAnalyzerCapability(AgentCapability):
         super().__init__(agent, scope_id, blackboard=blackboard)
         self.query_router: PageQueryRoutingPolicy | None = None
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Cluster Analysis (V1, FSM-based) — multi-page inference over a page cluster. "
+            "Fixed phase progression: key generation → local analysis (one page at a time) → "
+            "query processing (cross-page via routing) → synthesis (no pages loaded). "
+            "Pages don't all fit in LLM context, so analysis is done one page at a time."
+        )
+
     async def initialize(self) -> None:
         """Initialize cluster analyzer."""
         await super().initialize()

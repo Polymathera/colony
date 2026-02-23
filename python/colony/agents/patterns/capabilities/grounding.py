@@ -212,6 +212,14 @@ class GroundingCapability(AgentCapability):
         """
         super().__init__(agent, scope_id)
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Claim Grounding — validates claims against evidence via query generation. "
+            "Workflow: generate a grounding query for a claim, then publish the result. "
+            "Triggered by INFORM messages containing claims that need evidence. "
+            "Challenges unsupported claims and fetches additional evidence as needed."
+        )
+
     def _get_result_key(self) -> str:
         """Get blackboard key for this capability's result."""
         return f"{self.scope_id}:grounding:result"

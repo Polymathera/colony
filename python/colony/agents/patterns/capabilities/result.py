@@ -63,6 +63,15 @@ class ResultCapability(AgentCapability):
         """
         super().__init__(agent=agent, scope_id=scope_id)
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Partial Result Management — cluster-wide storage for intermediate results. "
+            "Orchestrates MergeCapability, ValidationCapability, and SynthesisCapability. "
+            "Typical flow: store_partial as results arrive → get_partials to review → "
+            "merge/validate/synthesize when ready. Results are blackboard-backed and visible cluster-wide. "
+            "detect_contradictions before merging to catch conflicts early."
+        )
+
     def _get_partial_key(self, result_id: str) -> str:
         """Get blackboard key for a partial result."""
         return self.PARTIAL_RESULT_KEY.format(

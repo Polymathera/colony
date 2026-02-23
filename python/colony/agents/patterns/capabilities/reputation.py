@@ -838,6 +838,14 @@ class ReputationCapability(AgentCapability):
         self.reputation_tracker = None
         self.update_history: list[ReputationUpdate] = []
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Reputation Tracking — maintains agent reputation scores based on task outcomes. "
+            "Triggered by ReputationUpdateRequest events. Supports VCG-style marginal contribution "
+            "updates for mechanism-design-fair scoring. Publish result to blackboard when ready. "
+            "Reputation scores are consumed by ContractNet bidding and agent selection."
+        )
+
     def _get_result_key(self) -> str:
         """Get blackboard key for this capability's result."""
         return f"{self.scope_id}:reputation:result"

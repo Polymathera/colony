@@ -303,7 +303,7 @@ class ImportAnalyzer(BaseAnalyzer):
                         )
 
                         if not resolved_path:
-                            logger.warning(
+                            logger.debug(
                                 f"Could not resolve import {import_path} "
                                 f"in {file_path}"
                             )
@@ -481,7 +481,7 @@ class ImportAnalyzer(BaseAnalyzer):
                 try:
                     resolved_path = task.result()
                     if not resolved_path:
-                        logger.warning(
+                        logger.debug(
                             f"Could not resolve import {imp_info['path']} "
                             f"in {file_path}"
                         )

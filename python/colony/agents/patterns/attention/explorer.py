@@ -106,6 +106,15 @@ class QueryDrivenExplorationCapability(AgentCapability):
         self._total_queries: int = 0
         self._iteration_history: list[dict[str, Any]] = []
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Query-Driven Exploration — iteratively explores by following knowledge gaps. "
+            "Loop: generate queries from findings → route to contexts → analyze for new findings → repeat. "
+            "Each context is analyzed at most once (tracked). Planner decides when to stop. "
+            "Generalizes to: research (following citations), investigation (following leads), "
+            "diagnosis (ordering tests). get_exploration_summary returns all findings sorted by relevance."
+        )
+
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement

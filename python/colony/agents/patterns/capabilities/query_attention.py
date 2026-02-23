@@ -88,6 +88,36 @@ class QueryAttentionCapability(AgentCapability):
         self.routing_policy = routing_policy
         self.attention_mechanism = attention_mechanism
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Query Generation & Routing — controls the pace of query-driven exploration.\n"
+            "Workflow: generate_queries → route_query (per query) → decision → process_query → iterate.\n"
+            "Decision points:\n"
+            "- After route_query: check attention scores. High (>0.7)? Process top pages. "
+            "Low (<0.5)? Skip or refine. Many candidates? Start with subset.\n"
+            "- After process_query: check answer confidence and needs_more_pages. "
+            "High confidence? Move on. Low? Route to more pages or refine query.\n"
+            "Cost: routing is cheap (batch freely), processing is expensive (be selective).\n"
+            "Strategy: start small, evaluate, expand if needed. Use answers to generate follow-up queries.\n"
+            "Query workflow - you control the pace:\n"
+            "1. generate_queries → creates list of queries from analyzed pages\n"
+            "2. route_query → for EACH query, find relevant pages (expensive! returns attention scores)\n"
+            "3. **Decision point**: Look at attention scores and total_candidates:\n"
+            "- High scores (>0.7)? Process those pages first (process_query with top_pages)\n"
+            "- Low scores (<0.5)? Maybe skip or try different query\n"
+            "- Many candidates? Start with subset, evaluate answer quality, then decide if more needed\n"
+            "4. process_query → Load selected pages, get LLM answer (expensive!)\n"
+            "5. **Decision point**: Check answer confidence and needs_more_pages:\n"
+            "- High confidence + no additional pages needed? Move to next query\n"
+            "- Low confidence or needs_more_pages? Route to additional pages or refine query\n"
+            "6. Iterate: Use answers to generate follow-up queries if needed\n"
+            "Be strategic:\n"
+            "- Don't process all routed pages at once - start small, evaluate, expand if needed\n"
+            "- Check attention scores before deciding how many pages to load\n"
+            "- Use answer confidence to decide whether to continue or move on\n"
+            "- Batch cheap operations (routing), but be selective with expensive ones (processing)\n"
+        )
+
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement

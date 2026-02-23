@@ -75,6 +75,14 @@ class MemoryLifecycleHooks(AgentCapability):
         )
         self._stm_scope_id = stm_scope_id or MemoryScope.agent_stm(agent.agent_id)
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Memory Lifecycle Hooks — automatic memory operations at agent lifecycle events. "
+            "Drains working memory to STM on task completion, consolidates before shutdown, "
+            "emits termination events for MemoryManagementAgent. "
+            "Purely hook-based (no plannable actions) — fires automatically."
+        )
+
     async def initialize(self) -> None:
         """Initialize lifecycle hooks.
 

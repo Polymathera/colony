@@ -888,6 +888,15 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             max_tokens=llm_max_tokens,
         )
 
+    def get_action_group_description(self) -> str:
+        return (
+            f"Game Protocol ({self.game_type}) — multi-agent structured interaction. "
+            f"Moves are validated against role_permissions (role+phase→allowed performatives) "
+            f"and applied with optimistic concurrency control. "
+            f"Game actions (start_game, submit_move, load_game_state) are excluded from planning — "
+            f"the planner uses game-specific subclass actions instead."
+        )
+
     async def initialize(self) -> None:
         """Initialize game blackboard. Call before using capability."""
         if self._blackboard is not None:

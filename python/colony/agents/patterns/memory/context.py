@@ -736,6 +736,11 @@ class AgentContextEngine(AgentCapability):
             f"Memory Introspection & Context Engine ({scope_count} scopes: "
             f"{', '.join(scope_types)}). "
             f"Use these actions to inspect, search, and reason about your memory system."
+            "Unified cross-scope interface for the entire memory system. "
+            "gather_context queries across all scopes without needing to know the architecture. "
+            "inspect_memory_map reveals scope structure, relationships, and dataflow. "
+            "search_memory does semantic search across all scopes. "
+            "Read-only orchestrator — delegates actual storage to individual MemoryCapability instances."
         )
 
     # -------------------------------------------------------------------------

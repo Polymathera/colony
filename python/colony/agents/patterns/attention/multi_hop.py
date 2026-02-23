@@ -92,6 +92,14 @@ class MultiHopSearchCapability(AgentCapability):
         self._frontier: list[str] = []
         self._hops: int = 0
 
+    def get_action_group_description(self) -> str:
+        return (
+            f"Multi-Hop Search (max {self.max_hops} hops) — expands frontier outward from seed pages. "
+            "initialize_search first, then call execute_hop repeatedly. Each hop routes from unvisited "
+            "frontier, marks results visited, refreshes frontier to top-k for next hop. "
+            "Pages visited at most once. Use for dependency chains, data flow tracing, pattern discovery."
+        )
+
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement

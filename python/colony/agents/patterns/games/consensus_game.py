@@ -179,6 +179,15 @@ class ConsensusGameProtocol(GameProtocolCapability[ConsensusGameData, ConsensusG
         super().__init__(agent, game_id=game_id, role=role, game_type="consensus_game")
         self.voting_method = voting_method
 
+    def get_action_group_description(self) -> str:
+        return (
+            f"Consensus Game — voting-based agreement using {self.voting_method.value}. "
+            "Phases: NOMINATE → VOTE → COUNT → DECLARE. "
+            "Aggregation methods: borda_count (rank-based points), approval (count approvals), "
+            "plurality (simple majority). Agreement level = winner_score / max_possible. "
+            "Requires at least one aggregator role."
+        )
+
     @override
     @action_executor(exclude_from_planning=True)
     async def start_game(

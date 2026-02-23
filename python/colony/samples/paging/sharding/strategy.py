@@ -970,7 +970,7 @@ class GitRepoShardingStrategy:
                         content: bytes = await asyncio.to_thread(fp.read_bytes)
 
                         if not content:
-                            logger.warning(f"Empty content for {file_path}, skipping")
+                            logger.debug(f"Empty content for {file_path}, skipping")
                             continue
 
                         mime_type: str = await asyncio.to_thread(
@@ -1005,7 +1005,7 @@ class GitRepoShardingStrategy:
                             )
 
                             if token_count > self.config.max_tokens_per_file:
-                                logger.warning(
+                                logger.debug(
                                     f"File too large: {file_path} ({token_count} tokens)"
                                 )
                                 continue

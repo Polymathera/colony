@@ -182,6 +182,15 @@ class WorkingSetCapability(AgentCapability):
         self._local_cache: dict[str, Any] | None = None
         self._cache_version: int = 0
 
+    def get_action_group_description(self) -> str:
+        return (
+            f"Working Set — manages cluster-wide VCM page cache (max {self.working_set_size} pages). "
+            "request_pages is the main cost driver (loads pages into KV cache). "
+            "release_pages frees slots. score_pages ranks by relevance for eviction decisions. "
+            "State is cluster-wide via blackboard — all agents in same tenant share the working set. "
+            "record_page_access before processing for accurate eviction scoring."
+        )
+
     def _get_working_set_key(self) -> str:
         """Get blackboard key for working set state."""
         return self.WORKING_SET_KEY.format(tenant_id=self.agent.tenant_id)

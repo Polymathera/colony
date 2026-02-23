@@ -8,7 +8,6 @@ This module provides the core Planner class that:
 
 import logging
 import time
-from typing import Any
 from abc import ABC, abstractmethod
 from overrides import override
 
@@ -17,7 +16,6 @@ from ...models import (
     Action,
     ActionPlan,
     ActionType,
-    ActionResult,
     ActionStatus,
     CacheContext,
     PlanningContext,
@@ -30,7 +28,6 @@ from .policies import (
     LearningPlanningPolicy,
     CoordinationPlanningPolicy,
 )
-from .blackboard import PlanBlackboard
 from ..models import Critique
 
 
@@ -41,11 +38,9 @@ logger = logging.getLogger(__name__)
 class ActionPlanner(ABC):
     """Policy for creating and revising agent action plans.
 
-    Different implementations:
-    - SequentialPlanner: Linear sequence of actions
-    - HierarchicalPlanner: Nested sub-plans
-    - ReactivePlanner: Generate next action on-the-fly
-    - LLMPlanner: Use LLM to generate plans
+    Implementations:
+    - SequentialPlanner: Manually-specified linear sequence
+    - CacheAwareActionPlanner: LLM-driven planning via pluggable PlanningStrategyPolicy
     """
 
     @abstractmethod
@@ -159,310 +154,6 @@ class SequentialPlanner(ActionPlanner):
     async def learn_from_plan_execution(self, plan: ActionPlan) -> None:
         raise NotImplementedError("SequentialPlanner does not support learning from execution.")
 
-
-
-class LLMPlanner(ActionPlanner):
-    """Planner that uses LLM to generate plans.
-
-    More sophisticated than sequential planner - can adapt to context.
-    """
-
-    def __init__(self, agent: Agent):
-        """Initialize LLM planner.
-
-        Args:
-            agent: Agent instance for LLM inference
-        """
-        self.agent = agent
-
-    @override
-    async def learn_from_plan_execution(self, plan: ActionPlan) -> None:
-        raise NotImplementedError("SequentialPlanner does not support learning from execution.")
-
-    @override
-    async def create_plan(self, planning_context: PlanningContext) -> ActionPlan:
-        """Use LLM to generate plan."""
-        prompt = self._build_planning_prompt(planning_context)
-
-        response = await self.agent.infer(
-            prompt=prompt,
-            context_page_ids=[],  # TODO: Planning runs only on the prompt. Right?
-            max_tokens=1000,  # TODO: Make configurable
-            temperature=0.3,  # More deterministic - TODO: Make configurable
-            json_schema=ActionPlan.model_json_schema()
-        )
-
-        # Parse LLM response into actions
-        # TODO: Does this correctly populate action fields correctly?
-        # TODO: What if one of the choices is an ActionPolicy? The JSON parsing won't
-        # correctly link to the intended ActionPolicy instance.
-        # TODO: Handle validation errors. LLMs are not perfect.
-        plan = ActionPlan.model_validate_json(
-            response.generated_text,
-        )
-
-        plan.goals = planning_context.goals
-        plan.strategy = "llm-generated"
-        plan.constraints = planning_context.constraints
-        plan.agent_id = self.agent.agent_id
-        plan.created_at = time.time()
-        return plan
-
-    def _build_planning_prompt(self, planning_context: PlanningContext) -> str:
-        """Build prompt for planning."""
-        # Extract structured context for easier reasoning
-        context_summary = self._summarize_context(planning_context)
-
-        action_descriptions = ""
-        for group_desc, group_actions in planning_context.action_descriptions:
-            if group_desc:
-                action_descriptions += f"\n### {group_desc}\n"
-            for action_key, action_desc in group_actions.items():
-                action_descriptions += f"- {action_key}: {action_desc}\n"
-
-        # Include memory architecture guidance if available
-        memory_guidance = planning_context.custom_data.get("memory_architecture_guidance", "")
-        memory_section = ""
-        if memory_guidance:
-            memory_section = f"\n{memory_guidance}\n"
-
-        return f"""Create a plan to achieve these goals:
-Goals:
-{planning_context.goals}
-
-Current state:
-{context_summary}
-
-Constraints:
-{planning_context.constraints}
-
-Available actions:
-{action_descriptions}
-- custom: Domain-specific action
-{memory_section}
-Query workflow - you control the pace:
-1. generate_queries → creates list of queries from analyzed pages
-2. route_query → for EACH query, find relevant pages (expensive! returns attention scores)
-3. **Decision point**: Look at attention scores and total_candidates:
-   - High scores (>0.7)? Process those pages first (process_query with top_pages)
-   - Low scores (<0.5)? Maybe skip or try different query
-   - Many candidates? Start with subset, evaluate answer quality, then decide if more needed
-4. process_query → Load selected pages, get LLM answer (expensive!)
-5. **Decision point**: Check answer confidence and needs_more_pages:
-   - High confidence + no additional pages needed? Move to next query
-   - Low confidence or needs_more_pages? Route to additional pages or refine query
-6. Iterate: Use answers to generate follow-up queries if needed
-
-Context interpretation:
-- last_query_routing: Contains page IDs, attention scores, and top_pages from latest route_query
-  → Use "top_pages" for initial processing, expand if answer unsatisfactory
-  → Check "attention_scores" to see confidence in each page's relevance
-- last_query_answer: Contains answer, confidence, evidence, pages_used from latest process_query
-  → Check "confidence" (high/medium/low) and whether "additional_pages_needed" is empty
-  → Use "evidence" to see which pages contributed to answer
-- answer_satisfactory: Boolean indicating if last answer was sufficient
-  → If false, consider processing more pages from last_query_routing
-- pending_queries: List of queries that still need routing/processing
-
-Output a list of actions in JSON format. Each action should have:
-- type: One of {[t.value for t in ActionType]}
-- parameters: Dict of parameters
-  Examples:
-  - route_query: {{"query": <query_object>}}
-  - process_query: {{"query": <query_object>, "page_ids": ["page_1", "page_2"]}}
-- reasoning: Why this action? What are you evaluating?
-
-Be strategic:
-- Don't process all routed pages at once - start small, evaluate, expand if needed
-- Check attention scores before deciding how many pages to load
-- Use answer confidence to decide whether to continue or move on
-- Batch cheap operations (routing), but be selective with expensive ones (processing)
-
-## Distributed VCM Analysis (for code analysis tasks)
-
-When using VCM analysis capabilities (IntentAnalysis, ContractAnalysis, SlicingAnalysis,
-ComplianceVCM), you have composable primitives. YOU decide the strategy:
-
-**Primitives you control:**
-- Worker lifecycle: spawn_worker, spawn_workers, terminate_worker, get_idle_workers
-- Work assignment: assign_work, prioritize_work, get_pending_work
-- Results: get_result, merge_results, detect_contradictions, synthesize_results
-- State queries: get_analyzed_pages, get_pages_with_issues, get_outstanding_queries
-- Iteration: mark_for_revisit, revisit_page, clear_result
-
-**Example strategies (choose based on data patterns):**
-
-1. **Cluster-Based**: For related pages that benefit from being analyzed together
-   - Use page_graph.get_clusters() to find clusters
-   - Spawn workers with cache_affine=True for each cluster
-   - Merge results after each cluster completes
-   - Good when: Pages have clear dependency structure
-
-2. **Query-Driven Continuous**: For exploratory analysis guided by questions
-   - Check get_outstanding_queries() for pending questions
-   - Spawn workers for pages that might answer top queries
-   - Detect contradictions as results come in
-   - Good when: Analysis is question-driven, not coverage-driven
-
-3. **Opportunistic with Revisits**: For fast initial pass with refinement
-   - Spawn workers for all pages (with max_parallel limit)
-   - Check get_pages_with_issues() for low-confidence results
-   - Mark issues for revisit with new context
-   - Good when: Need fast initial results, can refine later
-
-**Cache-awareness is EMERGENT from your choices:**
-- Set cache_affine=True to place workers near cached pages
-- Use working_set.request_pages() before spawn_workers() to pre-warm cache
-- Use page_graph.get_clusters() to find pages that benefit from co-location"""
-
-    def _summarize_context(self, planning_context: PlanningContext) -> str:
-        """Summarize context for LLM planner.
-
-        Extracts key information in a structured, readable format.
-        """
-        summary_parts = []
-
-        # TODO: Update this to extract more relevant PlanningContext fields as needed.
-        # TODO: This method is using many non-existent fields. Update to use existing ones.
-
-        # Pages analyzed
-        pages_analyzed = planning_context.current_state.get("pages_analyzed_count", 0) if planning_context.current_state else 0
-        if pages_analyzed > 0:
-            summary_parts.append(f"Pages analyzed: {pages_analyzed}")
-
-        # Pending queries
-        pending_queries = planning_context.pending_queries
-        if pending_queries:
-            summary_parts.append(f"\nPending queries ({len(pending_queries)}):")
-            for i, q in enumerate(pending_queries[:5], 1):  # Show first 5
-                query_text = q.get("query", str(q))
-                summary_parts.append(f"  {i}. {query_text}")
-            if len(pending_queries) > 5:
-                summary_parts.append(f"  ... and {len(pending_queries) - 5} more")
-
-        # Last query routing result
-        last_routing = planning_context.last_query_routing
-        if last_routing:
-            query = last_routing.get("query", "unknown")
-            total_candidates = last_routing.get("total_candidates", 0)
-            top_pages = last_routing.get("top_pages", [])
-            scores = last_routing.get("attention_scores", {})
-
-            summary_parts.append(f"\nLast query routed: '{query}'")
-            summary_parts.append(f"  Found {total_candidates} candidates")
-            if top_pages and scores:
-                summary_parts.append(f"  Top pages (with scores):")
-                for page_id in top_pages[:3]:  # Show top 3
-                    score = scores.get(page_id, 0)
-                    summary_parts.append(f"    - {page_id}: {score:.2f}")
-
-        # Last query answer
-        last_answer = planning_context.last_query_answer
-        if last_answer:
-            query = last_answer.get("query", "unknown")
-            answer_data = last_answer.get("answer", {})
-            if isinstance(answer_data, dict):
-                confidence = answer_data.get("confidence", "unknown")
-                needs_more = answer_data.get("additional_pages_needed", [])
-                answer_text = answer_data.get("answer", "")
-            else:
-                confidence = "unknown"
-                needs_more = []
-                answer_text = str(answer_data)
-
-            pages_used = last_answer.get("pages_used_count", 0)
-
-            summary_parts.append(f"\nLast query answered: '{query}'")
-            summary_parts.append(f"  Confidence: {confidence}, Pages used: {pages_used}")
-            if needs_more:
-                summary_parts.append(f"  Needs more pages: {needs_more[:3]}")
-            if answer_text:
-                preview = answer_text[:100] + "..." if len(answer_text) > 100 else answer_text
-                summary_parts.append(f"  Answer: {preview}")
-
-        # Answer satisfactory flag
-        if "answer_satisfactory" in planning_context:
-            satisfactory = planning_context["answer_satisfactory"]
-            summary_parts.append(f"\nLast answer satisfactory: {satisfactory}")
-
-        # Synthesis status
-        if planning_context.get("synthesis_complete"):
-            summary_parts.append("\nSynthesis: Complete")
-
-        if not summary_parts:
-            return "No context available yet - starting fresh"
-
-        return "\n".join(summary_parts)
-
-    @override
-    async def revise_plan(
-        self, current_plan: ActionPlan, planning_context: PlanningContext, critique: Critique
-    ) -> ActionPlan:
-        """Use LLM to revise plan based on critique."""
-        prompt = self._build_revision_prompt(current_plan, planning_context, critique)
-
-        response = await self.agent.infer(
-            prompt=prompt,
-            context_page_ids=[],  # TODO: Planning runs only on the prompt. Right?
-            max_tokens=1000,  # TODO: Make configurable
-            temperature=0.3,  # More deterministic - TODO: Make configurable
-            json_schema=ActionPlan.model_json_schema()
-        )
-
-        # Parse LLM response into actions
-        revised_plan = ActionPlan.model_validate_json(  # TODO: Handle validation errors. LLMs are not perfect.
-            response.generated_text,
-        )
-
-        # Combine with remaining actions from current plan
-        current_plan.actions = revised_plan.actions + current_plan.actions
-        current_plan.updated_at = time.time()
-        return current_plan
-
-    def _build_revision_prompt(
-        self, plan: ActionPlan, planning_context: PlanningContext, critique: Critique
-    ) -> str:
-        """Build prompt for plan revision."""
-        # TODO: This prompt is very weak. Needs improvement.
-        # TODO: It does not even provide action descriptions or context summary.
-
-        # TODO: The following context fields are not yet included:
-        # - planning_context.action_descriptions
-        # - planning_context.custom_data # Includes memory architecture
-        # - planning_context.constraints
-        # - planning_context.recalled_memories
-
-        action_descriptions = ""
-        for group_desc, group_actions in planning_context.action_descriptions:
-            if group_desc:
-                action_descriptions += f"\n### {group_desc}\n"
-            for action_key, action_desc in group_actions.items():
-                action_descriptions += f"- {action_key}: {action_desc}\n"
-
-        # Include memory architecture guidance if available
-        memory_guidance = planning_context.custom_data.get("memory_architecture_guidance", "")
-        memory_section = f"\n{memory_guidance}\n" if memory_guidance else ""
-
-        return f"""Revise this plan based on critique.
-
-Original goals: {plan.goals}
-
-Current remaining actions:
-{[a.model_dump() for a in plan.actions]}
-
-Critique:
-- Quality score: {critique.quality_score}
-- Issues: {critique.issues}
-- Suggestions: {critique.suggestions}
-
-New information learned:
-{planning_context.model_dump_json(indent=2)}
-
-Available actions:
-{action_descriptions}
-{memory_section}
-
-Output revised action list in JSON format."""
 
 
 class CacheAwareActionPlanner(ActionPlanner):

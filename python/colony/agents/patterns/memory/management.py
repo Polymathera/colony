@@ -78,6 +78,13 @@ class AgentMemoryRecycler(AgentCapability):
         self._monitor_task: asyncio.Task | None = None
         self._initialized = False
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Agent Memory Recycling — transfers terminated agents' memories to collective. "
+            "Triggered by AgentTerminationEvent on lifecycle scope. "
+            "Reads agent's private LTM scopes, transforms/merges into collective, deletes private scopes."
+        )
+
     async def initialize(self) -> None:
         """Initialize the recycler and start monitoring lifecycle events."""
         if self._initialized:
@@ -429,6 +436,13 @@ class CollectiveMemoryInitializer(AgentCapability):
         self._monitor_task: asyncio.Task | None = None
         self._initialized = False
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Collective Memory Initialization — seeds new agents' LTM from collective memory. "
+            "Triggered by AgentCreationEvent. Enables transfer learning: "
+            "terminated agents' knowledge flows to new agents of the same type."
+        )
+
     async def initialize(self) -> None:
         """Initialize and start monitoring for new agent events."""
         if self._initialized:
@@ -692,6 +706,13 @@ class CollectiveMemoryMaintainer(AgentCapability):
         scope_id: str,
     ):
         super().__init__(agent=agent, scope_id=scope_id)
+
+    def get_action_group_description(self) -> str:
+        return (
+            "Collective Memory Maintenance — periodic health maintenance of collective memory. "
+            "Deduplicates similar entries, prunes low-value ones, promotes high-value to system-level. "
+            "Can filter by agent_types for targeted maintenance."
+        )
 
     async def initialize(self) -> None:
         """Initialize maintainer."""

@@ -102,6 +102,15 @@ class ProgramSlicingCapability(AgentCapability):
         self.interprocedural = interprocedural
         self.max_depth = max_depth
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Program Slicing — LLM-based approximation of static program slicing. "
+            "Identifies data/control dependencies, traces variable flows, builds dependency graphs. "
+            f"Interprocedural: {'enabled' if self.interprocedural else 'disabled'} (max_depth={self.max_depth}). "
+            "Produces approximate slices with confidence scores. "
+            "Supports local mode (single page) and remote mode (via AgentHandle)."
+        )
+
     def _get_merge_capability(self) -> MergeCapability | None:
         """Get MergeCapability from agent dynamically."""
         return self.agent.get_capability_by_type(MergeCapability)
@@ -822,6 +831,14 @@ class SlicingCoordinatorCapability(AgentCapability):
         self._agent_pool_cap: AgentPoolCapability | None = None
         self._result_cap: ResultCapability | None = None
         self._page_graph_cap: PageGraphCapability | None = None
+
+    def get_action_group_description(self) -> str:
+        return (
+            "Slicing Coordination — distributes program slicing across pages. "
+            "Spawns slicing agents via AgentPoolCapability, batches by cache affinity, "
+            "collects page-level results, resolves interprocedural dependencies via PageGraph, "
+            "merges into unified program slice."
+        )
 
     async def initialize(self) -> None:
         """Initialize coordinator capability with Layer 0/1 capabilities."""

@@ -62,6 +62,14 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
     def __init__(self, agent: Agent):
         super().__init__(agent=agent)
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Code Analysis Coordination — orchestrates distributed analysis across page clusters. "
+            "Spawns ClusterAnalyzer agents as children, monitors via EVENT-DRIVEN blackboard (no polling). "
+            "Batches by working set overlap for cache efficiency. "
+            "Synthesizes global report from cluster results with optional peer critique."
+        )
+
     async def initialize(self) -> None:
         """Initialize coordinator."""
         await super().initialize()

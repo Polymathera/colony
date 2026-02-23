@@ -855,6 +855,14 @@ class MergeCapability(AgentCapability):
         super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
         self.merge_policy: MergePolicy | None = None
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Result Merging — combines multiple ScopeAwareResults via configurable merge policy. "
+            "Requires set_policy() before use. Supports hierarchical merging with group_by, "
+            "and automatic strategy selection based on content type (dict, list, semantic). "
+            "Always validate_merge after merging to check for information loss."
+        )
+
     def set_policy(self, policy: MergePolicy) -> None:
         """Configure the merge policy after instantiation.
 

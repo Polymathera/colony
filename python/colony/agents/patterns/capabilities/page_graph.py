@@ -66,6 +66,16 @@ class PageGraphCapability(AgentCapability):
         super().__init__(agent=agent, scope_id=scope_id)
         self._page_graph: nx.DiGraph | None = None
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Page Graph — graph-based traversal and relationship management over VCM pages. "
+            "Provides cache-aware traversal (BFS/DFS respecting working set), clustering for "
+            "batch scheduling, and centrality metrics for page prioritization. "
+            "Agnostic to relationship semantics — you decide how to use edges. "
+            "Graph is loaded lazily from PageStorage and cached in memory. "
+            "Use get_clusters for batch planning and compute_centrality for page importance ranking."
+        )
+
     async def _get_page_graph(self) -> nx.DiGraph:
         """Load page graph via PageStorage."""
         # TODO: This needs to be loaded dynamically since the page graph can change.

@@ -426,6 +426,16 @@ class NegotiationGameProtocol(GameProtocolCapability):
         self._my_offers: list[Offer] = []
         self._received_offers: list[Offer] = []
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Negotiation Game — iterative offer/counter-offer with convergence detection. "
+            "Phases: OFFER → COUNTER_OFFER → [EVALUATE] → AGREE. "
+            "Convergence: terms within 10% triggers AGREE phase. "
+            "Deadlock: 3+ stalls without mediator → TERMINAL (failure). "
+            "Mediator (optional) proposes solutions in EVALUATE phase. "
+            "LLM-based decision making for accept/reject/counter."
+        )
+
     @override
     @action_executor(exclude_from_planning=True)
     async def start_game(

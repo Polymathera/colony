@@ -187,6 +187,13 @@ class ConsciousnessCapability(AgentCapability):
             return self.agent.metadata.session_id
         return None
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Self-Awareness — provides access to system documentation (architecture, guidelines) "
+            "and agent self-concept (identity, role, capabilities). Self-concept is lazily loaded "
+            "from persistent storage on first access. Use to orient yourself before planning."
+        )
+
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement

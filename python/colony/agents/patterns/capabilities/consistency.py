@@ -232,6 +232,13 @@ class ConsistencyCapability(AgentCapability):
         """Get pattern for consistency events."""
         return f"{self.scope_id}:consistency:*"
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Consistency Checking — checks new results against existing results for contradictions. "
+            "Triggered by consistency check request events. Optionally delegates to "
+            "ValidationCapability for contradiction resolution if present."
+        )
+
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement

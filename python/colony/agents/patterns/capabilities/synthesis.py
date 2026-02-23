@@ -264,6 +264,15 @@ class SynthesisCapability(AgentCapability):
         self.partial_results: dict[str, ScopeAwareResult] = {}
         self.synthesis_history: list[SynthesisUpdate] = []
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Incremental Synthesis — builds up a synthesized result as partials arrive. "
+            "add_result triggers a multi-step pipeline: check if new result refines existing ones "
+            "(RefinementCapability), merge all partials (MergeCapability, REQUIRED), "
+            "validate merged result (ValidationCapability, optional). "
+            "Call get_synthesis_progress to check confidence/completeness before deciding to continue."
+        )
+
     # -------------------------------------------------------------------------
     # Capability Lookup Helpers (dynamic lookup at call time)
     # -------------------------------------------------------------------------

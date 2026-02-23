@@ -337,6 +337,16 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
         # Pluggable strategies (can be set/changed dynamically)
         self._formation_strategy = formation_strategy
         self._evidence_strategy = evidence_strategy
+
+    def get_action_group_description(self) -> str:
+        return (
+            "Hypothesis Game — validates claims through structured adversarial review. "
+            "Phases: PROPOSE → CHALLENGE → GROUND → DEFEND → ARBITRATE. "
+            "Roles: proposer (submits claims), skeptic (challenges), grounder (provides evidence), "
+            "arbiter (final judgment). Combats hallucination by requiring evidence before acceptance. "
+            "Multi-hypothesis support: processes hypotheses sequentially. "
+            "Pluggable strategies for formation, evidence gathering, and evaluation."
+        )
         self._evaluation_strategy = evaluation_strategy
 
     # =========================================================================

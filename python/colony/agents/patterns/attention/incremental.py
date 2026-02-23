@@ -92,6 +92,14 @@ class IncrementalQueryCapability(AgentCapability):
         self.attention_top_k = attention_top_k
         self._pages_used: set[str] = set()
 
+    def get_action_group_description(self) -> str:
+        return (
+            "Incremental Query — refines answers by progressively loading more pages. "
+            "Loop: get_answer → check confidence → if low, route_for_pages → refine_query → repeat. "
+            f"Stops when confidence >= {self.confidence_threshold} or max_iterations ({self.max_iterations}) reached. "
+            "Each page processed at most once. route_for_pages filters by attention threshold and top-k."
+        )
+
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement

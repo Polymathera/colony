@@ -327,6 +327,15 @@ class MemoryCapability(AgentCapability):
         self._last_maintenance_run: dict[int, float] = {}
         self._last_ingestion_time: float | None = None
 
+    def get_action_group_description(self) -> str:
+        return (
+            f"Memory Scope ({self.scope_id}) — single-scope storage with recall, maintenance, and ingestion. "
+            "recall is the most common operation (semantic search within this scope). "
+            "store adds entries; forget/prune/deduplicate maintain quality. "
+            "Subscriptions auto-collect from other scopes; ingest_now processes pending immediately. "
+            "Background maintenance runs on schedule (TTL, capacity, dedup, prune)."
+        )
+
     @property
     def storage(self) -> StorageBackend:
         """Storage backend for this capability.
