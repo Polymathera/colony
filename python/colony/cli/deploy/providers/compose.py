@@ -192,15 +192,19 @@ class DockerComposeProvider(DeploymentProvider):
 
     async def run(
         self,
-        codebase_path: str,
+        origin_url: str | None = None,
+        local_repo: str | None = None,
+        branch: str = "main",
+        commit: str = "HEAD",
         config_path: str | None = None,
         extra_env: dict[str, str] | None = None,
         extra_args: list[str] | None = None,
     ) -> int:
         """Run polymath.py inside the ray-head container.
 
-        Copies the codebase into the shared volume, then executes
-        polymath.py inside the running head container.
+        If --local-repo is given, copies the codebase into the shared volume
+        and passes it as a file:// URL.  If --origin-url is given, forwards
+        it directly (the container clones via GitStorage).
         """
         head = self._config.ray.head_container_name
 
@@ -210,18 +214,20 @@ class DockerComposeProvider(DeploymentProvider):
                 f"Container '{head}' is not healthy. Run 'colony-env up' first."
             )
 
-        # Copy codebase into shared volume
-        codebase = Path(codebase_path).resolve()
-        if not codebase.is_dir():
-            raise FileNotFoundError(f"Codebase not found: {codebase}")
+        # When a local repo is provided, copy it into the shared volume so
+        # the container can access it via file:// URL.
+        if local_repo:
+            codebase = Path(local_repo).resolve()
+            if not codebase.is_dir():
+                raise FileNotFoundError(f"Codebase not found: {codebase}")
 
-        # Clear previous codebase and copy new one
-        await self._exec("docker", "exec", head, "rm", "-rf", "/mnt/shared/codebase")
-        rc, _, stderr = await self._exec(
-            "docker", "cp", f"{codebase}/.", f"{head}:/mnt/shared/codebase/",
-        )
-        if rc != 0:
-            raise RuntimeError(f"Failed to copy codebase:\n{stderr}")
+            # Clear previous codebase and copy new one
+            await self._exec("docker", "exec", head, "rm", "-rf", "/mnt/shared/codebase")
+            rc, _, stderr = await self._exec(
+                "docker", "cp", f"{codebase}/.", f"{head}:/mnt/shared/codebase/",
+            )
+            if rc != 0:
+                raise RuntimeError(f"Failed to copy codebase:\n{stderr}")
 
         # Copy config if provided
         container_config_path = None
@@ -254,7 +260,14 @@ class DockerComposeProvider(DeploymentProvider):
             cmd.append("-it")
 
         cmd.append(head)
-        cmd.extend(["python", "-m", "colony.cli.polymath", "run", "/mnt/shared/codebase"])
+        cmd.extend(["python", "-m", "colony.cli.polymath", "run"])
+
+        if origin_url:
+            cmd.extend(["--origin-url", origin_url])
+        else:
+            # local_repo was copied to /mnt/shared/codebase above
+            cmd.extend(["--local-repo", "/mnt/shared/codebase"])
+        cmd.extend(["--branch", branch, "--commit", commit])
 
         if container_config_path:
             cmd.extend(["--config", container_config_path])

@@ -4,7 +4,8 @@ Usage:
     colony-env up [--workers N] [--no-build] [--k8s]
     colony-env down [--k8s]
     colony-env status
-    colony-env run PATH [--config YAML] [--verbose]
+    colony-env run --origin-url URL [--branch BRANCH] [--commit SHA] [--config YAML]
+    colony-env run --local-repo PATH [--branch BRANCH] [--commit SHA] [--config YAML]
     colony-env doctor
 """
 
@@ -71,7 +72,7 @@ def up(
     if all_ok:
         console.print()
         console.print("[green]Ready![/green] Run your analysis:")
-        console.print("  colony-env run /path/to/codebase --config analysis.yaml")
+        console.print("  colony-env run --local-repo /path/to/codebase --config analysis.yaml")
     else:
         console.print()
         console.print("[red]Some services failed to start. Check 'docker compose logs'.[/red]")
@@ -127,13 +128,32 @@ def status():
 
 @app.command()
 def run(
-    codebase_path: str = typer.Argument(..., help="Path to the codebase to analyze"),
+    origin_url: Optional[str] = typer.Option(
+        None, "--origin-url",
+        help="Git repository URL (HTTPS) for the codebase to analyze.",
+    ),
+    local_repo: Optional[str] = typer.Option(
+        None, "--local-repo",
+        help="Path to a local git repository to analyze.",
+    ),
+    branch: str = typer.Option("main", "--branch", help="Git branch to check out."),
+    commit: str = typer.Option("HEAD", "--commit", help="Git commit SHA (defaults to branch HEAD)."),
     config: Optional[str] = typer.Option(None, "--config", "-c", help="Path to analysis YAML config"),
     k8s: bool = typer.Option(False, "--k8s", help="Use Kind + KubeRay (advanced)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose polymath output"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show planned hierarchy without running"),
 ):
-    """Run polymath.py analysis inside the cluster."""
+    """Run polymath.py analysis inside the cluster.
+
+    Exactly one of --origin-url or --local-repo must be provided.
+    """
+    if origin_url and local_repo:
+        console.print("[red]Error:[/red] --origin-url and --local-repo are mutually exclusive.")
+        raise typer.Exit(1)
+    if not origin_url and not local_repo:
+        console.print("[red]Error:[/red] Provide --origin-url <URL> or --local-repo <path>.")
+        raise typer.Exit(1)
+
     deploy_config = DeployConfig(mode="k8s" if k8s else "compose")
     manager = DeploymentManager(deploy_config)
 
@@ -145,7 +165,10 @@ def run(
 
     try:
         exit_code = _run(manager.run(
-            codebase_path=codebase_path,
+            origin_url=origin_url,
+            local_repo=local_repo,
+            branch=branch,
+            commit=commit,
             config_path=config,
             extra_args=extra_args or None,
         ))

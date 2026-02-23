@@ -34,6 +34,8 @@ from ..metrics.common import BaseMetricsMonitor
 logger = logging.getLogger(__name__)
 
 
+_HASH_PREFIX_LENGTH: int = 8  # Length of the hash prefix for repo IDs and cache keys
+
 def build_repo_cache_key(
     origin_url: str, operation: str | None = None, *args, **kwargs
 ) -> str:
@@ -47,7 +49,7 @@ def get_replica_id(origin_url: str, branch: str, commit: str) -> str:
     """Generate a unique hash based on origin_url, branch, and commit"""
     return hashlib.sha256(
         f"{origin_url}_{branch}_{commit}".encode()
-    ).hexdigest()[:16]
+    ).hexdigest()[:_HASH_PREFIX_LENGTH]
 
 
 class GitCacheManager:
@@ -728,9 +730,32 @@ class GitFileStorage:
         pass
 
     def _get_repo_path(self, origin_url: str) -> Path:
-        return self.root_path / origin_url.replace(
-            "https://github.com/", "github_"
-        ).replace("/", "_")
+        """Convert a git origin URL to a deterministic local directory path.
+
+        Produces clean, filesystem-safe directory names for any URL scheme:
+          https://github.com/org/repo  → github_org_repo
+          https://gitlab.com/org/repo  → gitlab_com_org_repo
+          file:///mnt/shared/codebase  → codebase_<hash>
+        """
+        from urllib.parse import urlparse
+
+        parsed = urlparse(origin_url)
+
+        if parsed.scheme == "file":
+            # Use the directory basename + a short hash for uniqueness.
+            repo_name = Path(parsed.path).name or "repo"
+            url_hash = hashlib.sha256(origin_url.encode()).hexdigest()[:_HASH_PREFIX_LENGTH]
+            return self.root_path / f"{repo_name}_{url_hash}"
+
+        # Network URLs (https://, ssh://, git://, etc.)
+        host = (parsed.hostname or "unknown").replace(".", "_")
+        path_part = parsed.path.strip("/").replace("/", "_")
+
+        # Compact format for github.com (backwards-compatible with existing clones)
+        if host == "github_com":
+            return self.root_path / f"github_{path_part}"
+
+        return self.root_path / f"{host}_{path_part}"
 
     @asynccontextmanager
     async def _git_repo_lock(self, origin_url: str):

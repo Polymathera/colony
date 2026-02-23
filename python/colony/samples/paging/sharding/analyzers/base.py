@@ -91,6 +91,10 @@ class FileContentCache:
         """Read file content with metrics"""
         start_time = time.time()
         try:
+            p = Path(file_path)
+            if not p.is_file():
+                logger.debug(f"Skipping non-file path: {file_path}")
+                return None
             async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
                 content = await f.read()
             ### with open(file_path, 'r', encoding='utf-8') as f:

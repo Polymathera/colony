@@ -39,7 +39,9 @@ class FileGrouperContextPageSource(ContextPageSource):
         group_id: str,
         tenant_id: str,
         mmap_config: MmapConfig,
-        repo_path: str,  # Path to cloned repo
+        origin_url: str,   # Git repo URL (https:// or file://)
+        branch: str = "main",
+        commit: str = "HEAD",
     ):
         """Initialize file-grouper-based context page source.
 
@@ -48,10 +50,14 @@ class FileGrouperContextPageSource(ContextPageSource):
             group_id: Group identifier for VCM address space
             tenant_id: Tenant identifier
             mmap_config: Configuration for memory-mapped page graph data
-            repo_path: Local path to git repository
+            origin_url: Git repository URL (https:// or file:// for local repos)
+            branch: Git branch to check out
+            commit: Git commit SHA (defaults to branch HEAD)
         """
         super().__init__(scope_id=scope_id, group_id=group_id, tenant_id=tenant_id, mmap_config=mmap_config)
-        self.repo_path = repo_path
+        self.origin_url = origin_url
+        self.branch = branch
+        self.commit = commit
 
         # File grouping and sharding wrappers (expose graph and file-to-page mapping)
         self.file_grouper: FileGrouperWithGraph | None = None
@@ -115,7 +121,7 @@ class FileGrouperContextPageSource(ContextPageSource):
             # No existing graph — build from repository
             logger.info(
                 f"No existing page graph for {self.tenant_id}:{self.group_id}:{self.scope_id}, "
-                f"building from repository at {self.repo_path}"
+                f"building from repository at {self.origin_url} (branch={self.branch}, commit={self.commit})"
             )
             await self._build_and_persist_page_graph()
 
@@ -133,6 +139,28 @@ class FileGrouperContextPageSource(ContextPageSource):
         - Individual pages (text for remote LLMs)
         """
         import git
+        import time as _time
+
+        build_start = _time.time()
+        logger.info(
+            f"Building page graph from {self.origin_url} "
+            f"(branch={self.branch}, commit={self.commit})"
+        )
+
+        # Clone the repo through GitStorage so it lands under the managed
+        # prefix.  This ensures normalize_file_path / denormalize_file_path
+        # are idempotent for all file paths in the repository.
+        # We call git_storage directly because the Storage wrapper's
+        # _validate_repo_url() rejects file:// URLs via HttpUrl().
+        polymathera = get_polymathera()
+        storage = await polymathera.get_storage()
+        repo_path = await storage.git_storage.clone_or_retrieve_repository(
+            origin_url=self.origin_url,
+            branch=self.branch,
+            commit=self.commit,
+            vmr_id=self.group_id,
+        )
+        logger.info(f"Repository cloned to {repo_path} ({_time.time() - build_start:.1f}s)")
 
         prompt_strategy = IdentityPromptStrategy()
         strategy = GitRepoShardingStrategy(
@@ -142,13 +170,17 @@ class FileGrouperContextPageSource(ContextPageSource):
         await strategy.initialize()
 
         try:
-            repo = git.Repo(self.repo_path)
+            repo = git.Repo(str(repo_path))
+            logger.info(f"Starting create_shards_with_graph ({_time.time() - build_start:.1f}s elapsed)")
             result = await strategy.create_shards_with_graph(
                 group_id=self.group_id,
                 repo=repo,
             )
 
-            logger.info(f"Created {len(result.shards)} shards from {self.repo_path}")
+            logger.info(
+                f"Created {len(result.shards)} shards from {self.origin_url} "
+                f"({_time.time() - build_start:.1f}s elapsed)"
+            )
 
             # Page graph
             if result.page_graph and result.page_graph.number_of_nodes() > 0:
@@ -188,6 +220,7 @@ class FileGrouperContextPageSource(ContextPageSource):
             ###     self.page_keys[shard.shard_id] = " ".join(file_names)
 
             # Create and persist VirtualContextPages
+            logger.info(f"Persisting {len(result.shards)} pages ({_time.time() - build_start:.1f}s elapsed)")
             for shard in result.shards:
                 page = VirtualContextPage(
                     page_id=shard.shard_id,
@@ -233,10 +266,12 @@ class FileGrouperContextPageSource(ContextPageSource):
                 graph_data=self.page_keys
             )
 
+            total_time = _time.time() - build_start
             logger.info(
                 f"Persisted page graph for {self.tenant_id}:{self.group_id}:{self.scope_id}: "
                 f"{self.page_graph.number_of_nodes()} pages, "
-                f"{len(self.file_to_page)} files mapped"
+                f"{len(self.file_to_page)} files mapped "
+                f"(total build time: {total_time:.1f}s)"
             )
 
         finally:

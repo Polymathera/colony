@@ -29,10 +29,13 @@ Prerequisites:
 
 Usage:
     # Quick start — run impact analysis on a local codebase
-    polymath run /path/to/codebase --analysis impact
+    polymath run --local-repo /path/to/codebase --analysis impact
+
+    # Remote repository
+    polymath run --origin-url https://github.com/org/repo --analysis impact
 
     # Run multiple analyses with a YAML config
-    polymath run /path/to/codebase --config my_test.yaml
+    polymath run --local-repo /path/to/codebase --config my_test.yaml
 
     # List available analyses, agents, and capabilities
     polymath list analyses
@@ -527,6 +530,12 @@ class TestConfig:
     # references custom agent_type or capability paths that aren't in the Docker
     # image or the colony package.
     working_dir: str | None = None
+    # Git repository to analyze.  Exactly one of --origin-url or --local-repo
+    # must be set.  --local-repo is translated to file://<path> so downstream
+    # code always works with a URL (https:// or file://).
+    origin_url: str = ""       # Git repository URL (https:// or file://)
+    branch: str = "main"       # Git branch to check out
+    commit: str = "HEAD"       # Git commit SHA (defaults to branch HEAD)
     # Budget enforcement for remote LLM deployments
     budget_usd: float | None = None  # Maximum budget in USD (None = unlimited)
     warn_budget_pct: float = 0.8     # Warn when cost reaches this fraction of budget
@@ -666,6 +675,9 @@ def load_config_from_yaml(path: str) -> TestConfig:
         timeout_seconds=raw.get("timeout_seconds", 600),
         verbose=raw.get("verbose", False),
         working_dir=raw.get("working_dir"),
+        origin_url=raw.get("origin_url", ""),
+        branch=raw.get("branch", "main"),
+        commit=raw.get("commit", "HEAD"),
         budget_usd=raw.get("budget_usd"),
         warn_budget_pct=raw.get("warn_budget_pct", 0.8),
     )
@@ -684,6 +696,14 @@ repo_id: "my-project"
 tenant_id: "test-tenant"
 # session_id: "auto-generated-if-omitted"
 # run_id: "auto-generated-if-omitted"
+
+# --- Repository ---
+# Specify the git repository to analyze.  Use origin_url for remote repos
+# (https://...) or for local repos as file:///path/to/repo.
+# The CLI --origin-url and --local-repo flags override this value.
+# origin_url: "https://github.com/org/repo"
+# branch: "main"
+# commit: "HEAD"
 
 # --- LLM Cluster Configuration ---
 # Controls which LLM deployments are created and deployed.
@@ -1040,7 +1060,6 @@ def display_results_table(results: list[dict[str, Any]]) -> None:
 # ===========================================================================
 
 async def run_integration_test(
-    codebase_path: str,
     config: TestConfig,
     app_name: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -1055,8 +1074,7 @@ async def run_integration_test(
     6. Returns a list of result dictionaries
 
     Args:
-        codebase_path: Absolute path to the codebase on the cluster filesystem.
-        config: Test configuration.
+        config: Test configuration (includes origin_url, branch, commit).
         app_name: Optional Polymathera serving application name. If None,
             uses the current application context.
 
@@ -1306,12 +1324,27 @@ async def run_integration_test(
     console.print("  [green]OK[/green] — Cluster deployed")
 
     # -----------------------------------------------------------------------
+    # Step 0.75: Create session for this test run
+    # -----------------------------------------------------------------------
+    if config.agent_system.enable_sessions:
+        with console.status("[magenta]Creating session..."):
+            sm_handle = get_session_manager(effective_app_name)
+            session = await sm_handle.create_session(
+                tenant_id=config.tenant_id,
+            )
+            config.session_id = session.session_id
+        console.print(
+            f"  [green]OK[/green] — Session created: {config.session_id}"
+        )
+
+    # -----------------------------------------------------------------------
     # Step 1: Page the codebase into VCM
     # -----------------------------------------------------------------------
     console.print()
     console.print(Panel(
         f"[bold]Step 1:[/bold] Paging codebase into VCM\n"
-        f"  Path:   {codebase_path}\n"
+        f"  Origin: {config.origin_url}\n"
+        f"  Branch: {config.branch}  Commit: {config.commit}\n"
         f"  Scope:  {config.repo_id}\n"
         f"  Tenant: {config.tenant_id}",
         title="[bold cyan]VCM Context Paging[/bold cyan]",
@@ -1336,7 +1369,9 @@ async def run_integration_test(
             tenant_id=config.tenant_id,
             source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
             config=mmap_config,
-            repo_path=codebase_path,
+            origin_url=config.origin_url,
+            branch=config.branch,
+            commit=config.commit,
         )
 
     if mmap_result.status in ("mapped", "already_mapped"):
@@ -1705,9 +1740,25 @@ app.add_typer(list_app, name="list")
 
 @app.command()
 def run(
-    codebase_path: str = typer.Argument(
-        ...,
-        help="Path to the codebase on the Ray cluster filesystem.",
+    origin_url: Optional[str] = typer.Option(
+        None,
+        "--origin-url",
+        help="Git repository URL (HTTPS) for the codebase to analyze.",
+    ),
+    local_repo: Optional[str] = typer.Option(
+        None,
+        "--local-repo",
+        help="Path to a local git repository. Equivalent to --origin-url file://<path>.",
+    ),
+    branch: str = typer.Option(
+        "main",
+        "--branch",
+        help="Git branch to check out.",
+    ),
+    commit: str = typer.Option(
+        "HEAD",
+        "--commit",
+        help="Git commit SHA to check out (defaults to branch HEAD).",
     ),
     config: Optional[str] = typer.Option(
         None,
@@ -1798,20 +1849,28 @@ def run(
 ) -> None:
     """Run an integration test of the multi-agent framework on a codebase.
 
-    This command pages the codebase into VCM, spawns coordinator agents that
-    create teams of specialized workers, and runs complete analysis workflows.
+    This command clones the repository via GitStorage, pages it into VCM,
+    spawns coordinator agents that create teams of specialized workers,
+    and runs complete analysis workflows.
 
-    [bold]Quick Start:[/bold]
+    Exactly one of --origin-url or --local-repo must be provided (unless
+    the URL is specified in the YAML config file via the origin_url field).
 
-        polymath run /path/to/codebase --analysis impact --analysis compliance
+    [bold]Quick Start (remote repo):[/bold]
+
+        polymath run --origin-url https://github.com/org/repo --analysis impact
+
+    [bold]Quick Start (local repo):[/bold]
+
+        polymath run --local-repo /path/to/codebase --analysis impact
 
     [bold]With Config File:[/bold]
 
-        polymath run /path/to/codebase --config test.yaml
+        polymath run --local-repo /path/to/codebase --config test.yaml
 
     [bold]Dry Run (show hierarchy only):[/bold]
 
-        polymath run /path/to/codebase --analysis impact --dry-run
+        polymath run --origin-url https://github.com/org/repo --dry-run
     """
     if verbose:
         logging.getLogger("polymath").setLevel(logging.DEBUG)
@@ -1857,13 +1916,29 @@ def run(
             budget_usd=budget,
         )
 
-    # Validate codebase path
-    codebase = Path(codebase_path)
-    if not codebase.exists():
+    # Resolve --origin-url / --local-repo into test_config.origin_url.
+    # CLI options override YAML values.
+    if origin_url and local_repo:
+        console.print("[red]Error:[/red] --origin-url and --local-repo are mutually exclusive.")
+        raise typer.Exit(1)
+
+    if origin_url:
+        test_config.origin_url = origin_url
+    elif local_repo:
+        test_config.origin_url = f"file://{Path(local_repo).resolve()}"
+
+    if branch != "main" or not test_config.branch:
+        test_config.branch = branch
+    if commit != "HEAD" or not test_config.commit:
+        test_config.commit = commit
+
+    if not test_config.origin_url:
         console.print(
-            f"[yellow]Warning:[/yellow] Codebase path does not exist locally: {codebase_path}\n"
-            f"  This is OK if running on a remote Ray cluster where the path is valid."
+            "[red]Error:[/red] No repository specified. "
+            "Use --origin-url <URL> or --local-repo <path> "
+            "(or set origin_url in the YAML config)."
         )
+        raise typer.Exit(1)
 
     # Display planned hierarchy
     console.print()
@@ -1882,7 +1957,9 @@ def run(
         else "\n[bold]Budget:[/bold]   unlimited"
     )
     console.print(Panel(
-        f"[bold]Codebase:[/bold] {codebase_path}\n"
+        f"[bold]Origin:[/bold]   {test_config.origin_url}\n"
+        f"[bold]Branch:[/bold]   {test_config.branch}\n"
+        f"[bold]Commit:[/bold]   {test_config.commit}\n"
         f"[bold]Repo ID:[/bold]  {test_config.repo_id}\n"
         f"[bold]Session:[/bold]  {test_config.session_id}\n"
         f"[bold]Run ID:[/bold]   {test_config.run_id}\n"
@@ -1894,7 +1971,6 @@ def run(
 
     try:
         test_results = asyncio.run(run_integration_test(
-            codebase_path=str(codebase),
             config=test_config,
             app_name=app_name,
         ))
@@ -1921,7 +1997,9 @@ def run(
         "session_id": test_config.session_id,
         "run_id": test_config.run_id,
         "repo_id": test_config.repo_id,
-        "codebase_path": str(codebase),
+        "origin_url": test_config.origin_url,
+        "branch": test_config.branch,
+        "commit": test_config.commit,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "total_cost_usd": total_cost,
         "budget_usd": test_config.budget_usd,

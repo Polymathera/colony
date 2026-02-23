@@ -42,13 +42,19 @@ class DeploymentManager:
 
     async def run(
         self,
-        codebase_path: str,
+        origin_url: str | None = None,
+        local_repo: str | None = None,
+        branch: str = "main",
+        commit: str = "HEAD",
         config_path: str | None = None,
         extra_env: dict[str, str] | None = None,
         extra_args: list[str] | None = None,
     ) -> int:
         return await self._provider.run(
-            codebase_path=codebase_path,
+            origin_url=origin_url,
+            local_repo=local_repo,
+            branch=branch,
+            commit=commit,
             config_path=config_path,
             extra_env=extra_env,
             extra_args=extra_args,

@@ -47,7 +47,10 @@ class DeploymentProvider(ABC):
     @abstractmethod
     async def run(
         self,
-        codebase_path: str,
+        origin_url: str | None = None,
+        local_repo: str | None = None,
+        branch: str = "main",
+        commit: str = "HEAD",
         config_path: str | None = None,
         extra_env: dict[str, str] | None = None,
         extra_args: list[str] | None = None,
