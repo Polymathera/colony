@@ -206,6 +206,95 @@ class PlanningStrategyPolicy(ABC):
             lines.append(f"- {key}: {value}")
         return "\n".join(lines)
 
+    def _build_decomposition_prompt(self, planning_context: PlanningContext) -> str:
+        """Build prompt for goal decomposition (step 1 of top-down planning)."""
+        action_descriptions = self._format_action_descriptions(planning_context)
+        custom_data_section = self._format_custom_data(planning_context)
+        constraints_section = self._format_constraints(planning_context)
+        memories_section = self._format_recalled_memories(planning_context)
+
+        return f"""{planning_context.system_prompt}
+
+## Goals
+
+{', '.join(planning_context.goals)}
+
+## Available Actions
+
+{action_descriptions}
+{constraints_section}
+{memories_section}
+{custom_data_section}
+
+Break down the goals into a hierarchical structure.
+Each leaf goal should map to one or more of the available actions.
+
+The response must be valid JSON matching the expected schema."""
+
+    def _build_action_planning_prompt(
+        self,
+        planning_context: PlanningContext,
+        leaf_goals: list[str],
+        params: PlanningParameters,
+    ) -> str:
+        """Build prompt for action planning (step 2 of top-down planning)."""
+        action_descriptions = self._format_action_descriptions(planning_context)
+        custom_data_section = self._format_custom_data(planning_context)
+        constraints_section = self._format_constraints(planning_context)
+        memories_section = self._format_recalled_memories(planning_context)
+
+        return f"""{planning_context.system_prompt}
+
+## Leaf Goals
+
+{leaf_goals}
+
+## Available Actions
+
+{action_descriptions}
+{constraints_section}
+{memories_section}
+{custom_data_section}
+
+Create actions for each leaf goal. Each action must use one of the available action types listed above.
+Plan the next {params.planning_horizon} actions.
+
+The response must be valid JSON matching the expected schema."""
+
+    def _build_replan_prompt(
+        self,
+        planning_context: PlanningContext,
+        plan: Any,
+        summary: str,
+        params: Any,
+    ) -> str:
+        """Build prompt for replanning given current progress."""
+        action_descriptions = self._format_action_descriptions(planning_context)
+        custom_data_section = self._format_custom_data(planning_context)
+        constraints_section = self._format_constraints(planning_context)
+        memories_section = self._format_recalled_memories(planning_context)
+
+        return f"""{planning_context.system_prompt}
+
+## Goals
+
+{', '.join(plan.goals)}
+
+## Available Actions
+
+{action_descriptions}
+{constraints_section}
+{memories_section}
+{custom_data_section}
+
+## Progress
+
+{summary}
+Completed: {len([a for a in plan.actions if a.status.value == 'completed'])}/{len(plan.actions)} actions
+
+Plan the next {params.planning_horizon} actions.
+The response must be valid JSON matching the expected schema."""
+
     def _parse_plan_response(self, response: Any) -> PlanGenerationResponse:
         """Parse LLM response into PlanGenerationResponse using pydantic."""
         text = (
@@ -342,7 +431,7 @@ class PlanningStrategyPolicy(ABC):
                     parts.append(f"  - {action_id}: {status}")
             exec_context_section = "\n".join(parts) + "\n"
 
-        return f"""You are creating a plan to achieve multiple goals.
+        return f"""{planning_context.system_prompt}
 
 ## Goals
 
@@ -495,7 +584,9 @@ class ModelPredictiveControlStrategy(PlanningStrategyPolicy):
             ]
         )
 
-        return f"""You are replanning based on progress so far.
+        return f"""{planning_context.system_prompt}
+
+## Replanning
 
 Original Goals:
 {chr(10).join(f"- {g}" for g in plan.goals)}
@@ -540,26 +631,9 @@ class TopDownPlanningStrategy(PlanningStrategyPolicy):
         if not self.agent:
             raise RuntimeError("Agent reference not set. Call set_agent() or pass agent to __init__")
 
-        action_descriptions = self._format_action_descriptions(planning_context)
-        custom_data_section = self._format_custom_data(planning_context)
-        constraints_section = self._format_constraints(planning_context)
-        memories_section = self._format_recalled_memories(planning_context)
-
         # Step 1: Decompose goals into hierarchy (with action awareness)
-        decomposition_prompt = f"""Break down these goals into a hierarchical structure.
-Each leaf goal should map to one or more of the available actions below.
-
-Goals: {', '.join(planning_context.goals)}
-
-Available actions:
-{action_descriptions}
-{constraints_section}
-{custom_data_section}
-
-The response must be valid JSON matching the expected schema."""
-
         decomp_response = await self.agent.infer(
-            prompt=decomposition_prompt,
+            prompt=self._build_decomposition_prompt(planning_context),
             max_tokens=params.max_planning_tokens,
             temperature=0.3,  # More deterministic - TODO: Make configurable
             context_page_ids=[],  # TODO: Planning runs only on the prompt. Right?
@@ -595,21 +669,8 @@ The response must be valid JSON matching the expected schema."""
             g for g, data in goal_hierarchy.items() if not data.get("sub_goals")
         ]
 
-        planning_prompt = f"""Create actions for these leaf goals:
-
-Leaf goals: {leaf_goals}
-
-Available actions:
-{action_descriptions}
-{constraints_section}
-{memories_section}
-{custom_data_section}
-
-Each action must use one of the available action types listed above.
-The response must be valid JSON matching the expected schema."""
-
         action_response = await self.agent.infer(
-            prompt=planning_prompt,
+            prompt=self._build_action_planning_prompt(planning_context, leaf_goals, params),
             max_tokens=params.max_planning_tokens,
             temperature=0.3,  # More deterministic - TODO: Make configurable
             context_page_ids=[],  # TODO: Planning runs only on the prompt. Right?
@@ -643,11 +704,6 @@ The response must be valid JSON matching the expected schema."""
         if not self.agent:
             raise RuntimeError("Agent reference not set. Call set_agent() or pass agent to __init__")
 
-        action_descriptions = self._format_action_descriptions(planning_context)
-        custom_data_section = self._format_custom_data(planning_context)
-        constraints_section = self._format_constraints(planning_context)
-        memories_section = self._format_recalled_memories(planning_context)
-
         completed_actions = [
             a for a in plan.actions if a.status == ActionStatus.COMPLETED
         ]
@@ -656,25 +712,8 @@ The response must be valid JSON matching the expected schema."""
             for a in completed_actions
         )
 
-        prompt = f"""Replan actions for these goals given current progress.
-
-Goals: {', '.join(plan.goals)}
-
-Available actions:
-{action_descriptions}
-{constraints_section}
-{memories_section}
-{custom_data_section}
-
-Progress so far:
-{summary}
-Completed: {len(completed_actions)}/{len(plan.actions)} actions
-
-Plan the next {params.planning_horizon} actions.
-The response must be valid JSON matching the expected schema."""
-
         response = await self.agent.infer(
-            prompt=prompt,
+            prompt=self._build_replan_prompt(planning_context, plan, summary, params),
             max_tokens=params.max_planning_tokens,
             temperature=0.3,  # More deterministic - TODO: Make configurable
             context_page_ids=[],  # TODO: Planning runs only on the prompt. Right?
@@ -702,25 +741,9 @@ class BottomUpPlanningStrategy(PlanningStrategyPolicy):
         if not self.agent:
             raise RuntimeError("Agent reference not set. Call set_agent() or pass agent to __init__")
 
-        action_descriptions = self._format_action_descriptions(planning_context)
-        custom_data_section = self._format_custom_data(planning_context)
-        constraints_section = self._format_constraints(planning_context)
-        memories_section = self._format_recalled_memories(planning_context)
-
         # Step 1: Generate concrete actions
-        action_prompt = f"""Generate concrete actions to achieve: {', '.join(planning_context.goals)}
-
-Available actions:
-{action_descriptions}
-{constraints_section}
-{memories_section}
-{custom_data_section}
-
-Each action must use one of the available action types listed above.
-The response must be valid JSON matching the expected schema."""
-
         action_response = await self.agent.infer(
-            prompt=action_prompt,
+            prompt=self._build_action_planning_prompt(planning_context, planning_context.goals, params),
             max_tokens=params.max_planning_tokens,
             temperature=0.3,  # More deterministic - TODO: Make configurable
             context_page_ids=[],  # TODO: Planning runs only on the prompt. Right?
@@ -793,11 +816,6 @@ The response must be valid JSON matching the expected schema."""
         if not self.agent:
             raise RuntimeError("Agent reference not set. Call set_agent() or pass agent to __init__")
 
-        action_descriptions = self._format_action_descriptions(planning_context)
-        custom_data_section = self._format_custom_data(planning_context)
-        constraints_section = self._format_constraints(planning_context)
-        memories_section = self._format_recalled_memories(planning_context)
-
         completed_actions = [
             a for a in plan.actions if a.status == ActionStatus.COMPLETED
         ]
@@ -806,25 +824,8 @@ The response must be valid JSON matching the expected schema."""
             for a in completed_actions
         )
 
-        prompt = f"""Continue planning actions for these goals given current progress.
-
-Goals: {', '.join(plan.goals)}
-
-Available actions:
-{action_descriptions}
-{constraints_section}
-{memories_section}
-{custom_data_section}
-
-Progress so far:
-{summary}
-Completed: {len(completed_actions)}/{len(plan.actions)} actions
-
-Plan the next {params.planning_horizon} actions.
-The response must be valid JSON matching the expected schema."""
-
         response = await self.agent.infer(
-            prompt=prompt,
+            prompt=self._build_replan_prompt(planning_context, plan, summary, params),
             max_tokens=params.max_planning_tokens,
             json_schema=ReplanningResponse.model_json_schema(),
         )

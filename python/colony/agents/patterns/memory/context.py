@@ -182,7 +182,7 @@ class AgentContextEngine(AgentCapability):
     # LLM-Plannable Actions
     # -------------------------------------------------------------------------
 
-    @action_executor(action_key="gather_context")
+    @action_executor(action_key="gather_context", planning_summary="Gather relevant memories across scopes for a query.")
     async def gather_context(
         self,
         query: MemoryQuery | None = None,
@@ -223,7 +223,7 @@ class AgentContextEngine(AgentCapability):
         # Limit total results
         return all_entries[:query.max_results]
 
-    @action_executor(action_key="ingest_pending")
+    @action_executor(action_key="ingest_pending", planning_summary="Process pending ingestion entries across memory scopes.")
     async def ingest_pending(
         self,
         scopes: list[str] | None = None,
@@ -260,7 +260,7 @@ class AgentContextEngine(AgentCapability):
         logger.info(f"Ingestion complete: {total} total entries ingested")
         return results
 
-    @action_executor(action_key="maintain_memories")
+    @action_executor(action_key="maintain_memories", planning_summary="Run maintenance (TTL, capacity, decay) on memory scopes.")
     async def maintain(
         self,
         scopes: list[str] | None = None,
@@ -366,7 +366,7 @@ class AgentContextEngine(AgentCapability):
 
         return None
 
-    @action_executor(action_key="gather_full_context")
+    @action_executor(action_key="gather_full_context", planning_summary="Gather full memory context with statistics and validation.")
     async def gather_full_context(
         self,
         query: MemoryQuery | None = None,
@@ -406,7 +406,7 @@ class AgentContextEngine(AgentCapability):
     # Memory Introspection Actions
     # -------------------------------------------------------------------------
 
-    @action_executor(action_key="inspect_memory_map")
+    @action_executor(action_key="inspect_memory_map", planning_summary="Get overview of all memory scopes and their relationships.")
     async def inspect_memory_map(self) -> dict[str, Any]:
         """Get a complete map of the agent's memory layout.
 
@@ -429,7 +429,7 @@ class AgentContextEngine(AgentCapability):
         memory_map = await self._build_memory_map()
         return self._memory_map_to_dict(memory_map)
 
-    @action_executor(action_key="inspect_scope")
+    @action_executor(action_key="inspect_scope", planning_summary="Inspect a specific memory scope's entries, stats, and health.")
     async def inspect_scope(
         self,
         scope_id: str,
@@ -489,7 +489,7 @@ class AgentContextEngine(AgentCapability):
 
         return self._scope_inspection_to_dict(result)
 
-    @action_executor(action_key="search_memory")
+    @action_executor(action_key="search_memory", planning_summary="Search across memory scopes by text query with optional tag/recency filters.")
     async def search_memory(
         self,
         query: str,
@@ -566,7 +566,7 @@ class AgentContextEngine(AgentCapability):
             for r in all_results
         ]
 
-    @action_executor(action_key="get_memory_statistics")
+    @action_executor(action_key="get_memory_statistics", planning_summary="Get entry counts, token usage, and health stats for memory scopes.")
     async def get_memory_statistics(
         self,
         scopes: list[str] | None = None,

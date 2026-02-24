@@ -544,7 +544,7 @@ class MemoryCapability(AgentCapability):
     # CONSCIOUS ACTIONS (LLM-Plannable via @action_executor)
     # =========================================================================
 
-    @action_executor(action_key="memory_store")
+    @action_executor(action_key="memory_store", planning_summary="Store data in memory with optional tags and TTL.")
     async def store(
         self,
         data: BaseModel,
@@ -604,7 +604,7 @@ class MemoryCapability(AgentCapability):
         logger.debug(f"MemoryCapability: stored {key}")
         return key
 
-    @action_executor(action_key="memory_recall_with_scores")
+    @action_executor(action_key="memory_recall_with_scores", planning_summary="Recall memories with relevance scores. Supports query filtering, lenses, and goal-aware retrieval.")
     async def recall_with_scores(
         self,
         query: MemoryQuery | None = None,
@@ -650,7 +650,7 @@ class MemoryCapability(AgentCapability):
 
         return scored_entries
 
-    @action_executor(action_key="memory_recall")
+    @action_executor(action_key="memory_recall", planning_summary="Recall memories matching a query, lens, or retrieval context.")
     async def recall(
         self,
         query: MemoryQuery | None = None,
@@ -674,7 +674,7 @@ class MemoryCapability(AgentCapability):
         )
         return [se.entry for se in scored_entries]
 
-    @action_executor(action_key="memory_forget")
+    @action_executor(action_key="memory_forget", planning_summary="Delete memories by key, tags, or age.")
     async def forget(
         self,
         keys: list[str] | None = None,
@@ -729,7 +729,7 @@ class MemoryCapability(AgentCapability):
         logger.debug(f"MemoryCapability: forgot {count} memories from {self.scope_id}")
         return count
 
-    @action_executor(action_key="memory_deduplicate")
+    @action_executor(action_key="memory_deduplicate", planning_summary="Remove duplicate memories above a similarity threshold.")
     async def deduplicate(self, similarity_threshold: float = 0.95) -> int:
         """Deduplicate similar memories (conscious maintenance).
 
@@ -751,7 +751,7 @@ class MemoryCapability(AgentCapability):
         logger.debug(f"Deduplicated {result.entries_removed} memories from {self.scope_id}")
         return result.entries_removed
 
-    @action_executor(action_key="memory_prune")
+    @action_executor(action_key="memory_prune", planning_summary="Remove memories below a relevance threshold.")
     async def prune(self, relevance_threshold: float = 0.1) -> int:
         """Remove memories below the relevance threshold.
 
@@ -771,7 +771,7 @@ class MemoryCapability(AgentCapability):
         logger.debug(f"Pruned {result.entries_removed} memories from {self.scope_id}")
         return result.entries_removed
 
-    @action_executor(action_key="memory_transfer_raw")
+    @action_executor(action_key="memory_transfer_raw", planning_summary="Copy or move memories to another scope without transformation.")
     async def transfer_to(
         self,
         target_scope: str,
@@ -837,7 +837,7 @@ class MemoryCapability(AgentCapability):
         )
         return count
 
-    @action_executor(action_key="memory_ingest_now")
+    @action_executor(action_key="memory_ingest_now", planning_summary="Trigger on-demand ingestion of pending entries from subscriptions.")
     async def ingest_now(self) -> int:
         """Process pending entries from subscriptions (on-demand ingestion).
 

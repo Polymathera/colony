@@ -184,7 +184,7 @@ class WorkingMemoryCapability(MemoryCapability):
     # LLM-Plannable Actions
     # -------------------------------------------------------------------------
 
-    @action_executor(action_key="working_memory_store")
+    @action_executor(action_key="working_memory_store", planning_summary="Store data in working memory (append-only, token-bounded).")
     async def store(
         self,
         data: BaseModel,
@@ -231,7 +231,7 @@ class WorkingMemoryCapability(MemoryCapability):
 
         return key
 
-    @action_executor(action_key="working_memory_needs_compaction")
+    @action_executor(action_key="working_memory_needs_compaction", planning_summary="Check if working memory needs compaction.")
     async def needs_compaction(self) -> bool:
         """Check if working memory needs compaction.
 
@@ -242,7 +242,7 @@ class WorkingMemoryCapability(MemoryCapability):
         """
         return self.token_usage_fraction >= self.compaction_threshold
 
-    @action_executor(action_key="working_memory_compact")
+    @action_executor(action_key="working_memory_compact", planning_summary="Compact working memory by summarizing old entries to free token budget.")
     async def compact(
         self,
         current_task: str | None = None,
@@ -338,7 +338,7 @@ class WorkingMemoryCapability(MemoryCapability):
         logger.info(f"Working memory compacted: {result}")
         return result
 
-    @action_executor(action_key="working_memory_drain")
+    @action_executor(action_key="working_memory_drain", planning_summary="Drain working memory to STM on task completion, then clear.")
     async def drain_to_stm(
         self,
         stm_scope_id: str,
@@ -389,7 +389,7 @@ class WorkingMemoryCapability(MemoryCapability):
         logger.info(f"Drained {len(entries)} entries from working memory to STM")
         return len(entries)
 
-    @action_executor(action_key="working_memory_clear")
+    @action_executor(action_key="working_memory_clear", planning_summary="Clear all working memory entries.")
     async def clear(self) -> int:
         """Clear all working memory entries.
 

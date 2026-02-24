@@ -150,7 +150,7 @@ class SessionMemoryCapability(MemoryCapability):
         self.include_cross_session = include_cross_session
         self.cross_session_weight = cross_session_weight
 
-    @action_executor(action_key="session_memory_store")
+    @action_executor(action_key="session_memory_store", planning_summary="Store data in session-scoped memory with optional tags.")
     async def store(
         self,
         data: BaseModel,
@@ -193,7 +193,7 @@ class SessionMemoryCapability(MemoryCapability):
             metadata=metadata,
         )
 
-    @action_executor(action_key="session_memory_recall_with_scores")
+    @action_executor(action_key="session_memory_recall_with_scores", planning_summary="Recall session memories with relevance scores, optionally including cross-session.")
     async def recall_with_scores(
         self,
         query: MemoryQuery | None = None,
@@ -288,7 +288,7 @@ class SessionMemoryCapability(MemoryCapability):
                 context=context,
             )
 
-    @action_executor(action_key="session_memory_recall")
+    @action_executor(action_key="session_memory_recall", planning_summary="Recall session memories matching a query.")
     async def recall(
         self,
         query: MemoryQuery | None = None,
@@ -308,7 +308,7 @@ class SessionMemoryCapability(MemoryCapability):
         scored = await self.recall_with_scores(query=query, lens=lens, context=context)
         return [se.entry for se in scored]
 
-    @action_executor(action_key="session_memory_forget")
+    @action_executor(action_key="session_memory_forget", planning_summary="Delete session memories by key, tags, or age.")
     async def forget(
         self,
         keys: list[str] | None = None,

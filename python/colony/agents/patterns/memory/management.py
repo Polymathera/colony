@@ -206,7 +206,7 @@ class AgentMemoryRecycler(AgentCapability):
     # Memory Recycling
     # -------------------------------------------------------------------------
 
-    @action_executor(action_key="recycle_agent_memories")
+    @action_executor(action_key="recycle_agent_memories", planning_summary="Recycle terminated agent memories into collective memory.")
     async def recycle_agent_memories(
         self,
         terminated_agent_id: str,
@@ -560,7 +560,7 @@ class CollectiveMemoryInitializer(AgentCapability):
     # Memory Initialization
     # -------------------------------------------------------------------------
 
-    @action_executor(action_key="initialize_agent_memory")
+    @action_executor(action_key="initialize_agent_memory", planning_summary="Initialize new agent memory from collective memory (transfer learning).")
     async def initialize_agent_memory(
         self,
         new_agent_id: str,
@@ -751,7 +751,7 @@ class CollectiveMemoryMaintainer(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for CollectiveMemoryMaintainer")
         pass
 
-    @action_executor(action_key="maintain_collective_memory")
+    @action_executor(action_key="maintain_collective_memory", planning_summary="Run maintenance on collective memory (prune, consolidate).")
     async def maintain(
         self,
         agent_types: list[str] | None = None,

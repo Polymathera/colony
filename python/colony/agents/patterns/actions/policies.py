@@ -139,6 +139,7 @@ class MethodWrapperActionExecutor(ActionExecutor):
         reads: list[str] | None = None,
         writes: list[str] | None = None,
         exclude_from_planning: bool = False,
+        planning_summary: str | None = None,
     ):
         self.object = object
         self.method = method
@@ -148,6 +149,7 @@ class MethodWrapperActionExecutor(ActionExecutor):
         self.reads = reads or []
         self.writes = writes or []
         self.exclude_from_planning = exclude_from_planning
+        self.planning_summary = planning_summary
 
     async def execute(self, action: Action, resolved_params: dict[str, Any] | None = None) -> ActionResult:
         """Execute the wrapped method.
@@ -203,7 +205,9 @@ class MethodWrapperActionExecutor(ActionExecutor):
             return result
 
     async def get_action_description(self) -> str:
-        """Get human-readable description from the wrapped method's docstring."""
+        """Get human-readable description from planning_summary or the wrapped method's docstring."""
+        if self.planning_summary:
+            return self.planning_summary
         docstring = inspect.getdoc(self.method)
         if not docstring:
             raise ValueError(
@@ -211,7 +215,6 @@ class MethodWrapperActionExecutor(ActionExecutor):
                 "Cannot generate description."
             )
         return docstring
-        #return f"{self.action_key}: {docstring}"
 
 
 class FunctionWrapperActionExecutor(ActionExecutor):
@@ -259,6 +262,7 @@ class FunctionWrapperActionExecutor(ActionExecutor):
         first_param_is_agent: bool = False,
         first_param_name: str | None = None,
         exclude_from_planning: bool = False,
+        planning_summary: str | None = None,
     ):
         self.func = func
         self.action_key = str(action_key)
@@ -270,6 +274,7 @@ class FunctionWrapperActionExecutor(ActionExecutor):
         self.first_param_is_agent = first_param_is_agent
         self.first_param_name = first_param_name
         self.exclude_from_planning = exclude_from_planning
+        self.planning_summary = planning_summary
 
     async def execute(self, action: Action, resolved_params: dict[str, Any] | None = None) -> ActionResult:
         """Execute the wrapped function.
@@ -333,7 +338,9 @@ class FunctionWrapperActionExecutor(ActionExecutor):
             )
 
     async def get_action_description(self) -> str:
-        """Get description from function docstring."""
+        """Get description from planning_summary or function docstring."""
+        if self.planning_summary:
+            return self.planning_summary
         docstring = inspect.getdoc(self.func)
         if not docstring:
             raise ValueError(
@@ -496,6 +503,7 @@ def action_executor(
     reads: list[str] | None = None,
     writes: list[str] | None = None,
     exclude_from_planning: bool = False,
+    planning_summary: str | None = None,
 ):
     """Decorator to turn any method into an action executor.
 
@@ -555,6 +563,9 @@ def action_executor(
 
         # Store planning visibility flag
         func._action_exclude_from_planning = exclude_from_planning
+
+        # Store concise planning summary (used instead of full docstring in prompts)
+        func._action_planning_summary = planning_summary
 
         return func
 
@@ -736,9 +747,18 @@ class ActionDispatcher:
             # Unique short ID to avoid name clashes
             obj._action_dispatch_key = uuid.uuid4().hex[:8]
 
-        # Register methods decorated with @action_executor
-        for name, method in obj.__class__.__dict__.items():
-            if hasattr(method, '_action_key'):
+        # Register methods decorated with @action_executor.
+        # Walk MRO to discover inherited methods (not just immediate class).
+        seen_names: set[str] = set()
+        for cls in type(obj).__mro__:
+            if cls is object:
+                continue
+            for name, method in cls.__dict__.items():
+                if name in seen_names:
+                    continue  # Most-derived class wins
+                seen_names.add(name)
+                if not hasattr(method, '_action_key'):
+                    continue
                 action_key = method._action_key
 
                 # Apply action filters
@@ -758,6 +778,7 @@ class ActionDispatcher:
                     reads=getattr(method, '_action_reads', []),
                     writes=getattr(method, '_action_writes', []),
                     exclude_from_planning=getattr(method, '_action_exclude_from_planning', False),
+                    planning_summary=getattr(method, '_action_planning_summary', None),
                 )
                 # We can have multiple capabilities of the same type (e.g., memory
                 # capabilities) and/or capabilities of different types but with same action key.
@@ -2397,6 +2418,47 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             await self._plan_blackboard_cached.initialize()
         return self._plan_blackboard_cached
 
+    def _build_system_prompt(self) -> str:
+        """Build stable agent identity prompt from metadata, class docstring, and capabilities."""
+        parts = []
+        agent = self.agent
+
+        identity = f"You are {agent.__class__.__name__}"
+        if agent.metadata.role:
+            identity += f" (role: {agent.metadata.role})"
+        identity += f", a {agent.agent_type} agent."
+        parts.append(identity)
+
+        doc = agent.__class__.__doc__
+        if doc:
+            parts.append(doc.strip().split('\n\n')[0].strip())
+
+        cap_names = agent.get_capability_names()
+        if cap_names:
+            parts.append(f"Your capabilities: {', '.join(cap_names)}")
+
+        params = agent.metadata.parameters
+        if params:
+            param_lines = [f"- {k}: {v}" for k, v in params.items()
+                           if not k.startswith("_") and k != "planning_params"]
+            if param_lines:
+                parts.append("Task parameters:\n" + "\n".join(param_lines))
+
+        return "\n\n".join(parts)
+
+    def _get_constraints(self) -> dict[str, Any]:
+        """Extract execution constraints from agent metadata."""
+        constraints: dict[str, Any] = {}
+        meta = self.agent.metadata
+        if meta.max_iterations:
+            constraints["max_iterations"] = meta.max_iterations
+        params = meta.parameters
+        if "max_agents" in params:
+            constraints["max_parallel_workers"] = params["max_agents"]
+        if "quality_threshold" in params:
+            constraints["quality_threshold"] = params["quality_threshold"]
+        return constraints
+
     async def _get_planning_context(self, execution_context: PlanExecutionContext) -> PlanningContext:
         """Build the planning context for the current planning step (initial or replanning).
         """
@@ -2413,9 +2475,11 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
 
         # Create new planning context based on current state
         return PlanningContext(
+            system_prompt=self._build_system_prompt(),
             execution_context=execution_context,
             page_ids=list(self.agent.bound_pages) if hasattr(self.agent, 'bound_pages') else [],
             goals=goals,
+            constraints=self._get_constraints(),
             action_descriptions=await self.get_action_descriptions(),
             recalled_memories=recalled_memories,
             custom_data=custom_data,

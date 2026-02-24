@@ -621,6 +621,12 @@ class PlanningContext(BaseModel):
         description="Additional custom context data (escape hatch for extensibility)"
     )
 
+    system_prompt: str = Field(
+        default="",
+        description="Stable agent identity context (role, capabilities, action reference). "
+        "Separated for future KV-cache optimization.",
+    )
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PlanningContext:
         """Create PlanningContext from dictionary (for backward compatibility).
