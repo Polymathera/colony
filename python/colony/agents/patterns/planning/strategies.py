@@ -25,6 +25,7 @@ from ...models import (
     PlanExecutionContext,
     PlanningContext,
     PlanningParameters,
+    PlanStatus,
 )
 from ...base import Agent
 
@@ -613,6 +614,7 @@ class ModelPredictiveControlStrategy(PlanningStrategyPolicy):
             goals=planning_context.goals,
             goal_hierarchy=goal_hierarchy_dict,
             actions=actions,
+            status=PlanStatus.PROPOSED,
             planning_horizon=params.planning_horizon,
             replan_every_n_steps=params.replan_every_n_steps,
             generation_method="llm",
@@ -775,6 +777,7 @@ class TopDownPlanningStrategy(PlanningStrategyPolicy):
             goals=planning_context.goals,
             goal_hierarchy=goal_hierarchy,
             actions=actions,
+            status=PlanStatus.PROPOSED,
             planning_horizon=params.planning_horizon,
             replan_every_n_steps=params.replan_every_n_steps,
             generation_method="llm",
@@ -891,6 +894,7 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
             goals=planning_context.goals,
             goal_hierarchy=goal_hierarchy,
             actions=actions,
+            status=PlanStatus.PROPOSED,
             planning_horizon=params.planning_horizon,
             replan_every_n_steps=params.replan_every_n_steps,
             generation_method="llm",

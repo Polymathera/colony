@@ -153,7 +153,7 @@ class SessionMemoryCapability(MemoryCapability):
     @action_executor(action_key="session_memory_store", planning_summary="Store data in session-scoped memory with optional tags.")
     async def store(
         self,
-        data: BaseModel | dict[str, Any],
+        data: str | dict[str, Any] | BaseModel,
         tags: set[str] | None = None,
         ttl_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
@@ -164,10 +164,10 @@ class SessionMemoryCapability(MemoryCapability):
         the current `session_id` from context.
 
         Args:
-            `data`: Memory data to store (Pydantic model with get_blackboard_key, or plain dict)
-            `tags`: Tags for categorization and retrieval
-            `ttl_seconds`: TTL override (uses level default if None)
-            `metadata`: Additional metadata
+            data: Memory content to store (dict or Pydantic model)
+            tags: Tags for categorization and retrieval
+            ttl_seconds: TTL override (uses level default if None)
+            metadata: Additional metadata
 
         Returns:
             Key under which the memory was stored

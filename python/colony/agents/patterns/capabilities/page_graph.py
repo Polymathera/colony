@@ -572,17 +572,19 @@ class PageGraphCapability(AgentCapability):
 
     @action_executor()
     async def load_graph(self) -> dict[str, Any]:
-        """Load and return the page graph.
+        """Load the page graph and return summary info.
+
+        The graph is too big to return back to the action policy.
+        It is cached internally. Use other methods to query it.
 
         Returns:
             Dict with:
-            - graph: The nx.DiGraph object
             - node_count: Number of nodes
             - edge_count: Number of edges
         """
         graph = await self._get_page_graph()
         return {
-            "graph": graph,
+            # "graph": graph,
             "node_count": graph.number_of_nodes(),
             "edge_count": graph.number_of_edges(),
         }

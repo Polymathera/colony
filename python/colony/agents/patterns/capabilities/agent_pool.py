@@ -124,13 +124,20 @@ class AgentPoolCapability(AgentCapability):
             - created: Whether creation succeeded
         """
         try:
+            # Inherit tenant_id and group_id from parent when not explicitly set
+            if metadata is None:
+                metadata = AgentMetadata(
+                    tenant_id=self.agent.tenant_id,
+                    group_id=self.agent.group_id,
+                    parent_agent_id=self.agent.agent_id,
+                )
             handles: list[AgentHandle] = await self.agent.spawn_child_agents(
                 agent_specs=[
                     AgentSpawnSpec(
                         agent_type=agent_type,
                         capability_types=capabilities,
-                        bound_pages=bound_pages,
-                        metadata=metadata or AgentMetadata(),
+                        bound_pages=bound_pages or [],
+                        metadata=metadata,
                     )
                 ],
                 capability_types=[capabilities],

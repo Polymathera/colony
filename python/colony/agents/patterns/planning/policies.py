@@ -14,6 +14,7 @@ The Planner that uses these policies is responsible for providing the necessary 
 from abc import ABC, abstractmethod
 from typing import Any
 import logging
+import time
 
 import networkx as nx
 
@@ -559,6 +560,8 @@ class LearningPlanningPolicy(PlanningPolicy):
             plan_id=plan.plan_id,
             agent_id=plan.agent_id,
             goal=" ".join(plan.goals),
+            scope=plan.scope.value if plan.scope else "unknown",
+            created_at=time.time(),
             actions=[a.model_dump() for a in plan.actions],
             outcome=outcome.get("status", "unknown"),
             success_rate=outcome.get("success_rate", 0.0),

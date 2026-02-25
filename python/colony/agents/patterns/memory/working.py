@@ -187,7 +187,7 @@ class WorkingMemoryCapability(MemoryCapability):
     @action_executor(action_key="working_memory_store", planning_summary="Store data in working memory (append-only, token-bounded).")
     async def store(
         self,
-        data: BaseModel | dict[str, Any],
+        data: str | dict[str, Any] | BaseModel,
         tags: set[str] | None = None,
         ttl_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
@@ -195,11 +195,11 @@ class WorkingMemoryCapability(MemoryCapability):
         """Store data in working memory (append-only).
 
         Updates token count estimate. Does NOT overwrite existing entries.
-        Raw dicts (from LLM-planned actions) are auto-wrapped by the parent
-        ``MemoryCapability.store()`` into a :class:`MemoryRecord`.
+        Raw strings/dicts (from LLM-planned actions) are auto-wrapped by the
+        parent ``MemoryCapability.store()`` into a :class:`MemoryRecord`.
 
         Args:
-            data: Data to store (Pydantic model with get_blackboard_key, or plain dict)
+            data: Content to store (string, dict, or Pydantic model with get_blackboard_key)
             tags: Tags for categorization
             ttl_seconds: TTL override
             metadata: Additional metadata
@@ -207,8 +207,10 @@ class WorkingMemoryCapability(MemoryCapability):
         Returns:
             Key under which data was stored
         """
-        # Auto-wrap raw dicts before token estimation (parent.store does the
-        # same, but we need the wrapped object for accurate token counting).
+        # Auto-wrap strings/dicts before token estimation (parent.store does
+        # the same, but we need the wrapped object for accurate token counting).
+        if isinstance(data, str):
+            data = {"text": data}
         if isinstance(data, dict):
             from .types import MemoryRecord
             data = MemoryRecord(content=data, tags=tags or set())

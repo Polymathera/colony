@@ -205,16 +205,34 @@ class MethodWrapperActionExecutor(ActionExecutor):
             return result
 
     async def get_action_description(self) -> str:
-        """Get human-readable description from planning_summary or the wrapped method's docstring."""
+        """Get human-readable description from planning_summary or the wrapped method's docstring.
+
+        Appends a compact parameter signature so the LLM knows exact field names.
+        """
         if self.planning_summary:
-            return self.planning_summary
-        docstring = inspect.getdoc(self.method)
-        if not docstring:
-            raise ValueError(
-                f"No docstring found for action executor {self.action_key}. "
-                "Cannot generate description."
-            )
-        return docstring
+            desc = self.planning_summary
+        else:
+            docstring = inspect.getdoc(self.method)
+            if not docstring:
+                raise ValueError(
+                    f"No docstring found for action executor {self.action_key}. "
+                    "Cannot generate description."
+                )
+            desc = docstring
+
+        # Append parameter schema so the LLM uses correct field names
+        if self.input_schema:
+            sig_parts = []
+            for name, field in self.input_schema.model_fields.items():
+                ann = field.annotation
+                type_name = getattr(ann, '__name__', str(ann))
+                if field.is_required():
+                    sig_parts.append(f"{name}: {type_name}")
+                else:
+                    sig_parts.append(f"{name}?: {type_name}")
+            if sig_parts:
+                desc += f"\n  Parameters: {', '.join(sig_parts)}"
+        return desc
 
 
 class FunctionWrapperActionExecutor(ActionExecutor):
@@ -338,16 +356,34 @@ class FunctionWrapperActionExecutor(ActionExecutor):
             )
 
     async def get_action_description(self) -> str:
-        """Get description from planning_summary or function docstring."""
+        """Get description from planning_summary or function docstring.
+
+        Appends a compact parameter signature so the LLM knows exact field names.
+        """
         if self.planning_summary:
-            return self.planning_summary
-        docstring = inspect.getdoc(self.func)
-        if not docstring:
-            raise ValueError(
-                f"No docstring found for function executor {self.action_key}. "
-                "Cannot generate description."
-            )
-        return docstring
+            desc = self.planning_summary
+        else:
+            docstring = inspect.getdoc(self.func)
+            if not docstring:
+                raise ValueError(
+                    f"No docstring found for function executor {self.action_key}. "
+                    "Cannot generate description."
+                )
+            desc = docstring
+
+        # Append parameter schema so the LLM uses correct field names
+        if self.input_schema:
+            sig_parts = []
+            for name, field in self.input_schema.model_fields.items():
+                ann = field.annotation
+                type_name = getattr(ann, '__name__', str(ann))
+                if field.is_required():
+                    sig_parts.append(f"{name}: {type_name}")
+                else:
+                    sig_parts.append(f"{name}?: {type_name}")
+            if sig_parts:
+                desc += f"\n  Parameters: {', '.join(sig_parts)}"
+        return desc
 
 
 def _infer_input_schema(func: Callable) -> type[BaseModel] | None:
@@ -2130,14 +2166,14 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             return []
 
         try:
-            # Gather context from all memory levels
+            # Gather context from all available memory scopes
             entries = await ctx_engine.gather_context(
                 query=MemoryQuery(max_results=50),
-                scopes=[
-                    MemoryScope.agent_working(self.agent.agent_id),
-                    MemoryScope.agent_stm(self.agent.agent_id),
-                    MemoryScope.agent_ltm_episodic(self.agent.agent_id),
-                ],
+                ### scopes=[
+                ###     MemoryScope.agent_working(self.agent.agent_id),
+                ###     MemoryScope.agent_stm(self.agent.agent_id),
+                ###     MemoryScope.agent_ltm_episodic(self.agent.agent_id),
+                ### ],
             )
 
             # Convert BlackboardEntry objects to dicts for the planning context

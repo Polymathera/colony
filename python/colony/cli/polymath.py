@@ -1517,6 +1517,7 @@ async def run_integration_test(
         metadata = AgentMetadata(
             role=f"{reg['label']} coordinator",
             tenant_id=config.tenant_id,
+            group_id=config.repo_id,
             session_id=config.session_id,
             run_id=config.run_id,
             goals=[f"Run {reg['label']} on {config.repo_id}"],

@@ -547,7 +547,7 @@ class MemoryCapability(AgentCapability):
     @action_executor(action_key="memory_store", planning_summary="Store data in memory with optional tags and TTL.")
     async def store(
         self,
-        data: BaseModel | dict[str, Any],
+        data: str | BaseModel | dict[str, Any],
         tags: set[str] | None = None,
         ttl_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
@@ -559,13 +559,14 @@ class MemoryCapability(AgentCapability):
         The agent might want to store insights, conclusions, or important
         observations for later retrieval.
 
-        If ``data`` is a raw dict (e.g. from an LLM-planned action), it is
-        automatically wrapped in a :class:`MemoryRecord` which provides the
-        required ``get_blackboard_key`` method.
+        If ``data`` is a string or raw dict (e.g. from an LLM-planned action),
+        it is automatically wrapped in a :class:`MemoryRecord` which provides
+        the required ``get_blackboard_key`` method.
 
         Args:
-            data: Memory data to store. Either a Pydantic model with
-                ``get_blackboard_key``, or a plain dict (auto-wrapped).
+            data: Memory data to store. A string or dict is auto-wrapped
+                into a :class:`MemoryRecord`. A Pydantic model with
+                ``get_blackboard_key`` is stored directly.
             tags: Tags for categorization and retrieval
             ttl_seconds: TTL override (uses level default if None)
             metadata: Additional metadata
@@ -573,7 +574,9 @@ class MemoryCapability(AgentCapability):
         Returns:
             Key under which the memory was stored
         """
-        # Auto-wrap raw dicts from LLM-planned actions
+        # Auto-wrap strings and dicts from LLM-planned actions
+        if isinstance(data, str):
+            data = {"text": data}
         if isinstance(data, dict):
             from .types import MemoryRecord
             data = MemoryRecord(content=data, tags=tags or set())
@@ -1084,13 +1087,32 @@ class MemoryCapability(AgentCapability):
             )
         else:
             # No transformer = pass-through
-            transformed = all_entries
+            # Use IdentityConsolidationTransformer to re-wrap serialized values.
+            from .protocols import IdentityConsolidationTransformer
+            identity = IdentityConsolidationTransformer()
+            transformed = await identity.consolidate(
+                all_entries,
+                ConsolidationContext(
+                    source_scope=",".join({p.subscription.source_scope_id for p in self._pending_entries}),
+                    target_scope=self.scope_id,
+                ),
+            )
 
         # Write transformed entries to this scope
         # session_id is auto-added by EnhancedBlackboard.write()
+        # Per the ConsolidationTransformer contract (protocols.py):
+        #   entry.value MUST be a BaseModel with get_blackboard_key(scope_id)
+        #   entry.key is ignored — we generate it here using self.scope_id
         count = 0
         for entry in transformed:
             data = entry.value
+            if not hasattr(data, "get_blackboard_key"):
+                raise TypeError(
+                    f"Transformer returned entry.value of type "
+                    f"{type(data).__name__} without get_blackboard_key(scope_id). "
+                    f"Transformers must return "
+                    f"BlackboardEntry(value=<BaseModel with get_blackboard_key>)."
+                )
             key = data.get_blackboard_key(self.scope_id)
 
             value = data.model_dump() if hasattr(data, "model_dump") else data

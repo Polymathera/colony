@@ -173,7 +173,17 @@ class GitCacheManager:
                         key = key.decode(errors="replace")
                 decoded_keys.append(key)
 
-            return [RepoId(k.split(":")[1]) for k in decoded_keys]
+            repo_ids: list[RepoId] = []
+            for k in decoded_keys:
+                parts = k.split(":")
+                if len(parts) < 2:
+                    continue
+                try:
+                    repo_ids.append(RepoId(parts[1]))
+                except (ValueError, Exception):
+                    # Skip keys with non-UUID values (stale/invalid entries)
+                    continue
+            return repo_ids
         except Exception as e:
             logger.error(f"Error during get_all_repo_ids: {e!s}")
             return []
@@ -784,7 +794,7 @@ class GitFileStorage:
         source_path = self._get_repo_path(origin_url)
         replica_path = Path(f"{source_path}_{replica_id}")
 
-        logger.info(f"________ clone_or_retrieve_repository: source_path={source_path}, replica_path={replica_path}")
+        logger.debug(f"________ clone_or_retrieve_repository: source_path={source_path}, replica_path={replica_path}")
 
         tx = GitCloneTransaction(
             origin_url=origin_url,
@@ -795,7 +805,7 @@ class GitFileStorage:
 
         # First, ensure that we don't have more than max_concurrent_clones clones running at the same time
         async with self.semaphore:
-            logger.info(f"________ clone_or_retrieve_repository: <<<< semaphore acquired >>>>")
+            logger.debug(f"________ clone_or_retrieve_repository: <<<< semaphore acquired >>>>")
             # Second, ensure global mutual exclusion for the origin_url
             async with self._git_repo_lock(origin_url):
                 try:
@@ -805,18 +815,18 @@ class GitFileStorage:
                     tx.source_exists  = await self.file_system.exists(source_path)
                     tx.cold_storage_exists = await self.cold_storage.repository_exists(origin_url)
                     tx.is_cloned = await self.cache_manager.is_cloned(origin_url)
-                    logger.info(f"________ clone_or_retrieve_repository: replica_exists={tx.replica_exists}, source_exists={tx.source_exists}, cold_storage_exists={tx.cold_storage_exists}")
+                    logger.debug(f"________ clone_or_retrieve_repository: replica_exists={tx.replica_exists}, source_exists={tx.source_exists}, cold_storage_exists={tx.cold_storage_exists}")
 
                     if not tx.source_exists and tx.cold_storage_exists:
-                        logger.info(f"________ clone_or_retrieve_repository: retrieving repository from cold storage")
+                        logger.debug(f"________ clone_or_retrieve_repository: retrieving repository from cold storage")
                         await self.cold_storage.retrieve_repository(origin_url, source_path)
                         tx.retrieved_from_cold_storage = True
-                        logger.info(f"________ clone_or_retrieve_repository: repository retrieved from cold storage")
+                        logger.debug(f"________ clone_or_retrieve_repository: repository retrieved from cold storage")
 
                     if not tx.source_exists and not tx.cold_storage_exists:
                         # Clone the repository to EFS: Run git clone in a thread pool
                         # Shallow clone for speed in CI/test runs.
-                        logger.info("________ clone_or_retrieve_repository: cloning repository to EFS")
+                        logger.debug("________ clone_or_retrieve_repository: cloning repository to EFS")
 
                         def _clone_repo():
                             # Full clone required to ensure all commits exist locally.
@@ -830,38 +840,38 @@ class GitFileStorage:
 
                         await call_async(_clone_repo)
                         tx.cloned_to_efs = True
-                        logger.info(f"________ clone_or_retrieve_repository: repository cloned to EFS")
-                        logger.info(f"________ clone_or_retrieve_repository: adding source reference to cache")
+                        logger.debug(f"________ clone_or_retrieve_repository: repository cloned to EFS")
+                        logger.debug(f"________ clone_or_retrieve_repository: adding source reference to cache")
                         await self.add_reference(origin_url, vmr_id)
                         tx.added_source_reference = True
-                        logger.info(f"________ clone_or_retrieve_repository: reference added to cache")
+                        logger.debug(f"________ clone_or_retrieve_repository: reference added to cache")
 
                     if not tx.cold_storage_exists:
                         # Store in S3 cold storage
-                        logger.info(f"________ clone_or_retrieve_repository: storing repository in cold storage")
+                        logger.debug(f"________ clone_or_retrieve_repository: storing repository in cold storage")
                         await self.cold_storage.store_repository(origin_url, source_path)
                         tx.stored_in_cold_storage = True
-                        logger.info(f"________ clone_or_retrieve_repository: repository stored in cold storage")
+                        logger.debug(f"________ clone_or_retrieve_repository: repository stored in cold storage")
 
                     if not tx.is_cloned:
-                        logger.info(f"________ clone_or_retrieve_repository: marking repository as cloned")
+                        logger.debug(f"________ clone_or_retrieve_repository: marking repository as cloned")
                         await self.cache_manager.mark_as_cloned(origin_url)
                         tx.updated_cache = True
-                        logger.info(f"________ clone_or_retrieve_repository: repository marked as cloned")
+                        logger.debug(f"________ clone_or_retrieve_repository: repository marked as cloned")
 
                     if not tx.replica_exists:
-                        logger.info(f"________ clone_or_retrieve_repository: creating replica path in EFS and copying source to it")
+                        logger.debug(f"________ clone_or_retrieve_repository: creating replica path in EFS and copying source to it")
                         await call_async(
                             lambda: shutil.copytree(source_path, replica_path, dirs_exist_ok=True)
                         )
                         tx.created_replica_path = True
-                        logger.info(f"________ clone_or_retrieve_repository: replica path created")
-                        logger.info(f"________ clone_or_retrieve_repository: adding replica reference to cache")
+                        logger.debug(f"________ clone_or_retrieve_repository: replica path created")
+                        logger.debug(f"________ clone_or_retrieve_repository: adding replica reference to cache")
                         await self.add_reference(
                             f"{origin_url}_{replica_id}", vmr_id
                         )  # Add a system reference for the replica
                         tx.added_replica_reference = True
-                        logger.info(f"________ clone_or_retrieve_repository: replica reference added to cache")
+                        logger.debug(f"________ clone_or_retrieve_repository: replica reference added to cache")
 
                     # --------------------------------------------------
                     # Optional branch checkout
@@ -871,12 +881,12 @@ class GitFileStorage:
                         try:
                             branch_names = {h.name for h in repo.branches}
                             if branch in branch_names:
-                                logger.info(f"________ clone_or_retrieve_repository: checking out branch {branch}")
+                                logger.debug(f"________ clone_or_retrieve_repository: checking out branch {branch}")
                                 await call_async(
                                     lambda: repo.git.checkout(branch)
                                 )
                                 tx.checked_out_branch = True
-                                logger.info(f"________ clone_or_retrieve_repository: branch {branch} checked out")
+                                logger.debug(f"________ clone_or_retrieve_repository: branch {branch} checked out")
                             else:
                                 # Get list of available branches for better error message
                                 available_branches = [h.name for h in repo.branches]
@@ -901,12 +911,12 @@ class GitFileStorage:
                         try:
                             # Verify commit exists – rev-parse will throw if unknown
                             repo.git.rev_parse("--verify", commit)
-                            logger.info(f"________ clone_or_retrieve_repository: checking out commit {commit}")
+                            logger.debug(f"________ clone_or_retrieve_repository: checking out commit {commit}")
                             await call_async(
                                 lambda: repo.git.checkout(commit, force=True)
                             )
                             tx.checked_out_commit = True
-                            logger.info(f"________ clone_or_retrieve_repository: commit {commit} checked out")
+                            logger.debug(f"________ clone_or_retrieve_repository: commit {commit} checked out")
                         except GitCommandError:
                             logger.warning(f"Commit '{commit}' not found in repo - skipping checkout")
 
@@ -914,7 +924,7 @@ class GitFileStorage:
                     if not tx.source_exists and not tx.cold_storage_exists:
                         assert tx.cloned_to_efs
                         self.metrics.clone_counter.labels(origin_url=origin_url).inc()
-                        logger.info(f"________ clone_or_retrieve_repository: clone counter incremented")
+                        logger.debug(f"________ clone_or_retrieve_repository: clone counter incremented")
 
                     # Whether or not we checked out a specific commit, at this
                     # point the replica is ready for use.
@@ -960,7 +970,7 @@ class GitFileStorage:
 
             # Remove from S3 if it exists
             if tx.checked_out_branch or tx.checked_out_commit:
-                logger.info(f"________ clone_or_retrieve_repository: Checked out branch or commit. Nothing to undo.")
+                logger.debug(f"________ clone_or_retrieve_repository: Checked out branch or commit. Nothing to undo.")
 
         except Exception as cleanup_error:
             logger.error(f"Error during cleanup for {tx.origin_url}: {cleanup_error!s}")

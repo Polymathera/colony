@@ -245,7 +245,7 @@ class CacheAwareActionPlanner(ActionPlanner):
         learned_patterns = None
         if self.learning_policy:
             learned_patterns = await self.learning_policy.get_applicable_patterns(
-                current_plan.goals, planning_context
+                planning_context
             )
 
         cache_context = current_plan.cache_context if hasattr(current_plan, "cache_context") else None

@@ -3748,6 +3748,13 @@ class AgentManagerBase:
 
         # Create instance
         try:
+            # Propagate tenant_id and group_id from metadata to Agent fields
+            # so page graph lookups use the correct keys.
+            extra_fields: dict[str, Any] = {}
+            if isinstance(metadata, AgentMetadata):
+                extra_fields["tenant_id"] = metadata.tenant_id
+                if metadata.group_id:
+                    extra_fields["group_id"] = metadata.group_id
             agent = agent_class(
                 agent_id=agent_id,
                 agent_type=agent_class_id,
@@ -3756,6 +3763,7 @@ class AgentManagerBase:
                 bound_pages=bound_pages,
                 metadata=metadata,
                 resource_requirements=resource_requirements,
+                **extra_fields,
             )
             return agent
         except Exception as e:

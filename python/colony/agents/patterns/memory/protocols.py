@@ -31,7 +31,6 @@ from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from ...base import Agent
-    from ...blackboard.types import BlackboardEntry
     from .types import (
         MemoryQuery,
         RetrievalContext,
@@ -41,7 +40,7 @@ if TYPE_CHECKING:
         MemorySubscription,
     )
 
-from ...blackboard.types import BlackboardEvent, KeyPatternFilter
+from ...blackboard.types import BlackboardEntry, BlackboardEvent, KeyPatternFilter
 
 # =============================================================================
 # Storage Backend Protocol
@@ -98,7 +97,7 @@ class StorageBackend(Protocol):
         """
         ...
 
-    async def read(self, key: str) -> "BlackboardEntry | None":
+    async def read(self, key: str) -> BlackboardEntry | None:
         """Read a single entry by key.
 
         Args:
@@ -115,7 +114,7 @@ class StorageBackend(Protocol):
         tags: set[str] | None = None,
         time_range: tuple[float, float] | None = None,
         limit: int = 100,
-    ) -> list["BlackboardEntry"]:
+    ) -> list[BlackboardEntry]:
         """Query entries by pattern, tags, or time range.
 
         Args:
@@ -368,9 +367,9 @@ class ConsolidationTransformer(ABC, Generic[TSource, TTarget]):
     @abstractmethod
     async def consolidate(
         self,
-        entries: list["BlackboardEntry"],
-        context: "ConsolidationContext",
-    ) -> list["BlackboardEntry"]:
+        entries: list[BlackboardEntry],
+        context: ConsolidationContext,
+    ) -> list[BlackboardEntry]:
         """Consolidate entries into fewer, more abstract entries.
         Transform source entries into target entries.
 
@@ -393,27 +392,43 @@ class IdentityConsolidationTransformer(ConsolidationTransformer[TSource, TSource
     """No-op transformer that passes data through unchanged.
 
     Use this for simple memory forwarding without modification.
+    Entries from the blackboard may have serialized (dict) values;
+    these are re-wrapped into MemoryRecord to satisfy the contract.
     """
 
     async def consolidate(
         self,
-        entries: list["BlackboardEntry"],
-        context: "ConsolidationContext",
+        entries: list[BlackboardEntry],
+        context: ConsolidationContext,
     ) -> list[BlackboardEntry]:
-        """Pass through unchanged."""
-        return [
-            BlackboardEntry(
+        """Pass through unchanged, ensuring values satisfy the contract."""
+        from .types import MemoryRecord
+
+        result = []
+        for entry in entries:
+            value = entry.value
+            if not hasattr(value, "get_blackboard_key"):
+                if isinstance(value, str):
+                    value = MemoryRecord(content={"text": value}, tags=entry.tags)
+                elif isinstance(value, dict):
+                    value = MemoryRecord(content=value, tags=entry.tags)
+                else:
+                    raise TypeError(
+                        f"IdentityConsolidationTransformer: entry.value is "
+                        f"{type(value).__name__}, expected BaseModel with "
+                        f"get_blackboard_key or dict/str for auto-wrapping."
+                    )
+            result.append(BlackboardEntry(
                 key=entry.key,
-                value=entry.value,
+                value=value,
                 version=entry.version,
                 created_at=entry.created_at,
                 updated_at=entry.updated_at,
                 created_by=entry.created_by,
                 tags=entry.tags,
                 metadata=entry.metadata,
-            )
-            for entry in entries
-        ]
+            ))
+        return result
 
 
 class SummarizingTransformer(ConsolidationTransformer[TSource, TTarget]):
@@ -449,8 +464,8 @@ class SummarizingTransformer(ConsolidationTransformer[TSource, TTarget]):
 
     async def consolidate(
         self,
-        entries: list["BlackboardEntry"],
-        context: "ConsolidationContext",
+        entries: list[BlackboardEntry],
+        context: ConsolidationContext,
     ) -> list[BlackboardEntry]:
         """Summarize source entries using LLM with the configured prompt."""
         if not entries:
@@ -481,9 +496,15 @@ Summary:"""
         all_tags.add("summary")
         all_tags.add("consolidated")
 
+        from .types import MemoryRecord
+        summary_record = MemoryRecord(
+            content={"summary": summary_text},
+            tags=all_tags,
+        )
+
         return [BlackboardEntry(
-            key="",  # Key will be set by the caller
-            value=summary_text,
+            key="",  # Key set by memory capability via get_blackboard_key
+            value=summary_record,
             tags=all_tags,
             metadata={
                 "transformer": "SummarizingTransformer",
@@ -515,10 +536,12 @@ class FilteringTransformer(ConsolidationTransformer[TSource, TTarget]):
 
     async def consolidate(
         self,
-        entries: list["BlackboardEntry"],
-        context: "ConsolidationContext",
-    ) -> list["BlackboardEntry"]:
+        entries: list[BlackboardEntry],
+        context: ConsolidationContext,
+    ) -> list[BlackboardEntry]:
         """Filter entries based on criteria."""
+        from .types import MemoryRecord
+
         results = []
 
         for entry in entries:
@@ -535,9 +558,23 @@ class FilteringTransformer(ConsolidationTransformer[TSource, TTarget]):
             if self.excluded_tags and self.excluded_tags.intersection(entry.tags):
                 continue
 
+            # Re-wrap serialized values to satisfy the contract
+            value = entry.value
+            if not hasattr(value, "get_blackboard_key"):
+                if isinstance(value, str):
+                    value = MemoryRecord(content={"text": value}, tags=entry.tags)
+                elif isinstance(value, dict):
+                    value = MemoryRecord(content=value, tags=entry.tags)
+                else:
+                    raise TypeError(
+                        f"FilteringTransformer: entry.value is "
+                        f"{type(value).__name__}, expected BaseModel with "
+                        f"get_blackboard_key or dict/str for auto-wrapping."
+                    )
+
             results.append(BlackboardEntry(
                 key=entry.key,
-                value=entry.value,
+                value=value,
                 version=entry.version,
                 created_at=entry.created_at,
                 updated_at=entry.updated_at,
@@ -704,7 +741,7 @@ class UtilityScorer(Protocol):
 
     async def score(
         self,
-        entry: "BlackboardEntry",
+        entry: BlackboardEntry,
         context: dict[str, Any],
     ) -> float:
         """Score the utility of an entry.
@@ -1200,8 +1237,8 @@ class IdentityConsolidationTransformer:
 
     async def consolidate(
         self,
-        entries: list["BlackboardEntry"],
-        context: "ConsolidationContext",
-    ) -> list["BlackboardEntry"]:
+        entries: list[BlackboardEntry],
+        context: ConsolidationContext,
+    ) -> list[BlackboardEntry]:
         """Pass through unchanged."""
         return entries
