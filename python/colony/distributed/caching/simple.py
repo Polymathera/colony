@@ -286,6 +286,13 @@ class DistributedSimpleCache:
                 return zlib.decompress(value)
         return value
 
+    @staticmethod
+    def _json_default(obj: Any) -> Any:
+        """Handle non-JSON-serializable types (e.g., set → list)."""
+        if isinstance(obj, set):
+            return list(obj)
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
     def _serialize(self, data: Any) -> bytes | None:
         """Serialize value with proper error handling
 
@@ -300,7 +307,7 @@ class DistributedSimpleCache:
         ).time():
             try:
                 if self.config.serialization_format == "json":
-                    serialized = json.dumps(data).encode()
+                    serialized = json.dumps(data, default=self._json_default).encode()
                 elif self.config.serialization_format == "numpy":
                     if not isinstance(data, np.ndarray):
                         logger.error("Data is not a numpy array")

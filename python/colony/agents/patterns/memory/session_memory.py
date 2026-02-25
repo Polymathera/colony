@@ -154,7 +154,7 @@ class SessionMemoryCapability(MemoryCapability):
     async def store(
         self,
         data: str | dict[str, Any] | BaseModel,
-        tags: set[str] | None = None,
+        tags: list[str] | None = None,
         ttl_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> str:
@@ -317,7 +317,7 @@ class SessionMemoryCapability(MemoryCapability):
     async def forget(
         self,
         keys: list[str] | None = None,
-        tags: set[str] | None = None,
+        tags: list[str] | None = None,
         older_than_seconds: float | None = None,
     ) -> int:
         """Forget memories with automatic session scoping.

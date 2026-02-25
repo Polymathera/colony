@@ -188,7 +188,7 @@ class WorkingMemoryCapability(MemoryCapability):
     async def store(
         self,
         data: str | dict[str, Any] | BaseModel,
-        tags: set[str] | None = None,
+        tags: list[str] | None = None,
         ttl_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> str:

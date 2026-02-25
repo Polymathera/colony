@@ -548,7 +548,7 @@ class MemoryCapability(AgentCapability):
     async def store(
         self,
         data: str | BaseModel | dict[str, Any],
-        tags: set[str] | None = None,
+        tags: list[str] | None = None,
         ttl_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> str:
@@ -695,7 +695,7 @@ class MemoryCapability(AgentCapability):
     async def forget(
         self,
         keys: list[str] | None = None,
-        tags: set[str] | None = None,
+        tags: list[str] | None = None,
         older_than_seconds: float | None = None,
     ) -> int:
         """Forget memories (conscious deletion).
