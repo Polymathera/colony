@@ -2,7 +2,8 @@
 
 This module provides shared types for memory capabilities:
 - MemoryQuery: Query parameters for recalling memories
-- MemorySubscription: Configuration for listening to data typesto ingest from other scopes (subscriptions)
+- MemorySubscription: Configuration for listening to data types to ingest from other scopes (subscriptions)
+- MemoryRecord: Generic container for LLM-produced dict data (auto-wraps in store())
 - MemoryProducerConfig: Configuration for hook-based memory capture
 - MaintenanceResult: Result of maintenance operations
 - RetrievalContext: Context for goal-aware retrieval
@@ -13,6 +14,7 @@ This module provides shared types for memory capabilities:
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Awaitable, Literal
@@ -84,6 +86,48 @@ class MemoryQuery(BaseModel):
         default=None,
         description="Only return memories created within this time window"
     )
+
+
+class MemoryRecord(BaseModel):
+    """Generic container for storing arbitrary data in the memory system.
+
+    When the LLM plans a memory store action, it produces plain JSON dicts.
+    The memory system requires data objects to implement ``get_blackboard_key``.
+    ``MemoryRecord`` bridges this gap: ``MemoryCapability.store()`` auto-wraps
+    raw dicts into a ``MemoryRecord`` so they satisfy the blackboard protocol.
+
+    The blackboard key is deterministic — derived from the sorted tags and a
+    content hash — so identical data+tags always maps to the same key.
+
+    Example::
+
+        record = MemoryRecord(
+            content={"task": "impact_analysis", "repo_id": "my-project"},
+            tags={"task_context", "config"},
+        )
+        key = record.get_blackboard_key("agent-abc:working")
+        # -> "agent-abc:working:record:config+task_context:a1b2c3d4"
+    """
+
+    content: dict[str, Any] = Field(
+        description="The stored data payload.",
+    )
+    tags: set[str] = Field(
+        default_factory=set,
+        description="Tags for categorization and retrieval.",
+    )
+    created_at: float = Field(
+        default_factory=time.time,
+        description="Timestamp when this record was created.",
+    )
+
+    def get_blackboard_key(self, scope_id: str) -> str:
+        """Generate a deterministic blackboard key from tags + content hash."""
+        tag_part = "+".join(sorted(self.tags)) if self.tags else "untagged"
+        # Short content hash for uniqueness within same tags
+        content_bytes = str(sorted(self.content.items())).encode()
+        content_hash = hashlib.sha256(content_bytes).hexdigest()[:8]
+        return f"{scope_id}:record:{tag_part}:{content_hash}"
 
 
 @dataclass

@@ -174,7 +174,7 @@ class MethodWrapperActionExecutor(ActionExecutor):
                 except ValidationError as e:
                     return ActionResult(
                         success=False,
-                        completed=False,
+                        completed=True,
                         error=f"Parameter validation failed: {e}"
                     )
 
@@ -201,7 +201,7 @@ class MethodWrapperActionExecutor(ActionExecutor):
             return result
         except Exception as e:
             logger.exception(f"Failed to execute action {self.action_key}")
-            result = ActionResult(success=False, completed=False, error=str(e))
+            result = ActionResult(success=False, completed=True, error=str(e))
             return result
 
     async def get_action_description(self) -> str:
@@ -301,7 +301,7 @@ class FunctionWrapperActionExecutor(ActionExecutor):
                 except ValidationError as e:
                     return ActionResult(
                         success=False,
-                        completed=False,
+                        completed=True,
                         error=f"Parameter validation failed: {e}"
                     )
 
@@ -333,7 +333,7 @@ class FunctionWrapperActionExecutor(ActionExecutor):
             logger.exception(f"Error executing function {self.action_key}")
             return ActionResult(
                 success=False,
-                completed=False,
+                completed=True,
                 error=str(e)
             )
 
@@ -486,9 +486,13 @@ def _infer_output_schema(func: Callable) -> type[BaseModel] | None:
     if return_type in (str, int, float, bool):
         return create_model(f"{func.__name__}_Output", value=(return_type, ...))
 
-    # For generic types (list[str], dict[str, Any], etc.), wrap in model
+    # For generic types (list[str], Optional[X], etc.), wrap in model
     origin = get_origin(return_type)
     if origin is not None:
+        # Skip dict returns — they're inherently unstructured and the schema
+        # wrapper would conflict with dict unpacking in output validation.
+        if origin is dict:
+            return None
         return create_model(f"{func.__name__}_Output", value=(return_type, ...))
 
     # For complex types we don't recognize, skip validation
@@ -903,7 +907,7 @@ class ActionDispatcher:
             return await self._dispatch_action(action)
         except Exception as e:
             logger.exception(f"Failed to execute action {getattr(action, 'action_id', 'unknown')}")
-            result = ActionResult(success=False, completed=False, error=str(e))
+            result = ActionResult(success=False, completed=True, error=str(e))
             action.status = ActionStatus.FAILED
             action.result = result
             return result
@@ -957,11 +961,13 @@ class ActionDispatcher:
         #         resolved_params=resolved_params,
         #     )
         # else:
-        if isinstance(executor, MethodWrapperActionExecutor):
+        if isinstance(executor, (MethodWrapperActionExecutor, FunctionWrapperActionExecutor)):
             result = await executor.execute(action, resolved_params)
         else:
             # Fallback for other executor types
             result = await executor.execute(action)
+
+        logger.info(f"______ Action execution result: {result}")
 
         # Update action status
         action.status = ActionStatus.COMPLETED if result.success else ActionStatus.FAILED
@@ -2228,6 +2234,12 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             state.current_plan.status = PlanStatus.COMPLETED
             state.current_plan.completed_at = time.time()
 
+        # Always persist plan state (index, results) — even on failure.
+        # Without this, the re-fetch from blackboard resets the index.
+        await self.plan_blackboard.update_plan(state.current_plan)
+        self.current_plan_id = state.current_plan.plan_id
+        self.current_action_index = state.current_plan.current_action_index
+
         # Handle iteration result
         if not result.success:
             logger.warning(
@@ -2237,8 +2249,6 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             # Check if blocked (may need to wait for dependencies)
             if result.blocked_reason:
                 logger.info(f"Agent {self.agent.agent_id} blocked: {result.blocked_reason}")
-                # Save checkpoint before suspending
-                await self.plan_blackboard.update_plan(state.current_plan)
                 # Suspend agent until dependencies resolved
                 await self.agent.suspend(reason=f"Blocked: {result.blocked_reason}")
                 return ActionPolicyIterationResult(
@@ -2253,13 +2263,6 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
                 action_executed=next_action,
                 result=result,
             )
-
-        # Update plan on blackboard (persists across suspensions)
-        await self.plan_blackboard.update_plan(state.current_plan)
-        # self.current_plan = plan
-        # Sync plan ID and action index
-        self.current_plan_id = state.current_plan.plan_id
-        self.current_action_index = state.current_plan.current_action_index
 
         # Check if plan is complete
         if state.current_plan.is_complete():
@@ -2353,7 +2356,8 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
                         # Return None but don't set complete - we're suspended
                         return None
 
-                # Update blackboard
+                # Persist plan state (results, completed_action_ids).
+                # NOTE: current_action_index is persisted AFTER increment below.
                 await self.plan_blackboard.update_plan(state.current_plan)
 
                 # Sync local state
@@ -2390,10 +2394,15 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             logger.warning(f"      📋 PLAN_STEP: !!! REPLANNING triggered: {decision.reason}")
             await self._replan_horizon(decision)
 
-        # Get next action
+        # Get next action and advance index
         next_action = state.current_plan.actions[state.current_plan.current_action_index]
         state.current_plan.current_action_index += 1
         state.custom["last_action_id"] = next_action.action_id
+
+        # Persist the incremented index so re-fetch from blackboard sees it
+        await self.plan_blackboard.update_plan(state.current_plan)
+        self.current_plan_id = state.current_plan.plan_id
+        self.current_action_index = state.current_plan.current_action_index
 
         logger.warning(
             f"      📋 PLAN_STEP: returning action → id={next_action.action_id} type={next_action.action_type}"
@@ -2418,25 +2427,68 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             await self._plan_blackboard_cached.initialize()
         return self._plan_blackboard_cached
 
-    def _build_system_prompt(self) -> str:
-        """Build stable agent identity prompt from metadata, class docstring, and capabilities."""
-        parts = []
+    async def _build_system_prompt(self) -> str:
+        """Build stable agent identity prompt.
+
+        Uses AgentSelfConcept from ConsciousnessCapability when available,
+        falling back to agent metadata, class docstring, and capabilities.
+        """
+        from ..capabilities.consciousness import ConsciousnessCapability
+
         agent = self.agent
+        parts: list[str] = []
 
-        identity = f"You are {agent.__class__.__name__}"
-        if agent.metadata.role:
-            identity += f" (role: {agent.metadata.role})"
-        identity += f", a {agent.agent_type} agent."
-        parts.append(identity)
+        # Try to get self-concept from ConsciousnessCapability
+        consciousness: ConsciousnessCapability | None = agent.get_capability_by_type(ConsciousnessCapability)
+        self_concept = await consciousness.get_self_concept() if consciousness else None
 
-        doc = agent.__class__.__doc__
-        if doc:
-            parts.append(doc.strip().split('\n\n')[0].strip())
+        if self_concept:
+            # Build from self-concept
+            identity = f"You are {self_concept.name}"
+            if self_concept.role:
+                identity += f", {self_concept.role}"
+            parts.append(identity)
 
-        cap_names = agent.get_capability_names()
-        if cap_names:
-            parts.append(f"Your capabilities: {', '.join(cap_names)}")
+            if self_concept.description:
+                parts.append(self_concept.description)
 
+            if self_concept.identity:
+                parts.append(self_concept.identity)
+
+            if self_concept.goals:
+                parts.append("Goals:\n" + "\n".join(f"- {g}" for g in self_concept.goals))
+
+            if self_concept.constraints:
+                parts.append("Constraints:\n" + "\n".join(f"- {c}" for c in self_concept.constraints))
+
+            if self_concept.capabilities:
+                parts.append(f"Capabilities: {', '.join(self_concept.capabilities)}")
+
+            if self_concept.limitations:
+                parts.append("Limitations:\n" + "\n".join(f"- {l}" for l in self_concept.limitations))
+
+            if self_concept.world_model:
+                parts.append(f"World model: {self_concept.world_model}")
+
+            if self_concept.frame_of_mind:
+                parts.append(f"Frame of mind: {self_concept.frame_of_mind}")
+        else:
+            # Fallback: build from agent metadata and class info
+            identity = f"You are {agent.__class__.__name__}"
+            if agent.metadata.role:
+                identity += f" (role: {agent.metadata.role})"
+            identity += f", a {agent.agent_type} agent."
+            parts.append(identity)
+
+            doc = agent.__class__.__doc__
+            if doc:
+                parts.append(doc.strip().split('\n\n')[0].strip())
+
+            cap_names = agent.get_capability_names()
+            if cap_names:
+                parts.append(f"Your capabilities: {', '.join(cap_names)}")
+
+        # Task parameters (always from metadata — these are per-run, not part of self-concept)
         params = agent.metadata.parameters
         if params:
             param_lines = [f"- {k}: {v}" for k, v in params.items()
@@ -2475,7 +2527,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
 
         # Create new planning context based on current state
         return PlanningContext(
-            system_prompt=self._build_system_prompt(),
+            system_prompt=await self._build_system_prompt(),
             execution_context=execution_context,
             page_ids=list(self.agent.bound_pages) if hasattr(self.agent, 'bound_pages') else [],
             goals=goals,

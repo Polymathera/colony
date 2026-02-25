@@ -153,11 +153,20 @@ class PlanningStrategyPolicy(ABC):
         pass
 
     @staticmethod
-    def _strip_markdown_fences(text: str) -> str:
-        """Strip markdown code fences (```json ... ```) from LLM responses."""
-        stripped = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
-        stripped = re.sub(r"\n?```\s*$", "", stripped)
-        return stripped.strip()
+    def _extract_json(text: str) -> str:
+        """Extract the JSON object from LLM responses that may contain
+        markdown fences, natural language preamble, or trailing text.
+        """
+        # Try extracting from markdown fences first
+        fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+        if fence_match:
+            return fence_match.group(1).strip()
+        # Fall back to outermost { ... }
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return text[start:end + 1]
+        return text.strip()
 
     @staticmethod
     def _format_action_descriptions(planning_context: PlanningContext) -> str:
@@ -229,7 +238,24 @@ class PlanningStrategyPolicy(ABC):
 Break down the goals into a hierarchical structure.
 Each leaf goal should map to one or more of the available actions.
 
-The response must be valid JSON matching the expected schema."""
+Respond with ONLY a JSON object (no markdown fences, no surrounding text) in this exact format:
+
+{{
+  "goal_hierarchy": {{
+    "<goal_id>": {{
+      "goal": "<description of this goal>",
+      "sub_goals": ["<child_goal_id>", ...],
+      "parent": "<parent_goal_id or null>"
+    }},
+    ...
+  }}
+}}
+
+Rules:
+- "goal_hierarchy" is a flat dict keyed by goal ID (not a nested tree).
+- Every node must have a "goal" field (string), a "sub_goals" field (list of goal IDs), and a "parent" field (string or null).
+- Leaf nodes have empty "sub_goals" lists.
+- The root node has "parent": null."""
 
     def _build_action_planning_prompt(
         self,
@@ -259,7 +285,20 @@ The response must be valid JSON matching the expected schema."""
 Create actions for each leaf goal. Each action must use one of the available action types listed above.
 Plan the next {params.planning_horizon} actions.
 
-The response must be valid JSON matching the expected schema."""
+Respond with ONLY a JSON object (no markdown fences, no surrounding text) in this exact format:
+
+{{
+  "reasoning": "<step-by-step reasoning>",
+  "actions": [
+    {{
+      "action_type": "<one of the available action types above>",
+      "description": "<what this action does>",
+      "parameters": {{}},
+      "reasoning": "<why this action is needed>"
+    }},
+    ...
+  ]
+}}"""
 
     def _build_replan_prompt(
         self,
@@ -293,7 +332,21 @@ The response must be valid JSON matching the expected schema."""
 Completed: {len([a for a in plan.actions if a.status.value == 'completed'])}/{len(plan.actions)} actions
 
 Plan the next {params.planning_horizon} actions.
-The response must be valid JSON matching the expected schema."""
+
+Respond with ONLY a JSON object (no markdown fences, no surrounding text) in this exact format:
+
+{{
+  "reasoning": "<why these actions are needed given current progress>",
+  "actions": [
+    {{
+      "action_type": "<one of the available action types above>",
+      "description": "<what this action does>",
+      "parameters": {{}},
+      "reasoning": "<why this action is needed>"
+    }},
+    ...
+  ]
+}}"""
 
     def _parse_plan_response(self, response: Any) -> PlanGenerationResponse:
         """Parse LLM response into PlanGenerationResponse using pydantic."""
@@ -301,12 +354,12 @@ The response must be valid JSON matching the expected schema."""
             response.generated_text if hasattr(response, "generated_text") else str(response)
         )
         # Extract JSON from response
-        text = self._strip_markdown_fences(text)
+        text = self._extract_json(text)
         try:
             # TODO: Extract action parameters and populate ActionSpec properly
             return PlanGenerationResponse.model_validate_json(text)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Failed to parse LLM response as PlanGenerationResponse: {e}")
+            logger.warning(f"Failed to parse LLM response as PlanGenerationResponse:\nRaw response: {text}\nError: {e}")
             # Return minimal valid response
             return PlanGenerationResponse(
                 reasoning=text,
@@ -320,12 +373,12 @@ The response must be valid JSON matching the expected schema."""
             response.generated_text if hasattr(response, "generated_text") else str(response)
         )
         # Extract JSON from response
-        text = self._strip_markdown_fences(text)
+        text = self._extract_json(text)
         try:
             # TODO: Extract action parameters and populate ActionSpec properly
             return ReplanningResponse.model_validate_json(text)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Failed to parse LLM response as ReplanningResponse: {e}")
+            logger.warning(f"Failed to parse LLM response as ReplanningResponse:\nRaw response: {text}\nError: {e}")
             # Return minimal valid response
             return ReplanningResponse(
                 reasoning=text,
@@ -333,24 +386,33 @@ The response must be valid JSON matching the expected schema."""
             )
 
     def _convert_actions(self, action_specs: list[ActionSpec]) -> list[Action]:
-        """Convert ActionSpec objects to Action objects."""
+        """Convert ActionSpec objects to Action objects.
+
+        action_type may be an ActionType enum value (e.g. "tool_use") or a
+        capability action key (e.g. "AgentContextEngine.8dd64d54.inspect_memory_map").
+        Action.action_type is typed ActionType | str, and the dispatcher uses
+        str(action.action_type) for executor lookup, so both forms work.
+        """
         actions = []
         for i, spec in enumerate(action_specs):
+            # Prefer ActionType enum when it matches; otherwise keep the raw
+            # action key string — the dispatcher resolves it against executors.
             try:
-                actions.append(
-                    Action(
-                        action_id=f"action_{int(time.time() * 1000)}_{i}",
-                        agent_id="",  # Will be set by caller
-                        action_type=ActionType(spec.action_type),
-                        description=spec.description,
-                        parameters=spec.parameters,
-                        reasoning=spec.reasoning,
-                        expected_outcome=spec.expected_outcome,
-                    )
+                action_type: ActionType | str = ActionType(spec.action_type)
+            except ValueError:
+                action_type = spec.action_type
+
+            actions.append(
+                Action(
+                    action_id=f"action_{int(time.time() * 1000)}_{i}",
+                    agent_id="",  # Will be set by caller
+                    action_type=action_type,
+                    description=spec.description,
+                    parameters=spec.parameters,
+                    reasoning=spec.reasoning,
+                    expected_outcome=spec.expected_outcome,
                 )
-            except (KeyError, ValueError) as e:
-                logger.warning(f"Failed to convert action {i}: {e}")
-                continue
+            )
         return actions
 
     def _build_planning_prompt(
@@ -458,7 +520,28 @@ The response must be valid JSON matching the expected schema."""
 
 ## Output Format
 
-The response must be valid JSON matching the expected schema. The available action types are specified in the schema.
+Respond with ONLY a JSON object (no markdown fences, no surrounding text) in this exact format:
+
+{{
+  "reasoning": "<step-by-step reasoning>",
+  "goal_hierarchy": {{
+    "<goal_id>": {{
+      "goal": "<description>",
+      "sub_goals": ["<child_id>", ...],
+      "parent": "<parent_id or null>"
+    }},
+    ...
+  }},
+  "actions": [
+    {{
+      "action_type": "<one of the available action types above>",
+      "description": "<what this action does>",
+      "parameters": {{}},
+      "reasoning": "<why this action is needed>"
+    }},
+    ...
+  ]
+}}
 """
 
 
@@ -610,7 +693,20 @@ Replan the next {params.planning_horizon} actions based on:
 2. What's still needed
 3. Any issues encountered
 
-The response must be valid JSON matching the expected schema."""
+Respond with ONLY a JSON object (no markdown fences, no surrounding text) in this exact format:
+
+{{
+  "reasoning": "<why these actions are needed given current progress>",
+  "actions": [
+    {{
+      "action_type": "<one of the available action types above>",
+      "description": "<what this action does>",
+      "parameters": {{}},
+      "reasoning": "<why this action is needed>"
+    }},
+    ...
+  ]
+}}"""
 
 
 class TopDownPlanningStrategy(PlanningStrategyPolicy):
@@ -641,18 +737,12 @@ class TopDownPlanningStrategy(PlanningStrategyPolicy):
         )
 
         # Parse using pydantic
-        # TODO: Use GoalHierarchyDecompositionResponse.model_validate_json() once we ensure the LLM is returning clean JSON without extra text
         try:
             text = decomp_response.generated_text
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start >= 0 and end > start:
-                data = json.loads(text[start:end])
-                decomp_data = GoalHierarchyDecompositionResponse(**data)
-            else:
-                decomp_data = GoalHierarchyDecompositionResponse()
+            json_text = self._extract_json(text)
+            decomp_data = GoalHierarchyDecompositionResponse.model_validate_json(json_text)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Failed to parse decomposition response: {e}")
+            logger.warning(f"Failed to parse decomposition response:\nRaw response: {text}\nError: {e}")
             decomp_data = GoalHierarchyDecompositionResponse()
 
         # Convert to dict format
@@ -757,7 +847,18 @@ class BottomUpPlanningStrategy(PlanningStrategyPolicy):
 
 Actions: {[a.description for a in actions]}
 
-The response must be valid JSON matching the expected schema."""
+Respond with ONLY a JSON object (no markdown fences, no surrounding text) in this exact format:
+
+{{
+  "goal_hierarchy": {{
+    "<goal_id>": {{
+      "goal": "<description of this goal>",
+      "sub_goals": ["<child_goal_id>", ...],
+      "parent": "<parent_goal_id or null>"
+    }},
+    ...
+  }}
+}}"""
 
         hier_response = await self.agent.infer(
             prompt=hierarchy_prompt,
@@ -766,20 +867,13 @@ The response must be valid JSON matching the expected schema."""
             context_page_ids=[],  # TODO: Planning runs only on the prompt. Right?
             json_schema=GoalHierarchyInferenceResponse.model_json_schema(),
         )
-        
-        # TODO: Use GoalHierarchyInferenceResponse.model_validate_json() once we ensure the LLM is returning clean JSON without extra text
-        # Parse using pydantic
+
         try:
             text = hier_response.generated_text
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start >= 0 and end > start:
-                data = json.loads(text[start:end])
-                hier_data = GoalHierarchyInferenceResponse(**data)
-            else:
-                hier_data = GoalHierarchyInferenceResponse()
+            json_text = self._extract_json(text)
+            hier_data = GoalHierarchyInferenceResponse.model_validate_json(json_text)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Failed to parse hierarchy response: {e}")
+            logger.warning(f"Failed to parse hierarchy response:\nRaw response: {text}\nError: {e}")
             hier_data = GoalHierarchyInferenceResponse()
 
         # Convert to dict format

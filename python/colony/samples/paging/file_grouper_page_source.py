@@ -195,12 +195,14 @@ class FileGrouperContextPageSource(ContextPageSource):
                 for shard in result.shards:
                     self.page_graph.add_node(shard.shard_id)
 
-            # File-to-page and page-to-file mappings
+            # File-to-page and page-to-file mappings (normalized paths)
             self.file_to_page = result.file_to_page or {}
             if not self.file_to_page:
+                polymathera = get_polymathera()
                 for shard in result.shards:
                     for seg in shard.metadata.file_segments:
-                        self.file_to_page[seg.file_path] = shard.shard_id
+                        normalized = await polymathera.normalize_file_path(seg.file_path)
+                        self.file_to_page[normalized] = shard.shard_id
 
             ptf: dict[str, list[str]] = defaultdict(list)
             for file_path, page_id in self.file_to_page.items():

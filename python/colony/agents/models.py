@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from pydantic import BaseModel, Field, PrivateAttr
 
 from ..distributed.state_management import SharedState
+from .self_concept import AgentSelfConcept
 
 
 # ============================================================================
@@ -382,6 +383,26 @@ class ConflictResolutionStrategy(str, Enum):
     NEGOTIATION = "negotiation"  # Negotiate between agents
     ESCALATION = "escalation"  # Escalate to higher authority
     REPLAN = "replan"  # Replan one or both conflicting plans
+    STAGGER_EXECUTION = "stagger_execution"  # Stagger execution times to avoid conflict
+
+
+class ConflictSeverity(str, Enum):
+    """Severity levels for plan conflicts."""
+
+    LOW = "low"  # Minor issue, can likely be resolved with simple adjustments
+    MEDIUM = "medium"  # Significant issue, may require substantial changes
+    HIGH = "high"  # Critical issue, likely requires complete replanning
+    CRITICAL = "critical"  # Catastrophic issue, immediate action required
+
+
+class ActionPlanConflict(BaseModel):
+    """Action plan conflict."""
+
+    type: ConflictType
+    description: str
+    severity: ConflictSeverity
+    details: dict[str, Any] = {}
+    recommended_strategy: ConflictResolutionStrategy
 
 
 class PlanScope(str, Enum):
@@ -2513,6 +2534,8 @@ class AgentMetadata(BaseModel):
     group_id: str | None = None
 
     goals: list[str] = Field(default_factory=list)
+
+    self_concept: AgentSelfConcept | None = None
 
     # Optional page binding
     bound_pages: list[str] = Field(default_factory=list)

@@ -23,10 +23,14 @@ from ...models import (
     ActionPlan,
     PlanStatus,
     ConflictType,
+    ConflictSeverity,
+    ActionPlanConflict,
     ConflictResolutionStrategy,
     PlanExecutionRecord,
     PlanningContext,
+    PlanPattern,
 )
+from ...base import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 class PlanningPolicy(ABC):
     """Base protocol for planning policies."""
-    def __init__(self, agent: Any | None = None):
+    def __init__(self, agent: Agent | None = None):
         self.agent = agent
 
     @abstractmethod
@@ -64,7 +68,7 @@ class CacheAwarePlanningPolicy(PlanningPolicy):
 
     Design: Policy is stateless. Page graph and other context are passed in when calling methods.
     """
-    def __init__(self, agent: Any | None = None, cache_capacity: int = 10, query_vcm_state: bool = False):
+    def __init__(self, agent: Agent | None = None, cache_capacity: int = 10, query_vcm_state: bool = False):
         """Initialize cache-aware planning policy.
 
         Args:
@@ -128,7 +132,7 @@ class CacheAwarePlanningPolicy(PlanningPolicy):
         )
 
         # Assign priorities based on graph centrality and VCM state
-        cache_context.working_set_priority = self._calculate_page_priorities(
+        cache_context.working_set_priority = await self._calculate_page_priorities(
             cache_context, page_graph
         )
 
@@ -251,7 +255,7 @@ class CacheAwarePlanningPolicy(PlanningPolicy):
         return optimized
 
     def _find_related_pages_in_graph(
-        self, pages: list[str], page_graph: Any
+        self, pages: list[str], page_graph: nx.DiGraph
     ) -> list[str]:
         """Find pages related to given pages via graph edges.
 
@@ -279,7 +283,7 @@ class CacheAwarePlanningPolicy(PlanningPolicy):
         return list(related)
 
     def _summarize_page_graph(
-        self, working_set: list[str], page_graph: Any
+        self, working_set: list[str], page_graph: nx.DiGraph
     ) -> dict[str, Any]:
         """Summarize page graph for working set.
 
@@ -311,7 +315,7 @@ class CacheAwarePlanningPolicy(PlanningPolicy):
         return summary
 
     def _calculate_spatial_locality(
-        self, working_set: list[str], page_graph: Any
+        self, working_set: list[str], page_graph: nx.DiGraph
     ) -> dict[str, list[str]]:
         """Calculate spatial locality from graph structure.
 
@@ -447,15 +451,13 @@ class LearningPlanningPolicy(PlanningPolicy):
     Per Architecture Principle #2: This is a pluggable policy, NOT a separate planner.
     """
 
-    def __init__(self, agent: Any | None = None, blackboard: Any | None = None):
+    def __init__(self, agent: Agent | None = None):
         """Initialize learning policy.
 
         Args:
-            blackboard: Blackboard instance for accessing execution history
-                       (typically from agent.get_blackboard())
+            agent: Agent instance for accessing blackboard and other capabilities
         """
         super().__init__(agent)
-        self.blackboard = blackboard
         self.history_store = None
         self.pattern_learner = None
         self.cost_trainer = None
@@ -464,10 +466,6 @@ class LearningPlanningPolicy(PlanningPolicy):
         """Initialize policy (load learned patterns, cost models)."""
         logger.info("Initializing LearningPlanningPolicy")
 
-        if not self.blackboard:
-            logger.warning("No blackboard provided - learning features disabled")
-            return
-
         # Initialize learning components
         from .learning import (
             ExecutionHistoryStore,
@@ -475,7 +473,11 @@ class LearningPlanningPolicy(PlanningPolicy):
             CostModelTrainer,
         )
 
-        self.history_store = ExecutionHistoryStore(self.blackboard)
+        self.history_store = ExecutionHistoryStore(
+            blackboard=await self.agent.get_blackboard(
+                scope_id=f"planning_history_{self.agent.agent_id}"
+            )
+        )
         await self.history_store.initialize()
 
         self.pattern_learner = PatternLearner(self.history_store)
@@ -493,7 +495,7 @@ class LearningPlanningPolicy(PlanningPolicy):
     async def get_applicable_patterns(
         self,
         context: PlanningContext
-    ) -> list[Any]:  # list[PlanPattern]
+    ) -> list[PlanPattern]:
         """Get patterns applicable to given goals.
 
         Args:
@@ -515,7 +517,7 @@ class LearningPlanningPolicy(PlanningPolicy):
 
     async def get_similar_plans(
         self, goals: list[str], context: PlanningContext, limit: int = 5
-    ) -> list[dict[str, Any]]:
+    ) -> list[PlanExecutionRecord]:
         """Get similar successful plans from history.
 
         Args:
@@ -535,7 +537,7 @@ class LearningPlanningPolicy(PlanningPolicy):
         similar = await self.history_store.query_by_goal(goal_str, limit=limit)
 
         logger.info(f"Found {len(similar)} similar plans for goals: {goals}")
-        return [record.model_dump() for record in similar]
+        return similar
 
     async def learn_from_execution(
         self, plan: ActionPlan, outcome: dict[str, Any]
@@ -601,14 +603,14 @@ class CacheAwareConflictDetector:
         self.cache_capacity = cache_capacity
         self.page_size = page_size
 
-    async def detect_conflicts(self, plans: list[ActionPlan]) -> list[dict[str, Any]]:
+    async def detect_conflicts(self, plans: list[ActionPlan]) -> list[ActionPlanConflict]:
         """Detect conflicts between plans.
 
         Args:
             plans: List of plans to check for conflicts
 
         Returns:
-            List of conflict descriptions
+            List of action plan conflicts
         """
 
         conflicts = []
@@ -631,12 +633,12 @@ class CacheAwareConflictDetector:
 
         # Calculate severity for each conflict
         for conflict in conflicts:
-            conflict["severity"] = self._calculate_conflict_severity(conflict)
+            conflict.severity = self._calculate_conflict_severity(conflict)
 
         logger.info(f"Detected {len(conflicts)} conflicts between {len(plans)} plans")
         return conflicts
 
-    def _check_resource_exhaustion(self, total_working_set: set[str]) -> dict[str, Any] | None:
+    def _check_resource_exhaustion(self, total_working_set: set[str]) -> ActionPlanConflict | None:
         """Check if total working set exceeds cache capacity.
 
         Args:
@@ -647,16 +649,20 @@ class CacheAwareConflictDetector:
         """
 
         if len(total_working_set) > self.cache_capacity:
-            return {
-                "type": ConflictType.RESOURCE_CONTENTION,
-                "description": f"Total working set ({len(total_working_set)} pages) exceeds cache capacity ({self.cache_capacity} pages)",
-                "total_pages": len(total_working_set),
-                "capacity": self.cache_capacity,
-                "overflow": len(total_working_set) - self.cache_capacity,
-            }
+            return ActionPlanConflict(
+                type=ConflictType.RESOURCE_CONTENTION,
+                description=f"Total working set ({len(total_working_set)} pages) exceeds cache capacity ({self.cache_capacity} pages)",
+                severity=ConflictSeverity.HIGH,
+                details={
+                    "total_pages": len(total_working_set),
+                    "capacity": self.cache_capacity,
+                    "overflow": len(total_working_set) - self.cache_capacity,
+                },
+                recommended_strategy=ConflictResolutionStrategy.STAGGER_EXECUTION,
+            )
         return None
 
-    def _check_cache_contention(self, plan_a: ActionPlan, plan_b: ActionPlan) -> dict[str, Any] | None:
+    def _check_cache_contention(self, plan_a: ActionPlan, plan_b: ActionPlan) -> ActionPlanConflict | None:
         """Check for cache contention between two plans.
 
         Args:
@@ -675,19 +681,22 @@ class CacheAwareConflictDetector:
         # Check if combined working set exceeds capacity
         combined_size = len(pages_a | pages_b)
         if combined_size > self.cache_capacity:
-            return {
-                "type": ConflictType.CACHE_CONTENTION,
-                "description": f"Plans {plan_a.plan_id} and {plan_b.plan_id} have combined working set ({combined_size} pages) exceeding cache capacity",
-                "plan_a_id": plan_a.plan_id,
-                "plan_b_id": plan_b.plan_id,
-                "shared_pages": list(shared_pages),
-                "combined_size": combined_size,
-                "capacity": self.cache_capacity,
-                "overflow": combined_size - self.cache_capacity,
-            }
+            return ActionPlanConflict(
+                type=ConflictType.CACHE_CONTENTION,
+                description=f"Plans {plan_a.plan_id} and {plan_b.plan_id} have combined working set ({combined_size} pages) exceeding cache capacity",
+                plan_a_id=plan_a.plan_id,
+                plan_b_id=plan_b.plan_id,
+                details={
+                    "shared_pages": list(shared_pages),
+                    "combined_size": combined_size,
+                    "capacity": self.cache_capacity,
+                    "overflow": combined_size - self.cache_capacity,
+                },
+                recommended_strategy=ConflictResolutionStrategy.STAGGER_EXECUTION,
+            )
         return None
 
-    def _calculate_conflict_severity(self, conflict: dict[str, Any]) -> str:
+    def _calculate_conflict_severity(self, conflict: ActionPlanConflict) -> ConflictSeverity:
         """Calculate conflict severity.
 
         Args:
@@ -697,33 +706,33 @@ class CacheAwareConflictDetector:
             Severity level: "low", "medium", "high", "critical"
         """
 
-        conflict_type = conflict.get("type")
+        conflict_type = conflict.type
 
         if conflict_type == ConflictType.RESOURCE_CONTENTION:
-            overflow = conflict.get("overflow", 0)
+            overflow = conflict.details.get("overflow", 0)
             overflow_ratio = overflow / self.cache_capacity
 
             if overflow_ratio > 0.5:
-                return "critical"
+                return ConflictSeverity.CRITICAL
             elif overflow_ratio > 0.25:
-                return "high"
+                return ConflictSeverity.HIGH
             elif overflow_ratio > 0.1:
-                return "medium"
+                return ConflictSeverity.MEDIUM
             else:
-                return "low"
+                return ConflictSeverity.LOW
 
         elif conflict_type == ConflictType.CACHE_CONTENTION:
-            overflow = conflict.get("overflow", 0)
+            overflow = conflict.details.get("overflow", 0)
             overflow_ratio = overflow / self.cache_capacity
 
             if overflow_ratio > 0.3:
-                return "high"
+                return ConflictSeverity.HIGH
             elif overflow_ratio > 0.15:
-                return "medium"
+                return ConflictSeverity.MEDIUM
             else:
-                return "low"
+                return ConflictSeverity.LOW
 
-        return "medium"
+        return ConflictSeverity.MEDIUM
 
 
 class CacheAwareConflictResolver:
@@ -736,7 +745,7 @@ class CacheAwareConflictResolver:
     """
 
     async def resolve_cache_contention(
-        self, plan_a: ActionPlan, plan_b: ActionPlan, conflict: dict[str, Any]
+        self, plan_a: ActionPlan, plan_b: ActionPlan, conflict: ActionPlanConflict
     ) -> tuple[ActionPlan, ActionPlan]:
         """Resolve cache contention between two plans.
 
@@ -861,7 +870,7 @@ class ConflictResolver:
     - Partition working sets
     """
 
-    def __init__(self, default_strategy: str = "priority"):
+    def __init__(self, default_strategy: str = ConflictResolutionStrategy.PRIORITY):
         """Initialize conflict resolver.
 
         Args:
@@ -873,7 +882,7 @@ class ConflictResolver:
 
     async def resolve_conflict(
         self,
-        conflict: dict[str, Any],
+        conflict: ActionPlanConflict,
         plans: list[ActionPlan],
         strategy: str | None = None,
     ) -> list[ActionPlan]:
@@ -889,7 +898,7 @@ class ConflictResolver:
         """
 
         strategy = strategy or self.default_strategy
-        conflict_type = conflict.get("type")
+        conflict_type = conflict.type
 
         logger.info(
             f"Resolving {conflict_type} conflict using {strategy} strategy"
@@ -918,7 +927,7 @@ class ConflictResolver:
             return await self._resolve_by_priority(conflict, plans)
 
     async def _resolve_by_priority(
-        self, conflict: dict[str, Any], plans: list[ActionPlan]
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
     ) -> list[ActionPlan]:
         """Resolve conflict by priority ordering.
 
@@ -950,8 +959,8 @@ class ConflictResolver:
                 plan.metadata["delay_reason"] = f"Conflict with higher priority plan {sorted_plans[0].plan_id}"
 
                 # Suspend if severe conflict
-                severity = conflict.get("severity", "medium")
-                if severity in ["high", "critical"]:
+                severity = conflict.severity
+                if severity in [ConflictSeverity.HIGH, ConflictSeverity.CRITICAL]:
                     plan.status = PlanStatus.SUSPENDED
                     plan.blocked_reason = f"Suspended due to {severity} conflict with higher priority plan"
 
@@ -959,7 +968,7 @@ class ConflictResolver:
         return sorted_plans
 
     async def _resolve_by_temporal_staggering(
-        self, conflict: dict[str, Any], plans: list[ActionPlan]
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
     ) -> list[ActionPlan]:
         """Resolve conflict by staggering execution over time.
 
@@ -974,7 +983,7 @@ class ConflictResolver:
         return await self.cache_resolver._stagger_execution(plans)
 
     async def _resolve_by_efficiency(
-        self, conflict: dict[str, Any], plans: list[ActionPlan]
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
     ) -> list[ActionPlan]:
         """Resolve conflict by optimizing resource usage.
 
@@ -986,7 +995,7 @@ class ConflictResolver:
             Modified plans optimized for efficiency
         """
 
-        conflict_type = conflict.get("type")
+        conflict_type = conflict.type
 
         if conflict_type == ConflictType.CACHE_CONTENTION:
             # Use cache-specific resolution
@@ -1002,7 +1011,7 @@ class ConflictResolver:
         return plans
 
     async def _resolve_by_negotiation(
-        self, conflict: dict[str, Any], plans: list[ActionPlan]
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
     ) -> list[ActionPlan]:
         """Resolve conflict through negotiation between agents.
 
@@ -1019,7 +1028,7 @@ class ConflictResolver:
         return await self._resolve_by_priority(conflict, plans)
 
     async def _resolve_by_escalation(
-        self, conflict: dict[str, Any], plans: list[ActionPlan]
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
     ) -> list[ActionPlan]:
         """Escalate conflict to higher authority.
 
@@ -1041,7 +1050,7 @@ class ConflictResolver:
         return plans
 
     async def _resolve_by_replanning(
-        self, conflict: dict[str, Any], plans: list[ActionPlan]
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
     ) -> list[ActionPlan]:
         """Resolve conflict by requesting replanning.
 
@@ -1062,7 +1071,7 @@ class ConflictResolver:
         for i, plan in enumerate(sorted_plans):
             if i > 0:  # Skip highest priority plan
                 plan.metadata["requires_replanning"] = True
-                plan.metadata["replan_reason"] = f"Conflict: {conflict.get('description')}"
+                plan.metadata["replan_reason"] = f"Conflict: {conflict.description}"
 
         logger.info(f"Marked {len(plans) - 1} plans for replanning")
         return sorted_plans
@@ -1099,7 +1108,7 @@ class CoordinationPlanningPolicy:
 
     async def check_conflicts(
         self, plan: ActionPlan, other_plans: list[ActionPlan]
-    ) -> list[dict[str, Any]]:
+    ) -> list[ActionPlanConflict]:
         """Check for conflicts with other plans.
 
         Args:
@@ -1119,7 +1128,7 @@ class CoordinationPlanningPolicy:
         return conflicts
 
     async def resolve_conflict(
-        self, plan: ActionPlan, conflict: dict[str, Any]
+        self, plan: ActionPlan, conflict: ActionPlanConflict
     ) -> ActionPlan | None:
         """Resolve conflict for a plan.
 
@@ -1130,11 +1139,11 @@ class CoordinationPlanningPolicy:
         Returns:
             Modified plan, or None if conflict cannot be resolved
         """
-        conflict_type = conflict.get("type")
+        conflict_type = conflict.type
         logger.info(f"Resolving {conflict_type} conflict for plan {plan.plan_id}")
 
         # Use existing conflict resolver
-        strategy = conflict.get("recommended_strategy", "priority")
+        strategy = conflict.recommended_strategy
         resolved_plans = await self.resolver.resolve_conflict(
             conflict=conflict,
             plans=[plan],

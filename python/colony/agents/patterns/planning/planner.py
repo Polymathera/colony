@@ -184,13 +184,13 @@ class CacheAwareActionPlanner(ActionPlanner):
     async def initialize(self) -> None:
         """Initialize planner and its policies."""
         if self.cache_policy:
-            await self.cache_policy.initialize(self.agent, self.planning_params)
+            await self.cache_policy.initialize()
 
         if self.learning_policy:
-            await self.learning_policy.initialize(self.agent, self.planning_params)
+            await self.learning_policy.initialize()
 
         if self.coordination_policy:
-            await self.coordination_policy.initialize(self.agent, self.planning_params)
+            await self.coordination_policy.initialize()
 
     @override
     async def create_plan(self, planning_context: PlanningContext) -> ActionPlan:
@@ -305,6 +305,7 @@ class CacheAwareActionPlanner(ActionPlanner):
             quality_score = min(1.0, quality_score + 0.1)
 
         # Build outcome dictionary
+        # TODO: Convert this dict to a pydantic model for better structure and validation
         outcome = {
             "status": outcome_status,
             "duration_s": duration_s,
@@ -323,7 +324,8 @@ class CacheAwareActionPlanner(ActionPlanner):
         logger.info(
             f"Learning from plan {plan.plan_id}: {outcome_status} with {success_rate:.1%} success rate"
         )
-        await self.learning_policy.learn_from_execution(plan, outcome)
+        if self.learning_policy:
+            await self.learning_policy.learn_from_execution(plan, outcome)
 
 
 
@@ -352,12 +354,18 @@ async def create_cache_aware_planner(
 
     # Create planning strategy (TopDown works well for code analysis)
     planning_strategy = TopDownPlanningStrategy(agent=agent)
+    # Learn from execution outcomes
+    learning_policy = LearningPlanningPolicy(agent=agent)
+    # Analyze cache needs and update working set
+    cache_policy = CacheAwarePlanningPolicy(agent=agent)
 
     # Create sophisticated planner with policies
     cache_aware_planner = CacheAwareActionPlanner(
         agent=agent,
         planning_strategy=planning_strategy,
         planning_params=planning_params,
+        learning_policy=learning_policy,
+        cache_policy=cache_policy,
         # Policies will be created automatically in Agent.initialize()
         # when metadata doesn't provide them
     )

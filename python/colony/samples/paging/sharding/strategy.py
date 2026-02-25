@@ -584,13 +584,15 @@ class GitRepoShardingStrategy:
             file_graph = file_grouper.get_relationship_graph()
             if file_graph:
                 # Build page graph from file graph
-                page_graph = self._build_page_graph_from_file_graph(file_graph, shards)
+                page_graph = await self._build_page_graph_from_file_graph(file_graph, shards)
 
-                # Build file-to-page mapping for easy access
+                # Build file-to-page mapping using normalized paths (canonical form)
+                polymathera = get_polymathera()
                 file_to_page = {}
                 for shard in shards:
                     for segment in shard.metadata.file_segments:
-                        file_to_page[segment.file_path] = shard.shard_id
+                        normalized = await polymathera.normalize_file_path(segment.file_path)
+                        file_to_page[normalized] = shard.shard_id
 
                 logger.info(
                     f"________ create_shards_with_graph: Extracted page graph: "
@@ -789,7 +791,7 @@ class GitRepoShardingStrategy:
 
         return False
 
-    def _build_page_graph_from_file_graph(
+    async def _build_page_graph_from_file_graph(
         self,
         file_graph: nx.DiGraph,
         shards: list[RepositoryShard],
@@ -807,11 +809,17 @@ class GitRepoShardingStrategy:
         Returns:
             NetworkX DiGraph with page-to-page relationships
         """
-        # Build file-to-page mapping from shards
+        polymathera = get_polymathera()
+
+        # Build file-to-page mapping from shards.
+        # Segment file paths are denormalized (absolute), but graph edges use
+        # normalized paths (via polymathera.normalize_file_path in FileGrouper).
+        # Normalize here so lookups match the graph edge endpoints.
         file_to_page: dict[str, str] = {}
         for shard in shards:
             for segment in shard.metadata.file_segments:
-                file_to_page[segment.file_path] = shard.shard_id
+                normalized = await polymathera.normalize_file_path(segment.file_path)
+                file_to_page[normalized] = shard.shard_id
 
         # Create page graph with nodes
         page_graph = nx.DiGraph()

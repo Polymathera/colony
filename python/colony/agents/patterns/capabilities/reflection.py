@@ -366,7 +366,7 @@ Respond with a structured analysis."""
         # TODO: This should be cached in the ConsciousnessCapability which
         # should be called by the ActionPolicy to get self-concept info into context.
         try:
-            from .self_concept import AgentSelfConcept
+            from ...self_concept import AgentSelfConcept
             from .consciousness import ConsciousnessCapability
             consciousness: ConsciousnessCapability | None = (
                 self.agent.get_capability(ConsciousnessCapability.get_capability_name())

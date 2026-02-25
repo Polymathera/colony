@@ -187,7 +187,7 @@ class WorkingMemoryCapability(MemoryCapability):
     @action_executor(action_key="working_memory_store", planning_summary="Store data in working memory (append-only, token-bounded).")
     async def store(
         self,
-        data: BaseModel,
+        data: BaseModel | dict[str, Any],
         tags: set[str] | None = None,
         ttl_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
@@ -195,9 +195,11 @@ class WorkingMemoryCapability(MemoryCapability):
         """Store data in working memory (append-only).
 
         Updates token count estimate. Does NOT overwrite existing entries.
+        Raw dicts (from LLM-planned actions) are auto-wrapped by the parent
+        ``MemoryCapability.store()`` into a :class:`MemoryRecord`.
 
         Args:
-            data: Data to store (Pydantic model with get_blackboard_key)
+            data: Data to store (Pydantic model with get_blackboard_key, or plain dict)
             tags: Tags for categorization
             ttl_seconds: TTL override
             metadata: Additional metadata
@@ -205,6 +207,12 @@ class WorkingMemoryCapability(MemoryCapability):
         Returns:
             Key under which data was stored
         """
+        # Auto-wrap raw dicts before token estimation (parent.store does the
+        # same, but we need the wrapped object for accurate token counting).
+        if isinstance(data, dict):
+            from .types import MemoryRecord
+            data = MemoryRecord(content=data, tags=tags or set())
+
         # Estimate tokens for this entry
         entry_tokens = self._estimate_tokens(data)
         self._current_tokens += entry_tokens

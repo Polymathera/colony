@@ -21,7 +21,7 @@ from pydantic import Field
 
 from ....distributed import get_polymathera
 from ....distributed.state_management import SharedState, StateManager
-from .self_concept import AgentSelfConcept
+from ...self_concept import AgentSelfConcept
 from ...base import AgentCapability, CapabilityResultFuture
 from ...models import AgentSuspensionState
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
@@ -159,7 +159,9 @@ class ConsciousnessCapability(AgentCapability):
     async def initialize(self) -> None:
         """Initialize the consciousness capability.
 
-        Loads self-concept from storage if available.
+        Loads self-concept from storage if available, otherwise creates a
+        default one from agent metadata so the agent always has identity
+        context after initialization.
         """
         # Try to load existing self-concept
         try:
@@ -168,6 +170,20 @@ class ConsciousnessCapability(AgentCapability):
                 logger.info(f"Loaded self-concept for agent {self.agent.agent_id}")
         except Exception as e:
             logger.debug(f"No existing self-concept for agent {self.agent.agent_id}: {e}")
+
+        # Create default self-concept if none was loaded
+        if self._self_concept is None and self.agent is not None:
+            agent_type = getattr(self.agent, "agent_type", "general")
+            metadata: dict[str, Any] = {}
+            if hasattr(self.agent, "get_capability_names"):
+                metadata["capabilities"] = self.agent.get_capability_names()
+            if hasattr(self.agent, "metadata"):
+                metadata["goals"] = getattr(self.agent.metadata, "goals", [])
+            self._self_concept = await self._create_default_self_concept(
+                agent_id=self.agent.agent_id,
+                agent_type=agent_type,
+                metadata=metadata,
+            )
 
     @property
     def tenant_id(self) -> str:
@@ -258,6 +274,12 @@ class ConsciousnessCapability(AgentCapability):
     ) -> AgentSelfConcept:
         """Create a default self-concept for a new agent.
 
+        Identity is assembled from three sources (highest priority wins):
+        1. ``metadata.parameters["self_concept"]`` — explicit overrides from the
+           spawner (e.g., analysis-specific goals/constraints from ANALYSIS_REGISTRY)
+        2. Agent instance attributes — class name, docstring, metadata.role
+        3. Generic defaults — agent_id prefix, type-based role description
+
         Args:
             agent_id: Agent identifier
             agent_type: Agent type
@@ -266,13 +288,35 @@ class ConsciousnessCapability(AgentCapability):
         Returns:
             Created AgentSelfConcept
         """
+        # Layer 1: generic defaults
+        name = f"Agent {agent_id[:8]}"
+        role = self._get_default_role_for_type(agent_type)
+        description = f"A {agent_type} agent"
+
+        # Layer 2: agent instance attributes
+        if self.agent is not None:
+            name = self.agent.__class__.__name__
+            if self.agent.metadata.role:
+                role = self.agent.metadata.role
+            doc = self.agent.__class__.__doc__
+            if doc:
+                description = doc.strip().split('\n\n')[0].strip()
+
+        # Layer 3: explicit self_concept config from spawner
+        sc_config: dict[str, Any] = {}
+        if self.agent is not None:
+            sc_config = self.agent.metadata.self_concept
+
         self_concept = AgentSelfConcept(
             agent_id=agent_id,
-            name=f"Agent {agent_id[:8]}",
-            role=self._get_default_role_for_type(agent_type),
-            description=f"A {agent_type} agent",
+            name=name,
+            role=role,
+            description=sc_config.description if sc_config else description,
             capabilities=metadata.get("capabilities", []),
-            goals=metadata.get("goals", []),
+            goals=sc_config.goals if sc_config else metadata.get("goals", []),
+            constraints=sc_config.constraints if sc_config else [],
+            limitations=sc_config.limitations if sc_config else [],
+            world_model=sc_config.world_model if sc_config else "",
         )
 
         await self._save_self_concept(self_concept)

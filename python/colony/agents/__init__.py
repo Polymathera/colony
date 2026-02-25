@@ -89,6 +89,14 @@ from .models import (
     ToolParameterSchema,
 )
 
+from .self_concept import (
+    Persona,
+    AgentIntention,
+    AgentProfile,
+    AgentSelfConcept,
+    AgentSkill,
+)
+
 __all__ = [
     # Base
     "Agent",
@@ -137,4 +145,10 @@ __all__ = [
     "ToolCall",
     "ToolMetadata",
     "ToolParameterSchema",
+    # Self-concept
+    "Persona",
+    "AgentIntention",
+    "AgentProfile",
+    "AgentSelfConcept",
+    "AgentSkill",
 ]

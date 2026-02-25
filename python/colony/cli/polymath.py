@@ -164,6 +164,9 @@ class AnalysisType(str, Enum):
 # initialize() method (e.g., ChangeImpactAnalysisAgent extends HypothesisGameAgent
 # which adds HypothesisGameProtocol automatically). The lists here are used by
 # the `describe` and `list` commands to show what each worker provides.
+
+# TODO: This registry should be allowed to be injected using a JSON or Markdown file.
+
 ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
     "impact": {
         "label": "Change Impact Analysis",
@@ -191,6 +194,23 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "HypothesisGameProtocol",  # via HypothesisGameAgent base class
         ],
         "extra_metadata_keys": ["changes", "change_description"],
+        "self_concept": {
+            "description": (
+                "Coordinates change impact analysis across a codebase by spawning "
+                "worker agents, propagating dependency chains, and synthesizing "
+                "a unified impact report."
+            ),
+            "goals": [
+                "Identify all code regions affected by the specified changes",
+                "Propagate impact through multi-hop dependency chains",
+                "Validate critical impacts via hypothesis games",
+                "Produce a ranked, grounded impact report with confidence scores",
+            ],
+            "constraints": [
+                "Every impact claim must be grounded in source code evidence",
+                "Do not hallucinate dependencies that are not in the codebase",
+            ],
+        },
     },
     "slicing": {
         "label": "Program Slicing",
@@ -213,6 +233,21 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "MergeCapability",
         ],
         "extra_metadata_keys": ["slice_criteria"],
+        "self_concept": {
+            "description": (
+                "Coordinates program slicing by distributing slice criteria across "
+                "workers and merging partial slices into minimal complete subsets."
+            ),
+            "goals": [
+                "Extract the minimal code subset that affects the target criteria",
+                "Preserve soundness — never omit statements that influence the target",
+                "Maximize precision — exclude statements irrelevant to the target",
+            ],
+            "constraints": [
+                "Slices must be complete — every data and control dependency on the target must be included",
+                "Do not include code that has no influence path to the slice criterion",
+            ],
+        },
     },
     "compliance": {
         "label": "Compliance Analysis",
@@ -235,6 +270,22 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "MergeCapability",
         ],
         "extra_metadata_keys": ["compliance_types"],
+        "self_concept": {
+            "description": (
+                "Coordinates compliance analysis by distributing license, regulatory, "
+                "and security checks across workers and building obligation graphs."
+            ),
+            "goals": [
+                "Identify all license obligations and compatibility conflicts",
+                "Detect regulatory and security compliance violations",
+                "Build obligation graphs linking requirements to source evidence",
+                "Produce actionable compliance reports with remediation guidance",
+            ],
+            "constraints": [
+                "Every compliance finding must cite the specific license clause or regulation",
+                "Do not make legal conclusions — report obligations and conflicts factually",
+            ],
+        },
     },
     "intent": {
         "label": "Intent Inference",
@@ -259,6 +310,22 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "ConsensusGameProtocol",
         ],
         "extra_metadata_keys": ["granularity"],
+        "self_concept": {
+            "description": (
+                "Coordinates intent inference by distributing analysis across workers "
+                "and building intent graphs that map code to business purposes."
+            ),
+            "goals": [
+                "Infer the business-level purpose behind each code component",
+                "Distinguish business logic from implementation scaffolding",
+                "Detect misalignments between stated intent and actual behavior",
+                "Build intent graphs linking code regions to inferred purposes",
+            ],
+            "constraints": [
+                "Clearly separate high-confidence inferences from speculative ones",
+                "Use consensus game validation for contested intent claims",
+            ],
+        },
     },
     "contracts": {
         "label": "Contract Inference",
@@ -283,6 +350,21 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "HypothesisGameProtocol",
         ],
         "extra_metadata_keys": ["formalism"],
+        "self_concept": {
+            "description": (
+                "Coordinates contract inference by distributing function analysis "
+                "across workers and validating inferred contracts via hypothesis games."
+            ),
+            "goals": [
+                "Infer preconditions, postconditions, and invariants for each function",
+                "Validate contracts against actual code behavior",
+                "Produce specifications at the requested formalism level",
+            ],
+            "constraints": [
+                "Inferred contracts must be consistent with the code — no aspirational specs",
+                "Use hypothesis games to challenge and validate each contract before accepting",
+            ],
+        },
     },
     "basic": {
         "label": "Basic Code Analysis",
@@ -302,6 +384,19 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "ClusterAnalyzerCapability",
         ],
         "extra_metadata_keys": [],
+        "self_concept": {
+            "description": (
+                "Coordinates general-purpose code structure analysis by spawning "
+                "cluster analyzers and synthesizing their findings."
+            ),
+            "goals": [
+                "Analyze code structure, patterns, and relationships across the codebase",
+                "Synthesize findings from individual cluster analyses into a coherent report",
+            ],
+            "constraints": [
+                "Ground all findings in actual code evidence from the analyzed pages",
+            ],
+        },
     },
 }
 
@@ -1099,6 +1194,7 @@ async def run_integration_test(
     from colony.vcm.config import VCMConfig
     from colony.agents.config import AgentSystemConfig
     from colony.agents.sessions import AgentRun
+    from colony.agents import AgentSelfConcept
 
     # Import built-in page source modules to trigger their @register decorators.
     # User-defined page sources from working_dir should also be imported here
@@ -1417,13 +1513,19 @@ async def run_integration_test(
         )
 
         # Build metadata for the coordinator
+        self_concept_config = reg.get("self_concept", {})
         metadata = AgentMetadata(
-            role="coordinator",
+            role=f"{reg['label']} coordinator",
             tenant_id=config.tenant_id,
             session_id=config.session_id,
             run_id=config.run_id,
             goals=[f"Run {reg['label']} on {config.repo_id}"],
             max_iterations=analysis.max_iterations,
+            self_concept=AgentSelfConcept(
+                agent_id="",  # Placeholder — overwritten by ConsciousnessCapability
+                name="",      # Placeholder — overwritten by ConsciousnessCapability
+                **self_concept_config,
+            ) if self_concept_config else None,
             parameters={
                 "repo_id": config.repo_id,
                 "max_agents": analysis.max_agents,
@@ -1441,8 +1543,11 @@ async def run_integration_test(
         )
 
         # Resolve extra capabilities (with warnings for unknown names)
+        # ConsciousnessCapability is always included — agents need identity context for planning.
         all_extra_caps = list(set(
-            analysis.extra_capabilities + config.hierarchy.extra_capabilities
+            ["ConsciousnessCapability"]
+            + analysis.extra_capabilities
+            + config.hierarchy.extra_capabilities
         ))
         capability_paths = []
         for cap_name in all_extra_caps:

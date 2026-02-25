@@ -153,7 +153,7 @@ class SessionMemoryCapability(MemoryCapability):
     @action_executor(action_key="session_memory_store", planning_summary="Store data in session-scoped memory with optional tags.")
     async def store(
         self,
-        data: BaseModel,
+        data: BaseModel | dict[str, Any],
         tags: set[str] | None = None,
         ttl_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
@@ -164,7 +164,7 @@ class SessionMemoryCapability(MemoryCapability):
         the current `session_id` from context.
 
         Args:
-            `data`: Memory data to store (Pydantic model with get_blackboard_key)
+            `data`: Memory data to store (Pydantic model with get_blackboard_key, or plain dict)
             `tags`: Tags for categorization and retrieval
             `ttl_seconds`: TTL override (uses level default if None)
             `metadata`: Additional metadata
@@ -196,7 +196,7 @@ class SessionMemoryCapability(MemoryCapability):
     @action_executor(action_key="session_memory_recall_with_scores", planning_summary="Recall session memories with relevance scores, optionally including cross-session.")
     async def recall_with_scores(
         self,
-        query: MemoryQuery | None = None,
+        query: MemoryQuery | str | None = None,
         lens: str | None = None,
         context: RetrievalContext | None = None,
     ) -> list[ScoredEntry]:
@@ -206,13 +206,18 @@ class SessionMemoryCapability(MemoryCapability):
         by the current session_id from context.
 
         Args:
-            query: Query parameters for filtering/ranking
+            query: Query string or MemoryQuery object for filtering/ranking.
+                LLM planners typically pass a plain string which is auto-wrapped.
             lens: Name of a predefined lens to apply
             context: Retrieval context (goal, agent state) for relevance
 
         Returns:
             List of matching ScoredEntry objects, filtered by session_id
         """
+        if isinstance(query, str):
+            query = MemoryQuery(query=query)
+        elif isinstance(query, dict):
+            query = MemoryQuery(**query)
         session_id = _get_current_session_id()
 
         # Build session-filtered query
@@ -291,14 +296,14 @@ class SessionMemoryCapability(MemoryCapability):
     @action_executor(action_key="session_memory_recall", planning_summary="Recall session memories matching a query.")
     async def recall(
         self,
-        query: MemoryQuery | None = None,
+        query: MemoryQuery | str | None = None,
         lens: str | None = None,
         context: RetrievalContext | None = None,
     ) -> list[BlackboardEntry]:
         """Recall memories with automatic session filtering.
 
         Args:
-            query: Query parameters
+            query: Query string or MemoryQuery object.
             lens: Name of a predefined lens to apply
             context: Retrieval context
 

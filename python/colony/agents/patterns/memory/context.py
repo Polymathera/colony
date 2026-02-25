@@ -185,7 +185,7 @@ class AgentContextEngine(AgentCapability):
     @action_executor(action_key="gather_context", planning_summary="Gather relevant memories across scopes for a query.")
     async def gather_context(
         self,
-        query: MemoryQuery | None = None,
+        query: MemoryQuery | str | None = None,
         scopes: list[str] | None = None,
     ) -> list[BlackboardEntry]:
         """Gather relevant context from memory scopes.
@@ -195,7 +195,8 @@ class AgentContextEngine(AgentCapability):
         underlying memory architecture.
 
         Args:
-            query: Query parameters for filtering/ranking memories
+            query: Query string or MemoryQuery object for filtering/ranking memories.
+                LLM planners typically pass a plain string which is auto-wrapped.
             scopes: Optional list of specific scope IDs to query.
                    If None, queries all scopes of all discovered memory capabilities.
 
@@ -203,11 +204,23 @@ class AgentContextEngine(AgentCapability):
             List of relevant BlackboardEntry objects from all queried scopes.
             Entries are interleaved and sorted by relevance/recency.
         """
+        if isinstance(query, str):
+            query = MemoryQuery(query=query)
+        elif isinstance(query, dict):
+            query = MemoryQuery(**query)
         query = query or MemoryQuery()
         all_entries: list[BlackboardEntry] = []
 
-        # Determine which scopes of memory capabilities to query
+        # Determine which scopes of memory capabilities to query.
+        # Fall back to all scopes if none of the requested scopes match
+        # (LLM planners may guess scope names that don't exist).
         caps_to_query = self.get_capabilities_by_scopes(scopes)
+        if not caps_to_query and scopes:
+            logger.info(
+                f"None of the requested scopes {scopes} exist, "
+                f"falling back to all {len(self._memory_capabilities)} scopes"
+            )
+            caps_to_query = list(self._memory_capabilities)
 
         # Query unified MemoryCapability instances
         results = await asyncio.gather(*[cap.recall(query) for cap in caps_to_query], return_exceptions=True)
@@ -369,7 +382,7 @@ class AgentContextEngine(AgentCapability):
     @action_executor(action_key="gather_full_context", planning_summary="Gather full memory context with statistics and validation.")
     async def gather_full_context(
         self,
-        query: MemoryQuery | None = None,
+        query: MemoryQuery | str | None = None,
         scopes: list[str] | None = None,
         include_repl: bool = True,
     ) -> dict[str, Any]:
@@ -380,7 +393,8 @@ class AgentContextEngine(AgentCapability):
         - REPL variables and code history (if REPLCapability exists)
 
         Args:
-            query: Query parameters for memory retrieval
+            query: Query string or MemoryQuery object for memory retrieval.
+                LLM planners typically pass a plain string which is auto-wrapped.
             scopes: Optional list of specific scope IDs to query
             include_repl: Whether to include REPL context (default: True)
 
@@ -389,7 +403,7 @@ class AgentContextEngine(AgentCapability):
                 - memories: List of BlackboardEntry from memory capabilities
                 - repl: Dict with REPL variables/functions/recent_code (or None)
         """
-        # Gather memory context
+        # Gather memory context (gather_context handles str→MemoryQuery coercion)
         memories = await self.gather_context(query=query, scopes=scopes)
 
         result: dict[str, Any] = {
@@ -407,7 +421,7 @@ class AgentContextEngine(AgentCapability):
     # -------------------------------------------------------------------------
 
     @action_executor(action_key="inspect_memory_map", planning_summary="Get overview of all memory scopes and their relationships.")
-    async def inspect_memory_map(self) -> dict[str, Any]:
+    async def inspect_memory_map(self) -> MemoryMap:
         """Get a complete map of the agent's memory layout.
 
         Provides an overview of all memory scopes, their relationships,
@@ -418,16 +432,14 @@ class AgentContextEngine(AgentCapability):
         - What data might be relevant for your task
 
         Returns:
-            Dict representation of MemoryMap with all scope information
-            and dataflow edges.
+            MemoryMap with all scope information and dataflow edges.
 
         Example use cases:
         - Before complex reasoning: Check what memories are available
         - After failures: Understand if memory might have relevant context
         - Debugging: See where data is stored and how it flows
         """
-        memory_map = await self._build_memory_map()
-        return self._memory_map_to_dict(memory_map)
+        return await self._build_memory_map()
 
     @action_executor(action_key="inspect_scope", planning_summary="Inspect a specific memory scope's entries, stats, and health.")
     async def inspect_scope(
@@ -435,7 +447,7 @@ class AgentContextEngine(AgentCapability):
         scope_id: str,
         include_sample_entries: bool = False,
         sample_limit: int = 5,
-    ) -> dict[str, Any]:
+    ) -> ScopeInspectionResult:
         """Get detailed information about a specific memory scope.
 
         Provides deeper insight into a single scope including:
@@ -450,7 +462,10 @@ class AgentContextEngine(AgentCapability):
             sample_limit: Maximum sample entries to return (1-20)
 
         Returns:
-            Dict with detailed scope information.
+            ScopeInspectionResult with detailed scope information.
+
+        Raises:
+            ValueError: If scope_id is not found in any memory capability.
 
         Use when you need to understand:
         - What kind of data is in a specific scope
@@ -459,7 +474,7 @@ class AgentContextEngine(AgentCapability):
         """
         cap = self.get_capability_by_scope(scope_id)
         if cap is None:
-            return {"error": f"Scope not found: {scope_id}"}
+            raise ValueError(f"Scope not found: {scope_id}")
 
         scope_info = await self._build_scope_info(cap)
         result = ScopeInspectionResult(
@@ -487,7 +502,7 @@ class AgentContextEngine(AgentCapability):
             except Exception as e:
                 logger.warning(f"Failed to get sample entries for {scope_id}: {e}")
 
-        return self._scope_inspection_to_dict(result)
+        return result
 
     @action_executor(action_key="search_memory", planning_summary="Search across memory scopes by text query with optional tag/recency filters.")
     async def search_memory(
@@ -897,57 +912,5 @@ class AgentContextEngine(AgentCapability):
 
         return any(dfs(n) for n in nodes if color[n] == WHITE)
 
-    @staticmethod
-    def _memory_map_to_dict(memory_map: MemoryMap) -> dict[str, Any]:
-        """Convert MemoryMap to a dict suitable for LLM consumption."""
-        scopes_dict = {}
-        for scope_id, info in memory_map.scopes.items():
-            scopes_dict[scope_id] = {
-                "scope_type": info.scope_type,
-                "purpose": info.purpose,
-                "entry_count": info.entry_count,
-                "max_entries": info.max_entries,
-                "ttl_seconds": info.ttl_seconds,
-                "subscribes_to": info.subscribes_to,
-                "subscribers": info.subscribers,
-                "producer_count": info.producer_count,
-                "pending_ingestion_count": info.pending_ingestion_count,
-                "maintenance_policy_count": info.maintenance_policy_count,
-            }
-
-        dataflow = [
-            f"{src} -> {tgt}" for src, tgt in memory_map.dataflow_edges
-        ]
-
-        return {
-            "agent_id": memory_map.agent_id,
-            "total_entries": memory_map.total_entries,
-            "total_pending_ingestion": memory_map.total_pending_ingestion,
-            "scope_count": len(memory_map.scopes),
-            "scopes": scopes_dict,
-            "dataflow": dataflow,
-            "generated_at": memory_map.generated_at,
-        }
-
-    @staticmethod
-    def _scope_inspection_to_dict(result: ScopeInspectionResult) -> dict[str, Any]:
-        """Convert ScopeInspectionResult to a dict for LLM consumption."""
-        info = result.scope_info
-        return {
-            "scope_id": info.scope_id,
-            "scope_type": info.scope_type,
-            "purpose": info.purpose,
-            "entry_count": info.entry_count,
-            "max_entries": info.max_entries,
-            "ttl_seconds": info.ttl_seconds,
-            "subscribes_to": info.subscribes_to,
-            "subscribers": info.subscribers,
-            "producer_count": info.producer_count,
-            "pending_ingestion_count": info.pending_ingestion_count,
-            "retrieval_strategy": result.retrieval_strategy,
-            "maintenance_policies": result.maintenance_policies,
-            "lens_names": result.lens_names,
-            "sample_entries": result.sample_entries,
-        }
 
 

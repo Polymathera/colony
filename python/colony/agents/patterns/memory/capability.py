@@ -547,7 +547,7 @@ class MemoryCapability(AgentCapability):
     @action_executor(action_key="memory_store", planning_summary="Store data in memory with optional tags and TTL.")
     async def store(
         self,
-        data: BaseModel,
+        data: BaseModel | dict[str, Any],
         tags: set[str] | None = None,
         ttl_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
@@ -558,10 +558,14 @@ class MemoryCapability(AgentCapability):
         This action is exposed to the agent action policy for explicit memory storage.
         The agent might want to store insights, conclusions, or important
         observations for later retrieval.
-        The data instance MUST have `get_blackboard_key(scope_id)` method.
+
+        If ``data`` is a raw dict (e.g. from an LLM-planned action), it is
+        automatically wrapped in a :class:`MemoryRecord` which provides the
+        required ``get_blackboard_key`` method.
 
         Args:
-            data: Memory data to store (Pydantic model with get_blackboard_key)
+            data: Memory data to store. Either a Pydantic model with
+                ``get_blackboard_key``, or a plain dict (auto-wrapped).
             tags: Tags for categorization and retrieval
             ttl_seconds: TTL override (uses level default if None)
             metadata: Additional metadata
@@ -569,6 +573,11 @@ class MemoryCapability(AgentCapability):
         Returns:
             Key under which the memory was stored
         """
+        # Auto-wrap raw dicts from LLM-planned actions
+        if isinstance(data, dict):
+            from .types import MemoryRecord
+            data = MemoryRecord(content=data, tags=tags or set())
+
         if not hasattr(data, "get_blackboard_key"):
             raise ValueError(
                 f"Data instance of type {type(data).__name__} must have "
@@ -591,7 +600,6 @@ class MemoryCapability(AgentCapability):
         await self.storage.write(
             key=key,
             value=value,
-            agent_id=self.agent.agent_id,
             metadata=entry_metadata,
             tags=tags,
             ttl_seconds=effective_ttl,
@@ -607,7 +615,7 @@ class MemoryCapability(AgentCapability):
     @action_executor(action_key="memory_recall_with_scores", planning_summary="Recall memories with relevance scores. Supports query filtering, lenses, and goal-aware retrieval.")
     async def recall_with_scores(
         self,
-        query: MemoryQuery | None = None,
+        query: MemoryQuery | str | None = None,
         lens: str | None = None,
         context: RetrievalContext | None = None,
     ) -> list[ScoredEntry]:
@@ -623,13 +631,18 @@ class MemoryCapability(AgentCapability):
         - Goal-aware retrieval via RetrievalContext
 
         Args:
-            query: Query parameters for filtering/ranking
+            query: Query string or MemoryQuery object for filtering/ranking.
+                LLM planners typically pass a plain string which is auto-wrapped.
             lens: Name of a predefined lens to apply
             context: Retrieval context (goal, agent state) for relevance
 
         Returns:
             List of matching ScoredEntry objects with score breakdowns
         """
+        if isinstance(query, str):
+            query = MemoryQuery(query=query)
+        elif isinstance(query, dict):
+            query = MemoryQuery(**query)
         effective_query = query or MemoryQuery()
 
         # Apply lens if specified
@@ -653,14 +666,15 @@ class MemoryCapability(AgentCapability):
     @action_executor(action_key="memory_recall", planning_summary="Recall memories matching a query, lens, or retrieval context.")
     async def recall(
         self,
-        query: MemoryQuery | None = None,
+        query: MemoryQuery | str | None = None,
         lens: str | None = None,
         context: RetrievalContext | None = None,
     ) -> list[BlackboardEntry]:
         """Recall memories (conscious read).
 
         Args:
-            query: Query parameters
+            query: Query string or MemoryQuery object.
+                LLM planners typically pass a plain string which is auto-wrapped.
             lens: Name of a predefined lens to apply
             context: Retrieval context (goal, agent state) for relevance
 
@@ -1026,7 +1040,7 @@ class MemoryCapability(AgentCapability):
 
                 # Check if ingestion policy triggers
                 pending_as_entries = [p.entry for p in self._pending_entries]
-                should_ingest = await self._ingestion_policy.should_transfer(
+                should_ingest = await self._ingestion_policy.trigger.should_transfer(
                     pending_as_entries,
                     self._last_ingestion_time,
                 )

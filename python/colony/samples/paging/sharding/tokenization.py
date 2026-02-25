@@ -17,11 +17,12 @@ from colony.distributed.config import ConfigComponent, register_polymathera_conf
 from colony.distributed import get_polymathera
 from colony.distributed.metrics.common import BaseMetricsMonitor
 from colony.utils.retry import standard_retry
+from colony.utils import run_method_once, setup_logger
 
 from .languages.utils import detect_language
 from .analyzers.base import FileContentCache
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 
 class TokenizationStrategy(Enum):
@@ -217,6 +218,11 @@ class TokenManager:
             file_path, repo_id, commit_hash, return_tokens=False
         )
 
+    @run_method_once
+    def _warn_file_too_large(self, extension: str) -> None:
+        """Warn if a file is too large"""
+        logger.warning(f"File too large with extension: {extension}")
+
     @standard_retry(logger, retry=retry_if_exception_type(IOError))
     async def get_file_tokens(
         self,
@@ -271,7 +277,9 @@ class TokenManager:
                 token_count > self.config.max_tokens_per_file
                 and self.config.skip_large_files
             ):
-                raise ValueError(f"File too large: {file_path} ({token_count} tokens)")
+                self._warn_file_too_large(file_path.split(".")[-1])
+                return [] if return_tokens else 0
+                # raise ValueError(f"File too large: {file_path} ({token_count} tokens)")
 
             # Update metrics
             self.metrics.token_counts.labels(detect_language(file_path)).observe(

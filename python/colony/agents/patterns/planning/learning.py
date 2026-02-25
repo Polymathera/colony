@@ -16,6 +16,7 @@ from ...models import (
     PlanPattern,
     PlanningContext,
 )
+from ...blackboard import EnhancedBlackboard
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class ExecutionHistoryStore:
     Note: Requires a blackboard instance to be provided (typically from agent.get_blackboard()).
     """
 
-    def __init__(self, blackboard: Any):
+    def __init__(self, blackboard: EnhancedBlackboard):
         """Initialize execution history store.
 
         Args:
