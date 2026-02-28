@@ -67,7 +67,7 @@ from logging import getLogger
 from ....base import Agent, CapabilityResultFuture
 from ..state import GameOutcome
 from ...models import Hypothesis
-from ....models import AgentSpawnSpec, AgentMetadata
+from ....models import AgentMetadata
 from ...actions.policies import action_executor
 from .capabilities import (
     HypothesisGameProtocol,
@@ -229,19 +229,19 @@ class HypothesisCoordinatorAgent(Agent):
         # Get role -> capabilities mapping from metadata
         role_capabilities: dict[str, list[str]] = self.metadata.get("role_capabilities", {})
 
-        role_to_agent_type = {
-            "proposer": "polymathera.colony.agents.games.hypothesis_game.HypothesisProposerAgent",
-            "skeptic": "polymathera.colony.agents.games.hypothesis_game.HypothesisSkepticAgent",
-            "grounder": "polymathera.colony.agents.games.hypothesis_game.HypothesisGrounderAgent",
-            "arbiter": "polymathera.colony.agents.games.hypothesis_game.HypothesisArbiterAgent",
+        role_to_agent_class = {
+            "proposer": HypothesisProposerAgent,
+            "skeptic": HypothesisSkepticAgent,
+            "grounder": HypothesisGrounderAgent,
+            "arbiter": HypothesisArbiterAgent,
         }
 
         for agent_id, role in participants.items():
             if agent_id == self.agent_id:
                 continue  # Don't spawn self
 
-            agent_type = role_to_agent_type.get(role)
-            if not agent_type:
+            agent_cls = role_to_agent_class.get(role)
+            if not agent_cls:
                 continue
 
             child_config = HypothesisGameConfig(
@@ -255,9 +255,8 @@ class HypothesisCoordinatorAgent(Agent):
             agent_caps = role_capabilities.get(role, [])
 
             spawned_id = await self.spawn_child_agents(
-                agent_specs=[AgentSpawnSpec(
+                blueprints=[agent_cls.bind(
                     agent_id=agent_id,
-                    agent_type=agent_type,
                     capabilities=agent_caps,
                     metadata=AgentMetadata(parameters={"game_config": child_config.model_dump()}),
                 )],
@@ -377,9 +376,8 @@ async def run_hypothesis_game(
 
     # Spawn coordinator agent
     await owner.spawn_child_agents(
-        agent_specs=[AgentSpawnSpec(
+        blueprints=[HypothesisCoordinatorAgent.bind(
             agent_id=coordinator_id,
-            agent_type="polymathera.colony.agents.games.hypothesis_game.HypothesisCoordinatorAgent",
             capabilities=coordinator_caps,
             metadata=AgentMetadata(parameters={
                 "game_config": config.model_dump(),

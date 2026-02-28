@@ -32,7 +32,7 @@ from typing import Any, TYPE_CHECKING
 from overrides import override
 
 from ...base import AgentCapability, AgentHandle
-from ...models import AgentSpawnSpec, AgentMetadata, AgentSuspensionState
+from ...models import AgentMetadata, AgentSuspensionState
 from ..actions.policies import action_executor
 
 if TYPE_CHECKING:
@@ -131,11 +131,17 @@ class AgentPoolCapability(AgentCapability):
                     group_id=self.agent.group_id,
                     parent_agent_id=self.agent.agent_id,
                 )
+            # Resolve agent class from fully qualified path
+            import importlib
+
+            module_path, class_name = agent_type.rsplit(".", 1)
+            module = importlib.import_module(module_path)
+            agent_cls = getattr(module, class_name)
+
             handles: list[AgentHandle] = await self.agent.spawn_child_agents(
-                agent_specs=[
-                    AgentSpawnSpec(
+                blueprints=[
+                    agent_cls.bind(
                         agent_type=agent_type,
-                        capability_types=capabilities,
                         bound_pages=bound_pages or [],
                         metadata=metadata,
                     )

@@ -19,7 +19,7 @@ Programming Model (AgentHandle Pattern):
 ```python
 # Spawn objective guard agent with handle
 handle = await owner.spawn_child_agents(
-    agent_specs=[AgentSpawnSpec(
+    blueprints=[AgentBlueprint(
         agent_id=f"objective_guard_agent_{owner.tenant_id}_{uuid4().hex[:8]}",
         agent_type="...ObjectiveGuardAgent",
         tenant_id=owner.tenant_id,
@@ -59,7 +59,7 @@ from ..capabilities.goal_alignment import (
 from ..actions.policies import (
     CacheAwareActionPolicy,
 )
-from ...models import AgentSpawnSpec, AgentMetadata
+from ...models import AgentMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -150,14 +150,11 @@ async def spawn_objective_guard_agent(
     logger.info(f"Spawning ObjectiveGuardAgent {agent_id}...")
 
     return await owner.spawn_child_agents(
-        agent_specs=[AgentSpawnSpec(
+        blueprints=[ObjectiveGuardAgent.bind(
             agent_id=agent_id,
-            agent_type="polymathera.colony.agents.patterns.meta_agents.goal_alignment.ObjectiveGuardAgent",
-            # agent_type="polymathera.colony.agents.base.Agent",
-            # action_policy="polymathera.colony.agents.patterns.meta_agents.goal_alignment.ObjectiveGuardPolicy",
             bound_pages=owner.bound_pages,
-            capability_types=[ObjectiveGuardCapability],
         )],
+        capability_types=[[ObjectiveGuardCapability]], # TODO: This should be inferred from the agent blueprint, not passed here.
         soft_affinity=False,
         return_handles=True,
     )[0]

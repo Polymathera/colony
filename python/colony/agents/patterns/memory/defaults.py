@@ -121,6 +121,7 @@ async def create_default_memory_hierarchy(
         sensory = MemoryCapability(
             agent=agent,
             scope_id=MemoryScope.agent_sensory(agent_id),
+            capability_key="sensory",
             ttl_seconds=10,  # Very short retention
             max_entries=50,
             maintenance_policies=[
@@ -153,6 +154,7 @@ async def create_default_memory_hierarchy(
     working = WorkingMemoryCapability(
         agent=agent,
         scope_id=MemoryScope.agent_working(agent_id),
+        capability_key="working",
         max_tokens=working_max_tokens,
         compaction_threshold=0.9,
         maintenance=MaintenanceConfig(
@@ -205,6 +207,7 @@ async def create_default_memory_hierarchy(
     stm = MemoryCapability(
         agent=agent,
         scope_id=MemoryScope.agent_stm(agent_id),
+        capability_key="stm",
         ttl_seconds=stm_ttl,
         max_entries=stm_max_entries,
         # Trigger ingestion when enough items accumulate or periodically
@@ -264,6 +267,7 @@ async def create_default_memory_hierarchy(
     ltm_episodic = MemoryCapability(
         agent=agent,
         scope_id=MemoryScope.agent_ltm_episodic(agent_id),
+        capability_key="ltm:episodic",
         ttl_seconds=ltm_ttl,
         # Trigger ingestion less frequently (LTM consolidation is slower)
         ingestion_policy=MemoryIngestPolicy(
@@ -323,6 +327,7 @@ async def create_default_memory_hierarchy(
     ltm_semantic = MemoryCapability(
         agent=agent,
         scope_id=MemoryScope.agent_ltm_semantic(agent_id),
+        capability_key="ltm:semantic",
         ttl_seconds=ltm_ttl,
         # Semantic consolidation is infrequent (knowledge distillation takes time)
         ingestion_policy=MemoryIngestPolicy(
@@ -384,6 +389,7 @@ async def create_default_memory_hierarchy(
     ltm_procedural = MemoryCapability(
         agent=agent,
         scope_id=MemoryScope.agent_ltm_procedural(agent_id),
+        capability_key="ltm:procedural",
         ttl_seconds=ltm_ttl,
         # Skill learning is slower - less frequent consolidation
         ingestion_policy=MemoryIngestPolicy(
@@ -503,6 +509,7 @@ async def create_minimal_memory_hierarchy(
     working = WorkingMemoryCapability(
         agent=agent,
         scope_id=MemoryScope.agent_working(agent_id),
+        capability_key="working",
         max_tokens=4000,
     )
     capabilities["working"] = working
@@ -511,6 +518,7 @@ async def create_minimal_memory_hierarchy(
     stm = MemoryCapability(
         agent=agent,
         scope_id=MemoryScope.agent_stm(agent_id),
+        capability_key="stm",
         ttl_seconds=1800,  # 30 minutes
         max_entries=50,
         # Trigger on threshold or periodic

@@ -293,8 +293,8 @@ class PageAnalyzer(Agent):
 
     async def initialize(self) -> None:
         """Initialize page analyzer."""
-        self.add_capability_classes([
-            PageAnalyzerCapability
+        self.add_capability_blueprints([
+            PageAnalyzerCapability.bind(),
         ])
         await super().initialize()
 

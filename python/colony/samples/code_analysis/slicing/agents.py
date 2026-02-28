@@ -49,9 +49,9 @@ class ProgramSlicingAgent(Agent):
 
     async def initialize(self) -> None:
         """Initialize agent with capabilities configured."""
-        self.add_capability_classes([
-            ProgramSlicingCapability,
-            MergeCapability,
+        self.add_capability_blueprints([
+            ProgramSlicingCapability.bind(),
+            MergeCapability.bind(),
         ])
         await super().initialize()
 
@@ -79,9 +79,9 @@ class ProgramSlicingCoordinator(Agent):
 
     async def initialize(self) -> None:
         """Initialize coordinator with capabilities configured."""
-        self.add_capability_classes([
-            SlicingAnalysisCapability,
-            MergeCapability,
+        self.add_capability_blueprints([
+            SlicingAnalysisCapability.bind(),
+            MergeCapability.bind(),
         ])
         await super().initialize()
 

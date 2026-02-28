@@ -301,7 +301,7 @@ class AgentSelfConcept(BaseModel):
 
     def to_dict(self):
         """Exclude private cache attributes"""
-        return self.model_dump(exclude={})
+        return self.model_dump(mode="json")
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> AgentSelfConcept:
@@ -317,10 +317,11 @@ class AgentSelfConcept(BaseModel):
         Excludes history and metrics.
         """
         return self.model_dump(
+            mode="json",
             exclude={
                 "version_history",
                 "evolution_metrics",
-            }
+            },
         )
 
     def to_storage_dict(self) -> dict[str, Any]:
@@ -333,7 +334,7 @@ class AgentSelfConcept(BaseModel):
             exclude.add("version_history")
         if not self._include_metrics:
             exclude.add("evolution_metrics")
-        return self.model_dump(exclude=exclude)
+        return self.model_dump(mode="json", exclude=exclude)
 
     @staticmethod
     def from_storage_dict(

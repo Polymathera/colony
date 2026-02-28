@@ -245,6 +245,9 @@ class MemoryCapability(AgentCapability):
         # === VCM MAPPING ===
         map_to_vcm: bool = False,
         vcm_config: MmapConfig | None = None,
+
+        # === IDENTITY ===
+        capability_key: str | None = None,
     ):
         """Initialize memory capability.
 
@@ -281,8 +284,11 @@ class MemoryCapability(AgentCapability):
                 Enables attention-based discovery of this scope's contents.
             vcm_config: Configuration for VCM mapping (controls flushing, locality, etc.)
                 Only used if map_to_vcm=True. Defaults to MmapConfig() if None.
+
+            capability_key: Override for the capability dict key (allows multiple
+                instances of MemoryCapability with distinct keys).
         """
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope_id=scope_id, capability_key=capability_key)
 
         # Ingestion: sources and transformation
         self.producers = producers or []

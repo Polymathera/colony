@@ -1,0 +1,199 @@
+# Polymath Integration Test Configuration
+# ========================================
+# This file configures a complete analysis workflow using the Polymathera
+# multi-agent framework. Edit it to customize agent hierarchies, analysis
+# types, capabilities, and paging parameters.
+
+repo_id: "my-project"
+tenant_id: "test-tenant"
+# session_id: "auto-generated-if-omitted"
+# run_id: "auto-generated-if-omitted"
+
+# --- LLM Cluster Configuration ---
+# Controls which LLM deployments are created and deployed.
+#
+# Modes:
+#   - Local (no GPUs):  Use remote_deployments only
+#   - Cloud (GPUs):     Use vllm_deployments (and optional embedding_config)
+#   - Hybrid:           Both vllm_deployments and remote_deployments
+cluster:
+  app_name: "polymathera"
+  cleanup_on_init: true        # Clean up previous deployment state on startup
+
+  # --- Self-hosted vLLM deployments (require GPUs) ---
+  # vllm_deployments:
+  #   - model_name: "meta-llama/Llama-3.1-8B"
+  #     tensor_parallel_size: 1   # GPUs per replica
+  #     gpu_memory_utilization: 0.9
+  #     max_model_len: null        # Auto from model registry
+  #     num_replicas: 2
+  #     quantization: null         # "awq", "gptq", "fp8", or null
+  #     s3_bucket: null            # S3 bucket for model weights
+
+  # --- Embedding model (GPU-based, requires GPU) ---
+  # embedding_config:
+  #   model_name: "intfloat/e5-small-v2"
+  #   tensor_parallel_size: 1
+  #   gpu_memory_utilization: 0.5
+  #   num_replicas: 1
+
+  # --- Remote embedding (API-based, no GPU required) ---
+  # Mutually exclusive with embedding_config above.
+  remote_embedding_config:
+    model_name: "google/gemini-embedding-001"
+    provider: "openrouter"           # "openai", "gemini", or "openrouter"
+    api_key_env_var: "OPENROUTER_API_KEY"  # Auto-detected from provider
+    # dimensions: null           # null = model default (1536 for small)
+    # max_batch_size: 2048       # OpenAI: 2048, Gemini: 100
+    # num_replicas: 1
+
+  # --- Remote LLM deployments (no GPUs required) ---
+  remote_deployments:
+    # Anthropic Claude — uses prefix caching for VCM page text
+    - model_name: "claude-sonnet-4-20250514"
+      provider: "anthropic"
+      api_key_env_var: "ANTHROPIC_API_KEY"
+      max_cached_pages: 50
+      max_cached_tokens: 2000000
+      ttl: "1h"                # Prefix cache TTL ("5m" or "1h")
+      num_replicas: 1
+
+    # OpenRouter — OpenAI-compatible API, supports many providers
+    # - model_name: "anthropic/claude-sonnet-4"
+    #   provider: "openrouter"
+    #   api_key_env_var: "OPENROUTER_API_KEY"
+    #   num_replicas: 1
+
+# --- VCM Configuration ---
+# Controls VirtualContextManager behavior: page storage, eviction policy, etc.
+# vcm:
+#   caching_policy: "LRU"              # Page eviction policy: "LRU" or "LFU"
+#   page_storage_backend_type: "efs"   # Storage backend: "efs" or "s3"
+#   page_storage_path: "colony/context_pages"
+#   page_fault_processing_interval_s: 5.0
+#   metrics_collection_interval_s: 30.0
+#   reconciliation_interval_s: 30.0
+
+# --- Agent System Configuration ---
+# Controls agent system behavior: sessions, retries, etc.
+# agent_system:
+#   max_retries: 3
+#   enable_sessions: true
+#   default_session_ttl: 86400.0       # 24 hours
+
+# --- VCM Paging Configuration ---
+# Controls how the codebase is partitioned into VCM pages.
+paging:
+  flush_threshold: 20          # Records per page before flushing
+  flush_token_budget: 4096     # Token budget per page
+  flush_interval_seconds: 60.0
+  pinned: false                # Pin pages to prevent eviction (for small codebases)
+  locality_policy_type: "tag"  # "tag" or "temporal"
+  flush_policy_type: "threshold"  # "threshold", "periodic", or "immediate"
+
+# --- Analysis Configurations ---
+# Each entry spawns a coordinator agent that manages a team of workers.
+# Multiple analyses can run concurrently on the same paged codebase.
+analyses:
+
+  # 1. Change Impact Analysis
+  #    Coordinator → per-page ChangeImpactAnalysisAgent workers
+  #    Features: multi-hop propagation, hypothesis game validation,
+  #              game-theoretic merge, FeedbackLoopPredictor prefetching
+  - type: impact
+    coordinator_version: v2    # v1 = cache-oblivious, v2 = cache-aware
+    max_agents: 10
+    quality_threshold: 0.7
+    max_iterations: 3
+    batching_policy: hybrid    # "hybrid", "clustering", or "continuous"
+    overlap_threshold: 0.3
+    batch_size: 5
+    prefetch_depth: 2
+    changes:
+      - file_path: "src/main.py"
+        change_type: modification
+        description: "Refactored authentication flow"
+      - file_path: "src/auth/handler.py"
+        change_type: modification
+        description: "Updated token validation logic"
+
+  # 2. Compliance Analysis
+  #    Coordinator → per-page ComplianceAnalysisAgent workers
+  #    Features: obligation graphs, license conflict detection, risk assessment
+  - type: compliance
+    coordinator_version: v2
+    max_agents: 8
+    compliance_types:
+      - license
+      - security
+      - quality
+
+  # 3. Intent Inference
+  #    Coordinator → per-page IntentInferenceAgent workers
+  #    Features: intent graphs, misalignment detection, consensus games
+  - type: intent
+    coordinator_version: v2
+    max_agents: 8
+    granularity: "function"    # "function", "class", or "module"
+
+  # 4. Contract Inference
+  #    Coordinator → per-page ContractInferenceAgent workers
+  #    Features: hypothesis games for contract validation, formal specs
+  # - type: contracts
+  #   coordinator_version: v2
+  #   max_agents: 8
+  #   formalism: "semi_formal"   # "natural", "semi_formal", "formal", "code"
+
+  # 5. Program Slicing
+  #    Coordinator → per-page ProgramSlicingAgent workers
+  #    Features: backward/forward slicing, interprocedural resolution
+  # - type: slicing
+  #   coordinator_version: v2
+  #   max_agents: 8
+  #   slice_criteria:
+  #     - file_path: "src/main.py"
+  #       line: 42
+  #       variable: "user_token"
+  #       slice_type: "backward"
+
+  # 6. Basic Code Structure Analysis
+  #    Coordinator → ClusterAnalyzer workers
+  #    Features: page key generation, local analysis, cross-page queries, synthesis
+  # - type: basic
+  #   coordinator_version: v2
+  #   max_agents: 10
+
+# --- Agent Hierarchy Overrides ---
+# Override default coordinator/worker classes and attach extra capabilities
+# to all agents in the hierarchy.
+hierarchy:
+  # coordinator_class: null     # Use analysis-specific default
+  # worker_class: null          # Use analysis-specific default
+  extra_capabilities:
+    - ReflectionCapability       # Self-reflection on actions
+    - ConsciousnessCapability    # Self-awareness via SystemDocumentation
+    # - ReputationCapability     # No-regret learning for agent reputation
+    # - ValidationCapability     # Multi-level validation
+    # - ObjectiveGuardCapability # Goal drift prevention
+
+# --- Ray Worker Code Distribution ---
+# Optional directory containing YOUR code (custom agents, capabilities, configs)
+# to distribute to all Ray worker nodes.  Ray zips this on the driver, uploads
+# it to every worker (including autoscaled ones), and adds it to sys.path.
+#
+# This is NOT for the codebase being analyzed — that lives on shared storage
+# (e.g. EFS) and is accessed via VCM paging.  Use this when your config
+# references custom agent_type or capability class paths that aren't already
+# in the Docker image or the colony package.
+# working_dir: "/path/to/my-custom-agents"
+
+output_dir: "./polymath-results"
+timeout_seconds: 600
+verbose: false
+
+# --- Budget Enforcement (Remote LLM APIs) ---
+# Maximum spend in USD for remote LLM API calls (Anthropic, OpenRouter).
+# When the budget is exceeded, remaining analyses are skipped (soft stop).
+# Omit or set to null for unlimited spending.
+# budget_usd: 5.00
+# warn_budget_pct: 0.8    # Warn when cost reaches 80% of budget (default)

@@ -57,8 +57,8 @@ class ComplianceAnalysisAgent(Agent):
     async def initialize(self) -> None:
         """Initialize agent and configure capabilities."""
         # Extract and set up capability classes
-        self.add_capability_classes([
-            ComplianceVCMCapability, MergeCapability
+        self.add_capability_blueprints([
+            ComplianceVCMCapability.bind(), MergeCapability.bind()
         ])
 
         # Set bound_pages from page_id
@@ -92,9 +92,9 @@ class ComplianceAnalysisCoordinator(Agent):
 
     async def initialize(self) -> None:
         """Initialize coordinator and configure capabilities."""
-        self.add_capability_classes([
-            ComplianceVCMCapability,
-            MergeCapability
+        self.add_capability_blueprints([
+            ComplianceVCMCapability.bind(),
+            MergeCapability.bind()
         ])
         await super().initialize()
 

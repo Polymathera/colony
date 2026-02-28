@@ -104,6 +104,9 @@ class WorkingMemoryCapability(MemoryCapability):
         # === WORKING MEMORY CONFIG ===
         max_tokens: int = 8000,
         compaction_threshold: float = 0.9,
+
+        # === IDENTITY ===
+        capability_key: str | None = None,
     ):
         """Initialize memory capability.
 
@@ -162,6 +165,7 @@ class WorkingMemoryCapability(MemoryCapability):
             maintenance=maintenance or default_maintenance,
             map_to_vcm=False,
             vcm_config=None,
+            capability_key=capability_key,
         )
         self.max_tokens = max_tokens
         self.compaction_threshold = compaction_threshold

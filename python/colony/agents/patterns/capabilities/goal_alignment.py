@@ -19,7 +19,7 @@ Programming Model (AgentHandle Pattern):
 ```python
 # Spawn objective guard agent with handle
 handle = await owner.spawn_child_agents(
-    agent_specs=[AgentSpawnSpec(agent_type="...ObjectiveGuardAgent")],
+    blueprints=[AgentBlueprint(agent_type="...ObjectiveGuardAgent")],
     capability_types=[ObjectiveGuardCapability],
 )[0]
 

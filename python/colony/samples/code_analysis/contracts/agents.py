@@ -59,10 +59,10 @@ class ContractInferenceAgent(Agent):
 
     async def initialize(self) -> None:
         """Initialize agent with capabilities configured."""
-        self.add_capability_classes([
-            ContractInferenceCapability,
-            MergeCapability,
-            HypothesisGameProtocol,
+        self.add_capability_blueprints([
+            ContractInferenceCapability.bind(),
+            MergeCapability.bind(),
+            HypothesisGameProtocol.bind(),
         ])
         await super().initialize()
 
@@ -97,10 +97,10 @@ class ContractInferenceCoordinator(Agent):
 
     async def initialize(self) -> None:
         """Initialize coordinator with capabilities configured."""
-        self.add_capability_classes([
-            ContractAnalysisCapability,
-            MergeCapability,
-            SynthesisCapability,
+        self.add_capability_blueprints([
+            ContractAnalysisCapability.bind(),
+            MergeCapability.bind(),
+            SynthesisCapability.bind(),
         ])
         await super().initialize()
 

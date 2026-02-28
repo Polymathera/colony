@@ -20,7 +20,7 @@ Programming Model (AgentHandle Pattern):
 ```python
 # Spawn reputation agent with handle
 handle = await owner.spawn_child_agents(
-    agent_specs=[AgentSpawnSpec(
+    blueprints=[AgentBlueprint(
         agent_type="...ReputationAgent",
         capability_types=[ReputationCapability],
     )],
@@ -49,7 +49,7 @@ from ...base import (
     Agent,
     AgentHandle,
 )
-from ...models import AgentSpawnSpec, AgentMetadata
+from ...models import AgentMetadata
 from ..actions.policies import (
     CacheAwareActionPolicy,
 )
@@ -83,7 +83,7 @@ class ReputationAgent(Agent):
 
     async def initialize(self) -> None:
         """Initialize reputation agent with capability and policy."""
-        self.add_capability_classes([ReputationCapability])
+        self.add_capability_blueprints([ReputationCapability.bind()])
 
         await super().initialize()
 
@@ -139,13 +139,12 @@ async def spawn_reputation_agent(
     logger.info(f"Spawning ReputationAgent {agent_id}...")
 
     return await owner.spawn_child_agents(
-        agent_specs=[AgentSpawnSpec(
+        blueprints=[ReputationAgent.bind(
             agent_id=agent_id,
-            agent_type="polymathera.colony.agents.patterns.meta_agents.reputation_agent.ReputationAgent",
-            capability_types=[ReputationCapability],
             bound_pages=[],
-            soft_affinity=False,
         )],
+        capability_types=[[ReputationCapability]],  # TODO: Remove this and use capabilities from agent blueprints.
+        soft_affinity=False,
         return_handles=True,
     )[0]
 

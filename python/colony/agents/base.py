@@ -34,8 +34,12 @@ from .models import (
     AgentRegistrationInfo,
     AgentResourceRequirements,
     AgentSuspensionState,
-    AgentSpawnSpec,
     AgentMetadata
+)
+from .blueprint import (
+    AgentCapabilityBlueprint,
+    ActionPolicyBlueprint,
+    AgentBlueprint,
 )
 from .blackboard import EnhancedBlackboard, BlackboardScope, BlackboardEvent
 from .blackboard.types import KeyPatternFilter, EventFilter
@@ -109,30 +113,36 @@ class ActionPolicy(ABC):
             if capability not in self._used_agent_capabilities:
                 self._used_agent_capabilities.append(capability)
 
-    async def use_agent_capability_types(self, capabilities: list[type[AgentCapability]]) -> None:
-        """Instantiate and add agent capabilities to the agent and to the action policy as action providers.
+    async def use_capability_blueprints(self, blueprints: list[AgentCapabilityBlueprint]) -> None:
+        """Instantiate capability blueprints and add them as action providers.
 
         Args:
-            capabilities: List of capability classes to use. Extends existing list.
+            blueprints: List of capability blueprints to instantiate and use.
         """
-        for capability_cls in capabilities:
-            # Get or create consistency capability
-            if not self.agent.has_capability(capability_cls.get_capability_name()):
-                # TODO: How to allow passing params to capability constructor?
-                capability_instance = capability_cls(self.agent)
+        for bp in blueprints:
+            if not self.agent.has_capability(bp.key):
+                capability_instance = bp.local_instance(self.agent)
+                capability_instance._capability_key = bp.key
                 await capability_instance.initialize()
-                # TODO: How to allow passing more add_capability params?
                 self.agent.add_capability(
                     capability_instance,
-                    include_actions=[],
-                    exclude_actions=[],
-                    events_only=False,
+                    include_actions=bp.include_actions,
+                    exclude_actions=bp.exclude_actions,
+                    events_only=bp.events_only,
                 )
 
-        self.use_agent_capabilities([
-            capability_cls.get_capability_name()
-            for capability_cls in capabilities
-        ])
+        self.use_agent_capabilities([bp.key for bp in blueprints])
+
+    @classmethod
+    def bind(cls, **kwargs) -> ActionPolicyBlueprint:
+        """Create an ActionPolicyBlueprint from this class and constructor kwargs.
+
+        The agent and action_providers arguments are injected at
+        local_instance() time — never bound here.
+        """
+        bp = ActionPolicyBlueprint(cls, kwargs)
+        bp.validate_serializable()
+        return bp
 
     def disable_agent_capabilities(self, capabilities: list[str]) -> None:
         """Remove agent capabilities from action providers.
@@ -209,6 +219,7 @@ class AgentCapability(ABC):
         scope_id: str | None = None,
         *,
         blackboard: EnhancedBlackboard | None = None,
+        capability_key: str | None = None,
     ):
         """Initialize capability.
 
@@ -221,6 +232,8 @@ class AgentCapability(ABC):
                 - game_id: For game participants sharing a namespace
                 - task_id: For agents collaborating on a shared task
             blackboard: Pre-configured blackboard (for detached mode)
+            capability_key: Instance-level key for the agent's _capabilities dict.
+                Defaults to f"{cls.__name__}:{self.scope_id}" via get_capability_name().
 
         Raises:
             ValueError: If both agent and scope_id are None
@@ -228,6 +241,7 @@ class AgentCapability(ABC):
         self._agent = agent
         self._blackboard: EnhancedBlackboard | None = blackboard
         self._pending_request_id: str | None = None
+        self._capability_key: str | None = capability_key
 
         # In attached mode, derive scope from agent
         # In detached mode, scope_id must be provided
@@ -391,6 +405,26 @@ class AgentCapability(ABC):
             Name of the capability
         """
         return cls.__name__
+
+    @property
+    def capability_key(self) -> str:
+        """Unique key for this instance within an agent's _capabilities dict.
+
+        Set by AgentCapabilityBlueprint or directly in constructor.
+        Falls back to get_capability_name() (cls.__name__) for single-instance capabilities.
+        """
+        return self._capability_key or f"{self.get_capability_name()}:{self.scope_id}"
+
+    @classmethod
+    def bind(cls, **kwargs) -> AgentCapabilityBlueprint:
+        """Create an AgentCapabilityBlueprint from this class and constructor kwargs.
+
+        The agent positional arg is injected at local_instance() time — never bound.
+        Use .with_composition(key=, include_actions=, ...) to set composition metadata.
+        """
+        bp = AgentCapabilityBlueprint(cls, kwargs)
+        bp.validate_serializable()
+        return bp
 
     def get_memory_requirements(self) -> CapabilityMemoryRequirements | None:
         """Declare this capability's memory requirements.
@@ -835,9 +869,9 @@ class AgentHandle:
         return handle
 
     @classmethod
-    async def from_agent_type(
+    async def from_blueprint(
         cls,
-        agent_spec: AgentSpawnSpec,
+        agent_blueprint: AgentBlueprint,
         *,
         session_id: str | None = None,
         run_id: str | None = None,
@@ -846,19 +880,19 @@ class AgentHandle:
         default_capability_type: type[AgentCapability] | None = None,
         app_name: str | None = None
     ) -> "AgentHandle":
-        """Spawn an agent by type and return handle.
+        """Spawn an agent from a blueprint and return handle.
 
         Convenience method that spawns a new agent and returns a handle.
 
         Args:
-            agent_spec: Specification of the agent to spawn
+            agent_blueprint: AgentBlueprint defining the agent to spawn
             session_id: Session ID for context
             run_id: Run ID for context
             soft_affinity: Whether to use soft affinity routing
             suspend_agents: Whether to suspend other agents if needed
             default_capability_type: Default capability for run/stream
             app_name: The `serving.Application` name where the agent system resides.
-                This is required when `from_agent_type` is called from outside any
+                This is required when `from_blueprint` is called from outside any
                 `serving.deployment`.
 
         Returns:
@@ -869,10 +903,11 @@ class AgentHandle:
         """
         from ..system import spawn_agents
 
+        metadata: AgentMetadata | None = agent_blueprint.kwargs.get("metadata")
         child_ids: list[str] = await spawn_agents(
-            agent_specs=[agent_spec],
-            session_id=session_id or agent_spec.metadata.session_id,
-            run_id=run_id or agent_spec.metadata.run_id,
+            blueprints=[agent_blueprint],
+            session_id=session_id or (metadata.session_id if metadata else None),
+            run_id=run_id or (metadata.run_id if metadata else None),
             soft_affinity=soft_affinity,
             suspend_agents=suspend_agents,
             app_name=app_name
@@ -901,7 +936,7 @@ class AgentHandle:
     def agent_info(self) -> AgentRegistrationInfo | None:
         """Get the agent's registration info.
 
-        Available after creating handle via from_agent_id() or from_agent_type().
+        Available after creating handle via from_agent_id() or from_blueprint().
         Contains agent_type, capability_names, state, bound_pages, etc.
         """
         return self._agent_info
@@ -1565,6 +1600,7 @@ class Agent(BaseModel):
 
     page_storage: PageStorage | None = Field(default=None)
 
+    # TODO: Move resource_requirements to AgentManagerBase.
     # Resource requirements (for scheduling and capacity planning)
     resource_requirements: AgentResourceRequirements = Field(
         default_factory=AgentResourceRequirements,
@@ -1581,7 +1617,7 @@ class Agent(BaseModel):
     # Metadata and capabilities
     created_at: float = Field(default_factory=time.time)
 
-    capability_classes: list[type[AgentCapability]] = Field(default_factory=list)
+    capability_blueprints: list[AgentCapabilityBlueprint] = Field(default_factory=list)
 
     # Memory configuration
     enable_memory_hierarchy: bool = Field(
@@ -1593,7 +1629,7 @@ class Agent(BaseModel):
         description="Configuration for memory hierarchy (passed to create_default_memory_hierarchy)"
     )
 
-    action_policy_class: type[ActionPolicy] | None = None
+    action_policy_blueprint: ActionPolicyBlueprint | None = None
     action_policy_state: ActionPolicyExecutionState | None = Field(default=None)
     action_policy: ActionPolicy | None = None
 
@@ -1609,6 +1645,17 @@ class Agent(BaseModel):
     _hook_registry: AgentHookRegistry | None = PrivateAttr(default=None)
 
     model_config = {"arbitrary_types_allowed": True}
+
+    @classmethod
+    def bind(cls, **kwargs) -> AgentBlueprint:
+        """Create an AgentBlueprint from this class and constructor kwargs.
+
+        Validates kwargs against model_fields at bind time.
+        Use .remote_instance() to spawn on a remote deployment.
+        """
+        bp = AgentBlueprint(cls, kwargs)
+        bp.validate_serializable()
+        return bp
 
     def get_action_group_description(self) -> str:
         return (
@@ -1655,20 +1702,21 @@ class Agent(BaseModel):
             self._hook_registry = AgentHookRegistry(self)
         return self._hook_registry
 
-    def add_capability_classes(
+    def add_capability_blueprints(
         self,
-        capability_classes: list[type[AgentCapability]],
+        blueprints: list[AgentCapabilityBlueprint],
     ) -> None:
-        """Add multiple capability classes to the agent.
-        Typically, this method is called in an agent subclass
-        initialize() method before calling super().initialize().
+        """Add capability blueprints to be instantiated during _create_action_policy.
+
+        Typically called in an agent subclass initialize() method
+        before calling super().initialize().
 
         Args:
-            capability_classes: The capability classes to add
+            blueprints: The capability blueprints to add
         """
-        for capability_class in capability_classes:
-            if capability_class not in self.capability_classes:
-                self.capability_classes.append(capability_class)
+        for bp in blueprints:
+            if not any(b.key == bp.key for b in self.capability_blueprints):
+                self.capability_blueprints.append(bp)
 
     def add_capability(
         self,
@@ -1717,7 +1765,7 @@ class Agent(BaseModel):
             capability._action_include_filter = frozenset(include_actions) if include_actions is not None else None
             capability._action_exclude_filter = frozenset(exclude_actions) if exclude_actions else frozenset()
 
-        self._capabilities[capability.get_capability_name()] = capability
+        self._capabilities[capability.capability_key] = capability
 
     def remove_capability(self, capability_name: str) -> AgentCapability | None:
         """Remove a capability from the agent.
@@ -1770,6 +1818,15 @@ class Agent(BaseModel):
                 return cap
         return None
 
+    def get_capabilities_by_class(self, capability_class: type[AgentCapability]) -> list[AgentCapability]:
+        """Get all capabilities that are instances of the given class.
+
+        Unlike get_capability_by_type() which returns the first match,
+        this returns all matching instances — useful for multi-instance
+        capabilities like MemoryCapability with different capability_keys.
+        """
+        return [cap for cap in self._capabilities.values() if isinstance(cap, capability_class)]
+
     def get_capability_names(self) -> list[str]:
         """Get names of capabilities this agent has.
 
@@ -1787,14 +1844,6 @@ class Agent(BaseModel):
             True if the agent has the capability, False otherwise
         """
         return capability_name in self._capabilities
-
-    def get_capability_names(self) -> list[str]:
-        """Get agent's capability names for discovery.
-
-        Returns:
-            List of capability strings
-        """
-        return list(self._capabilities.keys())
 
     def get_capabilities(self) -> list[AgentCapability]:
         """Get agent's capabilities for discovery.
@@ -1921,29 +1970,30 @@ class Agent(BaseModel):
         if self.action_policy:
             return  # Already set
 
-        # First, create capabilities and add them to the agent. Do not initialize them yet,
-        # as some capabilities may discover each other during initialization and we want
-        # them all to be present in the agent before any initialize() calls.
-        for cap_class in self.capability_classes:
-            if not self.has_capability(cap_class.get_capability_name()):
-                capability = cap_class(self)
-                # await capability.initialize()
-                # TODO: How to allow passing more add_capability params?
+        # Phase 1: Instantiate capability blueprints and add to agent.
+        # Do not initialize yet — capabilities may discover each other during
+        # initialization and we want them all present first.
+        for bp in self.capability_blueprints:
+            if not self.has_capability(bp.key):
+                # local_instance creates a new instance of the capability for this agent, allowing the same blueprint to be reused across multiple agents with different internal state. It also passes other capability-specific parameters defined in the blueprint kwargs.
+                capability = bp.local_instance(self)
+                capability._capability_key = bp.key
                 self.add_capability(
                     capability,
-                    include_actions=[],
-                    exclude_actions=[],
-                    events_only=False,
+                    include_actions=bp.include_actions,
+                    exclude_actions=bp.exclude_actions,
+                    events_only=bp.events_only,
                 )
 
-        # Initialize all capabilities. Snapshot via list() because a capability's
-        # initialize() may add pre-initialized sub-capabilities to the agent
+        # Phase 2: Initialize all capabilities. Snapshot via list() because a
+        # capability's initialize() may add pre-initialized sub-capabilities
         # (e.g., AgentPoolCapability, PageGraphCapability), mutating the dict.
         for capability in list(self._capabilities.values()):
             await capability.initialize()
 
-        if not self.action_policy_class:
-            logger.warning("Agent does not have action_policy or action_policy_class defined. We will create a default ActionPolicy, but consider defining a custom one for better performance and capabilities.")
+        # Phase 3: Create action policy
+        if not self.action_policy_blueprint:
+            logger.warning("Agent does not have action_policy or action_policy_blueprint defined. We will create a default ActionPolicy, but consider defining a custom one for better performance and capabilities.")
             from .patterns.actions.policies import create_default_action_policy
             self.action_policy = await create_default_action_policy(
                 agent=self,
@@ -1955,23 +2005,24 @@ class Agent(BaseModel):
                 #     inputs={"context": QueryContext, "queries": list},
                 #     outputs={"analysis": ScopeAwareResult, "next_queries": list},
                 # ),
-                **self.metadata.action_policy_config
+                **self.metadata.action_policy_config,
             )
         else:
-            self.action_policy = self.action_policy_class(
-                agent=self,
+            self.action_policy = self.action_policy_blueprint.local_instance(
+                self,
                 action_providers=list(self._capabilities.values()),
                 # TODO: Allow configuring IO schemas
                 # io=ActionPolicyIO(
                 #     inputs={"context": QueryContext, "queries": list},
                 #     outputs={"analysis": ScopeAwareResult, "next_queries": list},
                 # ),
-                **self.metadata.action_policy_config
+                **self.metadata.action_policy_config,
             )
 
         logger.info(f"________ Created action policy {self.action_policy.__class__.__name__} for agent {self.agent_id} with capabilities: {self.get_capability_names()}")
 
-        self.action_policy.use_agent_capabilities([cap.get_capability_name() for cap in self.capability_classes])
+        # Phase 4: Mark capability blueprints as "used" by the action policy
+        self.action_policy.use_agent_capabilities([bp.key for bp in self.capability_blueprints])
         await self.action_policy.initialize()
 
     async def initialize_memory_hierarchy(
@@ -2565,14 +2616,14 @@ class Agent(BaseModel):
 
     async def spawn_child_agents(
         self,
-        agent_specs: list[AgentSpawnSpec],
+        blueprints: list[AgentBlueprint],
         *,
         session_id: str | None = None,
         run_id: str | None = None,
         soft_affinity: bool = True,
         suspend_agents: bool = False,
         roles: list[str] = [],
-        capability_types: list[list[type[AgentCapability]] | None] = None,
+        capability_types: list[list[type[AgentCapability]] | None] = None,  # TODO: Remove this and use capabilities from agent blueprints.
         return_handles: bool = False,
     ) -> list[str] | list["AgentHandle"]:
         """Spawn agents via agent system. This is intended to be called by this agent
@@ -2583,7 +2634,7 @@ class Agent(BaseModel):
         to interact with them via their capabilities.
 
         Args:
-            agent_specs: List of AgentSpawnSpec defining agents to spawn
+            blueprints: List of AgentBlueprint defining agents to spawn
             session_id: Optional session ID for tracking which session spawned these agents
             run_id: Optional run ID for tracking which AgentRun spawned these agents
             soft_affinity: If True, allows spawning on replicas without all pages (will page fault)
@@ -2598,10 +2649,12 @@ class Agent(BaseModel):
         Example:
             ```python
             # Spawn grounding agent with handle
-            handle = await self.spawn_child_agents(
-                agent_specs=[AgentSpawnSpec(agent_type="...GroundingAgent")],
+            handle = (await self.spawn_child_agents(
+                blueprints=[GroundingAgent.bind(...)],
+                roles=["grounding"],
                 capability_types=[[GroundingCapability]],
-            )[0]
+                return_handles=True,
+            ))[0]
 
             # Get capability proxy and stream events
             grounding = handle.get_capability_by_type(GroundingCapability)
@@ -2618,11 +2671,11 @@ class Agent(BaseModel):
         """
         from ..system import spawn_agents
 
-        if len(roles) != len(agent_specs):
-            raise ValueError("Number of roles must match number of agent_specs")
+        if len(roles) != len(blueprints):
+            raise ValueError("Number of roles must match number of blueprints")
 
-        child_ids: list[str] = spawn_agents(
-            agent_specs=agent_specs,  # TODO: Should we include parent_agent_id=self.agent_id here?
+        child_ids: list[str] = await spawn_agents(
+            blueprints=blueprints,  # TODO: Should we include parent_agent_id=self.agent_id here?
             session_id=session_id,
             run_id=run_id,
             soft_affinity=soft_affinity,
@@ -2638,11 +2691,8 @@ class Agent(BaseModel):
         if not return_handles:
             return child_ids
 
-        if not capability_types or len(capability_types) != len(agent_specs):
-            raise ValueError("Number of roles must match number of capability_types lists")
-
-        if not capability_types or len(capability_types) != len(agent_specs):
-            raise ValueError("Number of roles must match number of capability_types lists")
+        if not capability_types or len(capability_types) != len(blueprints):
+            raise ValueError("Number of capability_types lists must match number of blueprints")
 
         # Create AgentHandles for each child
         handles: list[AgentHandle] = []
@@ -2971,28 +3021,20 @@ class AgentManagerBase:
     )
     async def start_agent(
         self,
-        agent_class_id: str,
+        agent_blueprint: AgentBlueprint,
+        *,
         agent_id: str | None = None,
-        capabilities: list[str] | None = None,
-        action_policy_id: str | None = None,
-        bound_pages: list[str] | None = None,
         suspend_agents: bool = False,
-        metadata: dict[str, Any] | None = None,
-        resource_requirements: AgentResourceRequirements | None = None,
+        # resource_requirements: AgentResourceRequirements | None = None,
         max_iterations: int | None = None,
     ) -> str:
-        """Start a new agent.
+        """Start a new agent from a blueprint.
 
         Args:
-            agent_class_id: Type of agent to create ("general", "specialized", etc.)
+            agent_blueprint: AgentBlueprint with class and all constructor args
             agent_id: Optional ID (generated if None)
-            capabilities: Optional list of capabilities for the agent. The agent role is inferred from capabilities.
-            action_policy_id: Optional action policy ID to use
-            bound_pages: Optional page binding
             suspend_agents: If True and ResourceExhausted, suspend existing agents to make room
-            metadata: Agent metadata
-            resource_requirements: Optional resource requirements (uses defaults if None)
-            max_iterations: Optional maximum number of iterations for the agent's action policcy
+            max_iterations: Optional maximum number of iterations for the agent's action policy
 
         Returns:
             agent_id
@@ -3004,9 +3046,11 @@ class AgentManagerBase:
             if agent_id is None:
                 agent_id = f"agent-{uuid.uuid4().hex[:8]}"
 
-            # Use provided resource requirements or defaults
-            if resource_requirements is None:
-                resource_requirements = AgentResourceRequirements()
+            # Read resource requirements from blueprint kwargs (or use defaults)
+            resource_requirements = agent_blueprint.kwargs.get(
+                "resource_requirements", AgentResourceRequirements()
+            )
+            bound_pages = agent_blueprint.kwargs.get("bound_pages")
 
             # CHECK AGENT COUNT LIMIT
             if len(self._agents) >= self.max_agents:
@@ -3109,16 +3153,8 @@ class AgentManagerBase:
                         f"{new_gpu_memory}/{self.max_gpu_memory_mb} MB"
                     )
 
-            # Create agent instance (supports custom agent classes)
-            agent: Agent = self._create_agent_instance(
-                agent_class_id=agent_class_id,
-                agent_id=agent_id,
-                bound_pages=bound_pages or [],
-                metadata=metadata or {},
-                resource_requirements=resource_requirements,
-                capability_class_ids=capabilities or [],
-                action_policy_class_id=action_policy_id,
-            )
+            # Create agent instance from blueprint
+            agent: Agent = agent_blueprint.local_instance(agent_id=agent_id)
 
             # Attach manager reference for delegation
             agent.set_manager(self)
@@ -3155,7 +3191,7 @@ class AgentManagerBase:
                     logger.error(f"Failed to register agent {agent_id} with system: {e}")
 
             logger.info(
-                f"Started agent {agent_id} (type={agent_class_id}, bound_pages={bound_pages}, "
+                f"Started agent {agent_id} (type={agent_blueprint.cls.__name__}, bound_pages={bound_pages}, "
                 f"cpu={resource_requirements.cpu_cores}, mem={resource_requirements.memory_mb}MB)"
             )
 
@@ -3683,6 +3719,8 @@ class AgentManagerBase:
         # Suspended agents are deleted from self._agents, so we can't find them here
         # Resource-driven resumption should be handled by AgentSystem
         pass
+
+    # These helper methods are unused since we moved to using AgentBlueprints with local_instance().
 
     def _create_agent_instance(
         self,

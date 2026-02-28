@@ -64,6 +64,18 @@ Blackboard = EnhancedBlackboard
 # Tool system
 from .tools import ToolManagerDeployment, ToolResultCache, ToolSystemState
 
+# Blueprint system
+from .blueprint import (
+    Blueprint,
+    AgentBlueprint,
+    AgentCapabilityBlueprint,
+    ActionPolicyBlueprint,
+    BlueprintValidationError,
+    BlueprintSerializationError,
+    BlueprintRemoteError,
+    blueprint,
+)
+
 # Standalone deployment
 from .standalone import StandaloneAgentDeployment
 
@@ -78,7 +90,6 @@ from .models import (
     ActionPolicyIO,
     ActionPolicyIterationResult,
     AgentRegistrationInfo,
-    AgentSpawnSpec,
     ActionPlan,
     PolicyREPL,
     Ref,
@@ -124,6 +135,15 @@ __all__ = [
     "ToolManagerDeployment",
     "ToolResultCache",
     "ToolSystemState",
+    # Blueprint
+    "Blueprint",
+    "AgentBlueprint",
+    "AgentCapabilityBlueprint",
+    "ActionPolicyBlueprint",
+    "BlueprintValidationError",
+    "BlueprintSerializationError",
+    "BlueprintRemoteError",
+    "blueprint",
     # Standalone
     "StandaloneAgentDeployment",
     # Models
@@ -136,7 +156,6 @@ __all__ = [
     "ActionPolicyIO",
     "ActionPolicyIterationResult",
     "AgentRegistrationInfo",
-    "AgentSpawnSpec",
     "ActionPlan",
     "PolicyREPL",
     "Ref",

@@ -24,7 +24,7 @@ agent communication. When a parent spawns a GroundingAgent, it receives an
 1. **Wait for result** - Block until grounding completes:
    ```python
    handle = await owner.spawn_child_agents(
-       agent_specs=[AgentSpawnSpec(
+       blueprints=[AgentBlueprint(
            agent_id=f"grounding_agent_{owner.tenant_id}_{uuid.uuid4().hex[:8]}",
            agent_type="...GroundingAgent",
            bound_pages=owner.bound_pages,
@@ -60,7 +60,7 @@ from typing import Any
 import uuid
 
 from ...base import Agent, AgentHandle
-from ...models import AgentSpawnSpec, AgentMetadata
+from ...models import AgentMetadata
 from ..attention.incremental import IncrementalQueryCapability
 from ..actions.policies import CacheAwareActionPolicy
 from ..capabilities.grounding import (
@@ -91,7 +91,7 @@ class GroundingAgent(Agent):
                 capability = capability_type(self)
                 await capability.initialize()
                 self.add_capability(capability)
-        await self.action_policy.use_agent_capability_types(capability_types)
+        await self.action_policy.use_capability_blueprints([cap_cls.bind() for cap_cls in capability_types])
 
         logger.info(f"GroundingAgent {self.agent_id} initialized")
 
@@ -140,17 +140,14 @@ async def spawn_grounding_agent(
     logger.info(f"Spawning GroundingAgent {agent_id} for {owner.agent_id}...")
 
     return await owner.spawn_child_agents(
-        agent_specs=[AgentSpawnSpec(
+        blueprints=[GroundingAgent.bind(
             agent_id=agent_id,
-            agent_type="polymathera.colony.agents.patterns.meta_agents.grounding.GroundingAgent",
-            # agent_type="polymathera.colony.agents.base.Agent",
-            # action_policy="polymathera.colony.agents.patterns.meta_agents.grounding.GroundingAgentPolicy",
             tenant_id=owner.tenant_id,
-            capability_types=[GroundingCapability],
             bound_pages=[],  # Grounding agent doesn't need pages
         )],
         run_id=run_id,
         session_id=session_id,
+        capability_types=[[GroundingCapability]],  # TODO: This should be inferred from the agent blueprint, not passed here.
         soft_affinity=False,
         return_handles=True,
     )[0]

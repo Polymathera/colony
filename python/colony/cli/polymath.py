@@ -1154,6 +1154,14 @@ def display_results_table(results: list[dict[str, Any]]) -> None:
 # Core integration test logic
 # ===========================================================================
 
+def _resolve_class(fqn: str) -> type:
+    """Resolve a fully qualified class name to the actual class."""
+    import importlib
+    module_path, class_name = fqn.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
+
+
 async def run_integration_test(
     config: TestConfig,
     app_name: str | None = None,
@@ -1164,7 +1172,7 @@ async def run_integration_test(
     1. Connects to the Ray cluster via PolymatheraApp.setup_ray()
     2. Deploys PolymatheraCluster (LLM deployments, VCM, agent system)
     3. Pages the codebase into VCM using FileGrouperContextPageSource
-    4. Spawns coordinator agents via AgentHandle.from_agent_type()
+    4. Spawns coordinator agents via AgentHandle.from_blueprint()
     5. Monitors progress via handle.run_streamed() and collects results
     6. Returns a list of result dictionaries
 
@@ -1184,7 +1192,7 @@ async def run_integration_test(
     from colony.distributed import get_initialized_polymathera
     from colony.vcm.sources import BuilInContextPageSourceType, ContextPageSourceFactory
     from colony.vcm.models import MmapConfig, MmapResult
-    from colony.agents import AgentSpawnSpec, AgentMetadata, AgentHandle, AgentRunEvent
+    from colony.agents import AgentMetadata, AgentHandle, AgentRunEvent
     from colony.system import (
         PolymatheraCluster, PolymatheraClusterConfig,
         get_vcm, get_session_manager,
@@ -1561,11 +1569,16 @@ async def run_integration_test(
                     f"    Available: {', '.join(sorted(EXTRA_CAPABILITIES_REGISTRY.keys()))}"
                 )
 
-        spec = AgentSpawnSpec(
+        # Resolve coordinator class and build blueprint
+        agent_cls = _resolve_class(coord_class)
+        cap_blueprints = [
+            _resolve_class(path).bind() for path in capability_paths
+        ]
+        bp = agent_cls.bind(
             agent_type=coord_class,
-            capabilities=capability_paths,
             metadata=metadata,
             bound_pages=[],  # Coordinators don't bind to pages
+            capability_blueprints=cap_blueprints,
         )
 
         coord_name = coord_class.rsplit(".", 1)[-1]
@@ -1574,11 +1587,11 @@ async def run_integration_test(
             f"(max_agents={analysis.max_agents}, batching={analysis.batching_policy})"
         )
 
-        # Spawn via AgentHandle.from_agent_type() — higher-level than raw
+        # Spawn via AgentHandle.from_blueprint() — higher-level than raw
         # spawn_agents(), returns a handle for monitoring and communication.
         with console.status(f"  [green]Spawning {coord_name}..."):
-            handle = await AgentHandle.from_agent_type(
-                agent_spec=spec,
+            handle = await AgentHandle.from_blueprint(
+                agent_blueprint=bp,
                 session_id=config.session_id,
                 run_id=config.run_id,
                 app_name=effective_app_name

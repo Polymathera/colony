@@ -501,8 +501,8 @@ class ClusterAnalyzer(Agent):
 
     async def initialize(self) -> None:
         """Initialize cluster analyzer."""
-        self.add_capability_classes([
-            ClusterAnalyzerCapability
+        self.add_capability_blueprints([
+            ClusterAnalyzerCapability.bind(),
         ])
         await super().initialize()
 

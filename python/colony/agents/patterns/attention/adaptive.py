@@ -61,8 +61,8 @@ async def create_adaptive_query_policy(
         **kwargs,
     )
 
-    await policy.use_agent_capability_types([
-        AdaptiveQueryGenerator
+    await policy.use_capability_blueprints([
+        AdaptiveQueryGenerator.bind()
     ])
     await policy.initialize()
 

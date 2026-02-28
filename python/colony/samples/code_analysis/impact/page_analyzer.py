@@ -1079,10 +1079,10 @@ class ChangeImpactAnalysisAgent(HypothesisGameAgent):
         """Initialize agent and attach capabilities."""
         await super().initialize()
 
-        await self.action_policy.use_agent_capability_types([
-            ReflectionCapability,
-            CriticCapability,
-            ChangeImpactAnalysisCapability
+        await self.action_policy.use_capability_blueprints([
+            ReflectionCapability.bind(),
+            CriticCapability.bind(),
+            ChangeImpactAnalysisCapability.bind(),
         ])
 
         self.analysis_capability = self.get_capability(

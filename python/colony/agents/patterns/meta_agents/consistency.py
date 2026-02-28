@@ -17,7 +17,7 @@ Programming Model (AgentHandle Pattern):
 ```python
 # Spawn consistency agent with handle
 handle = await owner.spawn_child_agents(
-    agent_specs=[AgentSpawnSpec(agent_type="...ConsistencyAgent"),
+    blueprints=[AgentBlueprint(agent_type="...ConsistencyAgent")],
     capability_types=[ConsistencyCapability],
     return_handles=True,
 )[0]
@@ -38,7 +38,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from ...models import AgentSpawnSpec, AgentMetadata
+from ...models import AgentMetadata
 from ...base import (
     Agent,
     AgentHandle,
@@ -68,11 +68,12 @@ class ConsistencyAgent(Agent):
     """
 
     def __init__(self, *args, **kwargs):
-        capability_classes: list[type] = kwargs.pop("capability_classes", [])
+        capability_blueprints: list = kwargs.pop("capability_blueprints", [])
         for cap in [ConsistencyCapability, ValidationCapability]:
-            if cap not in capability_classes:
-                capability_classes.append(cap)
-        super().__init__(*args, **kwargs)
+            bp = cap.bind()
+            if not any(b.key == bp.key for b in capability_blueprints):
+                capability_blueprints.append(bp)
+        super().__init__(*args, capability_blueprints=capability_blueprints, **kwargs)
 
     async def initialize(self) -> None:
         """Initialize consistency agent."""
@@ -116,17 +117,15 @@ async def spawn_consistency_agent(
     logger.info(f"Spawning ConsistencyAgent {agent_id}...")
 
     return await owner.spawn_child_agents(
-        agent_specs=[AgentSpawnSpec(
+        blueprints=[ConsistencyAgent.bind(
             agent_id=agent_id,
-            agent_type="polymathera.colony.agents.patterns.meta_agents.consistency.ConsistencyAgent",
-            # agent_type="polymathera.colony.agents.base.Agent",
             # action_policy="polymathera.colony.agents.patterns.meta_agents.consistency.ConsistencyAgentPolicy",
             tenant_id=owner.tenant_id,
             bound_pages=[],  # Consistency agent doesn't need pages
         )],
         run_id=run_id,
         session_id=session_id,
-        capability_types=[ConsistencyCapability],
+        capability_types=[[ConsistencyCapability]],  # TODO: This should be inferred from the agent blueprint, not passed here.
         soft_affinity=False,
         return_handles=True,
     )[0]

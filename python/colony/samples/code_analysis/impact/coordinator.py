@@ -1531,12 +1531,12 @@ class ChangeImpactAnalysisCoordinator(Agent):
     async def initialize(self) -> None:
         """Initialize coordinator and attach capability."""
 
-        self.add_capability_classes([
-            WorkingSetCapability, # TODO: Set working_set_size = self.metadata.parameters.get("job_quota", self.metadata.parameters.get("max_agents", 10) * 5)
-            CriticCapability,
-            ChangeImpactAnalysisCoordinatorCapability,
-            MergeCapability, # TODO: scope_id=f"{self.agent_id}:merged_change_impact_reports"
-            SynthesisCapability, # TODO: scope_id=f"{self.agent_id}:change_impact_analysis"
+        self.add_capability_blueprints([
+            WorkingSetCapability.bind(), # TODO: Set working_set_size = self.metadata.parameters.get("job_quota", self.metadata.parameters.get("max_agents", 10) * 5)
+            CriticCapability.bind(),
+            ChangeImpactAnalysisCoordinatorCapability.bind(),
+            MergeCapability.bind(), # TODO: scope_id=f"{self.agent_id}:merged_change_impact_reports"
+            SynthesisCapability.bind(), # TODO: scope_id=f"{self.agent_id}:change_impact_analysis"
         ])
 
         await super().initialize()

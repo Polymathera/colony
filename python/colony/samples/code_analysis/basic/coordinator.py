@@ -20,7 +20,6 @@ from colony.agents.models import (
     Action,
     ActionResult,
     AgentMetadata,
-    AgentSpawnSpec,
     AgentResourceRequirements,
     AgentSuspensionState,
     RunContext,
@@ -413,8 +412,11 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
 
             agent_system = get_agent_system()
 
+            from colony.samples.code_analysis.basic.cluster_analyzer import ClusterAnalyzer
+
             cluster_count = 0
-            agent_specs = []
+            blueprints = []
+            cluster_metadata_list = []
 
             page_storage = await self.agent.get_page_storage()
             async for cluster in page_storage.get_all_clusters(
@@ -423,9 +425,8 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
                 max_cluster_size=10,  # TODO: Make configurable
                 min_cluster_size=2    # TODO: Make configurable
             ):
-                # Create spawn spec for this cluster
-                spec = AgentSpawnSpec(
-                    agent_type="polymathera.colony.samples.code_analysis.ClusterAnalyzer",
+                # Create blueprint for this cluster
+                bp = ClusterAnalyzer.bind(
                     metadata={
                         "parent_id": self.agent.agent_id,
                         "cluster": cluster.model_dump(),
@@ -434,19 +435,20 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
                     resource_requirements=AgentResourceRequirements(
                         num_tokens_context=8192,
                         num_tokens_generation=2000
-                    )
+                    ),
                 )
-                agent_specs.append(spec)
+                blueprints.append(bp)
+                cluster_metadata_list.append(cluster.model_dump())
                 cluster_count += 1
 
-            if not agent_specs:
+            if not blueprints:
                 logger.warning("No clusters found to analyze")
                 self.agent.state = AgentState.STOPPED
                 return
 
             # Spawn all cluster analyzers
             agent_ids = await agent_system.spawn_agents(
-                agent_specs=agent_specs,
+                blueprints=blueprints,
                 session_id=self.agent.metadata.session_id,  # TODO: Get it from session context instead of metadata --- IGNORE ---
                 run_id=self.agent.metadata.run_id,  # TODO: Get it from session context instead of metadata --- IGNORE ---
                 soft_affinity=True,
@@ -455,7 +457,7 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
 
             # Track children
             for i, agent_id in enumerate(agent_ids):
-                role = f"cluster_{agent_specs[i].metadata['cluster']['cluster_id']}"
+                role = f"cluster_{cluster_metadata_list[i]['cluster_id']}"
                 self.child_agents[role] = agent_id
 
             self.clusters_spawned = cluster_count
@@ -750,8 +752,8 @@ class BaseCodeAnalysisCoordinator(Agent):
         """Initialize coordinator."""
         # Add CriticCapability for critique handling
         # CriticCapability initializes policies from agent metadata
-        self.add_capability_classes([
-            CriticCapability
+        self.add_capability_blueprints([
+            CriticCapability.bind(),
         ])
 
         await super().initialize()
@@ -778,8 +780,8 @@ class CodeAnalysisCoordinator(BaseCodeAnalysisCoordinator):
 
     async def initialize(self) -> None:
         """Initialize coordinator and attach capability."""
-        self.add_capability_classes([
-            CodeAnalysisCoordinatorCapability
+        self.add_capability_blueprints([
+            CodeAnalysisCoordinatorCapability.bind(),
         ])
         await super().initialize()
 
@@ -804,8 +806,8 @@ class CodeAnalysisCoordinatorV2(BaseCodeAnalysisCoordinator):
 
     async def initialize(self) -> None:
         """Initialize cache-aware coordinator."""
-        self.add_capability_classes([
-            CodeAnalysisCoordinatorV2Capability
+        self.add_capability_blueprints([
+            CodeAnalysisCoordinatorV2Capability.bind(),
         ])
         await super().initialize()
 

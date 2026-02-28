@@ -17,7 +17,7 @@ Programming Model (AgentHandle Pattern):
 ```python
 # Spawn consistency agent with handle
 handle = await owner.spawn_child_agents(
-    agent_specs=[AgentSpawnSpec(agent_type="...ConsistencyAgent")],
+    blueprints=[AgentBlueprint(agent_type="...ConsistencyAgent")],
     capability_types=[ConsistencyCapability],
 )[0]
 

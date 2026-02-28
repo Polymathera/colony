@@ -41,7 +41,7 @@ Programming Model (AgentHandle Pattern):
 ```python
 # Spawn reputation agent with handle
 handle = await owner.spawn_child_agents(
-    agent_specs=[AgentSpawnSpec(agent_type="...ReputationAgent")],
+    blueprints=[AgentBlueprint(agent_type="...ReputationAgent")],
     capability_types=[ReputationCapability],
 )[0]
 

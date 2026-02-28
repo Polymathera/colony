@@ -26,7 +26,7 @@ Example:
         pass
 
     # Spawn with planning configuration
-    spec = AgentSpawnSpec(
+    spec = AgentBlueprint(
         agent_class="MyAgent",
         metadata={
             "goals": ["Analyze repository", "Generate report"],

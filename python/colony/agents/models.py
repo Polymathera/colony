@@ -2402,7 +2402,7 @@ class AgentSuspensionState(SharedState):
     bound_pages: list[str] = Field(
         default_factory=list,
         description=(
-            "Original bound_pages from AgentSpawnSpec. "
+            "Original bound_pages from AgentBlueprint. "
             "These are the pages the agent was routed to initially. "
             "Used for soft-affinity routing on resume."
         )
@@ -2594,86 +2594,6 @@ class AgentRegistrationInfo(BaseModel):
         default_factory=AgentResourceRequirements
     )
 
-
-class AgentSpawnSpec(BaseModel):
-    """Specification for spawning an agent.
-
-    This model provides strong typing for agent creation parameters,
-    including routing requirements for page-affinity agents.
-
-    Example:
-        ```python
-        # Page-affinity agent with specific requirements
-        spec = AgentSpawnSpec(
-            agent_type="code_analyzer",
-            bound_pages=["repo-123-context"],
-            requirements=LLMClientRequirements(
-                model_family="llama",
-                min_context_window=32000,
-                tenant_id="customer-123",
-            ),
-            metadata={"repo_id": "123"},
-        )
-
-        # Standalone agent (no page affinity or requirements)
-        spec = AgentSpawnSpec(
-            agent_type="supervisor",
-            metadata={"role": "coordinator"},
-        )
-        ```
-
-    Routing Logic:
-        - If bound_pages or requirements specified → Page-affinity agent on VLLMDeployment
-          - requirements used to select appropriate VLLM deployment
-        - Otherwise → Standalone agent on StandaloneAgentDeployment
-    """
-
-    agent_type: str = Field(
-        description="Type of agent to create (e.g., 'code_analyzer', 'supervisor', 'researcher')"
-    )
-
-    agent_id: str | None = Field(
-        default=None,
-        description="Optional unique ID (auto-generated if None)"
-    )
-
-    capabilities: list[str] = Field(
-        default_factory=list,
-        description="List of capability class paths to attach to the agent"
-    )
-
-    action_policy: str | None = Field(
-        default=None,
-        description="Action policy class path to use for the agent"
-    )
-
-    bound_pages: list[str] = Field(
-        default_factory=list,
-        description="Virtual page IDs this agent is bound to (empty for non-affinity agents)"
-    )
-
-    requirements: Any | None = Field(  # Import LLMClientRequirements would be circular, so use Any
-        default=None,
-        description="LLM deployment requirements for routing (LLMClientRequirements)"
-    )
-
-    resource_requirements: AgentResourceRequirements = Field(
-        default_factory=AgentResourceRequirements,
-        description="CPU/memory/GPU requirements for this agent"
-    )
-
-    metadata: AgentMetadata = Field(
-        default_factory=AgentMetadata,
-        description="Additional metadata for the agent"
-    )
-
-    def has_deployment_affinity(self) -> bool:
-        """Check if this agent requires specific deployment (vs standalone).
-
-        Returns:
-            True if agent has page bindings or LLM requirements
-        """
-        return bool(self.bound_pages) or (self.requirements is not None)
 
 
 # ============================================================================

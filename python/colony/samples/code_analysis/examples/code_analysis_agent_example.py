@@ -17,7 +17,7 @@ import logging
 
 from colony.vcm.sources import BuilInContextPageSourceType
 from colony.vcm.models import MmapConfig, MmapResult
-from colony.agents.models import AgentSpawnSpec
+from colony.samples.code_analysis.basic.coordinator import CodeAnalysisCoordinator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -64,8 +64,7 @@ async def analyze_repository(
 
     # 3. Spawn CodeAnalysisCoordinator
     logger.info("Spawning CodeAnalysisCoordinator...")
-    coordinator_spec = AgentSpawnSpec(
-        agent_type="polymathera.colony.samples.code_analysis.CodeAnalysisCoordinator",
+    coordinator_bp = CodeAnalysisCoordinator.bind(
         metadata={
             "repo_id": repo_id,
             "session_id": session_id,
@@ -75,7 +74,7 @@ async def analyze_repository(
     )
 
     agent_ids = await agent_system.spawn_agents(
-        agent_specs=[coordinator_spec],
+        blueprints=[coordinator_bp],
         session_id=session_id,
         run_id=run_id,
         soft_affinity=False

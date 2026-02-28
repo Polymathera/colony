@@ -79,7 +79,7 @@ from .capabilities import (
     NegotiationGameProtocol,
 )
 from ....base import Agent
-from ....models import AgentMetadata, AgentSpawnSpec
+from ....models import AgentMetadata
 from ...actions.policies import action_executor, create_default_action_policy
 
 
@@ -294,16 +294,18 @@ class NegotiationCoordinatorAgent(Agent):
         # Get role -> capabilities mapping from metadata
         role_capabilities: dict[str, list[str]] = self.metadata.get("role_capabilities", {})
 
+        role_to_agent_class = {
+            "participant": NegotiationParticipantAgent,
+            "mediator": NegotiationMediatorAgent,
+        }
+
         for agent_id, role in participants.items():
             if agent_id == self.agent_id:
                 assert role == "coordinator", "Only coordinator can have same ID as coordinator agent"
                 continue  # Don't spawn self
 
-            if role == "participant":
-                agent_type = "polymathera.colony.agents.games.negotiation.api.NegotiationParticipantAgent"
-            elif role == "mediator":
-                agent_type = "polymathera.colony.agents.games.negotiation.api.NegotiationMediatorAgent"
-            else:
+            agent_cls = role_to_agent_class.get(role)
+            if not agent_cls:
                 continue
 
             # Create config for child agent
@@ -320,9 +322,8 @@ class NegotiationCoordinatorAgent(Agent):
             agent_caps = role_capabilities.get(role, [])
 
             spawned_id = await self.spawn_child_agents(
-                agent_specs=[AgentSpawnSpec(
+                blueprints=[agent_cls.bind(
                     agent_id=agent_id,
-                    agent_type=agent_type,
                     capabilities=agent_caps,
                     metadata=AgentMetadata(parameters={"game_config": child_config.model_dump()}),
                 )],
@@ -464,9 +465,8 @@ async def run_negotiation_game(
 
     # Spawn coordinator agent and initialize it (which spawns others and starts game)
     await owner.spawn_child_agents(
-        agent_specs=[AgentSpawnSpec(
+        blueprints=[NegotiationCoordinatorAgent.bind(
             agent_id=coordinator_id,
-            agent_type="polymathera.colony.agents.games.negotiation.api.NegotiationCoordinatorAgent",
             capabilities=coordinator_caps,
             metadata=AgentMetadata(parameters={
                 "game_config": config.model_dump(),

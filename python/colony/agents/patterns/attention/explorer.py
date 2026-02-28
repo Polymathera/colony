@@ -282,8 +282,9 @@ async def create_exploration_policy(
         **kwargs,
     )
 
-    await policy.use_agent_capability_types([
-        QueryDrivenExplorationCapability
+    await policy.use_capability_blueprints([
+        # TODO: Pass QueryGenerator and PageQueryRoutingPolicy blueprints.
+        QueryDrivenExplorationCapability.bind()
     ])
     await policy.initialize()
 

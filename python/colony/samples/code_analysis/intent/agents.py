@@ -58,11 +58,11 @@ class IntentInferenceAgent(Agent):
 
     async def initialize(self) -> None:
         """Initialize agent with capabilities configured."""
-        self.add_capability_classes([
-            IntentInferenceCapability,
-            MergeCapability,
+        self.add_capability_blueprints([
+            IntentInferenceCapability.bind(),
+            MergeCapability.bind(),
             # TODO: Participate in consensus games for intent alignment
-            ConsensusGameProtocol,
+            ConsensusGameProtocol.bind(),
         ])
         await super().initialize()
 
@@ -96,10 +96,10 @@ class IntentInferenceCoordinator(Agent):
 
     async def initialize(self) -> None:
         """Initialize coordinator with capabilities configured."""
-        self.add_capability_classes([
-            IntentAnalysisCapability,
-            MergeCapability,
-            SynthesisCapability,
+        self.add_capability_blueprints([
+            IntentAnalysisCapability.bind(),
+            MergeCapability.bind(),
+            SynthesisCapability.bind(),
         ])
         await super().initialize()
 
