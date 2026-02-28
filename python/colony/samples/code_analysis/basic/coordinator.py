@@ -413,6 +413,7 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
             agent_system = get_agent_system()
 
             from colony.samples.code_analysis.basic.cluster_analyzer import ClusterAnalyzer
+            from colony.cluster import LLMClientRequirements
 
             cluster_count = 0
             blueprints = []
@@ -425,17 +426,19 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
                 max_cluster_size=10,  # TODO: Make configurable
                 min_cluster_size=2    # TODO: Make configurable
             ):
+                llm_requirements = LLMClientRequirements(
+                    num_tokens_context=8192,
+                    num_tokens_generation=2000
+                ),
                 # Create blueprint for this cluster
                 bp = ClusterAnalyzer.bind(
-                    metadata={
-                        "parent_id": self.agent.agent_id,
-                        "cluster": cluster.model_dump(),
-                    },
-                    bound_pages=cluster.page_ids,
-                    resource_requirements=AgentResourceRequirements(
-                        num_tokens_context=8192,
-                        num_tokens_generation=2000
+                    metadata=AgentMetadata(
+                        session_id=self.agent.metadata.session_id,
+                        run_id=self.agent.metadata.run_id,
+                        parent_agent_id=self.agent.agent_id,
+                        parameters={"cluster": cluster.model_dump()},
                     ),
+                    bound_pages=cluster.page_ids,
                 )
                 blueprints.append(bp)
                 cluster_metadata_list.append(cluster.model_dump())
@@ -447,10 +450,10 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
                 return
 
             # Spawn all cluster analyzers
+            # TODO: Pass LLM requirements to spawn_agents
             agent_ids = await agent_system.spawn_agents(
                 blueprints=blueprints,
-                session_id=self.agent.metadata.session_id,  # TODO: Get it from session context instead of metadata --- IGNORE ---
-                run_id=self.agent.metadata.run_id,  # TODO: Get it from session context instead of metadata --- IGNORE ---
+                requirements=llm_requirements,
                 soft_affinity=True,
                 suspend_agents=False
             )

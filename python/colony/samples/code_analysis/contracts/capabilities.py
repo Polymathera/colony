@@ -1520,8 +1520,8 @@ class ContractCoordinatorCapability(AgentCapability):
             # Use AgentPoolCapability for standardized agent creation
             handle = await self._agent_pool_cap.create_agent(
                 agent_type="polymathera.colony.samples.code_analysis.contracts.ContractInferenceAgent",
+                capabilities=["polymathera.colony.samples.code_analysis.contracts.capabilities.ContractInferenceCapability"],
                 bound_pages=[page_id],
-                capability_types=[ContractInferenceCapability],
                 requirements=LLMClientRequirements(
                     model_family="llama",  # TODO: Make configurable
                     min_context_window=32000,  # TODO: Make configurable

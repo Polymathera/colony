@@ -40,10 +40,12 @@ Programming Model (AgentHandle Pattern):
 ---------------------------------------
 ```python
 # Spawn reputation agent with handle
-handle = await owner.spawn_child_agents(
-    blueprints=[AgentBlueprint(agent_type="...ReputationAgent")],
-    capability_types=[ReputationCapability],
-)[0]
+handle = (await owner.spawn_child_agents(
+    blueprints=[ReputationAgent.bind(
+        capability_blueprints=[ReputationCapability.bind()],
+    )],
+    return_handles=True,
+))[0]
 
 # Get capability and communicate
 reputation = handle.get_capability(ReputationCapability)

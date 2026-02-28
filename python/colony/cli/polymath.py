@@ -1592,8 +1592,6 @@ async def run_integration_test(
         with console.status(f"  [green]Spawning {coord_name}..."):
             handle = await AgentHandle.from_blueprint(
                 agent_blueprint=bp,
-                session_id=config.session_id,
-                run_id=config.run_id,
                 app_name=effective_app_name
             )
 

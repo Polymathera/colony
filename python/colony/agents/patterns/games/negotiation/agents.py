@@ -67,6 +67,7 @@ Public API:
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import uuid
 from pydantic import BaseModel, Field, PrivateAttr
@@ -84,6 +85,13 @@ from ...actions.policies import action_executor, create_default_action_policy
 
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_class(fully_qualified_name: str) -> type:
+    """Resolve a class from its fully qualified name."""
+    module_path, class_name = fully_qualified_name.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
 
 
 class NegotiationGameConfig(BaseModel):
@@ -320,11 +328,13 @@ class NegotiationCoordinatorAgent(Agent):
 
             # Get capabilities for this role
             agent_caps = role_capabilities.get(role, [])
+            cap_blueprints = [_resolve_class(name).bind() for name in agent_caps]
 
+            # TODO: Pass LLMClientRequirements and other deployment parameters to spawn_child_agents
             spawned_id = await self.spawn_child_agents(
                 blueprints=[agent_cls.bind(
                     agent_id=agent_id,
-                    capabilities=agent_caps,
+                    capability_blueprints=cap_blueprints,
                     metadata=AgentMetadata(parameters={"game_config": child_config.model_dump()}),
                 )],
                 return_handles=False,
@@ -462,12 +472,14 @@ async def run_negotiation_game(
 
     # Get capabilities for coordinator role
     coordinator_caps = capabilities.get("coordinator", [])
+    cap_blueprints = [_resolve_class(name).bind() for name in coordinator_caps]
 
     # Spawn coordinator agent and initialize it (which spawns others and starts game)
+    # TODO: Pass LLMClientRequirements and other deployment parameters to spawn_child_agents
     await owner.spawn_child_agents(
         blueprints=[NegotiationCoordinatorAgent.bind(
             agent_id=coordinator_id,
-            capabilities=coordinator_caps,
+            capability_blueprints=cap_blueprints,
             metadata=AgentMetadata(parameters={
                 "game_config": config.model_dump(),
                 "role_capabilities": capabilities,  # Pass to coordinator for spawning others

@@ -19,13 +19,12 @@ Programming Model (AgentHandle Pattern):
 ---------------------------------------
 ```python
 # Spawn reputation agent with handle
-handle = await owner.spawn_child_agents(
-    blueprints=[AgentBlueprint(
-        agent_type="...ReputationAgent",
-        capability_types=[ReputationCapability],
+handle = (await owner.spawn_child_agents(
+    blueprints=[ReputationAgent.bind(
+        capability_blueprints=[ReputationCapability.bind()],
     )],
     return_handles=True,
-)[0]
+))[0]
 
 # Get capability and communicate
 reputation = handle.get_capability(ReputationCapability)
@@ -115,6 +114,8 @@ class ReputationAgent(Agent):
 
 async def spawn_reputation_agent(
     owner: Agent,
+    session_id: str | None = None,
+    run_id: str | None = None,
 ) -> AgentHandle:
     """Spawn a ReputationAgent and return a handle for communication.
 
@@ -131,20 +132,31 @@ async def spawn_reputation_agent(
 
     Args:
         owner: Agent spawning the reputation agent
+        session_id: Optional session ID (set in blueprint metadata)
+        run_id: Optional run ID (set in blueprint metadata)
 
     Returns:
         AgentHandle for interacting with the reputation agent
     """
+    logger.info(f"Spawning ReputationAgent for {owner.agent_id}...")
     agent_id = f"reputation_agent_{owner.tenant_id}_{uuid4().hex[:8]}"
-    logger.info(f"Spawning ReputationAgent {agent_id}...")
 
+    metadata = AgentMetadata(tenant_id=owner.tenant_id)
+    if session_id:
+        metadata.session_id = session_id
+    if run_id:
+        metadata.run_id = run_id
+
+    # TODO: Pass LLMClientRequirements and other deployment parameters to spawn_child_agents
     return await owner.spawn_child_agents(
         blueprints=[ReputationAgent.bind(
             agent_id=agent_id,
             bound_pages=[],
+            capability_blueprints=[ReputationCapability.bind()],
+            metadata=metadata,
         )],
-        capability_types=[[ReputationCapability]],  # TODO: Remove this and use capabilities from agent blueprints.
-        soft_affinity=False,
+        soft_affinity=True,
+        suspend_agents=True,
         return_handles=True,
     )[0]
 

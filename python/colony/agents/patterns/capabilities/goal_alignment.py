@@ -18,10 +18,12 @@ Programming Model (AgentHandle Pattern):
 ---------------------------------------
 ```python
 # Spawn objective guard agent with handle
-handle = await owner.spawn_child_agents(
-    blueprints=[AgentBlueprint(agent_type="...ObjectiveGuardAgent")],
-    capability_types=[ObjectiveGuardCapability],
-)[0]
+handle = (await owner.spawn_child_agents(
+    blueprints=[ObjectiveGuardAgent.bind(
+        capability_blueprints=[ObjectiveGuardCapability.bind()],
+    )],
+    return_handles=True,
+))[0]
 
 # Get capability and communicate
 guard = handle.get_capability(ObjectiveGuardCapability)

@@ -16,10 +16,12 @@ Programming Model (AgentHandle Pattern):
 ---------------------------------------
 ```python
 # Spawn consistency agent with handle
-handle = await owner.spawn_child_agents(
-    blueprints=[AgentBlueprint(agent_type="...ConsistencyAgent")],
-    capability_types=[ConsistencyCapability],
-)[0]
+handle = (await owner.spawn_child_agents(
+    blueprints=[ConsistencyAgent.bind(
+        capability_blueprints=[ConsistencyCapability.bind()],
+    )],
+    return_handles=True,
+))[0]
 
 # Get capability and communicate
 consistency = handle.get_capability(ConsistencyCapability)

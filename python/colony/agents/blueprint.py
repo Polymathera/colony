@@ -15,6 +15,7 @@ from typing import TypeVar, Generic, Any, ClassVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .base import Agent, AgentCapability, ActionPolicy
+    from ..cluster import LLMClientRequirements
 
 T = TypeVar("T")
 
@@ -45,9 +46,12 @@ class Blueprint(Generic[T]):
     Serialized across Ray boundaries via cloudpickle (same as BoundDeployment).
     Subclasses add domain-specific fields (key, action filters, etc.).
 
+    Attribute access: ``blueprint.metadata`` delegates to ``self.kwargs["metadata"]``,
+    so a Blueprint[T] feels like a deferred T for read access.
+
     Validates at bind time:
+    - For pydantic BaseModel subclasses: required fields present in kwargs
     - Serializability via ray.cloudpickle.dumps
-    - For pydantic BaseModel subclasses: kwargs are valid model fields
 
     Invariants:
     - self.cls is the actual class (not a string path)
@@ -60,6 +64,49 @@ class Blueprint(Generic[T]):
     def __init__(self, cls: type[T], kwargs: dict[str, Any] | None = None):
         self.cls = cls
         self.kwargs = kwargs or {}
+        self._validate_required_fields()
+
+    def _deferred_fields(self) -> frozenset[str]:
+        """Fields that are required on T but filled in later (e.g., by the spawn pipeline).
+        Subclasses override to declare deferred fields."""
+        return frozenset()
+
+    def _validate_required_fields(self) -> None:
+        """If T is a pydantic BaseModel, check that all required fields are in kwargs.
+        Skips fields returned by _deferred_fields()."""
+        model_fields = getattr(self.cls, "model_fields", None)
+        if model_fields is None:
+            return
+        from pydantic.fields import PydanticUndefined
+        skip = self._deferred_fields()
+        missing = []
+        for name, field_info in model_fields.items():
+            if name in skip or name in self.kwargs:
+                continue
+            if field_info.default is PydanticUndefined and field_info.default_factory is None:
+                missing.append(name)
+        if missing:
+            raise BlueprintValidationError(
+                f"Required fields missing from {self.cls.__name__}.bind(): {missing}"
+            )
+
+    def __getattr__(self, name: str) -> Any:
+        # Only called when normal slot/descriptor lookup fails.
+        # Delegates to kwargs so blueprint.metadata works like agent.metadata.
+        # Must use object.__getattribute__ to avoid recursion when self.kwargs
+        # itself isn't set yet (e.g. during unpickling).
+        try:
+            kwargs = object.__getattribute__(self, "kwargs")
+        except AttributeError:
+            raise AttributeError(
+                f"'{type(self).__name__}' has no attribute '{name}'"
+            )
+        try:
+            return kwargs[name]
+        except KeyError:
+            raise AttributeError(
+                f"'{type(self).__name__}' for {self.cls.__name__} has no attribute '{name}'"
+            )
 
     def validate_serializable(self) -> None:
         """Validate all kwargs are cloudpickle-serializable. Called at bind time.
@@ -185,13 +232,13 @@ class AgentBlueprint(Blueprint["Agent"]):
 
     At bind time:
     - Rejects kwargs that aren't Agent model fields
-    - Rejects excluded fields (agent_id, state, created_at, etc.)
+    - Rejects excluded fields (state, created_at, etc.) — runtime-managed
+    - Requires all required fields except deferred ones (agent_id — filled by pipeline)
     - Validates serializability via cloudpickle
-    Full pydantic validation deferred to local_instance (needs agent_id).
     """
 
+    # Runtime-managed fields: never allowed in kwargs, never required at bind time.
     _EXCLUDED_FIELDS: ClassVar[frozenset[str]] = frozenset({
-        "agent_id",
         "state",
         "created_at",
         "action_policy",
@@ -199,6 +246,14 @@ class AgentBlueprint(Blueprint["Agent"]):
         "page_storage",
         "child_agents",
     })
+
+    # Required on Agent but filled by the spawn pipeline before local_instance().
+    _DEFERRED_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "agent_id",
+    })
+
+    def _deferred_fields(self) -> frozenset[str]:
+        return self._EXCLUDED_FIELDS | self._DEFERRED_FIELDS
 
     def __init__(self, cls: type[Agent], kwargs: dict[str, Any] | None = None):
         kwargs = kwargs or {}
@@ -212,27 +267,47 @@ class AgentBlueprint(Blueprint["Agent"]):
             )
         super().__init__(cls, kwargs)
 
+    def __getattr__(self, name: str) -> Any:
+        # kwargs first, then model field defaults — so blueprint.metadata
+        # returns AgentMetadata() even when metadata wasn't passed to .bind().
+        try:
+            kwargs = object.__getattribute__(self, "kwargs")
+        except AttributeError:
+            raise AttributeError(
+                f"'{type(self).__name__}' has no attribute '{name}'"
+            )
+        try:
+            return kwargs[name]
+        except KeyError:
+            cls = object.__getattribute__(self, "cls")
+            field_info = cls.model_fields.get(name)
+            if field_info is not None:
+                from pydantic.fields import PydanticUndefined
+                if field_info.default is not PydanticUndefined:
+                    return field_info.default
+                if field_info.default_factory is not None:
+                    return field_info.default_factory()
+            raise AttributeError(
+                f"'{type(self).__name__}' for {cls.__name__} has no attribute '{name}'"
+            )
+
     def has_deployment_affinity(self) -> bool:
         """Check if agent needs VLLM routing (has bound pages)."""
-        return bool(self.kwargs.get("bound_pages"))
+        return bool(self.bound_pages) # Will return self.kwargs.get("bound_pages")
 
     async def remote_instance(
         self,
         *,
-        requirements: Any | None = None,
-        agent_id: str | None = None,
-        session_id: str | None = None,
-        run_id: str | None = None,
+        requirements: "LLMClientRequirements" | None = None,
         soft_affinity: bool = True,
         suspend_agents: bool = False,
-        max_iterations: int | None = None,
         app_name: str | None = None,
     ) -> str:
         """Spawn this agent on a remote deployment.
 
-        Deployment parameters (NOT Agent constructor args) go here.
-        Catches remote exceptions and raises BlueprintRemoteError
-        with the remote traceback attached.
+        Only true deployment parameters go here — things that affect routing
+        and resource allocation. Agent identity (agent_id, session_id, run_id,
+        max_iterations) belongs in the blueprint's kwargs/metadata.
 
         Returns:
             The spawned agent_id
@@ -244,12 +319,8 @@ class AgentBlueprint(Blueprint["Agent"]):
             return await agent_system.spawn_from_blueprint(
                 blueprint=self,
                 requirements=requirements,
-                agent_id=agent_id,
-                session_id=session_id,
-                run_id=run_id,
                 soft_affinity=soft_affinity,
                 suspend_agents=suspend_agents,
-                max_iterations=max_iterations,
             )
         except Exception as e:
             raise BlueprintRemoteError(

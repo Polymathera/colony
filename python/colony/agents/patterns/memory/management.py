@@ -841,30 +841,22 @@ class MemoryManagementAgent(Agent):
 
     Example:
         ```python
-        from polymathera.colony.agents import get_agent_system
-        from polymathera.colony.agents.blueprint import AgentBlueprint
-
-        # Spawn via AgentSystemDeployment (standard pattern)
-        # Can be called from anywhere in the Ray cluster
-        agent_system = get_agent_system()
+        from polymathera.colony.agents.patterns.memory.management import MemoryManagementAgent
+        from polymathera.colony.system import spawn_agents
 
         # Create tenant-level memory management agent
-        agent_ids = await agent_system.spawn_agents([
-            AgentBlueprint(
-                agent_type="polymathera.colony.agents.patterns.memory.management.MemoryManagementAgent",
-                agent_id="memory_mgmt_tenant_acme",
+        agent_ids = await spawn_agents([
+            MemoryManagementAgent.bind(
+                agent_type="service.memory_management",
                 tenant_id="acme_corp",
-                metadata={},
             ),
         ])
 
         # System-level agent (no tenant)
-        agent_ids = await agent_system.spawn_agents([
-            AgentBlueprint(
-                agent_type="polymathera.colony.agents.patterns.memory.management.MemoryManagementAgent",
-                agent_id="memory_mgmt_system",
-                tenant_id=None,  # System-level
-                metadata={},  # System-level
+        agent_ids = await spawn_agents([
+            MemoryManagementAgent.bind(
+                agent_type="service.memory_management",
+                tenant_id="system",
             ),
         ])
         ```

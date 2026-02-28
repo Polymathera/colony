@@ -60,6 +60,7 @@ This implements ideas from:
 
 from __future__ import annotations
 
+import importlib
 import uuid
 from pydantic import BaseModel, Field, PrivateAttr
 from logging import getLogger
@@ -73,6 +74,13 @@ from .capabilities import (
     HypothesisGameProtocol,
     HypothesisRole
 )
+
+
+def _resolve_class(fully_qualified_name: str) -> type:
+    """Resolve a class from its fully qualified name."""
+    module_path, class_name = fully_qualified_name.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
 
 logger = getLogger(__name__)
 
@@ -253,11 +261,13 @@ class HypothesisCoordinatorAgent(Agent):
             )
 
             agent_caps = role_capabilities.get(role, [])
+            cap_blueprints = [_resolve_class(name).bind() for name in agent_caps]
 
+            # TODO: Pass LLMClientRequirements and other deployment parameters to spawn_child_agents
             spawned_id = await self.spawn_child_agents(
                 blueprints=[agent_cls.bind(
                     agent_id=agent_id,
-                    capabilities=agent_caps,
+                    capability_blueprints=cap_blueprints,
                     metadata=AgentMetadata(parameters={"game_config": child_config.model_dump()}),
                 )],
                 return_handles=False,
@@ -373,12 +383,13 @@ async def run_hypothesis_game(
     )
 
     coordinator_caps = capabilities.get("coordinator", [])
+    cap_blueprints = [_resolve_class(name).bind() for name in coordinator_caps]
 
     # Spawn coordinator agent
     await owner.spawn_child_agents(
         blueprints=[HypothesisCoordinatorAgent.bind(
             agent_id=coordinator_id,
-            capabilities=coordinator_caps,
+            capability_blueprints=cap_blueprints,
             metadata=AgentMetadata(parameters={
                 "game_config": config.model_dump(),
                 "role_capabilities": capabilities,

@@ -17,6 +17,7 @@ import logging
 
 from colony.vcm.sources import BuilInContextPageSourceType
 from colony.vcm.models import MmapConfig, MmapResult
+from colony.agents.models import AgentMetadata
 from colony.samples.code_analysis.basic.coordinator import CodeAnalysisCoordinator
 
 logging.basicConfig(level=logging.INFO)
@@ -65,18 +66,17 @@ async def analyze_repository(
     # 3. Spawn CodeAnalysisCoordinator
     logger.info("Spawning CodeAnalysisCoordinator...")
     coordinator_bp = CodeAnalysisCoordinator.bind(
-        metadata={
-            "repo_id": repo_id,
-            "session_id": session_id,
-            "run_id": run_id
-        },
+        metadata=AgentMetadata(
+            session_id=session_id,
+            run_id=run_id,
+            parameters={"repo_id": repo_id},
+        ),
         bound_pages=[],  # Coordinator doesn't need pages
     )
 
+    # TODO: Pass LLM requirements to spawn_agents
     agent_ids = await agent_system.spawn_agents(
         blueprints=[coordinator_bp],
-        session_id=session_id,
-        run_id=run_id,
         soft_affinity=False
     )
 

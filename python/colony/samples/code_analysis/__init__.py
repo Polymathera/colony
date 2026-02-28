@@ -22,15 +22,15 @@ Example:
     )
 
     # Spawn coordinator agent
-    agent_system = serving.get_deployment(app_name, names.agent_system)
-    agent_ids = await agent_system.spawn_agents([{
-        "agent_type": "polymathera.colony.samples.code_analysis.CodeAnalysisCoordinator",
-        "metadata": {
-            "repo_id": "repo-123",
-            "group_id": "vmr-456",
-            "tenant_id": "tenant-1",
-        }
-    }])
+    from colony.system import spawn_agents
+    coordinator_bp = CodeAnalysisCoordinator.bind(
+        metadata=AgentMetadata(
+            tenant_id="tenant-1",
+            group_id="vmr-456",
+            parameters={"repo_id": "repo-123"},
+        ),
+    )
+    agent_ids = await spawn_agents(blueprints=[coordinator_bp])
     ```
 """
 

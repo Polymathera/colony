@@ -12,9 +12,11 @@ Messages are handled via direct messaging (communication.py) and blackboard.
 This deployment maintains distributed state via StateManager.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 import uuid
 
 from pydantic import Field
@@ -32,6 +34,9 @@ from .models import (
     ResourceExhaustedConfig,
     ResourceExhaustedStrategy,
 )
+if TYPE_CHECKING:
+    from ..cluster import LLMClientRequirements
+
 
 logger = logging.getLogger(__name__)
 
@@ -241,36 +246,51 @@ class AgentSystemDeployment:
             return state.agents_by_capability.get(capability, []).copy()
 
     # === Agent Spawning (Entry Point) ===
+    async def _start_agent(
+        self,
+        deployment_handle: serving.DeploymentHandle,
+        blueprint: AgentBlueprint,
+        suspend_agents: bool,
+        expected_agent_id: str | None = None
+    ) -> str:
+        """Helper to start an agent on a specific deployment handle."""
+        try:
+            spawned_id = await deployment_handle.start_agent(
+                blueprint,
+                suspend_agents=suspend_agents,
+            )
+            if expected_agent_id is not None and spawned_id != expected_agent_id:
+                raise ValueError(f"Spawned agent ID {spawned_id} does not match expected ID {expected_agent_id}")
+
+            logger.info(f"Spawned agent {spawned_id} on deployment {deployment_handle.deployment_name}")
+            return spawned_id
+        except ResourceExhausted as e:
+            logger.warning(f"ResourceExhausted when spawning agent with blueprint {blueprint}: {e}")
+            raise
 
     @serving.endpoint
     async def spawn_from_blueprint(
         self,
         blueprint: AgentBlueprint,
         *,
-        requirements: Any | None = None,
-        agent_id: str | None = None,
-        session_id: str | None = None,
-        run_id: str | None = None,
+        requirements: LLMClientRequirements | None = None,
         soft_affinity: bool = True,
         suspend_agents: bool = False,
-        max_iterations: int | None = None,
     ) -> str:
         """Spawn a single agent from a blueprint with deployment routing.
 
-        Enriches the blueprint's metadata with session/run tracking,
-        checks tenant quota, and routes to the correct deployment:
-        - Page affinity (bound_pages) or LLM requirements → VLLMDeployment
-        - No affinity → StandaloneAgentDeployment
+        The blueprint is the single source of truth for the agent's identity:
+        agent_id, session_id, run_id, max_iterations all live in the blueprint.
+        This method only handles true deployment concerns: quota checking
+        and routing to the correct deployment.
+
+        If agent_id is not in the blueprint, one is generated.
 
         Args:
-            blueprint: AgentBlueprint with class and constructor args
+            blueprint: AgentBlueprint with class, constructor args, and metadata
             requirements: LLM deployment requirements for routing (LLMClientRequirements)
-            agent_id: Optional ID (generated if None)
-            session_id: Optional session ID for tracking
-            run_id: Optional run ID for tracking
             soft_affinity: If True, allows spawning on replicas without all pages
             suspend_agents: If True, replica may suspend existing agents to make room
-            max_iterations: Optional maximum iterations for the agent's action policy
 
         Returns:
             Spawned agent ID
@@ -281,32 +301,22 @@ class AgentSystemDeployment:
             get_vllm_deployment
         )
 
-        agent_id = agent_id or f"agent-{uuid.uuid4().hex[:8]}"
+        # Ensure agent_id is in the blueprint
+        if "agent_id" not in blueprint.kwargs:
+            blueprint.kwargs["agent_id"] = f"agent-{uuid.uuid4().hex[:8]}"
+        agent_id = blueprint.agent_id
 
-        # Enrich metadata with session/run tracking
-        metadata = blueprint.kwargs.get("metadata", AgentMetadata())
-        if isinstance(metadata, AgentMetadata):
-            metadata = metadata.model_copy()
-        if session_id:
-            metadata.session_id = session_id
-        if run_id:
-            metadata.run_id = run_id
-        if max_iterations is not None:
-            metadata.max_iterations = max_iterations
-
-        # Check tenant quota
-        if metadata.tenant_id:
+        # Quota check — metadata and resource_requirements are in the blueprint
+        if blueprint.metadata.tenant_id:
             try:
-                resource_req = blueprint.kwargs.get("resource_requirements", AgentResourceRequirements())
-                await self._check_tenant_quota(metadata.tenant_id, resource_req)
+                await self._check_tenant_quota(
+                    blueprint.metadata.tenant_id, blueprint.resource_requirements
+                )
             except QuotaExceeded as e:
-                logger.error(f"Quota exceeded for tenant {metadata.tenant_id}: {e}")
+                logger.error(f"Quota exceeded for tenant {blueprint.metadata.tenant_id}: {e}")
                 raise
 
-        # Create enriched blueprint copy (with session/run metadata)
-        enriched_bp = AgentBlueprint(blueprint.cls, {**blueprint.kwargs, "metadata": metadata})
-
-        # Decide where to spawn based on deployment affinity
+        # Route based on deployment affinity
         has_affinity = blueprint.has_deployment_affinity() or (requirements is not None)
 
         if has_affinity:
@@ -318,17 +328,15 @@ class AgentSystemDeployment:
                 )
 
                 vllm_handle = get_vllm_deployment(vllm_deployment_name)
-                spawned_id = await vllm_handle.start_agent(
-                    enriched_bp,
-                    agent_id=agent_id,
-                    soft_affinity=soft_affinity,
+                spawned_id = await self._start_agent(
+                    vllm_handle,
+                    blueprint,
                     suspend_agents=suspend_agents,
-                    max_iterations=max_iterations,
+                    expected_agent_id=agent_id,
                 )
-                bound_pages = blueprint.kwargs.get("bound_pages", [])
                 logger.info(
                     f"Spawned page-affinity agent {spawned_id} on {vllm_deployment_name} "
-                    f"(pages={len(bound_pages)}, requirements={'set' if requirements else 'none'})"
+                    f"(pages={len(blueprint.bound_pages)}, requirements={'set' if requirements else 'none'})"
                 )
                 return spawned_id
 
@@ -339,14 +347,10 @@ class AgentSystemDeployment:
                 )
 
                 spawned_id = await self._handle_resource_exhausted_vllm(
-                    blueprint=enriched_bp,
-                    requirements=requirements,
-                    agent_id=agent_id,
+                    blueprint=blueprint,
                     vllm_handle=vllm_handle,
-                    vllm_deployment_name=vllm_deployment_name,
                     soft_affinity=soft_affinity,
                     suspend_agents=suspend_agents,
-                    max_iterations=max_iterations,
                 )
                 logger.info(
                     f"Spawned VLLM agent {spawned_id} after handling ResourceExhausted"
@@ -362,11 +366,11 @@ class AgentSystemDeployment:
         else:
             standalone_handle = get_standalone_agents()
             try:
-                spawned_id = await standalone_handle.start_agent(
-                    enriched_bp,
-                    agent_id=agent_id,
+                spawned_id = await self._start_agent(
+                    standalone_handle,
+                    blueprint,
                     suspend_agents=suspend_agents,
-                    max_iterations=max_iterations,
+                    expected_agent_id=agent_id,
                 )
                 logger.info(f"Spawned standalone agent {spawned_id}")
                 return spawned_id
@@ -378,10 +382,9 @@ class AgentSystemDeployment:
 
                 logger.warning(f"ResourceExhausted for agent {agent_id}: {e}")
                 spawned_id = await self._handle_resource_exhausted_standalone(
-                    blueprint=enriched_bp,
-                    agent_id=agent_id,
+                    blueprint=blueprint,
                     standalone_handle=standalone_handle,
-                    max_iterations=max_iterations,
+                    suspend_agents=suspend_agents,
                 )
                 logger.info(f"Spawned standalone agent {spawned_id} after handling ResourceExhausted")
                 return spawned_id
@@ -395,21 +398,18 @@ class AgentSystemDeployment:
         self,
         blueprints: list[AgentBlueprint],
         *,
-        requirements_list: list[Any | None] | None = None,
-        session_id: str | None = None,
-        run_id: str | None = None,
+        requirements: LLMClientRequirements | None = None,
         soft_affinity: bool = True,
         suspend_agents: bool = False,
     ) -> list[str]:
         """Spawn multiple agents from blueprints.
 
         Convenience method that calls spawn_from_blueprint for each blueprint.
+        Each blueprint carries its own metadata (session_id, run_id, etc.).
 
         Args:
             blueprints: List of AgentBlueprint defining agents to spawn
-            requirements_list: Optional per-blueprint LLM requirements (parallel list)
-            session_id: Optional session ID for tracking
-            run_id: Optional run ID for tracking
+            requirements: Optional LLMClientRequirements to apply to all agents
             soft_affinity: If True, allows spawning on replicas without all pages
             suspend_agents: If True, replica may suspend existing agents to make room
 
@@ -418,25 +418,15 @@ class AgentSystemDeployment:
         """
         agent_ids = []
         for i, bp in enumerate(blueprints):
-            requirements = requirements_list[i] if requirements_list else None
             spawned_id = await self.spawn_from_blueprint(
                 blueprint=bp,
                 requirements=requirements,
-                session_id=session_id,
-                run_id=run_id,
                 soft_affinity=soft_affinity,
                 suspend_agents=suspend_agents,
             )
             agent_ids.append(spawned_id)
 
-        context_info = []
-        if session_id:
-            context_info.append(f"session={session_id}")
-        if run_id:
-            context_info.append(f"run={run_id}")
-        context_str = f" ({', '.join(context_info)})" if context_info else ""
-        logger.info(f"Spawned {len(agent_ids)} agents{context_str}")
-
+        logger.info(f"Spawned {len(agent_ids)} agents")
         return agent_ids
 
     @serving.endpoint
@@ -923,9 +913,8 @@ class AgentSystemDeployment:
     async def _handle_resource_exhausted_standalone(
         self,
         blueprint: AgentBlueprint,
-        agent_id: str,
         standalone_handle: serving.DeploymentHandle,
-        max_iterations: int | None = None,
+        suspend_agents: bool,
     ) -> str:
         """Handle ResourceExhausted error for standalone agent spawning.
 
@@ -933,10 +922,9 @@ class AgentSystemDeployment:
         by adding one replica, then retry the spawn.
 
         Args:
-            blueprint: Agent blueprint (already enriched with metadata)
-            agent_id: Generated agent ID
+            blueprint: Agent blueprint (agent_id already in kwargs)
             standalone_handle: Handle to StandaloneAgentDeployment
-            max_iterations: Optional max iterations for agent
+            suspend_agents: Whether to suspend agents during scaling
 
         Returns:
             Spawned agent ID if successful
@@ -944,6 +932,8 @@ class AgentSystemDeployment:
         Raises:
             ResourceExhausted: If all retries exhausted or scaling disabled
         """
+        agent_id = blueprint.agent_id
+
         if not self.resource_exhausted_config.enable_auto_scaling:
             logger.error(
                 f"ResourceExhausted for agent {agent_id}, but auto-scaling is disabled"
@@ -987,10 +977,11 @@ class AgentSystemDeployment:
                 await asyncio.sleep(self.resource_exhausted_config.retry_delay_s)
 
                 # Retry spawn on scaled deployment
-                spawned_id = await standalone_handle.start_agent(
+                spawned_id = await self._start_agent(
+                    standalone_handle,
                     blueprint,
-                    agent_id=agent_id,
-                    max_iterations=max_iterations,
+                    suspend_agents=suspend_agents,
+                    expected_agent_id=agent_id,
                 )
 
                 logger.info(
@@ -1019,13 +1010,9 @@ class AgentSystemDeployment:
     async def _handle_resource_exhausted_vllm(
         self,
         blueprint: AgentBlueprint,
-        requirements: Any | None,
-        agent_id: str,
         vllm_handle: serving.DeploymentHandle,
-        vllm_deployment_name: str,
         soft_affinity: bool,
         suspend_agents: bool,
-        max_iterations: int | None = None,
     ) -> str:
         """Handle ResourceExhausted error for VLLM agent spawning.
 
@@ -1035,14 +1022,12 @@ class AgentSystemDeployment:
         - RETRY_LATER: Wait and retry
 
         Args:
-            blueprint: Agent blueprint (already enriched with metadata)
+            blueprint: Agent blueprint (agent_id already in kwargs)
             requirements: LLM deployment requirements
-            agent_id: Generated agent ID
             vllm_handle: Handle to VLLMDeployment
             vllm_deployment_name: Name of VLLM deployment
             soft_affinity: Current soft_affinity setting
             suspend_agents: Current suspend_agents setting
-            max_iterations: Optional max iterations for agent
 
         Returns:
             Spawned agent ID if successful
@@ -1050,6 +1035,8 @@ class AgentSystemDeployment:
         Raises:
             ResourceExhausted: If all strategies exhausted
         """
+        agent_id = blueprint.agent_id
+
         if not self.resource_exhausted_config.enable_auto_scaling:
             logger.error(
                 f"ResourceExhausted for agent {agent_id}, but auto-scaling is disabled"
@@ -1077,12 +1064,10 @@ class AgentSystemDeployment:
                     logger.info(
                         f"SOFT_CONSTRAINT strategy: Retrying agent {agent_id} with soft_affinity=True"
                     )
-                    spawned_id = await vllm_handle.start_agent(
+                    spawned_id = await self._start_agent(
+                        vllm_handle,
                         blueprint,
-                        agent_id=agent_id,
-                        soft_affinity=True,  # Enable soft affinity
                         suspend_agents=suspend_agents,
-                        max_iterations=max_iterations,
                     )
                     logger.info(
                         f"Successfully spawned agent {spawned_id} with SOFT_CONSTRAINT strategy"
@@ -1098,12 +1083,11 @@ class AgentSystemDeployment:
                     logger.info(
                         f"SUSPEND_AGENTS strategy: Retrying agent {agent_id} with suspend_agents=True"
                     )
-                    spawned_id = await vllm_handle.start_agent(
+                    spawned_id = await self._start_agent(
+                        vllm_handle,
                         blueprint,
-                        agent_id=agent_id,
-                        soft_affinity=True,  # Use soft affinity with suspension
                         suspend_agents=True,  # Enable suspension
-                        max_iterations=max_iterations,
+                        expected_agent_id=agent_id,
                     )
                     logger.info(
                         f"Successfully spawned agent {spawned_id} with SUSPEND_AGENTS strategy"

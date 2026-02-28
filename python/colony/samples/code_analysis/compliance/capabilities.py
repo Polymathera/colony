@@ -1631,12 +1631,11 @@ class ComplianceCoordinatorCapability(AgentCapability):
             # Use AgentPoolCapability for standardized agent creation
             handle: AgentHandle = await self._agent_pool_cap.create_agent(
                 agent_type="polymathera.colony.samples.code_analysis.compliance.ComplianceAnalysisAgent",
-                agent_id=agent_id,
+                capabilities=["polymathera.colony.samples.code_analysis.compliance.capabilities.ComplianceAnalysisCapability"],
                 bound_pages=[page_id],
-                capability_types=[ComplianceAnalysisCapability],
                 requirements=LLMClientRequirements(
-                    model_family="llama",
-                    min_context_window=32000,
+                    model_family="llama",  # TODO: Make configurable
+                    min_context_window=32000,  # TODO: Make configurable
                 ),
                 resource_requirements=AgentResourceRequirements(
                     cpu_cores=0.1,
@@ -1666,7 +1665,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
                 await self._result_cap.store_partial(
                     result_id=f"compliance:{page_id}",
                     result=run.output_data,
-                    source_agent=agent_id,
+                    source_agent=handle.child_agent_id,
                     source_pages=[page_id],
                     result_type="compliance_analysis",
                 )

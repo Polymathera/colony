@@ -18,16 +18,13 @@ Programming Model (AgentHandle Pattern):
 ---------------------------------------
 ```python
 # Spawn objective guard agent with handle
-handle = await owner.spawn_child_agents(
-    blueprints=[AgentBlueprint(
-        agent_id=f"objective_guard_agent_{owner.tenant_id}_{uuid4().hex[:8]}",
-        agent_type="...ObjectiveGuardAgent",
+handle = (await owner.spawn_child_agents(
+    blueprints=[ObjectiveGuardAgent.bind(
         tenant_id=owner.tenant_id,
-        bound_pages=[],  # Objective guard agent doesn't need pages
+        capability_blueprints=[ObjectiveGuardCapability.bind()],
     )],
-    capability_types=[ObjectiveGuardCapability],
     return_handles=True,
-)[0]
+))[0]
 
 # Get capability and communicate
 guard = handle.get_capability(ObjectiveGuardCapability)
@@ -126,6 +123,8 @@ def detect_goal_drift(
 
 async def spawn_objective_guard_agent(
     owner: Agent,
+    session_id: str | None = None,
+    run_id: str | None = None,
 ) -> AgentHandle:
     """Spawn an ObjectiveGuardAgent and return a handle for communication.
 
@@ -142,20 +141,31 @@ async def spawn_objective_guard_agent(
 
     Args:
         owner: Agent spawning the objective guard agent
+        session_id: Optional session ID (set in blueprint metadata)
+        run_id: Optional run ID (set in blueprint metadata)
 
     Returns:
         AgentHandle for interacting with the objective guard agent
     """
     agent_id = f"objective_guard_{owner.tenant_id}_{uuid4().hex[:8]}"
-    logger.info(f"Spawning ObjectiveGuardAgent {agent_id}...")
+    logger.info(f"Spawning ObjectiveGuardAgent for {owner.agent_id}...")
 
+    metadata = AgentMetadata(tenant_id=owner.tenant_id)
+    if session_id:
+        metadata.session_id = session_id
+    if run_id:
+        metadata.run_id = run_id
+
+    # TODO: Pass LLMClientRequirements and other deployment parameters to spawn_child_agents
     return await owner.spawn_child_agents(
         blueprints=[ObjectiveGuardAgent.bind(
             agent_id=agent_id,
             bound_pages=owner.bound_pages,
+            capability_blueprints=[ObjectiveGuardCapability.bind()],
+            metadata=metadata,
         )],
-        capability_types=[[ObjectiveGuardCapability]], # TODO: This should be inferred from the agent blueprint, not passed here.
-        soft_affinity=False,
+        soft_affinity=True,
+        suspend_agents=True,
         return_handles=True,
     )[0]
 

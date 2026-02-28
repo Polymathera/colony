@@ -15,7 +15,7 @@ Usage:
     self.add_capability(pool_cap)
 
     # ActionPolicy can now use these actions:
-    # - create_agent(agent_type, capabilities, bound_pages, metadata)
+    # - create_agent(agent_type, capabilities, bound_pages, metadata, role)
     # - get_agent_status(agent_ids, filter_state)
     # - assign_work(agent_id, work_unit, priority)
     # - get_work_results(agent_ids, result_type)
@@ -32,11 +32,12 @@ from typing import Any, TYPE_CHECKING
 from overrides import override
 
 from ...base import AgentCapability, AgentHandle
-from ...models import AgentMetadata, AgentSuspensionState
+from ...models import AgentMetadata, AgentResourceRequirements, AgentSuspensionState
 from ..actions.policies import action_executor
 
 if TYPE_CHECKING:
     from ...base import Agent
+    from ....cluster import LLMClientRequirements
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,14 @@ class AgentPoolCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for AgentPoolCapability")
         pass
 
+    @staticmethod
+    def _resolve_class(fully_qualified_name: str) -> type:
+        """Resolve a class from its fully qualified name (e.g., 'pkg.module.ClassName')."""
+        import importlib
+        module_path, class_name = fully_qualified_name.rsplit(".", 1)
+        module = importlib.import_module(module_path)
+        return getattr(module, class_name)
+
     # === Action Executors ===
 
     @action_executor()
@@ -100,7 +109,11 @@ class AgentPoolCapability(AgentCapability):
         capabilities: list[str] | None = None,
         bound_pages: list[str] | None = None,
         metadata: AgentMetadata | None = None,
+        resource_requirements: AgentResourceRequirements | None = None,
+        requirements: LLMClientRequirements | None = None,
         role: str | None = None,
+        soft_affinity: bool = True,
+        suspend_agents: bool = True,
     ) -> dict[str, Any]:
         """Spawn a new child agent in the pool.
 
@@ -112,10 +125,15 @@ class AgentPoolCapability(AgentCapability):
         Args:
             agent_type: Fully qualified class path
                 (e.g., "polymathera.colony.agents.base.Agent")
-            capabilities: Capability class names to attach
+            capabilities: Fully qualified capability class names to attach
+                (e.g., ["polymathera.colony.samples.code_analysis.ClusterAnalyzerCapabilityV2"])
             bound_pages: Pages for affinity routing (routes to replica with these loaded)
             metadata: Passed to child agent's metadata
+            resource_requirements: CPU/memory/GPU requirements for the child agent
+            requirements: LLM client requirements for the child agent
             role: Role identifier for tracking (e.g., "analyzer", "synthesizer")
+            soft_affinity: Whether to use soft affinity for routing
+            suspend_agents: Whether to suspend existing agents if resources are constrained
 
         Returns:
             Dict with:
@@ -132,21 +150,31 @@ class AgentPoolCapability(AgentCapability):
                     parent_agent_id=self.agent.agent_id,
                 )
             # Resolve agent class from fully qualified path
-            import importlib
+            agent_cls = self._resolve_class(agent_type)
 
-            module_path, class_name = agent_type.rsplit(".", 1)
-            module = importlib.import_module(module_path)
-            agent_cls = getattr(module, class_name)
+            # Resolve capability class names to blueprints
+            capability_blueprints = []
+            if capabilities:
+                for cap_name in capabilities:
+                    cap_cls = self._resolve_class(cap_name)
+                    capability_blueprints.append(cap_cls.bind())
 
+            bind_kwargs: dict[str, Any] = {
+                "agent_type": agent_type,
+                "bound_pages": bound_pages or [],
+                "metadata": metadata,
+            }
+            if capability_blueprints:
+                bind_kwargs["capability_blueprints"] = capability_blueprints
+            if resource_requirements:
+                bind_kwargs["resource_requirements"] = resource_requirements
+
+            # TODO: Pass LLMClientRequirements (and other deployment params) to spawn_child_agents
             handles: list[AgentHandle] = await self.agent.spawn_child_agents(
-                blueprints=[
-                    agent_cls.bind(
-                        agent_type=agent_type,
-                        bound_pages=bound_pages or [],
-                        metadata=metadata,
-                    )
-                ],
-                capability_types=[capabilities],
+                blueprints=[agent_cls.bind(**bind_kwargs)],
+                requirements=requirements,
+                soft_affinity=soft_affinity,
+                suspend_agents=suspend_agents,
                 return_handles=True,
             )
             handle = handles[0]

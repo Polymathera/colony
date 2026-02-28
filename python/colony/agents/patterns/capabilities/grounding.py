@@ -23,10 +23,12 @@ agent communication. When a parent spawns a GroundingAgent, it receives an
 
 1. **Wait for result** - Block until grounding completes:
    ```python
-   handle = await owner.spawn_child_agents(
-       blueprints=[AgentBlueprint(agent_type="...GroundingAgent")],
-       capability_types=[GroundingCapability],
-   )[0]
+   handle = (await owner.spawn_child_agents(
+       blueprints=[GroundingAgent.bind(
+           capability_blueprints=[GroundingCapability.bind()],
+       )],
+       return_handles=True,
+   ))[0]
    grounding = handle.get_capability(GroundingCapability)
    future = await grounding.get_result_future()
    result = await future.wait(timeout=30.0)

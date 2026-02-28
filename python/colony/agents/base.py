@@ -55,6 +55,8 @@ from .patterns.hooks import AgentHookRegistry, Pointcut, HookType, ErrorMode, au
 
 if TYPE_CHECKING:
     from .patterns.memory.types import CapabilityMemoryRequirements
+    from ..cluster import LLMClientRequirements
+
 
 
 logger = logging.getLogger(__name__)
@@ -873,8 +875,7 @@ class AgentHandle:
         cls,
         agent_blueprint: AgentBlueprint,
         *,
-        session_id: str | None = None,
-        run_id: str | None = None,
+        requirements: "LLMClientRequirements" | None = None,
         soft_affinity: bool = True,
         suspend_agents: bool = False,
         default_capability_type: type[AgentCapability] | None = None,
@@ -882,15 +883,15 @@ class AgentHandle:
     ) -> "AgentHandle":
         """Spawn an agent from a blueprint and return handle.
 
-        Convenience method that spawns a new agent and returns a handle.
+        The blueprint is the single source of truth — session_id, run_id,
+        max_iterations all live in blueprint.metadata.
 
         Args:
             agent_blueprint: AgentBlueprint defining the agent to spawn
-            session_id: Session ID for context
-            run_id: Run ID for context
+            requirements: LLM deployment requirements for routing (LLMClientRequirements)
             soft_affinity: Whether to use soft affinity routing
             suspend_agents: Whether to suspend other agents if needed
-            default_capability_type: Default capability for run/stream
+            default_capability_type: Default capability for run/stream (handle config)
             app_name: The `serving.Application` name where the agent system resides.
                 This is required when `from_blueprint` is called from outside any
                 `serving.deployment`.
@@ -903,11 +904,9 @@ class AgentHandle:
         """
         from ..system import spawn_agents
 
-        metadata: AgentMetadata | None = agent_blueprint.kwargs.get("metadata")
         child_ids: list[str] = await spawn_agents(
             blueprints=[agent_blueprint],
-            session_id=session_id or (metadata.session_id if metadata else None),
-            run_id=run_id or (metadata.run_id if metadata else None),
+            requirements=requirements,
             soft_affinity=soft_affinity,
             suspend_agents=suspend_agents,
             app_name=app_name
@@ -2618,12 +2617,9 @@ class Agent(BaseModel):
         self,
         blueprints: list[AgentBlueprint],
         *,
-        session_id: str | None = None,
-        run_id: str | None = None,
+        requirements: "LLMClientRequirements" | None = None,
         soft_affinity: bool = True,
         suspend_agents: bool = False,
-        roles: list[str] = [],
-        capability_types: list[list[type[AgentCapability]] | None] = None,  # TODO: Remove this and use capabilities from agent blueprints.
         return_handles: bool = False,
     ) -> list[str] | list["AgentHandle"]:
         """Spawn agents via agent system. This is intended to be called by this agent
@@ -2634,73 +2630,64 @@ class Agent(BaseModel):
         to interact with them via their capabilities.
 
         Args:
-            blueprints: List of AgentBlueprint defining agents to spawn
-            session_id: Optional session ID for tracking which session spawned these agents
-            run_id: Optional run ID for tracking which AgentRun spawned these agents
+            blueprints: List of AgentBlueprint defining agents to spawn.
+                Each blueprint carries its own metadata (session_id, run_id,
+                max_iterations, role) and capability_blueprints.
+                If metadata.role is set, the child is tracked in self.child_agents[role].
+                capability_blueprints are used to infer capability types for AgentHandle
+                when return_handles=True.
+            requirements: Optional LLMClientRequirements to apply to all agents
             soft_affinity: If True, allows spawning on replicas without all pages (will page fault)
             suspend_agents: If True, replica may suspend existing agents to make room
-            roles: Role names for these children (e.g., "analyzer", "synthesizer")
-            capability_types: List of lists of capability types for each child agent. Ignored if return_handles is False.
-            return_handles: If True, return AgentHandle objects instead of agent IDs for communication.
+            return_handles: If True, return AgentHandle objects instead of agent IDs.
 
         Returns:
             List of spawned agent IDs or AgentHandles
 
         Example:
             ```python
-            # Spawn grounding agent with handle
             handle = (await self.spawn_child_agents(
-                blueprints=[GroundingAgent.bind(...)],
-                roles=["grounding"],
-                capability_types=[[GroundingCapability]],
+                blueprints=[GroundingAgent.bind(
+                    metadata=AgentMetadata(session_id="s1", role="grounding"),
+                    capability_blueprints=[GroundingCapability.bind()],
+                )],
                 return_handles=True,
             ))[0]
 
-            # Get capability proxy and stream events
             grounding = handle.get_capability_by_type(GroundingCapability)
             await grounding.stream_events_to_queue(self.get_event_queue())
-
-            # Send request and wait for result
-            req_id = await grounding.send_request(
-                request_type="ground_claim",
-                request_data={"claim": "...", "context": {...}}
-            )
-            future = await grounding.get_result_future(task_id=req_id)
-            result = await asyncio.wait_for(future, timeout=30.0)
             ```
         """
         from ..system import spawn_agents
 
-        if len(roles) != len(blueprints):
-            raise ValueError("Number of roles must match number of blueprints")
-
         child_ids: list[str] = await spawn_agents(
-            blueprints=blueprints,  # TODO: Should we include parent_agent_id=self.agent_id here?
-            session_id=session_id,
-            run_id=run_id,
+            blueprints=blueprints,
+            requirements=requirements,
             soft_affinity=soft_affinity,
             suspend_agents=suspend_agents,
         )
 
-        for role, child_id in zip(roles, child_ids):
-            # Track child
-            self.child_agents[role] = child_id
-
-            logger.info(f"Agent {self.agent_id} spawned child {role} ({child_id}) with subscriptions")
+        # Track children in self.child_agents using role from blueprint metadata
+        for i, child_id in enumerate(child_ids):
+            role = blueprints[i].metadata.role
+            if role:
+                if role in self.child_agents:
+                    raise ValueError(f"Duplicate child role '{role}' in spawn_child_agents - roles must be unique for tracking")
+                self.child_agents[role] = child_id
+                logger.info(f"Agent {self.agent_id} spawned child {role} ({child_id})")
 
         if not return_handles:
             return child_ids
 
-        if not capability_types or len(capability_types) != len(blueprints):
-            raise ValueError("Number of capability_types lists must match number of blueprints")
-
-        # Create AgentHandles for each child
+        # Create AgentHandles — infer capability types from each blueprint's
+        # capability_blueprints so callers don't need to repeat them.
         handles: list[AgentHandle] = []
         for i, child_id in enumerate(child_ids):
+            cap_types = [cb.cls for cb in blueprints[i].capability_blueprints] or None
             handle = AgentHandle(
                 child_agent_id=child_id,
                 owner=self,
-                capability_types=capability_types[i],
+                capability_types=cap_types,
             )
             handles.append(handle)
         return handles
@@ -3023,18 +3010,16 @@ class AgentManagerBase:
         self,
         agent_blueprint: AgentBlueprint,
         *,
-        agent_id: str | None = None,
         suspend_agents: bool = False,
-        # resource_requirements: AgentResourceRequirements | None = None,
-        max_iterations: int | None = None,
     ) -> str:
         """Start a new agent from a blueprint.
 
+        The blueprint must contain agent_id (set by spawn_from_blueprint).
+
         Args:
-            agent_blueprint: AgentBlueprint with class and all constructor args
-            agent_id: Optional ID (generated if None)
+            agent_blueprint: AgentBlueprint with class and all constructor args.
+                max_iterations is read from the agent's metadata after construction.
             suspend_agents: If True and ResourceExhausted, suspend existing agents to make room
-            max_iterations: Optional maximum number of iterations for the agent's action policy
 
         Returns:
             agent_id
@@ -3043,14 +3028,12 @@ class AgentManagerBase:
             ResourceExhausted: If replica has insufficient resources and suspend_agents=False
         """
         async with self._agent_lock:
+            agent_id = agent_blueprint.agent_id
+            resource_requirements: "LLMClientRequirements" | None = agent_blueprint.resource_requirements
+            bound_pages = agent_blueprint.bound_pages or None
+
             if agent_id is None:
                 agent_id = f"agent-{uuid.uuid4().hex[:8]}"
-
-            # Read resource requirements from blueprint kwargs (or use defaults)
-            resource_requirements = agent_blueprint.kwargs.get(
-                "resource_requirements", AgentResourceRequirements()
-            )
-            bound_pages = agent_blueprint.kwargs.get("bound_pages")
 
             # CHECK AGENT COUNT LIMIT
             if len(self._agents) >= self.max_agents:
@@ -3154,7 +3137,7 @@ class AgentManagerBase:
                     )
 
             # Create agent instance from blueprint
-            agent: Agent = agent_blueprint.local_instance(agent_id=agent_id)
+            agent: Agent = agent_blueprint.local_instance()
 
             # Attach manager reference for delegation
             agent.set_manager(self)
@@ -3171,10 +3154,10 @@ class AgentManagerBase:
             self._used_gpu_cores += resource_requirements.gpu_cores
             self._used_gpu_memory_mb += resource_requirements.gpu_memory_mb
 
-            # Start agent loop
-            # TODO: Move this to the agent.initialize()?
+            # Start agent loop — max_iterations comes from the agent's metadata,
+            # which was set by spawn_from_blueprint before reaching here.
             task = asyncio.create_task(
-                self._run_agent_loop(agent, max_iterations=max_iterations)
+                self._run_agent_loop(agent, max_iterations=agent.metadata.max_iterations)
             )
             self._agent_tasks[agent_id] = task
 

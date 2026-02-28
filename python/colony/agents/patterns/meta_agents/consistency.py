@@ -16,11 +16,13 @@ Programming Model (AgentHandle Pattern):
 ---------------------------------------
 ```python
 # Spawn consistency agent with handle
-handle = await owner.spawn_child_agents(
-    blueprints=[AgentBlueprint(agent_type="...ConsistencyAgent")],
-    capability_types=[ConsistencyCapability],
+handle = (await owner.spawn_child_agents(
+    blueprints=[ConsistencyAgent.bind(
+        metadata=AgentMetadata(session_id="s1"),
+        capability_blueprints=[ConsistencyCapability.bind()],
+    )],
     return_handles=True,
-)[0]
+))[0]
 
 # Get capability and communicate
 consistency = handle.get_capability(ConsistencyCapability)
@@ -109,24 +111,31 @@ async def spawn_consistency_agent(
 
     Args:
         owner: Agent spawning the consistency agent
+        session_id: Optional session ID (set in blueprint metadata)
+        run_id: Optional run ID (set in blueprint metadata)
 
     Returns:
         AgentHandle for interacting with the consistency agent
     """
     agent_id = f"consistency_agent_{owner.tenant_id}_{uuid4().hex[:8]}"
-    logger.info(f"Spawning ConsistencyAgent {agent_id}...")
+    logger.info(f"Spawning ConsistencyAgent for {owner.agent_id}...")
 
+    metadata = AgentMetadata(tenant_id=owner.tenant_id)
+    if session_id:
+        metadata.session_id = session_id
+    if run_id:
+        metadata.run_id = run_id
+
+    # TODO: Pass LLMClientRequirements and other deployment parameters to spawn_child_agents
     return await owner.spawn_child_agents(
         blueprints=[ConsistencyAgent.bind(
             agent_id=agent_id,
-            # action_policy="polymathera.colony.agents.patterns.meta_agents.consistency.ConsistencyAgentPolicy",
-            tenant_id=owner.tenant_id,
             bound_pages=[],  # Consistency agent doesn't need pages
+            capability_blueprints=[ConsistencyCapability.bind(), ValidationCapability.bind()],
+            metadata=metadata,
         )],
-        run_id=run_id,
-        session_id=session_id,
-        capability_types=[[ConsistencyCapability]],  # TODO: This should be inferred from the agent blueprint, not passed here.
-        soft_affinity=False,
+        soft_affinity=True,
+        suspend_agents=True,
         return_handles=True,
     )[0]
 

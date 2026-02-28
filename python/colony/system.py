@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from .distributed import get_polymathera
 from .distributed.state_management import SharedState, StateManager
@@ -17,6 +17,9 @@ from .vcm.config import VCMConfig
 from .agents.config import AgentSystemConfig
 from .agents.blueprint import AgentBlueprint
 from . import get_deployment_names
+
+if TYPE_CHECKING:
+    from .cluster import LLMClientRequirements
 
 
 logger = logging.getLogger(__name__)
@@ -343,8 +346,7 @@ def get_embedding_deployment(app_name: str | None = None) -> serving.DeploymentH
 async def spawn_agents(
     blueprints: list[AgentBlueprint],
     *,
-    session_id: str | None = None,
-    run_id: str | None = None,
+    requirements: "LLMClientRequirements" | None = None,
     soft_affinity: bool = True,
     suspend_agents: bool = False,
     app_name: str | None = None
@@ -356,12 +358,14 @@ async def spawn_agents(
     But it can also be called by an agent to spawn child agents by specifying
     parent_agent_id in the blueprint's metadata.
 
+    Each blueprint carries its own metadata (session_id, run_id,
+    max_iterations, etc.) — no separate threading of these values.
+
     Args:
         blueprints: List of AgentBlueprint defining agents to spawn
-        session_id: Optional session ID to associate with spawned agents
-        run_id: Optional run ID to associate with spawned agents
+        requirements: Optional LLMClientRequirements to apply to all agents
         soft_affinity: Whether to use soft affinity for agent placement
-        suspend_agents: Whether to start agents in suspended state
+        suspend_agents: Whether to suspend existing agents to make room
         app_name: The `serving.Application` name where the agent system resides.
             This is required when `spawn_agents` is called from outside any
             `serving.deployment`.
@@ -372,8 +376,7 @@ async def spawn_agents(
     agent_system = get_agent_system(app_name)
     agent_ids = await agent_system.spawn_agents(
         blueprints=blueprints,
-        session_id=session_id,
-        run_id=run_id,
+        requirements=requirements,
         soft_affinity=soft_affinity,
         suspend_agents=suspend_agents,
     )
