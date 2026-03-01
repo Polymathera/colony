@@ -180,6 +180,18 @@ def run(
 
 
 @app.command()
+def dashboard(
+    port: int = typer.Option(8080, "--port", "-p", help="Dashboard port (must match COLONY_DASHBOARD_UI_PORT)"),
+):
+    """Open the Colony web dashboard in the browser."""
+    import webbrowser
+
+    url = f"http://localhost:{port}"
+    console.print(f"Opening dashboard at [blue]{url}[/blue]")
+    webbrowser.open(url)
+
+
+@app.command()
 def doctor():
     """Check prerequisites for running colony-env."""
     manager = DeploymentManager()

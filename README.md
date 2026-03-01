@@ -41,6 +41,9 @@ colony-env run /path/to/codebase --config my_analysis.yaml
 # Check service status
 colony-env status
 
+# Open the web dashboard
+colony-env dashboard
+
 # Scale workers
 colony-env up --workers 3
 
@@ -57,9 +60,38 @@ All Colony dependencies run inside Docker — no local GPU drivers, Ray, or Redi
 
 | Service | Port | Description |
 |---------|------|-------------|
+| Colony dashboard | `localhost:8080` | Web UI for agents, sessions, VCM |
 | Ray dashboard | `localhost:8265` | Cluster monitoring UI |
 | Ray client | `localhost:10001` | Ray client connection |
 | Redis | `localhost:6379` | State management backend |
+
+### Web Dashboard
+
+The Colony dashboard starts automatically with `colony-env up` at [localhost:8080](http://localhost:8080). It provides:
+
+- **Overview** — cluster health, application deployments, quick stats
+- **Agents** — list registered agents, view state, capabilities, and details
+- **Sessions** — browse sessions and their agent runs with token usage
+- **VCM** — page table, working set, and virtual context statistics
+
+```bash
+# Run the agent colony
+colony-env down && colony-env up --workers 3 && colony-env run --local-repo /path/to/codebase --config my_analysis.yaml --verbose
+
+# Open the dashboard in your browser
+colony-env dashboard
+
+# Use a custom port (must match COLONY_DASHBOARD_UI_PORT)
+colony-env dashboard --port 9090
+```
+
+For frontend development, run the Vite dev server on the host with hot-reload:
+
+```bash
+cd python/colony/web_ui/frontend
+npm install
+npm run dev     # Starts on localhost:5173, proxies /api to localhost:8080
+```
 
 ## Development
 

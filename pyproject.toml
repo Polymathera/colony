@@ -64,6 +64,9 @@ multipledispatch = "^1.0.0"
 asyncpg = "^0.31.0"
 sentence-transformers = { version = "^5.2.2", optional = true }
 openai = { version = "^2.21.0", optional = true }
+fastapi = { version = ">=0.115", optional = true }
+uvicorn = { version = ">=0.30", extras = ["standard"], optional = true }
+httpx = { version = ">=0.27", optional = true }
 
 [tool.poetry.scripts]
 colony-env = "colony.cli.deploy.cli:app"
@@ -114,6 +117,12 @@ aws = [
     "boto3",
     "botocore",
     "aiobotocore",
+]
+
+dashboard = [
+    "fastapi",
+    "uvicorn",
+    "httpx",
 ]
 
 [tool.poetry.group.dev.dependencies]

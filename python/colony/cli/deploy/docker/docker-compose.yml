@@ -147,6 +147,36 @@ services:
       timeout: 3s
       retries: 5
 
+  dashboard:
+    image: colony:local
+    container_name: colony-dashboard
+    command: >
+      python -m colony.web_ui.backend.main
+    ports:
+      - "${COLONY_DASHBOARD_UI_PORT:-8080}:8080"
+    environment:
+      - RAY_ADDRESS=ray-head:6379
+      - RAY_CLIENT_ADDRESS=ray://ray-head:10001
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RDS_HOST=postgres
+      - RDS_PORT=5432
+      - RDS_USER=colony
+      - RDS_PASSWORD=colony_dev
+      - RDS_DB_NAME=colony
+      - RAY_DASHBOARD_URL=http://ray-head:8265
+      - PROMETHEUS_URL=http://ray-head:9090
+    depends_on:
+      ray-head:
+        condition: service_healthy
+    networks:
+      - colony-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v1/infra/status')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   colony-shared:
   redis-data:

@@ -209,3 +209,6 @@ __marimo__/
 # Test runs
 test_runs/
 
+# Frontend (web dashboard)
+node_modules/
+

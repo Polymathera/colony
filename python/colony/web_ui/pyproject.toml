@@ -1,0 +1,15 @@
+[project]
+name = "colony-dashboard"
+version = "0.1.0"
+description = "Web dashboard for monitoring and debugging Polymathera Colony agents"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "redis[hiredis]>=5.0",
+    "asyncpg>=0.29",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+colony-dashboard = "colony.web_ui.backend.main:cli_main"
