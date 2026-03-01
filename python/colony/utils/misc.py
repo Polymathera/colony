@@ -63,27 +63,20 @@ def setup_logger(name: str, level: int = logging.INFO, use_rich: bool = False, c
     root_logger = logging.getLogger()
     if root_logger.handlers:
         # Root logger is already configured
-        # so just return the named logger - it will inherit the configuration
+        # so just return the named logger — it will inherit the configuration
         if not capture_logs:
             return logger
-        capture_handler: logging.StreamHandler | None = None
-        if logger.handlers:
-            for handler in logger.handlers:
-                if isinstance(handler, logging.StreamHandler):
-                    capture_handler = handler.stream
-                    break
-        if capture_handler is None:
-            log_stream = io.StringIO()
-            capture_handler = logging.StreamHandler(log_stream)
-            capture_handler.setLevel(level)
-            formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-            capture_handler.setFormatter(formatter)
-            logger.addHandler(capture_handler)
-            root_logger.addHandler(capture_handler)
-            # Also add to root logger to capture all logs
-            root_logger.addHandler(capture_handler)
-        else:
-            log_stream = capture_handler.stream
+        # Check if we already attached a capture handler to root
+        for handler in root_logger.handlers:
+            if isinstance(handler, logging.StreamHandler) and isinstance(getattr(handler, 'stream', None), io.StringIO):
+                return logger, handler.stream
+        log_stream = io.StringIO()
+        capture_handler = logging.StreamHandler(log_stream)
+        capture_handler.setLevel(level)
+        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        capture_handler.setFormatter(formatter)
+        # Only add to root — named loggers propagate up by default
+        root_logger.addHandler(capture_handler)
         return logger, log_stream
 
     # Configure the root logger if it hasn't been configured yet
@@ -96,13 +89,6 @@ def setup_logger(name: str, level: int = logging.INFO, use_rich: bool = False, c
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
 
-    # logging.basicConfig(
-    #     level=logging.INFO,
-    #     format="%(message)s",
-    #     datefmt="[%X]",
-    #     handlers=[RichHandler(rich_tracebacks=True)],
-    # )
-
     handler.setFormatter(formatter)
     root_logger.addHandler(handler)
     root_logger.setLevel(level)
@@ -113,7 +99,7 @@ def setup_logger(name: str, level: int = logging.INFO, use_rich: bool = False, c
         capture_handler = logging.StreamHandler(log_stream)
         capture_handler.setLevel(level)
         capture_handler.setFormatter(formatter)
-        logger.addHandler(capture_handler)
+        # Only add to root — named loggers propagate up by default
         root_logger.addHandler(capture_handler)
         return logger, log_stream
 
