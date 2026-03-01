@@ -581,12 +581,29 @@ class ManualPlanSpec(BaseModel):
     )
 
 
+class ActionGroupDescription(BaseModel):
+    """Describes one action group for the planning LLM.
+
+    Each group corresponds to a capability or provider instance.
+    Used both for full action descriptions (action_descriptions populated)
+    and for lightweight summaries (action_descriptions empty, action_count set).
+    """
+    group_key: str = Field(description="Stable identifier for this action group (e.g., capability_key).")
+    group_description: str = Field(description="Human-readable description of the group's purpose and actions.")
+    action_descriptions: dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapping of full action names to their descriptions. Empty for lightweight summaries."
+    )
+    tags: frozenset[str] = Field(default_factory=frozenset, description="Domain/modality/cost tags.")
+    action_count: int = Field(default=0, description="Number of plannable actions in this group.")
+
+
 class PlanningContext(BaseModel):
     """Strongly-typed planning context.
     
     This context is passed to planning methods to provide all necessary information
     for plan generation, evaluation, and execution.
-    
+
     Fields:
         parent_plan_id: ID of parent plan if this is a sub-plan (for hierarchical planning)
         manual_plan: Optional manual plan specification (if provided, plan is created manually)
@@ -609,11 +626,20 @@ class PlanningContext(BaseModel):
         description="Execution constraints (time limits, resource limits, etc.)"
     )
 
-    action_descriptions: list[tuple[str, dict[str, str]]] = Field(
+    action_descriptions: list[ActionGroupDescription] = Field(
         default_factory=list,
-        description="Descriptions of available action groups for planning by their keys in "
-        "the action map of the ActionDispatcher. The action policy will get it from "
-        "ActionDispatcher.get_action_descriptions(). Each tuple contains the group description and a dictionary of action descriptions."
+        description="Descriptions of available action groups for planning. "
+        "Populated by ActionDispatcher.get_action_descriptions()."
+    )
+
+    action_group_summaries: list[ActionGroupDescription] = Field(
+        default_factory=list,
+        description="Lightweight group summaries for scope selection (action_descriptions empty, action_count set)."
+    )
+
+    selected_groups: list[str] | None = Field(
+        default=None,
+        description="Group keys selected by scope selection. None = all groups included."
     )
 
     manual_plan: ManualPlanSpec | None = Field(
@@ -1156,6 +1182,13 @@ class ActionPlan(BaseModel):
 
     # Cache context (planning package)
     cache_context: CacheContext = Field(default_factory=CacheContext)
+
+    # Scope selection (hierarchical action scoping)
+    selected_groups: list[str] | None = Field(
+        default=None,
+        description="Action group keys selected by scope selection. "
+        "Cached from scope selection, reused for replanning. None = all groups."
+    )
 
     # Parent-child relationships (planning package)
     # NOTE: Parent doesn't track child status here - that's event-driven via blackboard

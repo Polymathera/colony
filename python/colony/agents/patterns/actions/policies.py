@@ -34,6 +34,7 @@ from ...models import (
     Action,
     ActionType,
     ActionResult,
+    ActionGroupDescription,
     ActionPlan,
     ActionStatus,
     PlanningContext,
@@ -544,6 +545,7 @@ def action_executor(
     writes: list[str] | None = None,
     exclude_from_planning: bool = False,
     planning_summary: str | None = None,
+    tags: frozenset[str] | None = None,
 ):
     """Decorator to turn any method into an action executor.
 
@@ -561,6 +563,8 @@ def action_executor(
             planner. Use this for actions that are only meant to be invoked
             programmatically in response to events (e.g., game moves in response
             to spawned agent events). Default is False.
+        tags: Optional domain/modality tags for this action (e.g., frozenset({"memory", "expensive"})).
+            Used for future per-action tag-based filtering and grouping.
 
     Example:
         ```python
@@ -607,6 +611,9 @@ def action_executor(
         # Store concise planning summary (used instead of full docstring in prompts)
         func._action_planning_summary = planning_summary
 
+        # Store tags for future per-action tag-based filtering
+        func._action_tags = tags or frozenset()
+
         return func
 
     return decorator
@@ -621,8 +628,10 @@ class ActionGroup(BaseModel):
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    group_key: str = Field(description="Stable identifier for this action group (e.g., capability_key).")
     description: str = Field(description="Description of the action group.")
     executors: dict[str, ActionExecutor] = Field(default_factory=dict)
+    tags: frozenset[str] = Field(default_factory=frozenset, description="Domain/modality/cost tags for hierarchical action scoping.")
 
 
 
@@ -701,8 +710,10 @@ class ActionDispatcher:
                 action_executor = self._create_function_action_executor(provider)
                 if action_executor:
                     action_groups.append(ActionGroup(
+                        group_key=f"func.{provider.__name__}",
                         description=f"Actions from function {provider.__name__}",
-                        executors={action_executor.action_key: action_executor}
+                        executors={action_executor.action_key: action_executor},
+                        tags=getattr(provider, '_action_tags', frozenset()),
                     ))
             else:
                 # It's an object with methods
@@ -825,12 +836,14 @@ class ActionDispatcher:
                 full_action_name = f"{obj.__class__.__name__}.{obj._action_dispatch_key}.{executor.action_key}"
                 action_executors[full_action_name] = executor
 
-        description = None
-        if hasattr(obj, 'get_action_group_description'):
+        # Resolve group description: blueprint override > instance method > default
+        description = getattr(obj, '_action_group_description', None)
+        if description is None and hasattr(obj, 'get_action_group_description'):
             try:
                 description = obj.get_action_group_description()
             except Exception:
                 pass
+
         if description is None:
             description = f"Actions from {obj.__class__.__name__}.{obj._action_dispatch_key}"
             logger.warning(
@@ -838,9 +851,21 @@ class ActionDispatcher:
                 "Consider implementing get_action_group_description() for better LLM planning."
             )
 
+        # Resolve tags: blueprint override > class method > empty
+        tags: frozenset[str] = getattr(obj, '_action_tags', None) or frozenset()
+        if not tags and hasattr(obj, 'get_capability_tags') and callable(obj.get_capability_tags):
+            tags = obj.get_capability_tags()
+
+        # Resolve group_key: capability_key > ClassName.dispatch_key
+        group_key = getattr(obj, '_capability_key', None) or getattr(obj, 'capability_key', None)
+        if not group_key:
+            group_key = f"{obj.__class__.__name__}.{obj._action_dispatch_key}"
+
         return ActionGroup(
+            group_key=group_key,
             description=description,
             executors=action_executors,
+            tags=tags,
         )
 
     def get_plannable_actions(self) -> dict[str, ActionExecutor]:
@@ -860,7 +885,10 @@ class ActionDispatcher:
             if not getattr(executor, 'exclude_from_planning', False)
         }
 
-    async def get_action_descriptions(self) -> list[tuple[str, dict[str, str]]]:
+    async def get_action_descriptions(
+        self,
+        selected_groups: list[str] | None = None,
+    ) -> list[ActionGroupDescription]:
         """Get human-readable description of plannable actions for LLM-based
         action selection.
 
@@ -869,49 +897,91 @@ class ActionDispatcher:
 
         If REPL is available, includes REPL guidance and variable summary.
 
+        Args:
+            selected_groups: If provided, only return descriptions for groups
+                whose group_key is in this list. If None, return all groups.
+
         Returns:
-            List of tuples containing group descriptions and dictionaries
-            mapping action keys to descriptions
+            List of ActionGroupDescription with full action descriptions.
         """
-        descriptions = []
+        descriptions: list[ActionGroupDescription] = []
         for group in self.action_map:
-            group_descriptions: dict[str, str] = {}
+            if selected_groups is not None and group.group_key not in selected_groups:
+                continue
+            action_descs: dict[str, str] = {}
             for action_key, executor in group.executors.items():
                 if getattr(executor, 'exclude_from_planning', False):
                     continue
                 try:
                     desc = await executor.get_action_description()
-                    group_descriptions[action_key] = desc
+                    action_descs[action_key] = desc
                 except NotImplementedError:
                     # Use the docstring of the execute() method instead
                     doc = executor.execute.__doc__
                     if doc:
-                        group_descriptions[action_key] = doc.strip()
-            if group_descriptions:
-                descriptions.append((group.description, group_descriptions))
+                        action_descs[action_key] = doc.strip()
+            if action_descs:
+                descriptions.append(ActionGroupDescription(
+                    group_key=group.group_key,
+                    group_description=group.description,
+                    action_descriptions=action_descs,
+                    tags=group.tags,
+                    action_count=len(action_descs),
+                ))
 
-        # Add REPL-specific descriptions if REPL is available
+        # REPL is a meta-capability — always included regardless of selected_groups
         if self.repl:
             # Add EXECUTE_CODE action description
-            descriptions.append((
-                "Python REPL Actions",
-                {
+            descriptions.append(ActionGroupDescription(
+                group_key="repl",
+                group_description="Python REPL Actions",
+                action_descriptions={
                     str(ActionType.EXECUTE_CODE): (
                         "Execute Python code in the REPL context. "
                         "Use for data transformations, filtering, aggregation, "
                         "or generating multiple actions programmatically."
-                    )
-                }
+                    ),
+                },
+                action_count=1,
             ))
             # Add REPL variable summary
-            descriptions.append(("REPL Variables", {
-                "__repl_variables__": self.repl.get_variable_summary()
-            }))
-            descriptions.append(("REPL Guidance", {
-                "__repl_guidance__": get_repl_guidance(self.repl)
-            }))
+            descriptions.append(ActionGroupDescription(
+                group_key="repl.variables",
+                group_description="REPL Variables",
+                action_descriptions={"__repl_variables__": self.repl.get_variable_summary()},
+            ))
+            descriptions.append(ActionGroupDescription(
+                group_key="repl.guidance",
+                group_description="REPL Guidance",
+                action_descriptions={"__repl_guidance__": get_repl_guidance(self.repl)},
+            ))
 
         return descriptions
+
+    def get_action_group_summaries(self) -> list[ActionGroupDescription]:
+        """Get lightweight summaries of action groups for scope selection.
+
+        Returns one entry per group with NO individual action details.
+        Used by the scope selection phase to let the LLM choose relevant groups.
+
+        Returns:
+            List of ActionGroupDescription with empty action_descriptions
+            but populated action_count, tags, and group_description.
+        """
+        summaries: list[ActionGroupDescription] = []
+        for group in self.action_map:
+            plannable = sum(
+                1 for e in group.executors.values()
+                if not getattr(e, 'exclude_from_planning', False)
+            )
+            if plannable > 0:
+                summaries.append(ActionGroupDescription(
+                    group_key=group.group_key,
+                    group_description=group.description,
+                    tags=group.tags,
+                    action_count=plannable,
+                ))
+        return summaries
 
     @hookable
     async def dispatch(
@@ -1500,10 +1570,22 @@ class BaseActionPolicy(ActionPolicy):
         # Base implementation - subclasses restore from state.policy_state
         pass
 
-    async def get_action_descriptions(self) -> list[tuple[str, dict[str, str]]]:
-        """Get descriptions of available actions."""
+    async def get_action_descriptions(
+        self,
+        selected_groups: list[str] | None = None,
+    ) -> list[ActionGroupDescription]:
+        """Get descriptions of available actions.
+
+        Args:
+            selected_groups: If provided, only return descriptions for these group keys.
+        """
         await self._create_action_dispatcher()
-        return await self._action_dispatcher.get_action_descriptions()
+        return await self._action_dispatcher.get_action_descriptions(selected_groups=selected_groups)
+
+    async def get_action_group_summaries(self) -> list[ActionGroupDescription]:
+        """Get lightweight group summaries for scope selection."""
+        await self._create_action_dispatcher()
+        return self._action_dispatcher.get_action_group_summaries()
 
     async def dispatch(
         self,
@@ -2569,6 +2651,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             goals=goals,
             constraints=self._get_constraints(),
             action_descriptions=await self.get_action_descriptions(),
+            action_group_summaries=await self.get_action_group_summaries(),
             recalled_memories=recalled_memories,
             custom_data=custom_data,
             # parent_plan_id=self.current_plan.parent_plan_id,

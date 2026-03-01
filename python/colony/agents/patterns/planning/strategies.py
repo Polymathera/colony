@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from ...models import (
     Action,
+    ActionGroupDescription,
     ActionStatus,
     ActionType,
     CacheContext,
@@ -94,6 +95,18 @@ class GoalHierarchyInferenceResponse(BaseModel):
     goal_hierarchy: dict[str, GoalHierarchyNode] = Field(
         default_factory=dict, description="Hierarchical goal structure"
     )
+
+
+class ScopeSelectionResponse(BaseModel):
+    """Response model for scope selection (Phase 1 of hierarchical action scoping)."""
+
+    reasoning: str = Field(description="Brief reasoning for scope selection")
+    selected_groups: list[str] = Field(description="group_key values for relevant action groups")
+
+
+# Skip scope selection when total groups are at or below this count.
+# The overhead of an extra LLM call exceeds the savings at small group counts.
+SCOPE_SELECTION_THRESHOLD: int = 6
 
 
 class PlanningStrategyPolicy(ABC):
@@ -173,11 +186,11 @@ class PlanningStrategyPolicy(ABC):
     def _format_action_descriptions(planning_context: PlanningContext) -> str:
         """Format action descriptions from planning context into prompt text."""
         sections = []
-        for group_desc, group_actions in planning_context.action_descriptions:
-            if group_desc:
-                sections.append(f"\n### {group_desc}")
-            for action_key, action_desc in group_actions.items():
-                sections.append(f"- {action_key}: {action_desc}")
+        for group in planning_context.action_descriptions:
+            if group.group_description:
+                sections.append(f"\n### {group.group_description}")  # TODO: Format this using XML tags?
+            for action_key, action_desc in group.action_descriptions.items():
+                sections.append(f"- {action_key}: {action_desc}")  # TODO: Format this using XML tags?
         return "\n".join(sections)
 
     @staticmethod
@@ -215,6 +228,146 @@ class PlanningStrategyPolicy(ABC):
         for key, value in planning_context.constraints.items():
             lines.append(f"- {key}: {value}")
         return "\n".join(lines)
+
+    # ── Scope selection (Phase 1 of hierarchical action scoping) ──────────────
+
+    @staticmethod
+    def _format_action_group_summaries(summaries: list[ActionGroupDescription]) -> str:
+        """Format action group summaries as one line per group for the scope selection prompt."""
+        lines = []
+        for s in summaries:
+            tags_str = f", tags: {', '.join(sorted(s.tags))}" if s.tags else ""
+            lines.append(f"- [{s.group_key}] ({s.action_count} actions{tags_str}): {s.group_description}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _should_use_scope_selection(planning_context: PlanningContext) -> bool:
+        """Return True if scope selection is beneficial (enough groups to justify the extra call)."""
+        return len(planning_context.action_group_summaries) > SCOPE_SELECTION_THRESHOLD
+
+    def _build_scope_selection_prompt(self, planning_context: PlanningContext) -> str:
+        """Build a lightweight prompt for scope selection (Phase 1).
+
+        Includes only: system identity, goals, minimal execution context, and group summaries.
+        Omits: full action descriptions, memory guidance, recalled memories — those go in Phase 2.
+        """
+        goals_str = "\n".join(f"- {g}" for g in planning_context.goals)
+        summaries_str = self._format_action_group_summaries(planning_context.action_group_summaries)
+
+        # Minimal execution context — just enough for the LLM to know what phase we're in
+        exec_hint = ""
+        if planning_context.execution_context:
+            ctx = planning_context.execution_context
+            completed = len(ctx.completed_action_ids)
+            if completed > 0:
+                exec_hint = f"\n\nExecution progress: {completed} actions completed."
+
+        return f"""You are selecting which action groups are relevant for the current planning step.
+
+## Goals
+
+{goals_str}
+{exec_hint}
+
+## Available Action Groups
+
+{summaries_str}
+
+## Instructions
+
+Select the action groups that are relevant to the current goals. Include groups whose actions
+might be needed for planning. When in doubt, include the group — it is better to include an
+extra group than to miss a needed one.
+
+Respond with ONLY a JSON object (no markdown fences, no surrounding text):
+
+{{
+  "reasoning": "<brief reasoning for your selection>",
+  "selected_groups": ["<group_key_1>", "<group_key_2>", ...]
+}}"""
+
+    async def _run_scope_selection(self, planning_context: PlanningContext) -> list[str]:
+        """Run scope selection (Phase 1) and return selected group keys.
+
+        On parse failure, falls back to all groups (no filtering).
+        """
+        if not self.agent:
+            raise RuntimeError("Agent reference not set for scope selection")
+
+        prompt = self._build_scope_selection_prompt(planning_context)
+        all_keys = [s.group_key for s in planning_context.action_group_summaries]
+
+        logger.info(
+            f"Scope selection: {len(all_keys)} groups available, "
+            f"prompt_len={len(prompt)}"
+        )
+
+        try:
+            response = await self.agent.infer(
+                prompt=prompt,
+                max_tokens=512,
+                temperature=0.1,
+                context_page_ids=[],
+                json_schema=ScopeSelectionResponse.model_json_schema(),
+            )
+            text = response.generated_text if hasattr(response, "generated_text") else str(response)
+            json_text = self._extract_json(text)
+            result = ScopeSelectionResponse.model_validate_json(json_text)
+
+            # Validate: only keep keys that actually exist
+            valid = [k for k in result.selected_groups if k in all_keys]
+            if not valid:
+                logger.warning("Scope selection returned no valid group keys — using all groups")
+                return all_keys
+
+            logger.info(
+                f"Scope selection: {len(valid)}/{len(all_keys)} groups selected — "
+                f"reasoning: {result.reasoning[:120]}"
+            )
+            return valid
+
+        except Exception as e:
+            logger.warning(f"Scope selection failed ({e}) — using all groups")
+            return all_keys
+
+    async def _apply_scope_selection(self, planning_context: PlanningContext) -> list[str] | None:
+        """Run scope selection if beneficial and filter planning_context.action_descriptions in place.
+
+        Returns the selected group keys (for caching on ActionPlan), or None if scope selection
+        was skipped (all groups included).
+        """
+        if not self._should_use_scope_selection(planning_context):
+            return None
+
+        selected = await self._run_scope_selection(planning_context)
+        all_keys = [s.group_key for s in planning_context.action_group_summaries]
+        if len(selected) == len(all_keys):
+            return None  # All groups selected — no filtering needed
+
+        # Filter action_descriptions to only include selected groups
+        selected_set = set(selected)
+        planning_context.action_descriptions = [
+            desc for desc in planning_context.action_descriptions
+            if desc.group_key in selected_set
+        ]
+        planning_context.selected_groups = selected
+        return selected
+
+    @staticmethod
+    def _apply_cached_scope_filter(
+        planning_context: PlanningContext,
+        plan: ActionPlan,
+    ) -> None:
+        """Reuse cached selected_groups from a plan to filter action_descriptions for replanning."""
+        if plan.selected_groups is None:
+            return
+        selected_set = set(plan.selected_groups)
+        planning_context.action_descriptions = [
+            desc for desc in planning_context.action_descriptions
+            if desc.group_key in selected_set
+        ]
+
+    # ── End scope selection ─────────────────────────────────────────────────────
 
     def _build_decomposition_prompt(self, planning_context: PlanningContext) -> str:
         """Build prompt for goal decomposition (step 1 of top-down planning)."""
@@ -564,7 +717,10 @@ class ModelPredictiveControlStrategy(PlanningStrategyPolicy):
         if not self.agent:
             raise RuntimeError("Agent reference not set. Call set_agent() or pass agent to __init__")
 
-        # Build prompt for LLM
+        # Phase 1: Scope selection (filters action_descriptions in place if beneficial)
+        selected_groups = await self._apply_scope_selection(planning_context)
+
+        # Phase 2: Build prompt with (possibly filtered) action descriptions
         prompt = self._build_planning_prompt(
             planning_context=planning_context,
             params=params,
@@ -619,6 +775,7 @@ class ModelPredictiveControlStrategy(PlanningStrategyPolicy):
             replan_every_n_steps=params.replan_every_n_steps,
             generation_method="llm",
             initial_reasoning=plan_response.reasoning,
+            selected_groups=selected_groups,
         )
 
     @override
@@ -633,6 +790,9 @@ class ModelPredictiveControlStrategy(PlanningStrategyPolicy):
         """Replan next horizon steps based on execution so far."""
         if not self.agent:
             raise RuntimeError("Agent reference not set. Call set_agent() or pass agent to __init__")
+
+        # Reuse cached scope selection from initial plan
+        self._apply_cached_scope_filter(planning_context, plan)
 
         # Build prompt with execution history
         prompt = self._build_replanning_prompt(plan, planning_context, params)
@@ -729,6 +889,9 @@ class TopDownPlanningStrategy(PlanningStrategyPolicy):
         if not self.agent:
             raise RuntimeError("Agent reference not set. Call set_agent() or pass agent to __init__")
 
+        # Phase 1: Scope selection (filters action_descriptions in place if beneficial)
+        selected_groups = await self._apply_scope_selection(planning_context)
+
         # Step 1: Decompose goals into hierarchy (with action awareness)
         decomp_response = await self.agent.infer(
             prompt=self._build_decomposition_prompt(planning_context),
@@ -782,6 +945,7 @@ class TopDownPlanningStrategy(PlanningStrategyPolicy):
             replan_every_n_steps=params.replan_every_n_steps,
             generation_method="llm",
             initial_reasoning=action_data.reasoning,
+            selected_groups=selected_groups,
         )
 
     @override
@@ -796,6 +960,9 @@ class TopDownPlanningStrategy(PlanningStrategyPolicy):
         """Replan based on current progress."""
         if not self.agent:
             raise RuntimeError("Agent reference not set. Call set_agent() or pass agent to __init__")
+
+        # Reuse cached scope selection from initial plan
+        self._apply_cached_scope_filter(planning_context, plan)
 
         completed_actions = [
             a for a in plan.actions if a.status == ActionStatus.COMPLETED
@@ -833,6 +1000,9 @@ class BottomUpPlanningStrategy(PlanningStrategyPolicy):
         """Generate plan bottom-up from concrete actions."""
         if not self.agent:
             raise RuntimeError("Agent reference not set. Call set_agent() or pass agent to __init__")
+
+        # Phase 1: Scope selection (filters action_descriptions in place if beneficial)
+        selected_groups = await self._apply_scope_selection(planning_context)
 
         # Step 1: Generate concrete actions
         action_response = await self.agent.infer(
@@ -899,6 +1069,7 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
             replan_every_n_steps=params.replan_every_n_steps,
             generation_method="llm",
             initial_reasoning=action_data.reasoning,
+            selected_groups=selected_groups,
         )
 
     @override
@@ -913,6 +1084,9 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
         """Replan based on current progress."""
         if not self.agent:
             raise RuntimeError("Agent reference not set. Call set_agent() or pass agent to __init__")
+
+        # Reuse cached scope selection from initial plan
+        self._apply_cached_scope_filter(planning_context, plan)
 
         completed_actions = [
             a for a in plan.actions if a.status == ActionStatus.COMPLETED

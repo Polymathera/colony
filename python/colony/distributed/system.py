@@ -176,7 +176,7 @@ class PolymatheraApp:
             return self._state_managers[state_key]
 
         # Create new StateManager instance
-        logger.info(
+        logger.debug(
             f"Creating new StateManager for state_key='{state_key}'. "
             f"State storage config:\n{self.sys_config.distributed_state.storage.model_dump_json(indent=2)}"
         )
@@ -268,7 +268,7 @@ class PolymatheraApp:
             SystemConfig.CONFIG_PATH,
             SystemConfig,
         )
-        logger.info(
+        logger.debug(
             f"State storage config:\n{self.sys_config.distributed_state.storage.model_dump_json(indent=2)}"
         )
 

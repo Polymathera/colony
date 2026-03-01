@@ -408,6 +408,19 @@ class AgentCapability(ABC):
         """
         return cls.__name__
 
+    @classmethod
+    def get_capability_tags(cls) -> frozenset[str]:
+        """Return domain/modality tags for hierarchical action scoping.
+
+        Override in subclasses to provide tags used for filtering action groups
+        during scope selection. Tags are free-form strings:
+        "memory", "analysis", "coordination", "synthesis", "expensive", etc.
+
+        Returns:
+            frozenset of tag strings (default: empty)
+        """
+        return frozenset()
+
     @property
     def capability_key(self) -> str:
         """Unique key for this instance within an agent's _capabilities dict.
@@ -1976,7 +1989,6 @@ class Agent(BaseModel):
             if not self.has_capability(bp.key):
                 # local_instance creates a new instance of the capability for this agent, allowing the same blueprint to be reused across multiple agents with different internal state. It also passes other capability-specific parameters defined in the blueprint kwargs.
                 capability = bp.local_instance(self)
-                capability._capability_key = bp.key
                 self.add_capability(
                     capability,
                     include_actions=bp.include_actions,

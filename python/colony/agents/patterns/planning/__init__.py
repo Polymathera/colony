@@ -75,6 +75,8 @@ from .strategies import (
     BottomUpPlanningStrategy,
     ModelPredictiveControlStrategy,
     PlanningStrategyPolicy,
+    SCOPE_SELECTION_THRESHOLD,
+    ScopeSelectionResponse,
     TopDownPlanningStrategy,
     get_default_planning_strategy,
 )
@@ -121,4 +123,7 @@ __all__ = [
     "TopDownPlanningStrategy",
     "BottomUpPlanningStrategy",
     "get_default_planning_strategy",
+    # Scope selection
+    "ScopeSelectionResponse",
+    "SCOPE_SELECTION_THRESHOLD",
 ]

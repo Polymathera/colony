@@ -11,6 +11,7 @@ See capability_bind_proposal.md for full design rationale.
 
 from __future__ import annotations
 
+from overrides import override
 from typing import TypeVar, Generic, Any, ClassVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -168,7 +169,7 @@ class AgentCapabilityBlueprint(Blueprint["AgentCapability"]):
     Set via .with_composition() — NOT passed to the capability constructor.
     """
 
-    __slots__ = ("key", "include_actions", "exclude_actions", "events_only")
+    __slots__ = ("key", "include_actions", "exclude_actions", "events_only", "tags", "group_description")
 
     def __init__(
         self,
@@ -179,12 +180,28 @@ class AgentCapabilityBlueprint(Blueprint["AgentCapability"]):
         include_actions: list[str] | None = None,
         exclude_actions: list[str] | None = None,
         events_only: bool = False,
+        tags: frozenset[str] | None = None,
+        group_description: str | None = None,
     ):
         super().__init__(cls, kwargs)
         self.key = key or cls.__name__
         self.include_actions = include_actions
         self.exclude_actions = exclude_actions
         self.events_only = events_only
+        self.tags = tags
+        self.group_description = group_description
+
+    @override
+    def local_instance(self, *prefix_args: Any, **extra_kwargs: Any) -> "AgentCapability":
+        """Construct the capability instance and set its _capability_key for later reference."""
+        instance = super().local_instance(*prefix_args, **extra_kwargs)
+        instance._capability_key = self.key
+        # Propagate blueprint composition metadata for action scoping
+        if self.tags is not None:
+            instance._action_tags = self.tags
+        if self.group_description is not None:
+            instance._action_group_description = self.group_description
+        return instance
 
     # TODO: Move this method to the base Blueprint class and make it more generic (e.g., with_metadata) for other use cases?
     def with_composition(
@@ -194,6 +211,8 @@ class AgentCapabilityBlueprint(Blueprint["AgentCapability"]):
         include_actions: list[str] | None = None,
         exclude_actions: list[str] | None = None,
         events_only: bool | None = None,
+        tags: frozenset[str] | None = None,
+        group_description: str | None = None,
     ) -> AgentCapabilityBlueprint:
         """Return a copy with updated composition metadata. Immutable."""
         return AgentCapabilityBlueprint(
@@ -203,6 +222,8 @@ class AgentCapabilityBlueprint(Blueprint["AgentCapability"]):
             include_actions=include_actions if include_actions is not None else self.include_actions,
             exclude_actions=exclude_actions if exclude_actions is not None else self.exclude_actions,
             events_only=events_only if events_only is not None else self.events_only,
+            tags=tags if tags is not None else self.tags,
+            group_description=group_description if group_description is not None else self.group_description,
         )
 
     def __repr__(self) -> str:

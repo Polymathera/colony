@@ -173,7 +173,7 @@ class RedisStateStorageBackendFactory(StateStorageBackendFactory):
 
     def create_backend(self, config: RedisStateStorageConfig) -> StateStorageBackend:
         """Create a RedisStorage instance based on the provided config"""
-        logger.info(
+        logger.debug(
             f"RedisStateStorageBackendFactory: {config.model_dump_json(indent=2)}"
         )
         return RedisStorage(
