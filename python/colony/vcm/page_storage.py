@@ -282,7 +282,7 @@ class RelationalPageMetadataStore(PageMetadataStore):
         self,
         tenant_id: str | None = None,
         source_pattern: str | None = None,
-        limit: int = 500,
+        limit: int = 20000,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """List page summaries (id, source, size) without loading blobs.
@@ -305,6 +305,7 @@ class RelationalPageMetadataStore(PageMetadataStore):
                     VirtualContextPageMetadata.size,
                     VirtualContextPageMetadata.group_id,
                     VirtualContextPageMetadata.tenant_id,
+                    VirtualContextPageMetadata.metadata_json,
                 )
 
                 if tenant_id:
@@ -316,16 +317,25 @@ class RelationalPageMetadataStore(PageMetadataStore):
                 stmt = stmt.limit(limit).offset(offset)
 
                 result = await session.execute(stmt)
-                return [
-                    {
+                summaries = []
+                for row in result.all():
+                    files: list[str] = []
+                    if row.metadata_json:
+                        try:
+                            import json
+                            meta = json.loads(row.metadata_json) if isinstance(row.metadata_json, str) else row.metadata_json
+                            files = meta.get("files", [])
+                        except Exception:
+                            pass
+                    summaries.append({
                         "page_id": row.page_id,
                         "source": row.source or "",
                         "size": row.size or 0,
                         "group_id": row.group_id or "",
                         "tenant_id": row.tenant_id or "",
-                    }
-                    for row in result.all()
-                ]
+                        "files": files,
+                    })
+                return summaries
         except Exception as e:
             logger.error(f"Failed to list page summaries: {e}", exc_info=True)
             raise
@@ -921,7 +931,7 @@ class PageStorage:
         self,
         tenant_id: str | None = None,
         source_pattern: str | None = None,
-        limit: int = 500,
+        limit: int = 20000,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """List page summaries (id, source, size) without loading blobs.

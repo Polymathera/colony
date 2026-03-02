@@ -52,7 +52,7 @@ async def get_vcm_stats(
 @router.get("/vcm/pages", response_model=list[PageSummary])
 async def list_pages(
     colony: ColonyConnection = Depends(get_colony),
-    limit: int = Query(default=500, le=5000),
+    limit: int = Query(default=20000, le=50000),
     offset: int = Query(default=0, ge=0),
 ):
     """List stored pages via VCM deployment handle list_stored_pages() RPC."""
@@ -70,6 +70,7 @@ async def list_pages(
                 source=s.get("source", ""),
                 tokens=s.get("size", 0),
                 loaded=True,
+                files=s.get("files", []),
             )
             for s in summaries
         ]
@@ -92,6 +93,21 @@ async def get_working_set(
     except Exception as e:
         logger.warning("Failed to get working set: %s", e)
         return {"pages": [], "error": str(e)}
+
+
+@router.get("/vcm/loaded-pages")
+async def list_loaded_pages(
+    colony: ColonyConnection = Depends(get_colony),
+) -> list[dict[str, Any]]:
+    """Get all pages currently loaded in KV cache with access stats."""
+    if not colony.is_connected:
+        return []
+
+    try:
+        return await _vcm_handle(colony).list_loaded_page_entries()
+    except Exception as e:
+        logger.warning("Failed to list loaded pages: %s", e)
+        return []
 
 
 @router.get("/vcm/pages/{page_id}")

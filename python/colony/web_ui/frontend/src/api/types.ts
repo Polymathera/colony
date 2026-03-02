@@ -59,6 +59,34 @@ export interface PageSummary {
   source: string;
   tokens: number;
   loaded: boolean;
+  files?: string[];
+}
+
+export interface PageLocationSummary {
+  deployment_name: string;
+  client_id: string;
+  access_count: number;
+  last_access_time: number;
+  load_time: number;
+}
+
+export interface PageLoadedEntry {
+  page_id: string;
+  size: number;
+  tenant_id: string;
+  total_access_count: number;
+  locations: PageLocationSummary[];
+}
+
+export interface AgentHierarchyNode {
+  agent_id: string;
+  agent_type: string;
+  state: string;
+  role: string | null;
+  parent_agent_id: string | null;
+  capability_names: string[];
+  bound_pages: string[];
+  tenant_id: string;
 }
 
 export interface VCMStats {

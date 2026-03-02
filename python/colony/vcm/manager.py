@@ -659,7 +659,7 @@ class VirtualContextManager:
         self,
         tenant_id: str | None = None,
         source_pattern: str | None = None,
-        limit: int = 500,
+        limit: int = 20000,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """List page summaries from persistent storage.
@@ -682,6 +682,34 @@ class VirtualContextManager:
             limit=limit,
             offset=offset,
         )
+
+    @serving.endpoint
+    async def list_loaded_page_entries(self) -> list[dict[str, Any]]:
+        """Return summary of all pages currently loaded in KV cache with access stats.
+
+        Returns per-page: page_id, size, tenant_id, total_access_count,
+        and physical location details (deployment, replica, access count, timestamps).
+        """
+        async for state in self.page_table.state_manager.read_transaction():
+            result = []
+            for page_id, entry in state.entries.items():
+                locations = []
+                for loc in entry.physical_locations:
+                    locations.append({
+                        "deployment_name": loc.deployment_name,
+                        "client_id": loc.client_id,
+                        "access_count": loc.access_count,
+                        "last_access_time": loc.last_access_time,
+                        "load_time": loc.load_time,
+                    })
+                result.append({
+                    "page_id": page_id,
+                    "size": entry.size,
+                    "tenant_id": entry.tenant_id,
+                    "total_access_count": entry.total_access_count,
+                    "locations": locations,
+                })
+            return result
 
     async def _page_is_on_target(
         self,

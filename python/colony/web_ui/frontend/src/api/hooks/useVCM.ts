@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../client";
-import type { PageSummary, VCMStats } from "../types";
+import type { PageLoadedEntry, PageSummary, VCMStats } from "../types";
 
 export function useVCMStats() {
   return useQuery({
@@ -12,7 +12,7 @@ export function useVCMStats() {
 export function useVCMPages() {
   return useQuery({
     queryKey: ["vcm", "pages"],
-    queryFn: () => apiFetch<PageSummary[]>("/vcm/pages"),
+    queryFn: () => apiFetch<PageSummary[]>("/vcm/pages?limit=50000"),
   });
 }
 
@@ -20,6 +20,13 @@ export function useWorkingSet() {
   return useQuery({
     queryKey: ["vcm", "working-set"],
     queryFn: () => apiFetch<{ pages: string[] }>("/vcm/working-set"),
+  });
+}
+
+export function useLoadedPageEntries() {
+  return useQuery({
+    queryKey: ["vcm", "loaded-pages"],
+    queryFn: () => apiFetch<PageLoadedEntry[]>("/vcm/loaded-pages"),
   });
 }
 

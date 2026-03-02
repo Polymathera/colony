@@ -77,6 +77,19 @@ class PageSummary(BaseModel):
     source: str = ""
     tokens: int = 0
     loaded: bool = False
+    files: list[str] = Field(default_factory=list)
+
+
+class AgentHierarchyNode(BaseModel):
+    """Agent with parent-child relationship info for hierarchy view."""
+    agent_id: str
+    agent_type: str = ""
+    state: str = ""
+    role: str | None = None
+    parent_agent_id: str | None = None
+    capability_names: list[str] = Field(default_factory=list)
+    bound_pages: list[str] = Field(default_factory=list)
+    tenant_id: str = ""
 
 
 class VCMStats(BaseModel):

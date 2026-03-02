@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 
 from ..dependencies import get_colony
-from ..models.api_models import AgentSummary
+from ..models.api_models import AgentHierarchyNode, AgentSummary
 from ..services.colony_connection import ColonyConnection
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,42 @@ async def list_agents(
 
     except Exception as e:
         logger.warning(f"Failed to list agents: {e}")
+        return []
+
+
+@router.get("/agents/hierarchy", response_model=list[AgentHierarchyNode])
+async def get_agent_hierarchy(
+    colony: ColonyConnection = Depends(get_colony),
+):
+    """Get all agents with parent-child relationship info for hierarchy view."""
+    if not colony.is_connected:
+        return []
+
+    try:
+        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "agent_system")
+        agent_ids: list[str] = await handle.list_all_agents()
+
+        nodes = []
+        for agent_id in agent_ids:
+            info = await handle.get_agent_info(agent_id=agent_id)
+            if info is None:
+                nodes.append(AgentHierarchyNode(agent_id=agent_id))
+                continue
+            metadata = getattr(info, "metadata", None)
+            nodes.append(AgentHierarchyNode(
+                agent_id=agent_id,
+                agent_type=getattr(info, "agent_type", ""),
+                state=str(getattr(info, "state", "")),
+                role=getattr(metadata, "role", None) if metadata else None,
+                parent_agent_id=getattr(metadata, "parent_agent_id", None) if metadata else None,
+                capability_names=getattr(info, "capability_names", []),
+                bound_pages=getattr(info, "bound_pages", []),
+                tenant_id=getattr(metadata, "tenant_id", "") if metadata else "",
+            ))
+        return nodes
+
+    except Exception as e:
+        logger.warning(f"Failed to get agent hierarchy: {e}")
         return []
 
 

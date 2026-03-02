@@ -35,7 +35,7 @@ async def get_token_usage(
             runs = await handle.get_session_runs(session_id=session_id, limit=200)
         else:
             # Get runs across all sessions
-            sessions = await handle.list_sessions(limit=20)
+            sessions = await handle.list_sessions(limit=20, include_expired=True)
             runs = []
             for s in sessions:
                 session_runs = await handle.get_session_runs(
@@ -45,17 +45,17 @@ async def get_token_usage(
 
         token_data = []
         for r in runs:
-            resources = getattr(r, "resources", None)
+            ru = getattr(r, "resource_usage", None)
             token_data.append({
                 "run_id": r.run_id,
                 "agent_id": getattr(r, "agent_id", ""),
                 "status": str(getattr(r, "status", "")),
-                "input_tokens": getattr(resources, "input_tokens", 0) if resources else 0,
-                "output_tokens": getattr(resources, "output_tokens", 0) if resources else 0,
-                "cache_read_tokens": getattr(resources, "cache_read_tokens", 0) if resources else 0,
-                "cache_write_tokens": getattr(resources, "cache_write_tokens", 0) if resources else 0,
-                "llm_calls": getattr(resources, "llm_calls", 0) if resources else 0,
-                "cost_usd": getattr(resources, "cost_usd", 0.0) if resources else 0.0,
+                "input_tokens": getattr(ru, "input_tokens", 0) if ru else 0,
+                "output_tokens": getattr(ru, "output_tokens", 0) if ru else 0,
+                "cache_read_tokens": getattr(ru, "cache_read_tokens", 0) if ru else 0,
+                "cache_write_tokens": getattr(ru, "cache_write_tokens", 0) if ru else 0,
+                "llm_calls": getattr(ru, "llm_calls", 0) if ru else 0,
+                "cost_usd": getattr(ru, "cost_usd", 0.0) if ru else 0.0,
                 "started_at": getattr(r, "started_at", None),
             })
 
@@ -64,6 +64,26 @@ async def get_token_usage(
         total_output = sum(d["output_tokens"] for d in token_data)
         total_cache_read = sum(d["cache_read_tokens"] for d in token_data)
         total_cost = sum(d["cost_usd"] for d in token_data)
+
+        # Aggregate by agent
+        by_agent: dict[str, dict[str, Any]] = {}
+        for d in token_data:
+            aid = d["agent_id"] or "unknown"
+            if aid not in by_agent:
+                by_agent[aid] = {
+                    "agent_id": aid,
+                    "input_tokens": 0, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0,
+                    "llm_calls": 0, "cost_usd": 0.0, "run_count": 0,
+                }
+            agg = by_agent[aid]
+            agg["input_tokens"] += d["input_tokens"]
+            agg["output_tokens"] += d["output_tokens"]
+            agg["cache_read_tokens"] += d["cache_read_tokens"]
+            agg["cache_write_tokens"] += d["cache_write_tokens"]
+            agg["llm_calls"] += d["llm_calls"]
+            agg["cost_usd"] += d["cost_usd"]
+            agg["run_count"] += 1
 
         return {
             "runs": token_data,
@@ -75,6 +95,7 @@ async def get_token_usage(
                 "cost_usd": total_cost,
                 "run_count": len(token_data),
             },
+            "by_agent": list(by_agent.values()),
         }
 
     except Exception as e:

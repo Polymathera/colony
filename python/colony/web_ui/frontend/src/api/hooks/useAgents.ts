@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../client";
-import type { AgentSummary } from "../types";
+import type { AgentHierarchyNode, AgentSummary } from "../types";
 
 export function useAgents() {
   return useQuery({
@@ -14,6 +14,13 @@ export function useAgentDetail(agentId: string) {
     queryKey: ["agents", agentId],
     queryFn: () => apiFetch<Record<string, unknown>>(`/agents/${agentId}`),
     enabled: !!agentId,
+  });
+}
+
+export function useAgentHierarchy() {
+  return useQuery({
+    queryKey: ["agents", "hierarchy"],
+    queryFn: () => apiFetch<AgentHierarchyNode[]>("/agents/hierarchy"),
   });
 }
 

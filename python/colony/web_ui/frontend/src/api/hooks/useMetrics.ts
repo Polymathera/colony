@@ -23,9 +23,21 @@ interface TokenTotals {
   run_count: number;
 }
 
+interface AgentTokenSummary {
+  agent_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  llm_calls: number;
+  cost_usd: number;
+  run_count: number;
+}
+
 export interface TokenUsageResponse {
   runs: TokenRun[];
   totals: TokenTotals;
+  by_agent?: AgentTokenSummary[];
 }
 
 export function useTokenUsage(sessionId?: string) {

@@ -21,15 +21,12 @@ export function MetricsTab() {
 
   const totals = data?.totals;
   const runs = data?.runs ?? [];
+  const byAgent = data?.by_agent ?? [];
 
-  // Per-agent aggregation for pie chart
-  const agentMap = new Map<string, number>();
-  for (const r of runs) {
-    const key = r.agent_id || "unknown";
-    agentMap.set(key, (agentMap.get(key) ?? 0) + r.input_tokens + r.output_tokens);
-  }
-  const pieData = Array.from(agentMap.entries())
-    .map(([name, value]) => ({ name: name.slice(0, 16), value }))
+  // Pie data from server-side by-agent aggregation
+  const pieData = byAgent
+    .map((a) => ({ name: a.agent_id.slice(0, 16), value: a.input_tokens + a.output_tokens }))
+    .filter((d) => d.value > 0)
     .sort((a, b) => b.value - a.value);
 
   // Bar chart data: input vs output per run
