@@ -1,4 +1,8 @@
-"""Serving deployment status endpoints."""
+"""Serving deployment status endpoints.
+
+Reads application registry via Colony deployment handle.
+No direct Redis access.
+"""
 
 from __future__ import annotations
 
@@ -7,74 +11,48 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from ..dependencies import get_colony, get_redis
+from ..dependencies import get_colony
 from ..models.api_models import ApplicationSummary, DeploymentSummary
 from ..services.colony_connection import ColonyConnection
-from ..services.redis_service import RedisService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_DEFAULT_APP_NAME = "polymathera"
 
 
 @router.get("/deployments/", response_model=list[ApplicationSummary])
 async def list_deployments(
     colony: ColonyConnection = Depends(get_colony),
-    redis_svc: RedisService = Depends(get_redis),
 ):
-    """List all serving applications and their deployments.
-
-    Reads from the ApplicationRegistry shared state in Redis.
-    """
+    """List all serving applications and their deployments."""
     if not colony.is_connected:
         return []
 
     try:
-        # ApplicationRegistry is stored as a shared state in Redis.
-        # Try to read it through the Colony serving framework.
-        from colony.distributed.ray_utils.serving.models import ApplicationRegistry
-        from colony.distributed.ray_utils.state import StateManager
+        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "agent_system")
+        infra = await handle.get_infrastructure_status()
 
-        # The registry key follows the pattern used by SharedState
-        registry_key = "polymathera:serving:app_registry"
-        raw = await redis_svc.get_json(registry_key)
-
-        if raw is None:
-            # Try scanning for registry keys
-            keys = await redis_svc.scan_keys("*app_registry*")
-            if keys:
-                raw = await redis_svc.get_json(keys[0])
-
-        if raw is None:
-            # Fallback: try to discover apps by scanning for proxy actors
-            return await _discover_apps_from_actors(colony)
-
-        # Parse the registry
         apps = []
-        applications = raw.get("applications", {})
-        for app_name, app_info in applications.items():
-            deployments = []
-            for dep_name, dep_info in app_info.get("deployments", {}).items():
-                deployments.append(DeploymentSummary(
-                    app_name=app_name,
-                    deployment_name=dep_name,
-                    proxy_actor_name=dep_info.get("proxy_actor_name", ""),
-                ))
+        for app_data in infra.get("applications", []):
+            deployments = [
+                DeploymentSummary(
+                    app_name=app_data["app_name"],
+                    deployment_name=d["deployment_name"],
+                    proxy_actor_name=d.get("proxy_actor_name", ""),
+                )
+                for d in app_data.get("deployments", [])
+            ]
             apps.append(ApplicationSummary(
-                app_name=app_name,
-                created_at=app_info.get("created_at", 0),
+                app_name=app_data["app_name"],
+                created_at=app_data.get("created_at", 0),
                 deployments=deployments,
             ))
         return apps
 
     except Exception as e:
-        logger.warning(f"Failed to list deployments: {e}")
+        logger.warning("Failed to list deployments: %s", e)
         return []
-
-
-async def _discover_apps_from_actors(colony: ColonyConnection) -> list[ApplicationSummary]:
-    """Fallback: discover applications by looking for known proxy actors."""
-    # This is a best-effort approach when the registry is not directly readable
-    return []
 
 
 @router.get("/deployments/{app_name}/{deployment_name}/health")
@@ -83,14 +61,24 @@ async def get_deployment_health(
     deployment_name: str,
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
-    """Get health status of a specific deployment."""
+    """Get health status of a specific deployment via its proxy's get_stats()."""
     if not colony.is_connected:
         return {"status": "disconnected"}
 
     try:
         handle = colony.get_deployment_handle(app_name, deployment_name)
-        # Try calling a health-related method if available
-        # The proxy actor tracks replica health internally
-        return {"status": "reachable", "app_name": app_name, "deployment_name": deployment_name}
+        stats = await handle.get_stats()
+        healthy = stats.get("healthy_replicas", 0)
+        total = stats.get("total_replicas", 0)
+        return {
+            "status": "healthy" if healthy == total and total > 0 else "degraded",
+            "app_name": app_name,
+            "deployment_name": deployment_name,
+            "total_replicas": total,
+            "healthy_replicas": healthy,
+            "total_queue_length": stats.get("total_queue_length", 0),
+            "total_in_flight": stats.get("total_in_flight", 0),
+            "autoscaling_config": stats.get("autoscaling_config", {}),
+        }
     except Exception as e:
         return {"status": "error", "error": str(e)}

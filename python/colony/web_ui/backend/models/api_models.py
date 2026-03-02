@@ -14,7 +14,6 @@ class HealthStatus(BaseModel):
     """Overall cluster health summary."""
     ray_connected: bool = False
     redis_connected: bool = False
-    postgres_connected: bool = False
     ray_cluster_status: str = "unknown"
     node_count: int = 0
 

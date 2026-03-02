@@ -654,6 +654,35 @@ class VirtualContextManager:
         """
         return await self.page_table.get_all_loaded_pages()
 
+    @serving.endpoint
+    async def list_stored_pages(
+        self,
+        tenant_id: str | None = None,
+        source_pattern: str | None = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List page summaries from persistent storage.
+
+        Returns lightweight metadata (id, source, size, group_id, tenant_id)
+        without loading page blobs. Suitable for dashboard page tables.
+
+        Args:
+            tenant_id: Filter by tenant ID
+            source_pattern: Filter by source pattern (SQL LIKE)
+            limit: Maximum number of results
+            offset: Number of results to skip
+
+        Returns:
+            List of page summary dicts
+        """
+        return await self.page_storage.list_page_summaries(
+            tenant_id=tenant_id,
+            source_pattern=source_pattern,
+            limit=limit,
+            offset=offset,
+        )
+
     async def _page_is_on_target(
         self,
         page_id: str,

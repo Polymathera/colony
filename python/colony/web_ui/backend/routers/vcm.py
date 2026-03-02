@@ -1,16 +1,20 @@
-"""Virtual Context Manager (VCM) endpoints."""
+"""Virtual Context Manager (VCM) endpoints.
+
+All data flows through the VCM deployment handle via Ray RPC.
+Stats use get_stats(), page listings use list_stored_pages(),
+working set uses get_all_loaded_pages().
+"""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
-from ..dependencies import get_colony, get_redis
+from ..dependencies import get_colony
 from ..models.api_models import PageSummary, VCMStats
 from ..services.colony_connection import ColonyConnection
-from ..services.redis_service import RedisService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -18,66 +22,59 @@ router = APIRouter()
 _DEFAULT_APP_NAME = "polymathera"
 
 
+def _vcm_handle(colony: ColonyConnection) -> Any:
+    return colony.get_deployment_handle(_DEFAULT_APP_NAME, "vcm")
+
+
 @router.get("/vcm/stats", response_model=VCMStats)
 async def get_vcm_stats(
     colony: ColonyConnection = Depends(get_colony),
 ):
-    """Get VCM statistics: total pages, loaded pages, groups, pending faults."""
+    """VCM statistics from deployment handle get_stats() RPC."""
     if not colony.is_connected:
         return VCMStats()
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "vcm")
-        stats = await handle.get_stats()
-
+        stats = await _vcm_handle(colony).get_stats()
+        pt = stats.get("page_table", {})
+        storage = stats.get("storage", {})
         return VCMStats(
-            total_pages=stats.get("total_pages", 0),
-            loaded_pages=stats.get("loaded_pages", 0),
-            page_groups=stats.get("page_groups", 0),
-            pending_faults=stats.get("pending_faults", 0),
+            total_pages=storage.get("total_pages", 0) or pt.get("total_pages_loaded", 0),
+            loaded_pages=pt.get("total_pages_loaded", 0),
+            page_groups=pt.get("num_groups", 0),
+            pending_faults=pt.get("pending_faults", 0),
         )
-
     except Exception as e:
-        logger.warning(f"Failed to get VCM stats: {e}")
+        logger.warning("Failed to get VCM stats: %s", e)
         return VCMStats()
 
 
 @router.get("/vcm/pages", response_model=list[PageSummary])
 async def list_pages(
     colony: ColonyConnection = Depends(get_colony),
-    redis_svc: RedisService = Depends(get_redis),
+    limit: int = Query(default=500, le=5000),
+    offset: int = Query(default=0, ge=0),
 ):
-    """List virtual pages from the VCM page table.
-
-    Reads VirtualPageTableState from Redis shared state.
-    """
+    """List stored pages via VCM deployment handle list_stored_pages() RPC."""
     if not colony.is_connected:
         return []
 
     try:
-        # The page table is stored as shared state in Redis
-        raw = await redis_svc.get_json("polymathera:serving:vcm:page_table")
-        if raw is None:
-            keys = await redis_svc.scan_keys("*page_table*")
-            if keys:
-                raw = await redis_svc.get_json(keys[0])
-
-        if raw is None:
-            return []
-
-        pages = []
-        entries = raw.get("entries", {})
-        for page_id, entry in entries.items():
-            pages.append(PageSummary(
-                page_id=page_id,
-                source=entry.get("source", ""),
-                tokens=entry.get("token_count", 0),
-                loaded=entry.get("loaded", False),
-            ))
-        return pages
-
+        summaries = await _vcm_handle(colony).list_stored_pages(
+            limit=limit,
+            offset=offset,
+        )
+        return [
+            PageSummary(
+                page_id=s["page_id"],
+                source=s.get("source", ""),
+                tokens=s.get("size", 0),
+                loaded=True,
+            )
+            for s in summaries
+        ]
     except Exception as e:
-        logger.warning(f"Failed to list VCM pages: {e}")
+        logger.warning("Failed to list pages: %s", e)
         return []
 
 
@@ -85,17 +82,15 @@ async def list_pages(
 async def get_working_set(
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
-    """Get the current working set of loaded pages."""
+    """Get the current working set of pages loaded in KV cache."""
     if not colony.is_connected:
         return {"pages": []}
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "vcm")
-        loaded = await handle.get_all_loaded_pages()
+        loaded = await _vcm_handle(colony).get_all_loaded_pages()
         return {"pages": loaded}
-
     except Exception as e:
-        logger.warning(f"Failed to get working set: {e}")
+        logger.warning("Failed to get working set: %s", e)
         return {"pages": [], "error": str(e)}
 
 
@@ -109,14 +104,12 @@ async def get_page_detail(
         return {"error": "not connected"}
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "vcm")
-        page = await handle.get_virtual_page(page_id=page_id)
+        page = await _vcm_handle(colony).get_virtual_page(page_id=page_id)
         if page is None:
             return {"error": "page not found", "page_id": page_id}
         if hasattr(page, "model_dump"):
             return page.model_dump()
         return {"page_id": page_id, "raw": str(page)}
-
     except Exception as e:
         return {"error": str(e), "page_id": page_id}
 
@@ -131,8 +124,7 @@ async def get_page_locations(
         return {"error": "not connected"}
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "vcm")
-        locations = await handle.get_page_locations(virtual_page_id=page_id)
+        locations = await _vcm_handle(colony).get_page_locations(virtual_page_id=page_id)
         return {
             "page_id": page_id,
             "locations": [
@@ -140,6 +132,5 @@ async def get_page_locations(
                 for loc in locations
             ],
         }
-
     except Exception as e:
         return {"error": str(e), "page_id": page_id}

@@ -17,7 +17,6 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import DashboardConfig
 from .services.colony_connection import ColonyConnection
-from .services.redis_service import RedisService
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +25,6 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Manage startup/shutdown of shared services."""
     config: DashboardConfig = app.state.config
-
-    # Initialize Redis
-    redis_service = RedisService(host=config.redis_host, port=config.redis_port)
-    await redis_service.connect()
-    app.state.redis_service = redis_service
-    logger.info(f"Redis connected: {config.redis_host}:{config.redis_port}")
 
     # Initialize Colony connection (Ray cluster)
     colony = ColonyConnection(
@@ -46,7 +39,6 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    await redis_service.disconnect()
     await colony.disconnect()
     logger.info("Dashboard services shut down")
 
@@ -79,13 +71,15 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     )
 
     # Register API routers
-    from .routers import infrastructure, deployments, agents, sessions, vcm
+    from .routers import infrastructure, deployments, agents, sessions, vcm, metrics, logs
 
     app.include_router(infrastructure.router, prefix="/api/v1", tags=["infrastructure"])
     app.include_router(deployments.router, prefix="/api/v1", tags=["deployments"])
     app.include_router(agents.router, prefix="/api/v1", tags=["agents"])
     app.include_router(sessions.router, prefix="/api/v1", tags=["sessions"])
     app.include_router(vcm.router, prefix="/api/v1", tags=["vcm"])
+    app.include_router(metrics.router, prefix="/api/v1", tags=["metrics"])
+    app.include_router(logs.router, prefix="/api/v1", tags=["logs"])
 
     # Serve built frontend as static files (production mode)
     static_dir = config.static_dir

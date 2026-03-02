@@ -3,7 +3,6 @@
 export interface HealthStatus {
   ray_connected: boolean;
   redis_connected: boolean;
-  postgres_connected: boolean;
   ray_cluster_status: string;
   node_count: number;
 }

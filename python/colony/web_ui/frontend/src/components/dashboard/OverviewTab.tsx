@@ -3,9 +3,10 @@ import { useDeployments } from "@/api/hooks/useDeployments";
 import { useAgents } from "@/api/hooks/useAgents";
 import { useVCMStats } from "@/api/hooks/useVCM";
 import { useSessionStats } from "@/api/hooks/useSessions";
+import { useTokenUsage } from "@/api/hooks/useMetrics";
 import { MetricCard } from "../shared/MetricCard";
 import { Badge } from "../shared/Badge";
-import { formatDuration } from "@/lib/utils";
+import { formatDuration, formatTokens } from "@/lib/utils";
 
 export function OverviewTab() {
   const health = useHealthStatus();
@@ -14,15 +15,17 @@ export function OverviewTab() {
   const agents = useAgents();
   const vcm = useVCMStats();
   const sessionStats = useSessionStats();
+  const tokenUsage = useTokenUsage();
 
   const h = health.data;
   const r = redis.data;
+  const totals = tokenUsage.data?.totals;
 
   return (
     <div className="space-y-6">
-      {/* Connection Status */}
+      {/* Cluster Health */}
       <section>
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           Cluster Health
         </h2>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -45,9 +48,9 @@ export function OverviewTab() {
         </div>
       </section>
 
-      {/* Deployments */}
+      {/* Applications */}
       <section>
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           Applications
         </h2>
         {deployments.data?.length ? (
@@ -55,10 +58,13 @@ export function OverviewTab() {
             {deployments.data.map((app) => (
               <div
                 key={app.app_name}
-                className="rounded-lg border bg-card p-4 shadow-sm"
+                className="rounded-lg border bg-card p-4 transition-colors hover:border-primary/30"
               >
-                <h3 className="font-medium">{app.app_name}</h3>
-                <div className="mt-2 flex flex-wrap gap-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_4px_theme(colors.emerald.400)]" />
+                  <h3 className="font-medium">{app.app_name}</h3>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-1.5">
                   {app.deployments.map((d) => (
                     <Badge key={d.deployment_name} variant="info">
                       {d.deployment_name}
@@ -77,10 +83,10 @@ export function OverviewTab() {
 
       {/* Quick Stats */}
       <section>
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-          Quick Stats
+        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          Activity
         </h2>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
           <MetricCard
             label="Agents"
             value={agents.data?.length ?? 0}
@@ -100,6 +106,14 @@ export function OverviewTab() {
           <MetricCard
             label="Loaded Pages"
             value={vcm.data?.loaded_pages ?? 0}
+          />
+          <MetricCard
+            label="Total Tokens"
+            value={formatTokens(totals?.total_tokens ?? 0)}
+          />
+          <MetricCard
+            label="LLM Runs"
+            value={totals?.run_count ?? 0}
           />
         </div>
       </section>

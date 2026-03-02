@@ -2,6 +2,16 @@ import { useHealthStatus } from "@/api/hooks/useInfrastructure";
 import { useAgents } from "@/api/hooks/useAgents";
 import { useVCMStats } from "@/api/hooks/useVCM";
 
+function Dot({ ok }: { ok: boolean }) {
+  return (
+    <span
+      className={`inline-block h-1.5 w-1.5 rounded-full ${
+        ok ? "bg-emerald-400 shadow-[0_0_4px_theme(colors.emerald.400)]" : "bg-red-400"
+      }`}
+    />
+  );
+}
+
 export function StatusBar() {
   const health = useHealthStatus();
   const agents = useAgents();
@@ -13,28 +23,21 @@ export function StatusBar() {
   const pageCount = vcm.data?.total_pages ?? 0;
 
   return (
-    <footer className="flex h-7 items-center gap-4 border-t bg-muted/30 px-4 text-xs text-muted-foreground">
+    <footer className="flex h-7 shrink-0 items-center gap-4 border-t bg-muted/20 px-4 text-[11px] text-muted-foreground">
       <span className="flex items-center gap-1.5">
-        <span
-          className={`inline-block h-2 w-2 rounded-full ${
-            rayOk ? "bg-emerald-500" : "bg-red-500"
-          }`}
-        />
-        Ray: {rayOk ? "connected" : "disconnected"}
+        <Dot ok={rayOk} />
+        Ray {rayOk ? "connected" : "disconnected"}
       </span>
       <span className="flex items-center gap-1.5">
-        <span
-          className={`inline-block h-2 w-2 rounded-full ${
-            redisOk ? "bg-emerald-500" : "bg-red-500"
-          }`}
-        />
-        Redis: {redisOk ? "connected" : "disconnected"}
+        <Dot ok={redisOk} />
+        Redis {redisOk ? "connected" : "disconnected"}
       </span>
-      <span>{agentCount} agents</span>
+      <span className="border-l border-border pl-4">{agentCount} agents</span>
       <span>{pageCount} pages</span>
       {health.data?.node_count != null && (
         <span>{health.data.node_count} nodes</span>
       )}
+      <span className="ml-auto text-muted-foreground/50">Colony v0.1</span>
     </footer>
   );
 }

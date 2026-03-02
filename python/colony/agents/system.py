@@ -1242,6 +1242,64 @@ class AgentSystemDeployment:
                 "total_pages_with_agents": len(state.page_agents),
             }
 
+    # === Infrastructure Status (for dashboard) ===
+
+    @serving.endpoint
+    async def get_infrastructure_status(self) -> dict[str, Any]:
+        """Get cluster infrastructure status: Redis health/info, app registry.
+
+        Returns a single consolidated view so the dashboard needs only one RPC.
+        """
+        polymathera = get_polymathera()
+        result: dict[str, Any] = {
+            "redis_connected": False,
+            "redis_info": {},
+            "applications": [],
+        }
+
+        # Redis health + info
+        try:
+            redis_client = await polymathera.get_redis_client()
+            result["redis_connected"] = await redis_client.is_healthy()
+            info_data = await redis_client.execute_with_semaphore(
+                lambda r: r.info("server", "clients", "memory")
+            )
+            result["redis_info"] = {
+                "connected_clients": info_data.get("connected_clients", 0),
+                "used_memory_human": info_data.get("used_memory_human", ""),
+                "total_commands_processed": info_data.get("total_commands_processed", 0),
+                "keyspace_hits": info_data.get("keyspace_hits", 0),
+                "keyspace_misses": info_data.get("keyspace_misses", 0),
+                "uptime_in_seconds": info_data.get("uptime_in_seconds", 0),
+            }
+        except Exception as e:
+            logger.warning("Failed to get Redis info: %s", e)
+
+        # Application registry
+        try:
+            from ..distributed.ray_utils.serving.models import ApplicationRegistry
+            registry_sm = await polymathera.get_state_manager(
+                state_type=ApplicationRegistry,
+                state_key="polymathera.colony.distributed.ray_utils.serving.apps",
+            )
+            async for registry in registry_sm.read_transaction():
+                for app_info in registry.list_apps():
+                    result["applications"].append({
+                        "app_name": app_info.app_name,
+                        "created_at": app_info.created_at,
+                        "deployments": [
+                            {
+                                "deployment_name": dep_name,
+                                "proxy_actor_name": dep_info.proxy_actor_name,
+                            }
+                            for dep_name, dep_info in app_info.deployments.items()
+                        ],
+                    })
+        except Exception as e:
+            logger.warning("Failed to read application registry: %s", e)
+
+        return result
+
     # === Resource-Driven Resumption ===
 
     async def _resource_monitor_loop(self):

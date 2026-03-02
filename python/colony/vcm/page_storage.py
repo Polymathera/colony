@@ -278,6 +278,58 @@ class RelationalPageMetadataStore(PageMetadataStore):
             logger.error(f"Failed to list pages: {e}", exc_info=True)
             raise
 
+    async def list_page_summaries(
+        self,
+        tenant_id: str | None = None,
+        source_pattern: str | None = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List page summaries (id, source, size) without loading blobs.
+
+        Args:
+            tenant_id: Filter by tenant ID
+            source_pattern: Filter by source pattern (SQL LIKE pattern)
+            limit: Maximum number of results
+            offset: Number of results to skip
+
+        Returns:
+            List of dicts with page_id, source, size, group_id, tenant_id
+        """
+        try:
+            session_maker = self.relational_storage._get_current_loop_session_maker()
+            async with session_maker() as session:
+                stmt = sqlm.select(
+                    VirtualContextPageMetadata.page_id,
+                    VirtualContextPageMetadata.source,
+                    VirtualContextPageMetadata.size,
+                    VirtualContextPageMetadata.group_id,
+                    VirtualContextPageMetadata.tenant_id,
+                )
+
+                if tenant_id:
+                    stmt = stmt.where(VirtualContextPageMetadata.tenant_id == tenant_id)
+                if source_pattern:
+                    stmt = stmt.where(VirtualContextPageMetadata.source.like(source_pattern))
+
+                stmt = stmt.order_by(VirtualContextPageMetadata.created_at.desc())
+                stmt = stmt.limit(limit).offset(offset)
+
+                result = await session.execute(stmt)
+                return [
+                    {
+                        "page_id": row.page_id,
+                        "source": row.source or "",
+                        "size": row.size or 0,
+                        "group_id": row.group_id or "",
+                        "tenant_id": row.tenant_id or "",
+                    }
+                    for row in result.all()
+                ]
+        except Exception as e:
+            logger.error(f"Failed to list page summaries: {e}", exc_info=True)
+            raise
+
     @override
     async def query_pages_by_metadata(
         self,
@@ -863,6 +915,24 @@ class PageStorage:
             source_pattern=source_pattern,
             limit=limit,
             offset=offset
+        )
+
+    async def list_page_summaries(
+        self,
+        tenant_id: str | None = None,
+        source_pattern: str | None = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List page summaries (id, source, size) without loading blobs.
+
+        Delegates to the metadata store for efficient column-only queries.
+        """
+        return await self.page_metadata_store.list_page_summaries(
+            tenant_id=tenant_id,
+            source_pattern=source_pattern,
+            limit=limit,
+            offset=offset,
         )
 
     async def query_pages_by_metadata(
