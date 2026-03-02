@@ -579,6 +579,7 @@ class AgentSystemYAMLConfig:
     max_retries: int = 3
     enable_sessions: bool = True
     default_session_ttl: float = 86400.0   # 24 hours
+    blackboard_backend_type: str = "redis"  # "distributed", "redis", or "memory"
 
 
 @dataclass
@@ -1370,6 +1371,7 @@ async def run_integration_test(
         max_retries=config.agent_system.max_retries,
         enable_sessions=config.agent_system.enable_sessions,
         default_session_ttl=config.agent_system.default_session_ttl,
+        blackboard_backend_type=config.agent_system.blackboard_backend_type,
     )
 
     polyconfig = PolymatheraClusterConfig(

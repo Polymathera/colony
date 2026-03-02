@@ -24,11 +24,16 @@ class AgentSystemConfig:
     enable_sessions: bool = True
     default_session_ttl: float = 86400.0  # 24 hours
 
+    # Blackboard configuration
+    blackboard_backend_type: str = "distributed"  # "distributed", "redis", or "memory"
+
     def add_deployments_to_app(self, app: serving.Application, top_level: bool) -> None:
         if not top_level:
             from .system import AgentSystemDeployment
             app.add_deployment(
-                AgentSystemDeployment.bind(),
+                AgentSystemDeployment.bind(
+                    blackboard_backend_type=self.blackboard_backend_type,
+                ),
                 name="agent_system"
             )
 

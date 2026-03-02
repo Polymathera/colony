@@ -86,6 +86,10 @@ class AgentSystemState(SharedState):
     # Statistics (updated periodically, not per-message!)
     stats: dict[str, Any] = Field(default_factory=dict)
 
+    # Blackboard scope registry: (scope, scope_id) -> {backend_type, registered_at, ...}
+    # Populated by EnhancedBlackboard.initialize() via register_blackboard_scope()
+    blackboard_scopes: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
     @classmethod
     def get_state_key(cls, app_name: str) -> str:
         """Generate state key for this agent system."""
@@ -110,16 +114,19 @@ class AgentSystemDeployment:
         self,
         max_retries: int = 3,
         resource_exhausted_config: ResourceExhaustedConfig | None = None,
+        blackboard_backend_type: str = "redis",
     ):
         """Initialize agent system deployment.
 
         Args:
             max_retries: Maximum retries for general operations (deprecated - use resource_exhausted_config)
             resource_exhausted_config: Configuration for handling ResourceExhausted errors
+            blackboard_backend_type: Default backend for blackboards ("distributed", "redis", "memory")
         """
         # Initialized in initialize()
         self.max_retries = max_retries  # Legacy parameter, kept for backwards compatibility
         self.resource_exhausted_config = resource_exhausted_config or ResourceExhaustedConfig()
+        self.blackboard_backend_type = blackboard_backend_type
         self.app_name: str | None = None
         self.state_manager: StateManager[AgentSystemState] | None = None
         self.vcm_handle = None
@@ -1299,6 +1306,134 @@ class AgentSystemDeployment:
             logger.warning("Failed to read application registry: %s", e)
 
         return result
+
+    # === Blackboard Configuration & Registry ===
+
+    @serving.endpoint
+    async def get_blackboard_backend_type(self) -> str:
+        """Return the configured default blackboard backend type."""
+        return self.blackboard_backend_type
+
+    @serving.endpoint
+    async def register_blackboard_scope(
+        self,
+        scope: str,
+        scope_id: str,
+        backend_type: str,
+    ) -> None:
+        """Register an active blackboard scope.
+
+        Called by EnhancedBlackboard.initialize() so the dashboard can
+        discover scopes without scanning Redis keys.
+        """
+        import time
+        key = f"{scope}:{scope_id}"
+        async for state in self.state_manager.write_transaction():
+            state.blackboard_scopes[key] = {
+                "scope": scope,
+                "scope_id": scope_id,
+                "backend_type": backend_type,
+                "registered_at": time.time(),
+            }
+
+    # === Blackboard Observer (for dashboard) ===
+
+    @serving.endpoint
+    async def get_blackboard_scopes(self) -> list[dict[str, Any]]:
+        """List all registered blackboard scopes with live statistics.
+
+        Reads the scope registry (populated by EnhancedBlackboard.initialize())
+        and queries each scope's backend for current stats.
+        """
+        from ..agents.blackboard import EnhancedBlackboard
+        from ..agents.blackboard.types import BlackboardScope as BBScope
+
+        # Read registered scopes from shared state
+        async for state in self.state_manager.read_transaction():
+            registered = dict(state.blackboard_scopes)
+
+        scopes: list[dict[str, Any]] = []
+        for key, info in registered.items():
+            scope = info["scope"]
+            scope_id = info["scope_id"]
+            backend_type = info.get("backend_type", self.blackboard_backend_type)
+            scope_enum = BBScope(scope) if scope in BBScope._value2member_map_ else BBScope.SHARED
+
+            try:
+                bb = EnhancedBlackboard(
+                    app_name=self.app_name,
+                    scope=scope_enum,
+                    scope_id=scope_id,
+                    enable_events=False,
+                    backend_type=backend_type,
+                )
+                stats = await bb.get_statistics()
+                scopes.append({
+                    "scope": scope,
+                    "scope_id": scope_id,
+                    "entry_count": stats.get("entry_count", 0),
+                    "oldest_entry_age": stats.get("oldest_entry_age"),
+                    "newest_entry_age": stats.get("newest_entry_age"),
+                    "backend_type": stats.get("backend_type", backend_type),
+                    "subscriber_count": stats.get("subscriber_count", 0),
+                })
+            except Exception as e:
+                logger.debug("Failed to get stats for %s/%s: %s", scope, scope_id, e)
+                scopes.append({
+                    "scope": scope,
+                    "scope_id": scope_id,
+                    "entry_count": 0,
+                    "backend_type": backend_type,
+                    "error": str(e),
+                })
+
+        return scopes
+
+    @serving.endpoint
+    async def get_blackboard_entries(
+        self,
+        scope: str,
+        scope_id: str,
+        limit: int = 100,
+        backend_type: str = "",
+    ) -> list[dict[str, Any]]:
+        """List entries in a specific blackboard scope."""
+        try:
+            from ..agents.blackboard import EnhancedBlackboard
+            from ..agents.blackboard.types import BlackboardScope as BBScope
+            scope_enum = BBScope(scope) if scope in BBScope._value2member_map_ else BBScope.SHARED
+            # Map backend class name to backend_type string for EnhancedBlackboard
+            bt = None
+            if backend_type == "RedisBackend":
+                bt = "redis"
+            elif backend_type == "DistributedBackend":
+                bt = "distributed"
+            elif backend_type == "InMemoryBackend":
+                bt = "memory"
+            bb = EnhancedBlackboard(
+                app_name=self.app_name,
+                scope=scope_enum,
+                scope_id=scope_id,
+                enable_events=False,
+                backend_type=bt,
+            )
+            entries = await bb.query(limit=limit)
+            return [
+                {
+                    "key": e.key,
+                    "value": e.value,
+                    "version": e.version,
+                    "created_by": e.created_by,
+                    "updated_by": e.updated_by,
+                    "created_at": e.created_at,
+                    "updated_at": e.updated_at,
+                    "tags": list(e.tags) if e.tags else [],
+                }
+                for e in entries
+            ]
+        except Exception as e:
+            logger.warning("Failed to get blackboard entries for %s/%s: %s", scope, scope_id, e)
+            return []
 
     # === Resource-Driven Resumption ===
 

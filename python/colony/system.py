@@ -287,7 +287,7 @@ def _get_deployment_by_name(name_attr: str, app_name: str | None = None) -> serv
             app_name or serving.get_my_app_name(),
             getattr(names, name_attr)
         )
-        logger.info(f"Connected to {name_attr} deployment: {getattr(names, name_attr)}")
+        logger.debug(f"Connected to {name_attr} deployment: {getattr(names, name_attr)}")
         return handle
     except Exception as e:
         logger.error(f"{name_attr} deployment '{getattr(names, name_attr)}' not found: {e}")

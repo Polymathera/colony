@@ -274,13 +274,17 @@ class AgentCapability(ABC):
 
     async def get_blackboard(
         self,
-        backend_type: str = "redis",
+        backend_type: str | None = None,
         enable_events: bool = True,
     ) -> EnhancedBlackboard:
         """Get blackboard for this capability's scope.
 
         In attached mode: uses agent's blackboard
         In detached mode: creates/uses standalone blackboard
+
+        Args:
+            backend_type: Backend type override. None reads from cluster config.
+            enable_events: Enable event system for reactive updates.
 
         Returns:
             Blackboard scoped to this capability
@@ -955,7 +959,7 @@ class AgentHandle:
 
     async def _get_child_blackboard(
         self,
-        backend_type: str = "redis",
+        backend_type: str | None = None,
         enable_events: bool = True,
     ) -> EnhancedBlackboard:
         """Get blackboard for detached mode communication."""
@@ -966,6 +970,8 @@ class AgentHandle:
             return await self._owner.get_blackboard(
                 scope="shared",
                 scope_id=self.child_agent_id,
+                backend_type=backend_type,
+                enable_events=enable_events,
             )
 
         # Detached mode: create blackboard

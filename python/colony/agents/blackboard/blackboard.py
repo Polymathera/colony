@@ -311,7 +311,8 @@ class EnhancedBlackboard:
                 if self.scope == BlackboardScope.LOCAL:
                     self.backend_type = "memory"
                 else:
-                    self.backend_type = "distributed"
+                    # Use configured default from AgentSystemDeployment
+                    self.backend_type = await self._get_configured_backend_type()
 
             # Create backend
             if self.backend_type == "memory":
@@ -338,6 +339,34 @@ class EnhancedBlackboard:
             f"Initialized EnhancedBlackboard (app={self.app_name}, scope={self.scope}, "
             f"scope_id={self.scope_id}, backend={type(self.backend).__name__})"
         )
+
+        # Register scope with the agent system (best-effort, non-blocking)
+        await self._register_scope()
+
+    async def _get_configured_backend_type(self) -> str:
+        """Get the configured default blackboard backend type from AgentSystemDeployment."""
+        try:
+            from ...system import get_agent_system
+            handle = get_agent_system(self.app_name)
+            return await handle.get_blackboard_backend_type()
+        except Exception:
+            return "distributed"
+
+    async def _register_scope(self) -> None:
+        """Register this blackboard scope with the agent system for discovery."""
+        if self.scope == BlackboardScope.LOCAL:
+            return  # LOCAL blackboards are not discoverable
+        try:
+            from ...system import get_agent_system
+            handle = get_agent_system(self.app_name)
+            await handle.register_blackboard_scope(
+                scope=self.scope.value,
+                scope_id=self.scope_id,
+                backend_type=self.backend_type,
+            )
+        except Exception as e:
+            logger.debug("Failed to register blackboard scope %s/%s: %s",
+                         self.scope.value, self.scope_id, e)
 
     async def write(
         self,
