@@ -1,9 +1,12 @@
-"""Server-Sent Events for streaming scraped Prometheus metrics.
+"""Server-Sent Events for streaming metrics and logs.
 
-Colony runs a prometheus_client HTTP server on each node (port 9090)
+Metrics: Colony runs a prometheus_client HTTP server on each node (port 9090)
 that exposes /metrics in Prometheus text format. There is NO Prometheus
 server with PromQL — so we scrape the raw text, parse it, and stream
 structured JSON snapshots to the frontend via SSE.
+
+Logs: Proxies Ray Dashboard's HTTP chunked log streaming API
+(GET /api/v0/logs/stream) as SSE events for per-actor log views.
 """
 
 from __future__ import annotations
@@ -195,3 +198,57 @@ async def get_metrics_history(
 ) -> list[dict[str, Any]]:
     """Return buffered metric history (from SSE scraper)."""
     return list(_history)[-last:]
+
+
+# ── Log streaming (proxy to Ray Dashboard) ──────────────────────
+
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
+async def _log_event_generator(
+    colony: ColonyConnection,
+    ray_params: dict[str, str],
+):
+    """Proxy Ray Dashboard's chunked log stream as SSE events."""
+    url = f"{colony.ray_dashboard_url}/api/v0/logs/stream"
+    try:
+        async with colony._http_client.stream("GET", url, params=ray_params, timeout=None) as resp:
+            async for chunk in resp.aiter_text():
+                for line in chunk.splitlines():
+                    if line:
+                        yield f"data: {json.dumps({'line': line})}\n\n"
+    except Exception as e:
+        yield f"data: {json.dumps({'_error': str(e)})}\n\n"
+
+
+@router.get("/stream/logs")
+async def stream_logs(
+    node_id: str = Query(..., description="Ray node ID"),
+    pid: int = Query(..., description="Worker process ID"),
+    lines: int = Query(500, ge=1, le=2000),
+    suffix: str = Query("err", description="Log file suffix (out or err)"),
+    colony: ColonyConnection = Depends(get_colony),
+) -> StreamingResponse:
+    """SSE stream of logs for a specific worker process.
+
+    Uses pid + node_id to identify the worker (Ray's actor_id lookup
+    is unreliable). Default suffix is 'err' because Colony logs go
+    to stderr via Python's logging module.
+    """
+    ray_params: dict[str, str] = {
+        "node_id": node_id,
+        "pid": str(pid),
+        "lines": str(lines),
+        "interval": "0.5",
+        "suffix": suffix,
+    }
+    return StreamingResponse(
+        _log_event_generator(colony, ray_params),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )

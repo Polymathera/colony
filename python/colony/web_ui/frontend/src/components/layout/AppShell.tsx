@@ -7,6 +7,7 @@ import { SessionsTab } from "../sessions/SessionsTab";
 import { VCMTab } from "../vcm/VCMTab";
 import { MetricsTab } from "../observability/MetricsTab";
 import { BlackboardTab } from "../blackboard/BlackboardTab";
+import { LogsTab } from "../logs/LogsTab";
 
 const TABS: Tab[] = [
   { id: "overview", label: "Overview" },
@@ -14,6 +15,7 @@ const TABS: Tab[] = [
   { id: "sessions", label: "Sessions" },
   { id: "vcm", label: "VCM" },
   { id: "blackboard", label: "Blackboard" },
+  { id: "logs", label: "Logs" },
   { id: "metrics", label: "Metrics" },
 ];
 
@@ -29,6 +31,8 @@ function TabContent({ activeTab }: { activeTab: string }) {
       return <VCMTab />;
     case "blackboard":
       return <BlackboardTab />;
+    case "logs":
+      return <LogsTab />;
     case "metrics":
       return <MetricsTab />;
     default:

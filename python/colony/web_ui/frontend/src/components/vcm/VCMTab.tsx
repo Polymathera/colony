@@ -85,7 +85,7 @@ export function VCMTab() {
   const stats = useVCMStats();
   const pages = useVCMPages();
   const loadedEntries = useLoadedPageEntries();
-  const [viewMode, setViewMode] = useState<"table" | "grid">("table");
+  const [viewMode, setViewMode] = useState<"table" | "grid">("grid");
   const [colorMode, setColorMode] = useState<ColorMode>("loaded");
   const [hoveredPage, setHoveredPage] = useState<PageSummary | null>(null);
 

@@ -95,3 +95,12 @@ export interface VCMStats {
   page_groups: number;
   pending_faults: number;
 }
+
+export interface LogSource {
+  actor_id: string;
+  class_name: string;
+  node_id: string;
+  pid: number;
+  ip: string;
+  repr_name: string;
+}
