@@ -476,7 +476,7 @@ class LearningPlanningPolicy(PlanningPolicy):
 
         self.history_store = ExecutionHistoryStore(
             blackboard=await self.agent.get_blackboard(
-                scope_id=f"planning_history_{self.agent.agent_id}"
+                scope_id=f"{self.agent.agent_id}:planning_history"
             )
         )
         await self.history_store.initialize()

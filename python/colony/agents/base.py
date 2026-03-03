@@ -4084,7 +4084,7 @@ class AgentManagerBase:
         Args:
             scope: Blackboard scope ("local", "shared", "global")
             scope_id: Scope identifier
-            backend_type: Backend type ("memory", "distributed", "redis"). Auto-selected if None.
+            backend_type: Backend type ("memory", "distributed", "redis"). If None, the globally configured backend will be used.
             enable_events: Enable event system for reactive updates (default: True)
 
         Returns:

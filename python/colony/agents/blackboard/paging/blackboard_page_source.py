@@ -708,6 +708,7 @@ class BlackboardContextPageSource(ContextPageSource):
             scope=BlackboardScope.SHARED,
             scope_id=scope_id,
             enable_events=True,
+            backend_type=None, # Use the globally configured backend.
         )
 
         # Internal state

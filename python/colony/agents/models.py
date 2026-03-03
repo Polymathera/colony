@@ -1150,7 +1150,7 @@ class ActionPlan(BaseModel):
     """
 
     plan_id: str = Field(
-        default_factory=lambda: f"action_plan_{uuid.uuid4()}",
+        default_factory=lambda: f"action_plan:{uuid.uuid4()}",
         description="Unique identifier for the plan"
     )
     agent_id: str
@@ -1310,12 +1310,11 @@ class ActionPlan(BaseModel):
     @staticmethod
     def get_plan_key(agent_id: str) -> str:
         """Get blackboard key for agent's plan (static method)."""
-        return f"agent:{agent_id}:plan"
-
+        return f"agent:{agent_id}:action_plan" # It will automatically be scoped by agent ID when stored in blackboard
 
     @staticmethod
     def get_all_plans_key_pattern() -> str:
-        return "agent:*:plan"
+        return "agent:*:action_plan"
 
     # Modification methods
     def insert_action(self, action: Action, position: int | None = None) -> None:
