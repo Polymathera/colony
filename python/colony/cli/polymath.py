@@ -1438,9 +1438,23 @@ async def run_integration_test(
             session = await sm_handle.create_session(
                 tenant_id=config.tenant_id,
             )
-            config.session_id = session.session_id
+            # Handle both Pydantic model and dict from DeploymentHandle
+            if isinstance(session, dict):
+                config.session_id = session.get("session_id", config.session_id)
+            else:
+                config.session_id = session.session_id
         console.print(
             f"  [green]OK[/green] — Session created: {config.session_id}"
+        )
+
+        # Pre-create the run so token reporting works even before run_streamed
+        # (agents start their action loop immediately after spawn, before
+        # run_streamed has a chance to call create_run).
+        await sm_handle.create_run(
+            session_id=config.session_id,
+            agent_id="coordinator",
+            input_data={},
+            run_id=config.run_id,
         )
 
     # -----------------------------------------------------------------------
@@ -1677,6 +1691,7 @@ async def run_integration_test(
                 },
                 timeout=float(config.timeout_seconds),
                 session_id=config.session_id,
+                run_id=config.run_id,
             ):
                 event_count += 1
                 last_event_type = event.event_type

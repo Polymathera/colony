@@ -2,6 +2,10 @@
 
 Manages the Ray connection and provides cached deployment handles
 for calling Colony's serving deployments (AgentSystem, SessionManager, VCM).
+
+Uses the proper system helpers from colony.system (get_session_manager,
+get_agent_system, get_vcm, etc.) which resolve deployment names through
+colony.deployment_names.get_deployment_names().
 """
 
 from __future__ import annotations
@@ -13,6 +17,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Default app name — matches polymath.py default
+_DEFAULT_APP_NAME = "polymathera"
+
 
 class ColonyConnection:
     """Manages connection to the running Colony Ray cluster."""
@@ -22,10 +29,12 @@ class ColonyConnection:
         ray_client_address: str = "ray://ray-head:10001",
         ray_dashboard_url: str = "http://ray-head:8265",
         prometheus_url: str = "http://ray-head:9090",
+        app_name: str = _DEFAULT_APP_NAME,
     ):
         self.ray_client_address = ray_client_address
         self.ray_dashboard_url = ray_dashboard_url
         self.prometheus_url = prometheus_url
+        self.app_name = app_name
         self._connected = False
         self._handle_cache: dict[str, Any] = {}
         self._http_client: httpx.AsyncClient | None = None
@@ -42,7 +51,7 @@ class ColonyConnection:
                     logging_level=logging.WARNING,
                 )
                 self._connected = True
-                logger.info("Ray Client connected")
+                logger.info("Ray Client connected to %s", self.ray_client_address)
             except Exception as e:
                 logger.warning(f"Ray Client connection failed: {e}. Dashboard will run in degraded mode.")
                 self._connected = False
@@ -65,11 +74,54 @@ class ColonyConnection:
     def is_connected(self) -> bool:
         return self._connected
 
-    def get_deployment_handle(self, app_name: str, deployment_name: str) -> Any:
-        """Get a cached deployment handle.
+    def _get_handle(self, name_attr: str) -> Any:
+        """Get a cached deployment handle using colony.system helpers.
 
-        Returns a DeploymentHandle that can call @serving.endpoint methods
-        on the target deployment via Ray actor RPC.
+        Uses get_deployment_names() to resolve the actual deployment name,
+        then serving.get_deployment() to get the handle.
+        """
+        if name_attr in self._handle_cache:
+            return self._handle_cache[name_attr]
+
+        from colony.deployment_names import get_deployment_names
+        from colony.distributed.ray_utils.serving import get_deployment
+
+        names = get_deployment_names()
+        deployment_name = getattr(names, name_attr)
+        logger.info(
+            "Resolving deployment: %s → %s (app=%s)",
+            name_attr, deployment_name, self.app_name,
+        )
+        handle = get_deployment(self.app_name, deployment_name)
+        self._handle_cache[name_attr] = handle
+        return handle
+
+    def get_session_manager(self) -> Any:
+        """Get SessionManagerDeployment handle."""
+        return self._get_handle("session_manager")
+
+    def get_agent_system(self) -> Any:
+        """Get AgentSystemDeployment handle."""
+        return self._get_handle("agent_system")
+
+    def get_vcm(self) -> Any:
+        """Get VirtualContextManager handle."""
+        return self._get_handle("vcm")
+
+    def get_llm_cluster(self) -> Any:
+        """Get LLM cluster handle."""
+        return self._get_handle("llm_cluster")
+
+    def get_tool_manager(self) -> Any:
+        """Get ToolManager handle."""
+        return self._get_handle("tool_manager")
+
+    def get_deployment_handle(self, app_name: str, deployment_name: str) -> Any:
+        """Get a deployment handle by explicit app/deployment name.
+
+        Prefer the typed methods (get_session_manager, get_agent_system, etc.)
+        which resolve names through get_deployment_names(). This method is
+        only for cases where the caller has a dynamic app_name/deployment_name.
         """
         cache_key = f"{app_name}/{deployment_name}"
         if cache_key not in self._handle_cache:

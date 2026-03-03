@@ -752,6 +752,7 @@ class SessionManagerDeployment:
         timeout: float = 30.0,
         track_events: bool = False,
         parent_run_id: str | None = None,
+        run_id: str | None = None,
     ) -> AgentRun:
         """Create and register a new agent run.
 
@@ -765,6 +766,7 @@ class SessionManagerDeployment:
             timeout: Timeout in seconds
             track_events: Whether to record intermediate events
             parent_run_id: Parent run if this is a nested call
+            run_id: Explicit run ID (uses agent's pre-assigned ID to avoid mismatch)
 
         Returns:
             Created AgentRun
@@ -776,7 +778,7 @@ class SessionManagerDeployment:
         # Merge config with session defaults
         effective_config = config or session.default_run_config or AgentRunConfig()
 
-        run = AgentRun(
+        run_kwargs: dict[str, Any] = dict(
             session_id=session_id,
             tenant_id=session.tenant_id,
             agent_id=agent_id,
@@ -786,6 +788,10 @@ class SessionManagerDeployment:
             track_events=track_events,
             parent_run_id=parent_run_id,
         )
+        if run_id:
+            run_kwargs["run_id"] = run_id
+
+        run = AgentRun(**run_kwargs)
 
         async for state in self.state_manager.write_transaction():
             state.runs[run.run_id] = run
@@ -824,29 +830,31 @@ class SessionManagerDeployment:
         """
         current_time = time.time()
 
+        found = False
         async for state in self.state_manager.write_transaction():
             run = state.runs.get(run_id)
-            if not run:
-                return False
+            if run:
+                # Update status
+                old_status = run.status
+                run.status = status
+                run.output_data = output_data
+                run.error = error
 
-            # Update status
-            old_status = run.status
-            run.status = status
-            run.output_data = output_data
-            run.error = error
+                # Update timing
+                if status == RunStatus.RUNNING and run.started_at is None:
+                    run.started_at = current_time
+                if status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.TIMEOUT):
+                    run.completed_at = current_time
+                    run.resource_usage.wall_time_seconds = current_time - (run.started_at or run.created_at)
 
-            # Update timing
-            if status == RunStatus.RUNNING and run.started_at is None:
-                run.started_at = current_time
-            if status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.TIMEOUT):
-                run.completed_at = current_time
-                run.resource_usage.wall_time_seconds = current_time - (run.started_at or run.created_at)
+                    # Remove from active runs
+                    state.active_runs.pop(run_id, None)
 
-                # Remove from active runs
-                state.active_runs.pop(run_id, None)
+                logger.debug(f"Updated run {run_id} status: {old_status} -> {status}")
+                found = True
+            # Let loop body end naturally so write_transaction can compare_and_swap
 
-            logger.debug(f"Updated run {run_id} status: {old_status} -> {status}")
-            return True
+        return found
 
     @serving.endpoint
     async def add_run_event(
@@ -870,14 +878,15 @@ class SessionManagerDeployment:
         # TODO: This is too expensive because it competes with
         # all other operations by all other sessions. Store events
         # somewhere else more efficiently.
+        added = False
         async for state in self.state_manager.write_transaction():
             run = state.runs.get(run_id)
-            if not run or not run.track_events:
-                return False
+            if run and run.track_events:
+                event = AgentRunEvent(event_type=event_type, data=data)
+                run.events.append(event)
+                added = True
 
-            event = AgentRunEvent(event_type=event_type, data=data)
-            run.events.append(event)
-            return True
+        return added
 
     @serving.endpoint
     async def update_run_resources(
@@ -908,24 +917,30 @@ class SessionManagerDeployment:
         Returns:
             True if run was found and updated
         """
+        updated = False
         async for state in self.state_manager.write_transaction():
             run = state.runs.get(run_id)
-            if not run:
-                return False
+            logger.warning(
+                "update_run_resources: run_id=%s found=%s runs_in_state=%s input_tokens=%d",
+                run_id, run is not None, list(state.runs.keys()), input_tokens,
+            )
+            if run:
+                run.resource_usage.input_tokens += input_tokens
+                run.resource_usage.output_tokens += output_tokens
+                run.resource_usage.total_tokens += input_tokens + output_tokens
+                run.resource_usage.llm_calls += llm_calls
+                run.resource_usage.cost_usd += cost_usd
+                run.resource_usage.cache_read_tokens += cache_read_tokens
+                run.resource_usage.cache_write_tokens += cache_write_tokens
 
-            run.resource_usage.input_tokens += input_tokens
-            run.resource_usage.output_tokens += output_tokens
-            run.resource_usage.total_tokens += input_tokens + output_tokens
-            run.resource_usage.llm_calls += llm_calls
-            run.resource_usage.cost_usd += cost_usd
-            run.resource_usage.cache_read_tokens += cache_read_tokens
-            run.resource_usage.cache_write_tokens += cache_write_tokens
+                if child_agent_id:
+                    run.resource_usage.agents_spawned += 1
+                    run.resource_usage.child_agent_ids.append(child_agent_id)
 
-            if child_agent_id:
-                run.resource_usage.agents_spawned += 1
-                run.resource_usage.child_agent_ids.append(child_agent_id)
+                updated = True
+        logger.warning("update_run_resources: returning updated=%s for run_id=%s", updated, run_id)
 
-            return True
+        return updated
 
     @serving.endpoint
     async def get_run(self, run_id: str) -> AgentRun | None:
@@ -986,22 +1001,20 @@ class SessionManagerDeployment:
         Returns:
             True if run was cancelled
         """
+        cancelled = False
         async for state in self.state_manager.write_transaction():
             run = state.runs.get(run_id)
-            if not run:
-                return False
+            if run and not run.is_terminal():
+                run.status = RunStatus.CANCELLED
+                run.completed_at = time.time()
+                run.resource_usage.wall_time_seconds = run.completed_at - (run.started_at or run.created_at)
 
-            if run.is_terminal():
-                return False  # Already finished
+                state.active_runs.pop(run_id, None)
 
-            run.status = RunStatus.CANCELLED
-            run.completed_at = time.time()
-            run.resource_usage.wall_time_seconds = run.completed_at - (run.started_at or run.created_at)
+                logger.info(f"Cancelled run {run_id}")
+                cancelled = True
 
-            state.active_runs.pop(run_id, None)
-
-            logger.info(f"Cancelled run {run_id}")
-            return True
+        return cancelled
 
     @serving.endpoint
     async def set_session_default_config(
@@ -1018,14 +1031,15 @@ class SessionManagerDeployment:
         Returns:
             True if session was found and updated
         """
+        updated = False
         async for state in self.state_manager.write_transaction():
             session = state.sessions.get(session_id)
-            if not session:
-                return False
+            if session:
+                session.default_run_config = config
+                session.updated_at = time.time()
+                updated = True
 
-            session.default_run_config = config
-            session.updated_at = time.time()
-            return True
+        return updated
 
     @serving.endpoint
     async def get_session_default_config(

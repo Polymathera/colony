@@ -16,8 +16,6 @@ from ..services.colony_connection import ColonyConnection
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_DEFAULT_APP_NAME = "polymathera"
-
 
 @router.get("/blackboard/scopes")
 async def list_blackboard_scopes(
@@ -28,7 +26,7 @@ async def list_blackboard_scopes(
         return []
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "agent_system")
+        handle = colony.get_agent_system()
         return await handle.get_blackboard_scopes()
     except Exception as e:
         logger.warning("Failed to list blackboard scopes: %s", e)
@@ -48,7 +46,7 @@ async def get_blackboard_entries(
         return []
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "agent_system")
+        handle = colony.get_agent_system()
         return await handle.get_blackboard_entries(
             scope=scope, scope_id=scope_id, limit=limit,
             backend_type=backend_type,

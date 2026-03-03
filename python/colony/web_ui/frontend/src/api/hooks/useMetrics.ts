@@ -38,6 +38,7 @@ export interface TokenUsageResponse {
   runs: TokenRun[];
   totals: TokenTotals;
   by_agent?: AgentTokenSummary[];
+  error?: string;
 }
 
 export function useTokenUsage(sessionId?: string) {

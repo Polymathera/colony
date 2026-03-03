@@ -1922,14 +1922,20 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         # 1. Get next event
         event = await self.get_next_event()
 
-        # 2. Extract session_id from event and store in state for distributed traceability
+        # 2. Extract session_id and run_id from event and store in state for distributed traceability.
         # In distributed Ray systems, context variables don't cross node boundaries,
-        # so we extract session_id from the event metadata and propagate it explicitly.
+        # so we extract these from the event metadata and propagate them explicitly.
         # Store in state so execute_iteration() can set up context around dispatch()
         from ...sessions.context import session_id_context
         event_session_id = event.metadata.get("session_id") if event else None
         if event_session_id:
             state.custom["current_session_id"] = event_session_id
+        # run_id is in the event value (set by AgentHandle.run/run_streamed)
+        event_value = event.value if event else None
+        if isinstance(event_value, dict) and event_value.get("run_id"):
+            state.custom["current_run_id"] = event_value["run_id"]
+            # Also update agent metadata so child agents inherit the run_id
+            self.agent.metadata.run_id = event_value["run_id"]
 
         # 3. Broadcast to event handlers (within session_id context)
         immediate_actions = []

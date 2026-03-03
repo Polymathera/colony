@@ -19,12 +19,6 @@ from ..services.colony_connection import ColonyConnection
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_DEFAULT_APP_NAME = "polymathera"
-
-
-def _vcm_handle(colony: ColonyConnection) -> Any:
-    return colony.get_deployment_handle(_DEFAULT_APP_NAME, "vcm")
-
 
 @router.get("/vcm/stats", response_model=VCMStats)
 async def get_vcm_stats(
@@ -35,7 +29,7 @@ async def get_vcm_stats(
         return VCMStats()
 
     try:
-        stats = await _vcm_handle(colony).get_stats()
+        stats = await colony.get_vcm().get_stats()
         pt = stats.get("page_table", {})
         storage = stats.get("storage", {})
         return VCMStats(
@@ -60,7 +54,7 @@ async def list_pages(
         return []
 
     try:
-        summaries = await _vcm_handle(colony).list_stored_pages(
+        summaries = await colony.get_vcm().list_stored_pages(
             limit=limit,
             offset=offset,
         )
@@ -88,7 +82,7 @@ async def get_working_set(
         return {"pages": []}
 
     try:
-        loaded = await _vcm_handle(colony).get_all_loaded_pages()
+        loaded = await colony.get_vcm().get_all_loaded_pages()
         return {"pages": loaded}
     except Exception as e:
         logger.warning("Failed to get working set: %s", e)
@@ -104,7 +98,7 @@ async def list_loaded_pages(
         return []
 
     try:
-        return await _vcm_handle(colony).list_loaded_page_entries()
+        return await colony.get_vcm().list_loaded_page_entries()
     except Exception as e:
         logger.warning("Failed to list loaded pages: %s", e)
         return []
@@ -120,7 +114,7 @@ async def get_page_detail(
         return {"error": "not connected"}
 
     try:
-        page = await _vcm_handle(colony).get_virtual_page(page_id=page_id)
+        page = await colony.get_vcm().get_virtual_page(page_id=page_id)
         if page is None:
             return {"error": "page not found", "page_id": page_id}
         if hasattr(page, "model_dump"):
@@ -140,7 +134,7 @@ async def get_page_locations(
         return {"error": "not connected"}
 
     try:
-        locations = await _vcm_handle(colony).get_page_locations(virtual_page_id=page_id)
+        locations = await colony.get_vcm().get_page_locations(virtual_page_id=page_id)
         return {
             "page_id": page_id,
             "locations": [

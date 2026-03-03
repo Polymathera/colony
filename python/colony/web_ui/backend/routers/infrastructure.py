@@ -17,8 +17,6 @@ from ..services.colony_connection import ColonyConnection
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_DEFAULT_APP_NAME = "polymathera"
-
 
 @router.get("/infra/status", response_model=HealthStatus)
 async def get_status(
@@ -32,7 +30,7 @@ async def get_status(
     redis_connected = False
     if colony.is_connected:
         try:
-            handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "agent_system")
+            handle = colony.get_agent_system()
             infra = await handle.get_infrastructure_status()
             redis_connected = infra.get("redis_connected", False)
         except Exception as e:
@@ -55,7 +53,7 @@ async def get_redis_info(
         return RedisInfo()
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "agent_system")
+        handle = colony.get_agent_system()
         infra = await handle.get_infrastructure_status()
         info = infra.get("redis_info", {})
         return RedisInfo(

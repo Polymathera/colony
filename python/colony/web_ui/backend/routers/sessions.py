@@ -14,7 +14,14 @@ from ..services.colony_connection import ColonyConnection
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_DEFAULT_APP_NAME = "polymathera"
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    """Get attribute from object or dict — handles both Pydantic models and dicts."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
 
 
 @router.get("/sessions/", response_model=list[SessionSummary])
@@ -28,7 +35,7 @@ async def list_sessions(
         return []
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "session_manager")
+        handle = colony.get_session_manager()
         sessions = await handle.list_sessions(
             tenant_id=tenant_id,
             include_expired=False,
@@ -37,11 +44,11 @@ async def list_sessions(
 
         return [
             SessionSummary(
-                session_id=s.session_id,
-                tenant_id=getattr(s, "tenant_id", ""),
-                state=str(getattr(s, "state", "")),
-                created_at=getattr(s, "created_at", 0.0),
-                run_count=len(getattr(s, "runs", [])),
+                session_id=_get(s, "session_id", ""),
+                tenant_id=_get(s, "tenant_id", ""),
+                state=str(_get(s, "state", "")),
+                created_at=_get(s, "created_at", 0.0),
+                run_count=len(_get(s, "runs", []) or []),
             )
             for s in sessions
         ]
@@ -61,10 +68,12 @@ async def get_session_detail(
         return {"error": "not connected"}
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "session_manager")
+        handle = colony.get_session_manager()
         session = await handle.get_session(session_id=session_id)
         if session is None:
             return {"error": "session not found", "session_id": session_id}
+        if isinstance(session, dict):
+            return session
         if hasattr(session, "model_dump"):
             return session.model_dump()
         return {"session_id": session_id, "raw": str(session)}
@@ -84,22 +93,23 @@ async def get_session_runs(
         return []
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "session_manager")
+        handle = colony.get_session_manager()
         runs = await handle.get_session_runs(session_id=session_id, limit=limit)
 
-        return [
-            RunSummary(
-                run_id=r.run_id,
-                session_id=getattr(r, "session_id", session_id),
-                agent_id=getattr(r, "agent_id", ""),
-                status=str(getattr(r, "status", "")),
-                started_at=getattr(r, "started_at", None),
-                completed_at=getattr(r, "completed_at", None),
-                input_tokens=getattr(getattr(r, "resources", None), "input_tokens", 0),
-                output_tokens=getattr(getattr(r, "resources", None), "output_tokens", 0),
-            )
-            for r in runs
-        ]
+        result = []
+        for r in runs:
+            ru = _get(r, "resource_usage", None)
+            result.append(RunSummary(
+                run_id=_get(r, "run_id", ""),
+                session_id=_get(r, "session_id", session_id),
+                agent_id=_get(r, "agent_id", ""),
+                status=str(_get(r, "status", "")),
+                started_at=_get(r, "started_at", None),
+                completed_at=_get(r, "completed_at", None),
+                input_tokens=_get(ru, "input_tokens", 0) if ru else 0,
+                output_tokens=_get(ru, "output_tokens", 0) if ru else 0,
+            ))
+        return result
 
     except Exception as e:
         logger.warning(f"Failed to list runs for session {session_id}: {e}")
@@ -116,10 +126,12 @@ async def get_run_detail(
         return {"error": "not connected"}
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "session_manager")
+        handle = colony.get_session_manager()
         run = await handle.get_run(run_id=run_id)
         if run is None:
             return {"error": "run not found", "run_id": run_id}
+        if isinstance(run, dict):
+            return run
         if hasattr(run, "model_dump"):
             return run.model_dump()
         return {"run_id": run_id, "raw": str(run)}
@@ -137,7 +149,7 @@ async def get_session_stats(
         return {"status": "disconnected"}
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "session_manager")
+        handle = colony.get_session_manager()
         return await handle.get_stats()
     except Exception as e:
         return {"error": str(e)}

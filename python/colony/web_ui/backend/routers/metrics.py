@@ -13,7 +13,14 @@ from ..services.colony_connection import ColonyConnection
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_DEFAULT_APP_NAME = "polymathera"
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    """Get attribute from object or dict — handles both Pydantic models and dicts."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
 
 
 @router.get("/metrics/tokens")
@@ -26,37 +33,40 @@ async def get_token_usage(
     Returns per-run token counts for charting.
     """
     if not colony.is_connected:
-        return {"runs": []}
+        return {"runs": [], "totals": {}, "error": "not connected"}
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "session_manager")
+        handle = colony.get_session_manager()
 
         if session_id:
             runs = await handle.get_session_runs(session_id=session_id, limit=200)
         else:
             # Get runs across all sessions
             sessions = await handle.list_sessions(limit=20, include_expired=True)
+            logger.info("Metrics: found %d sessions", len(sessions))
             runs = []
             for s in sessions:
+                sid = _get(s, "session_id", "")
                 session_runs = await handle.get_session_runs(
-                    session_id=s.session_id, limit=50,
+                    session_id=sid, limit=50,
                 )
+                logger.info("Metrics: session %s → %d runs", sid[:16], len(session_runs))
                 runs.extend(session_runs)
 
         token_data = []
         for r in runs:
-            ru = getattr(r, "resource_usage", None)
+            ru = _get(r, "resource_usage", None)
             token_data.append({
-                "run_id": r.run_id,
-                "agent_id": getattr(r, "agent_id", ""),
-                "status": str(getattr(r, "status", "")),
-                "input_tokens": getattr(ru, "input_tokens", 0) if ru else 0,
-                "output_tokens": getattr(ru, "output_tokens", 0) if ru else 0,
-                "cache_read_tokens": getattr(ru, "cache_read_tokens", 0) if ru else 0,
-                "cache_write_tokens": getattr(ru, "cache_write_tokens", 0) if ru else 0,
-                "llm_calls": getattr(ru, "llm_calls", 0) if ru else 0,
-                "cost_usd": getattr(ru, "cost_usd", 0.0) if ru else 0.0,
-                "started_at": getattr(r, "started_at", None),
+                "run_id": _get(r, "run_id", ""),
+                "agent_id": _get(r, "agent_id", ""),
+                "status": str(_get(r, "status", "")),
+                "input_tokens": _get(ru, "input_tokens", 0) if ru else 0,
+                "output_tokens": _get(ru, "output_tokens", 0) if ru else 0,
+                "cache_read_tokens": _get(ru, "cache_read_tokens", 0) if ru else 0,
+                "cache_write_tokens": _get(ru, "cache_write_tokens", 0) if ru else 0,
+                "llm_calls": _get(ru, "llm_calls", 0) if ru else 0,
+                "cost_usd": _get(ru, "cost_usd", 0.0) if ru else 0.0,
+                "started_at": _get(r, "started_at", None),
             })
 
         # Aggregate totals
@@ -99,8 +109,84 @@ async def get_token_usage(
         }
 
     except Exception as e:
-        logger.warning(f"Failed to get token usage: {e}")
+        logger.warning("Failed to get token usage: %s", e, exc_info=True)
         return {"runs": [], "totals": {}, "error": str(e)}
+
+
+@router.get("/metrics/debug")
+async def get_metrics_debug(
+    colony: ColonyConnection = Depends(get_colony),
+) -> dict[str, Any]:
+    """Raw diagnostic: dump exactly what session_manager returns.
+
+    Hit /api/v1/metrics/debug in your browser to see what's happening.
+    """
+    result: dict[str, Any] = {
+        "connected": colony.is_connected,
+        "sessions_raw": [],
+        "errors": [],
+    }
+    if not colony.is_connected:
+        result["errors"].append("Colony not connected")
+        return result
+
+    try:
+        handle = colony.get_session_manager()
+        result["handle_type"] = str(type(handle))
+    except Exception as e:
+        result["errors"].append(f"get_session_manager failed: {e}")
+        return result
+
+    try:
+        sessions = await handle.list_sessions(limit=10, include_expired=True)
+        result["sessions_count"] = len(sessions)
+        result["sessions_type"] = str(type(sessions))
+
+        for i, s in enumerate(sessions[:3]):
+            s_info: dict[str, Any] = {
+                "python_type": str(type(s)),
+                "is_dict": isinstance(s, dict),
+            }
+            sid = _get(s, "session_id", "???")
+            s_info["session_id"] = sid
+            s_info["state"] = str(_get(s, "state", "???"))
+            s_info["tenant_id"] = _get(s, "tenant_id", "???")
+
+            # Get runs for this session
+            try:
+                runs = await handle.get_session_runs(session_id=sid, limit=5)
+                s_info["runs_count"] = len(runs)
+                s_info["runs_type"] = str(type(runs))
+                for j, r in enumerate(runs[:2]):
+                    r_info: dict[str, Any] = {
+                        "python_type": str(type(r)),
+                        "is_dict": isinstance(r, dict),
+                        "run_id": _get(r, "run_id", "???"),
+                        "agent_id": _get(r, "agent_id", "???"),
+                        "status": str(_get(r, "status", "???")),
+                    }
+                    ru = _get(r, "resource_usage", None)
+                    r_info["resource_usage_type"] = str(type(ru))
+                    r_info["resource_usage_is_dict"] = isinstance(ru, dict)
+                    if ru:
+                        r_info["input_tokens"] = _get(ru, "input_tokens", 0)
+                        r_info["output_tokens"] = _get(ru, "output_tokens", 0)
+                        r_info["llm_calls"] = _get(ru, "llm_calls", 0)
+                        r_info["cost_usd"] = _get(ru, "cost_usd", 0.0)
+                    else:
+                        r_info["resource_usage"] = None
+                    s_info[f"run_{j}"] = r_info
+            except Exception as e:
+                s_info["runs_error"] = str(e)
+
+            result["sessions_raw"].append(s_info)
+
+    except Exception as e:
+        result["errors"].append(f"list_sessions failed: {e}")
+        import traceback
+        result["traceback"] = traceback.format_exc()
+
+    return result
 
 
 @router.get("/metrics/prometheus")

@@ -14,9 +14,6 @@ from ..services.colony_connection import ColonyConnection
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Default app name — configurable if multi-app support is needed later
-_DEFAULT_APP_NAME = "polymathera"
-
 
 @router.get("/agents/", response_model=list[AgentSummary])
 async def list_agents(
@@ -27,7 +24,7 @@ async def list_agents(
         return []
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "agent_system")
+        handle = colony.get_agent_system()
         agent_ids: list[str] = await handle.list_all_agents()
 
         summaries = []
@@ -58,7 +55,7 @@ async def get_agent_hierarchy(
         return []
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "agent_system")
+        handle = colony.get_agent_system()
         agent_ids: list[str] = await handle.list_all_agents()
 
         nodes = []
@@ -95,7 +92,7 @@ async def get_agent_detail(
         return {"error": "not connected"}
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "agent_system")
+        handle = colony.get_agent_system()
         info = await handle.get_agent_info(agent_id=agent_id)
         if info is None:
             return {"error": "agent not found", "agent_id": agent_id}
@@ -118,7 +115,7 @@ async def get_agent_capabilities(
         return {"error": "not connected"}
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "agent_system")
+        handle = colony.get_agent_system()
         info = await handle.get_agent_info(agent_id=agent_id)
         if info is None:
             return {"error": "agent not found", "agent_id": agent_id}
@@ -140,7 +137,7 @@ async def get_system_stats(
         return {"status": "disconnected"}
 
     try:
-        handle = colony.get_deployment_handle(_DEFAULT_APP_NAME, "agent_system")
+        handle = colony.get_agent_system()
         return await handle.get_system_stats()
     except Exception as e:
         return {"error": str(e)}

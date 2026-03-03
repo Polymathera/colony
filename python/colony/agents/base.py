@@ -1054,6 +1054,7 @@ class AgentHandle:
         session_id: str | None = None,
         config: "AgentRunConfig | None" = None,
         track_events: bool = False,
+        run_id: str | None = None,
     ) -> "AgentRun":
         """Run a task on the agent and wait for result.
 
@@ -1067,6 +1068,7 @@ class AgentHandle:
             session_id: Optional session ID for context
             config: Run configuration (uses session defaults if None)
             track_events: Whether to record intermediate events
+            run_id: Explicit run ID (matches agent's metadata.run_id to avoid mismatch)
 
         Returns:
             AgentRun with status, output_data, and resource_usage
@@ -1092,24 +1094,35 @@ class AgentHandle:
         run: AgentRun | None = None
         session_manager_handle = None
 
+        run_id: str | None = None
         if session_id:
             try:
                 session_manager_handle = get_session_manager(app_name=self._app_name)
 
-                run = await session_manager_handle.create_run(
+                run_result = await session_manager_handle.create_run(
                     session_id=effective_session_id,
                     agent_id=self.child_agent_id,
                     input_data=input_data,
                     config=config,
                     timeout=timeout,
                     track_events=track_events,
+                    run_id=run_id,
                 )
 
-                # Mark as running
-                await session_manager_handle.update_run_status(
-                    run_id=run.run_id,
-                    status=RunStatus.RUNNING,
-                )
+                # Handle both Pydantic model and dict from DeploymentHandle
+                if isinstance(run_result, dict):
+                    run = None
+                    run_id = run_result.get("run_id")
+                else:
+                    run = run_result
+                    run_id = run.run_id
+
+                if run_id:
+                    # Mark as running
+                    await session_manager_handle.update_run_status(
+                        run_id=run_id,
+                        status=RunStatus.RUNNING,
+                    )
             except Exception as e:
                 logger.warning(f"Failed to create tracked run: {e}")
                 # Continue without tracking
@@ -1133,7 +1146,7 @@ class AgentHandle:
                 "request_id": request_id,
                 "session_id": effective_session_id,  # Include in value for receiver to extract
                 "sender": sender_id,
-                "run_id": run.run_id if run else None,
+                "run_id": run_id,
             },
             created_by=sender_id,
         )
@@ -1141,12 +1154,13 @@ class AgentHandle:
         # Check if result already exists (race condition handling)
         existing = await blackboard.read(result_key)
         if existing is not None:
-            if run and session_manager_handle:
+            if run_id and session_manager_handle:
                 await session_manager_handle.update_run_status(
-                    run_id=run.run_id,
+                    run_id=run_id,
                     status=RunStatus.COMPLETED,
                     output_data=existing,
                 )
+            if run:
                 run.status = RunStatus.COMPLETED
                 run.output_data = existing
             else:
@@ -1180,13 +1194,14 @@ class AgentHandle:
             error_msg = f"Timeout after {timeout}s"
 
         # Update run status
-        if run and session_manager_handle:
+        if run_id and session_manager_handle:
             await session_manager_handle.update_run_status(
-                run_id=run.run_id,
+                run_id=run_id,
                 status=final_status,
                 output_data=result_value,
                 error=error_msg,
             )
+        if run:
             run.status = final_status
             run.output_data = result_value
             run.error = error_msg
@@ -1212,6 +1227,7 @@ class AgentHandle:
         session_id: str | None = None,
         event_types: set[str] | None = None,
         track_events: bool = True,
+        run_id: str | None = None,
     ) -> AsyncIterator[AgentRunEvent]:
         """Run a task with streaming events.
 
@@ -1225,6 +1241,7 @@ class AgentHandle:
             session_id: Optional session ID
             event_types: Filter for specific event types (if None, all write events)
             track_events: If True, events are persisted to the AgentRun
+            run_id: Explicit run ID (matches agent's metadata.run_id to avoid mismatch)
 
         Yields:
             AgentRunEvent for each event during execution
@@ -1255,20 +1272,38 @@ class AgentHandle:
             try:
                 session_manager_handle = get_session_manager(app_name=self._app_name)
 
-                run = await session_manager_handle.create_run(
-                    session_id=session_id,
-                    agent_id=self.child_agent_id,
-                    input_data=input_data,
-                    config=config,
-                    timeout=timeout,
-                    track_events=track_events,
-                )
+                if run_id:
+                    # Caller pre-created the run — just mark it as running
+                    await session_manager_handle.update_run_status(
+                        run_id=run_id,
+                        status=RunStatus.RUNNING,
+                    )
+                else:
+                    # Create a new run
+                    run_result = await session_manager_handle.create_run(
+                        session_id=session_id,
+                        agent_id=self.child_agent_id,
+                        input_data=input_data,
+                        config=config,
+                        timeout=timeout,
+                        track_events=track_events,
+                        run_id=None,
+                    )
 
-                # Mark as running
-                await session_manager_handle.update_run_status(
-                    run_id=run.run_id,
-                    status=RunStatus.RUNNING,
-                )
+                    # Handle both Pydantic model and dict from DeploymentHandle
+                    if isinstance(run_result, dict):
+                        run = None
+                        run_id = run_result.get("run_id")
+                    else:
+                        run = run_result
+                        run_id = run.run_id
+
+                    if run_id:
+                        # Mark as running
+                        await session_manager_handle.update_run_status(
+                            run_id=run_id,
+                            status=RunStatus.RUNNING,
+                        )
             except Exception as e:
                 logger.warning(f"Failed to create tracked run for streaming: {e}")
                 # Continue without tracking
@@ -1289,7 +1324,7 @@ class AgentHandle:
                 "session_id": effective_session_id,  # Include in value for receiver to extract
                 "sender": sender_id,
                 "streaming": True,
-                "run_id": run.run_id if run else None,
+                "run_id": run_id,
             },
             created_by=sender_id,
         )
@@ -1323,10 +1358,10 @@ class AgentHandle:
                         data={"error": error_msg},
                     )
 
-                    if run and session_manager_handle and track_events:
+                    if run_id and session_manager_handle and track_events:
                         try:
                             await session_manager_handle.add_run_event(
-                                run_id=run.run_id,
+                                run_id=run_id,
                                 event_type="timeout",
                                 data={"error": error_msg},
                             )
@@ -1362,10 +1397,10 @@ class AgentHandle:
                 )
 
                 # Persist event if tracking
-                if run and session_manager_handle and track_events:
+                if run_id and session_manager_handle and track_events:
                     try:
                         await session_manager_handle.add_run_event(
-                            run_id=run.run_id,
+                            run_id=run_id,
                             event_type=event_type_str,
                             data=agent_event.data,
                         )
@@ -1404,10 +1439,10 @@ class AgentHandle:
             yield error_event
 
         # Update final run status
-        if run and session_manager_handle:
+        if run_id and session_manager_handle:
             try:
                 await session_manager_handle.update_run_status(
-                    run_id=run.run_id,
+                    run_id=run_id,
                     status=final_status,
                     output_data=result_data,
                     error=error_msg,
@@ -2550,7 +2585,61 @@ class Agent(BaseModel):
             f"              📡 agent.infer() returned — len={len(resp_text)}"
         )
         logger.info(f"__________ Agent {self.agent_id} inference request:\n\tPrompt:{prompt}\n\tResult:{resp_text}")
+
+        # Report token usage to session manager
+        await self._report_llm_usage(result)
+
         return result
+
+    async def _report_llm_usage(self, response: InferenceResponse) -> None:
+        """Report LLM token usage from an inference response to the session manager."""
+        # run_id comes from action_policy_state (propagated from blackboard request)
+        # or falls back to metadata.run_id (set at spawn time)
+        run_id = None
+        if self.action_policy_state is not None:
+            run_id = self.action_policy_state.custom.get("current_run_id")
+        if not run_id or run_id == "default":
+            run_id = self.metadata.run_id
+        if not run_id or run_id == "default":
+            logger.warning("_report_llm_usage: no run_id available, skipping")
+            return
+
+        # Handle both Pydantic model and dict (Ray RPC may return dicts)
+        if isinstance(response, dict):
+            meta = response.get("metadata") or {}
+        else:
+            meta = getattr(response, "metadata", None) or {}
+        if isinstance(meta, str):
+            logger.warning("_report_llm_usage: metadata is a string, skipping")
+            return
+
+        input_tokens = meta.get("input_tokens", 0)
+        output_tokens = meta.get("output_tokens", 0)
+        logger.warning(
+            "_report_llm_usage: run_id=%s input=%d output=%d cost=%.4f",
+            run_id, input_tokens, output_tokens, meta.get("cost_usd", 0.0),
+        )
+        if input_tokens == 0 and output_tokens == 0:
+            return
+
+        try:
+            from ..system import get_session_manager
+            handle = get_session_manager(app_name=serving.get_my_app_name())
+            result = await handle.update_run_resources(
+                run_id=run_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                llm_calls=1,
+                cost_usd=meta.get("cost_usd", 0.0),
+                cache_read_tokens=meta.get("cache_read_tokens", 0),
+                cache_write_tokens=meta.get("cache_write_tokens", 0),
+            )
+            logger.warning(
+                "_report_llm_usage: update_run_resources returned %s for run %s",
+                result, run_id,
+            )
+        except Exception as e:
+            logger.warning("Failed to report LLM usage for run %s: %s", run_id, e)
 
     # === Blackboard (Delegated to manager) ===
 

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   BarChart,
   Bar,
@@ -10,14 +11,22 @@ import {
   Pie,
   Cell,
 } from "recharts";
+import { useQuery } from "@tanstack/react-query";
 import { useTokenUsage } from "@/api/hooks/useMetrics";
+import { apiFetch } from "@/api/client";
 import { MetricCard } from "../shared/MetricCard";
 import { formatTokens } from "@/lib/utils";
 
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"];
 
 export function MetricsTab() {
-  const { data, isLoading } = useTokenUsage();
+  const { data, isLoading, error: queryError } = useTokenUsage();
+  const [showDebug, setShowDebug] = useState(false);
+  const debugQuery = useQuery({
+    queryKey: ["metrics", "debug"],
+    queryFn: () => apiFetch<Record<string, unknown>>("/metrics/debug"),
+    enabled: showDebug,
+  });
 
   const totals = data?.totals;
   const runs = data?.runs ?? [];
@@ -48,14 +57,76 @@ export function MetricsTab() {
     );
   }
 
+  const error = (data as Record<string, unknown> | undefined)?.error as string | undefined;
+
   return (
     <div className="space-y-6">
+      {/* Debug panel */}
+      <div className="rounded-lg border border-yellow-800 bg-yellow-950/20 px-4 py-3 text-xs">
+        <button
+          className="font-semibold text-yellow-400 underline"
+          onClick={() => setShowDebug(!showDebug)}
+        >
+          {showDebug ? "Hide" : "Show"} debug info
+        </button>
+        {showDebug && (
+          <div className="mt-2 space-y-3">
+            <div>
+              <div className="font-semibold text-yellow-400 mb-1">/metrics/tokens response:</div>
+              <pre className="max-h-40 overflow-auto text-yellow-300/80">
+                {JSON.stringify(
+                  {
+                    queryError: queryError?.message ?? null,
+                    isLoading,
+                    hasData: !!data,
+                    runsCount: runs.length,
+                    totals,
+                    byAgentCount: byAgent.length,
+                    firstRun: runs[0] ?? null,
+                    error,
+                  },
+                  null,
+                  2,
+                )}
+              </pre>
+            </div>
+            <div>
+              <div className="font-semibold text-yellow-400 mb-1">
+                /metrics/debug (raw session_manager data):
+              </div>
+              {debugQuery.isLoading && <span className="text-yellow-300/60">Loading...</span>}
+              {debugQuery.error && (
+                <span className="text-red-400">
+                  Debug endpoint error: {(debugQuery.error as Error).message}
+                  {" "}(backend may need rebuild)
+                </span>
+              )}
+              {debugQuery.data && (
+                <pre className="max-h-60 overflow-auto text-yellow-300/80">
+                  {JSON.stringify(debugQuery.data, null, 2)}
+                </pre>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-800 bg-red-950/30 px-4 py-3 text-sm text-red-400">
+          Backend error: {error}
+        </div>
+      )}
+
       {/* Totals */}
       <section>
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           Token Usage
         </h2>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
+          <MetricCard
+            label="Runs"
+            value={String(totals?.run_count ?? 0)}
+          />
           <MetricCard
             label="Total Tokens"
             value={formatTokens(totals?.total_tokens ?? 0)}
