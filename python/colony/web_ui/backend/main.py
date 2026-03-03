@@ -71,7 +71,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     )
 
     # Register API routers
-    from .routers import infrastructure, deployments, agents, sessions, vcm, metrics, logs, blackboard
+    from .routers import infrastructure, deployments, agents, sessions, vcm, metrics, logs, blackboard, page_graph
     from .streaming import sse
 
     app.include_router(infrastructure.router, prefix="/api/v1", tags=["infrastructure"])
@@ -82,6 +82,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     app.include_router(metrics.router, prefix="/api/v1", tags=["metrics"])
     app.include_router(logs.router, prefix="/api/v1", tags=["logs"])
     app.include_router(blackboard.router, prefix="/api/v1", tags=["blackboard"])
+    app.include_router(page_graph.router, prefix="/api/v1", tags=["page-graph"])
     app.include_router(sse.router, prefix="/api/v1", tags=["streaming"])
 
     # Serve built frontend as static files (production mode)

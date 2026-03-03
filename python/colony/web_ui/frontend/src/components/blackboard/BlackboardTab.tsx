@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo, useCallback } from "react";
 import {
   useBlackboardScopes,
   useBlackboardEntries,
@@ -44,6 +44,48 @@ export function BlackboardTab() {
     selected?.backendType ?? "",
   );
 
+  // Tag + text filtering
+  const [searchText, setSearchText] = useState("");
+  const [activeTags, setActiveTags] = useState<Set<string>>(new Set());
+
+  const addTag = useCallback((tag: string) => {
+    setActiveTags((prev) => new Set([...prev, tag]));
+  }, []);
+
+  const removeTag = useCallback((tag: string) => {
+    setActiveTags((prev) => {
+      const next = new Set(prev);
+      next.delete(tag);
+      return next;
+    });
+  }, []);
+
+  const filteredEntries = useMemo(() => {
+    const raw = entries.data ?? [];
+    if (!searchText && activeTags.size === 0) return raw;
+
+    const lowerSearch = searchText.toLowerCase();
+    return raw.filter((e) => {
+      // Tag filter: entry must have ALL active tags
+      if (activeTags.size > 0) {
+        for (const tag of activeTags) {
+          if (!e.tags.includes(tag)) return false;
+        }
+      }
+      // Text filter: key or value must contain search text
+      if (lowerSearch) {
+        const valStr = typeof e.value === "string" ? e.value : JSON.stringify(e.value);
+        if (
+          !e.key.toLowerCase().includes(lowerSearch) &&
+          !valStr.toLowerCase().includes(lowerSearch)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [entries.data, searchText, activeTags]);
+
   return (
     <div className="space-y-6">
       <section>
@@ -80,6 +122,43 @@ export function BlackboardTab() {
               Close
             </button>
           </div>
+
+          {/* Search + tag filters */}
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              placeholder="Search keys & values..."
+              value={searchText}
+              onChange={(e) => setSearchText(e.target.value)}
+              className="rounded border border-border bg-background px-2 py-1 text-xs font-mono w-60"
+            />
+            {activeTags.size > 0 && (
+              <div className="flex flex-wrap items-center gap-1">
+                <span className="text-[10px] text-muted-foreground">Tags:</span>
+                {[...activeTags].map((tag) => (
+                  <button
+                    key={tag}
+                    onClick={() => removeTag(tag)}
+                    className="flex items-center gap-0.5 rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/30"
+                  >
+                    {tag} <span>&times;</span>
+                  </button>
+                ))}
+                <button
+                  onClick={() => setActiveTags(new Set())}
+                  className="text-[10px] text-muted-foreground hover:text-foreground"
+                >
+                  Clear all
+                </button>
+              </div>
+            )}
+            {searchText || activeTags.size > 0 ? (
+              <span className="text-[10px] text-muted-foreground">
+                {filteredEntries.length} / {(entries.data ?? []).length}
+              </span>
+            ) : null}
+          </div>
+
           {entries.isLoading ? (
             <p className="text-sm text-muted-foreground">Loading entries...</p>
           ) : (
@@ -95,7 +174,7 @@ export function BlackboardTab() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(entries.data ?? []).map((e, i) => (
+                  {filteredEntries.map((e, i) => (
                     <tr key={i} className="border-b hover:bg-accent/30">
                       <td className="p-2 font-mono">{e.key}</td>
                       <td className="max-w-xs truncate p-2 text-muted-foreground">
@@ -108,7 +187,15 @@ export function BlackboardTab() {
                       <td className="p-2">
                         <div className="flex flex-wrap gap-1">
                           {e.tags.slice(0, 3).map((t) => (
-                            <Badge key={t} variant="default">{t}</Badge>
+                            <button
+                              key={t}
+                              onClick={() => addTag(t)}
+                              className="cursor-pointer"
+                            >
+                              <Badge variant={activeTags.has(t) ? "info" : "default"}>
+                                {t}
+                              </Badge>
+                            </button>
                           ))}
                           {e.tags.length > 3 && (
                             <span className="text-muted-foreground">
@@ -119,10 +206,12 @@ export function BlackboardTab() {
                       </td>
                     </tr>
                   ))}
-                  {(entries.data ?? []).length === 0 && (
+                  {filteredEntries.length === 0 && (
                     <tr>
                       <td colSpan={5} className="p-4 text-center text-muted-foreground">
-                        No entries in this scope
+                        {(entries.data ?? []).length === 0
+                          ? "No entries in this scope"
+                          : "No entries match filters"}
                       </td>
                     </tr>
                   )}

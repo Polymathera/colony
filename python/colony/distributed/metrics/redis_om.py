@@ -9,7 +9,7 @@ class RedisOMMetricsMonitor(BaseMetricsMonitor):
                  service_name: str = "redis_om_metrics"):
         super().__init__(enable_http_server, service_name)
 
-        self.logger.info(f"Initializing RedisOMMetricsMonitor instance {id(self)}...")
+        self.logger.debug(f"Initializing RedisOMMetricsMonitor instance {id(self)}...")
 
         # Operation counters
         self.REDIS_OP_COUNT = self.get_or_create_counter(

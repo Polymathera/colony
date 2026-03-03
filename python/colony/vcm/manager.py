@@ -1267,6 +1267,92 @@ class VirtualContextManager:
             "storage": storage_stats,
         }
 
+    # === Page Graph Visualization ===
+
+    @serving.endpoint
+    async def get_page_graph_groups(self) -> list[dict[str, Any]]:
+        """List (tenant_id, group_id, scope_id) tuples that have page graphs.
+
+        Reads mapped_scopes from shared state to discover which groups
+        might have page graphs stored in PageStorage.
+        """
+        groups: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        async for state in self.page_table.state_manager.read_transaction():
+            for scope_id, mapping in state.mapped_scopes.items():
+                key = (mapping.tenant_id, mapping.group_id)
+                if key not in seen:
+                    seen.add(key)
+                    groups.append({
+                        "tenant_id": mapping.tenant_id,
+                        "group_id": mapping.group_id,
+                        "scope_id": scope_id,
+                    })
+        return groups
+
+    @serving.endpoint
+    async def get_page_graph_data(
+        self,
+        tenant_id: str,
+        group_id: str,
+        max_nodes: int = 5000,
+    ) -> dict[str, Any]:
+        """Get page graph as JSON-serializable node/edge lists for 3D visualization.
+
+        Loads the nx.DiGraph from PageStorage, optionally prunes to max_nodes
+        (keeping highest-degree nodes), computes 3D positions via spring_layout.
+        """
+        import networkx as nx
+
+        graph = await self.page_storage.load_page_graph(
+            tenant_id=tenant_id, group_id=group_id, cached=False,
+        )
+
+        if graph is None or len(graph.nodes) == 0:
+            return {"nodes": [], "edges": [], "node_count": 0, "edge_count": 0}
+
+        # Prune large graphs by keeping highest-degree nodes
+        if len(graph.nodes) > max_nodes:
+            degree_sorted = sorted(
+                graph.nodes, key=lambda n: graph.degree(n), reverse=True,
+            )
+            graph = graph.subgraph(degree_sorted[:max_nodes]).copy()
+
+        # Compute 3D positions server-side
+        try:
+            pos = nx.spring_layout(graph, dim=3, seed=42, iterations=50)
+        except Exception:
+            pos = {}
+
+        nodes = []
+        for node_id in graph.nodes:
+            p = pos.get(node_id, [0.0, 0.0, 0.0])
+            nodes.append({
+                "id": str(node_id),
+                "x": float(p[0]),
+                "y": float(p[1]),
+                "z": float(p[2]),
+            })
+
+        edges = []
+        for u, v, data in graph.edges(data=True):
+            edges.append({
+                "source": str(u),
+                "target": str(v),
+                "weight": data.get("weight", 0.5),
+                "confidence": data.get("confidence", 1.0),
+                "relationship_types": data.get("relationship_types", []),
+            })
+
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "tenant_id": tenant_id,
+            "group_id": group_id,
+        }
+
     # === Branch Management API (Copy-on-Write Support) ===
 
     @serving.endpoint

@@ -104,3 +104,34 @@ export interface LogSource {
   ip: string;
   repr_name: string;
 }
+
+export interface PageGraphGroup {
+  tenant_id: string;
+  group_id: string;
+  scope_id: string;
+}
+
+export interface PageGraphNode {
+  id: string;
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface PageGraphEdge {
+  source: string;
+  target: string;
+  weight: number;
+  confidence: number;
+  relationship_types: string[];
+}
+
+export interface PageGraphData {
+  nodes: PageGraphNode[];
+  edges: PageGraphEdge[];
+  node_count: number;
+  edge_count: number;
+  tenant_id?: string;
+  group_id?: string;
+  error?: string;
+}

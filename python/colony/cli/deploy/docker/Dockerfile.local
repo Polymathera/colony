@@ -75,7 +75,7 @@ RUN groupadd -r ${RAY_CONTAINER_USER} 2>/dev/null || true && \
 COPY --chown=${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} . .
 
 # Build dashboard frontend
-RUN cd python/colony/web_ui/frontend && npm ci && npm run build && rm -rf node_modules
+RUN cd python/colony/web_ui/frontend && npm install && npm run build && rm -rf node_modules
 
 # Fix permissions
 # /mnt/shared is the mount point for the colony-shared Docker volume.

@@ -5,18 +5,24 @@ import { OverviewTab } from "../dashboard/OverviewTab";
 import { AgentsTab } from "../agents/AgentsTab";
 import { SessionsTab } from "../sessions/SessionsTab";
 import { VCMTab } from "../vcm/VCMTab";
-import { MetricsTab } from "../observability/MetricsTab";
+import { PageGraphTab } from "../graph/PageGraphTab";
 import { BlackboardTab } from "../blackboard/BlackboardTab";
+import { InteractTab } from "../interact/InteractTab";
 import { LogsTab } from "../logs/LogsTab";
+import { MetricsTab } from "../observability/MetricsTab";
+import { SettingsTab } from "../settings/SettingsTab";
 
 const TABS: Tab[] = [
   { id: "overview", label: "Overview" },
   { id: "agents", label: "Agents" },
   { id: "sessions", label: "Sessions" },
   { id: "vcm", label: "VCM" },
+  { id: "graph", label: "Page Graph" },
   { id: "blackboard", label: "Blackboard" },
+  { id: "interact", label: "Interact" },
   { id: "logs", label: "Logs" },
   { id: "metrics", label: "Metrics" },
+  { id: "settings", label: "Settings" },
 ];
 
 function TabContent({ activeTab }: { activeTab: string }) {
@@ -29,12 +35,18 @@ function TabContent({ activeTab }: { activeTab: string }) {
       return <SessionsTab />;
     case "vcm":
       return <VCMTab />;
+    case "graph":
+      return <PageGraphTab />;
     case "blackboard":
       return <BlackboardTab />;
+    case "interact":
+      return <InteractTab />;
     case "logs":
       return <LogsTab />;
     case "metrics":
       return <MetricsTab />;
+    case "settings":
+      return <SettingsTab />;
     default:
       return null;
   }
