@@ -899,6 +899,7 @@ class SessionManagerDeployment:
         cost_usd: float = 0.0,
         cache_read_tokens: int = 0,
         cache_write_tokens: int = 0,
+        agent_id: str | None = None,
     ) -> bool:
         """Update resource usage for a run.
 
@@ -913,6 +914,7 @@ class SessionManagerDeployment:
             cost_usd: Cost in USD to add (from remote LLM deployments)
             cache_read_tokens: Cache read tokens to add (prefix cache hits)
             cache_write_tokens: Cache write tokens to add (prefix cache creation)
+            agent_id: Reporting agent's ID (for per-agent breakdown)
 
         Returns:
             True if run was found and updated
@@ -920,10 +922,6 @@ class SessionManagerDeployment:
         updated = False
         async for state in self.state_manager.write_transaction():
             run = state.runs.get(run_id)
-            logger.warning(
-                "update_run_resources: run_id=%s found=%s runs_in_state=%s input_tokens=%d",
-                run_id, run is not None, list(state.runs.keys()), input_tokens,
-            )
             if run:
                 run.resource_usage.input_tokens += input_tokens
                 run.resource_usage.output_tokens += output_tokens
@@ -937,8 +935,23 @@ class SessionManagerDeployment:
                     run.resource_usage.agents_spawned += 1
                     run.resource_usage.child_agent_ids.append(child_agent_id)
 
+                # Track per-agent breakdown
+                if agent_id:
+                    pa = run.resource_usage.per_agent
+                    if agent_id not in pa:
+                        pa[agent_id] = {
+                            "input_tokens": 0, "output_tokens": 0,
+                            "llm_calls": 0, "cost_usd": 0.0,
+                            "cache_read_tokens": 0, "cache_write_tokens": 0,
+                        }
+                    pa[agent_id]["input_tokens"] += input_tokens
+                    pa[agent_id]["output_tokens"] += output_tokens
+                    pa[agent_id]["llm_calls"] += llm_calls
+                    pa[agent_id]["cost_usd"] += cost_usd
+                    pa[agent_id]["cache_read_tokens"] += cache_read_tokens
+                    pa[agent_id]["cache_write_tokens"] += cache_write_tokens
+
                 updated = True
-        logger.warning("update_run_resources: returning updated=%s for run_id=%s", updated, run_id)
 
         return updated
 

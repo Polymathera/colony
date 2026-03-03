@@ -2633,6 +2633,7 @@ class Agent(BaseModel):
                 cost_usd=meta.get("cost_usd", 0.0),
                 cache_read_tokens=meta.get("cache_read_tokens", 0),
                 cache_write_tokens=meta.get("cache_write_tokens", 0),
+                agent_id=self.agent_id,
             )
             logger.warning(
                 "_report_llm_usage: update_run_resources returned %s for run %s",

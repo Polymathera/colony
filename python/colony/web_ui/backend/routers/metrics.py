@@ -75,25 +75,47 @@ async def get_token_usage(
         total_cache_read = sum(d["cache_read_tokens"] for d in token_data)
         total_cost = sum(d["cost_usd"] for d in token_data)
 
-        # Aggregate by agent
+        # Aggregate by agent using per_agent breakdown from resource_usage
         by_agent: dict[str, dict[str, Any]] = {}
-        for d in token_data:
-            aid = d["agent_id"] or "unknown"
-            if aid not in by_agent:
-                by_agent[aid] = {
-                    "agent_id": aid,
-                    "input_tokens": 0, "output_tokens": 0,
-                    "cache_read_tokens": 0, "cache_write_tokens": 0,
-                    "llm_calls": 0, "cost_usd": 0.0, "run_count": 0,
-                }
-            agg = by_agent[aid]
-            agg["input_tokens"] += d["input_tokens"]
-            agg["output_tokens"] += d["output_tokens"]
-            agg["cache_read_tokens"] += d["cache_read_tokens"]
-            agg["cache_write_tokens"] += d["cache_write_tokens"]
-            agg["llm_calls"] += d["llm_calls"]
-            agg["cost_usd"] += d["cost_usd"]
-            agg["run_count"] += 1
+        for r in runs:
+            ru = _get(r, "resource_usage", None)
+            per_agent = _get(ru, "per_agent", {}) if ru else {}
+            if isinstance(per_agent, dict) and per_agent:
+                for aid, usage in per_agent.items():
+                    if aid not in by_agent:
+                        by_agent[aid] = {
+                            "agent_id": aid,
+                            "input_tokens": 0, "output_tokens": 0,
+                            "cache_read_tokens": 0, "cache_write_tokens": 0,
+                            "llm_calls": 0, "cost_usd": 0.0, "run_count": 0,
+                        }
+                    agg = by_agent[aid]
+                    u = usage if isinstance(usage, dict) else {}
+                    agg["input_tokens"] += u.get("input_tokens", 0)
+                    agg["output_tokens"] += u.get("output_tokens", 0)
+                    agg["cache_read_tokens"] += u.get("cache_read_tokens", 0)
+                    agg["cache_write_tokens"] += u.get("cache_write_tokens", 0)
+                    agg["llm_calls"] += u.get("llm_calls", 0)
+                    agg["cost_usd"] += u.get("cost_usd", 0)
+                    agg["run_count"] += 1
+            else:
+                # Fallback: no per_agent data, use run-level agent_id
+                aid = _get(r, "agent_id", "") or "unknown"
+                if aid not in by_agent:
+                    by_agent[aid] = {
+                        "agent_id": aid,
+                        "input_tokens": 0, "output_tokens": 0,
+                        "cache_read_tokens": 0, "cache_write_tokens": 0,
+                        "llm_calls": 0, "cost_usd": 0.0, "run_count": 0,
+                    }
+                agg = by_agent[aid]
+                agg["input_tokens"] += _get(ru, "input_tokens", 0) if ru else 0
+                agg["output_tokens"] += _get(ru, "output_tokens", 0) if ru else 0
+                agg["cache_read_tokens"] += _get(ru, "cache_read_tokens", 0) if ru else 0
+                agg["cache_write_tokens"] += _get(ru, "cache_write_tokens", 0) if ru else 0
+                agg["llm_calls"] += _get(ru, "llm_calls", 0) if ru else 0
+                agg["cost_usd"] += _get(ru, "cost_usd", 0.0) if ru else 0.0
+                agg["run_count"] += 1
 
         return {
             "runs": token_data,

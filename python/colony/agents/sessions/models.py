@@ -218,6 +218,11 @@ class RunResourceUsage(BaseModel):
     cache_read_tokens: int = Field(default=0, ge=0, description="Tokens read from cache (prefix cache hits)")
     cache_write_tokens: int = Field(default=0, ge=0, description="Tokens written to cache (prefix cache creation)")
 
+    # Per-agent breakdown (agent_id → {input_tokens, output_tokens, llm_calls, cost_usd, ...})
+    per_agent: dict[str, dict[str, float]] = Field(
+        default_factory=dict, description="Token usage broken down by agent_id"
+    )
+
     # Agent tree
     agents_spawned: int = Field(default=0, ge=0, description="Child agents spawned")
     child_agent_ids: list[str] = Field(
