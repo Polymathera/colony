@@ -166,6 +166,22 @@ class ColonyConnection:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    async def query_prometheus_range(
+        self, query: str, start: float, end: float, step: str = "15s",
+    ) -> dict[str, Any]:
+        """Run a PromQL range query."""
+        if not self._http_client:
+            return {"status": "error", "error": "No HTTP client"}
+        try:
+            resp = await self._http_client.get(
+                f"{self.prometheus_url}/api/v1/query_range",
+                params={"query": query, "start": start, "end": end, "step": step},
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
     async def fetch_prometheus_metrics(self) -> str:
         """Fetch raw Prometheus metrics text."""
         if not self._http_client:

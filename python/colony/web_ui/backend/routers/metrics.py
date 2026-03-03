@@ -213,8 +213,8 @@ async def get_metrics_debug(
 
 @router.get("/metrics/prometheus")
 async def get_prometheus_metrics(
-    query: str = Query("up", description="PromQL query"),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
-    """Proxy a PromQL query to the Prometheus endpoint on the Ray head."""
-    return await colony.query_prometheus(query)
+    """Fetch raw Prometheus metrics text from Colony's metrics server."""
+    text = await colony.fetch_prometheus_metrics()
+    return {"raw": text[:50000] if text else "", "available": bool(text)}
