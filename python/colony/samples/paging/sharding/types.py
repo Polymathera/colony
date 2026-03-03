@@ -27,6 +27,7 @@ class ShardMetadata(BaseModel):
     shard_id: str
     file_segments: list[ShardFileSegment] = Field(default_factory=list)
     content_size_bytes: int = 0  # Size of actual content (excluding binary files)
+    token_count: int = 0  # Actual token count from tokenizer (set during sharding)
     binary_files: set[str] = Field(default_factory=set)
     creation_timestamp: float = 0.0
     git_commit_hash: str = ""

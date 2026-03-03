@@ -228,7 +228,7 @@ class FileGrouperContextPageSource(ContextPageSource):
                     page_id=shard.shard_id,
                     tokens=[],  # Remote deployments use text; vLLM path would tokenize separately
                     text=shard.raw_content,
-                    size=max(1, len(shard.raw_content) // 4),  # Rough token estimate
+                    size=shard.metadata.token_count or max(1, len(shard.raw_content) // 4),
                     metadata={
                         "source": FileGrouperContextPageSource.get_source_metadata(self.scope_id),
                         "files": [seg.file_path for seg in shard.metadata.file_segments],

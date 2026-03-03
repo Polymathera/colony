@@ -884,6 +884,7 @@ class GitRepoShardingStrategy:
         segments: list[ShardFileSegment],
         content: str,
         commit_hash: str,
+        token_count: int = 0,
     ) -> RepositoryShard:
         """Create a shard from the given segments."""
         async with self.shard_semaphore:
@@ -894,6 +895,7 @@ class GitRepoShardingStrategy:
                     ),
                     file_segments=segments,
                     content_size_bytes=len(content),
+                    token_count=token_count,
                     creation_timestamp=time.time(),
                     git_commit_hash=commit_hash,
                 )
@@ -1043,17 +1045,25 @@ class GitRepoShardingStrategy:
                 current_segments = []
                 current_tokens = 0
 
+                # Pre-compute line counts per file for segment token estimation
+                file_line_counts: dict[str, int] = {}
+                for fp, text, _ in file_contents:
+                    file_line_counts[fp] = text.count("\n") + 1
+
+                token_manager = await self.get_token_manager()
+
                 # TODO: Use parallel processing
                 for segment_group in segment_groups:
                     group_content = []
 
                     for segment in segment_group:
-                        # Get token count for segment
-                        # TODO: FIXME: Get tokens for segment not whole file
-                        token_manager = await self.get_token_manager()
-                        segment_tokens = await token_manager.get_file_token_count(
+                        # Estimate segment tokens by scaling file tokens by line ratio
+                        file_tokens = await token_manager.get_file_token_count(
                             segment.file_path, group_id, commit_hash
                         )
+                        num_file_lines = file_line_counts.get(segment.file_path, 1)
+                        segment_lines = max(1, segment.end_line - segment.start_line)
+                        segment_tokens = max(1, file_tokens * segment_lines // num_file_lines)
 
                         if (
                             current_tokens + segment_tokens
@@ -1068,6 +1078,7 @@ class GitRepoShardingStrategy:
                                     commit_hash=commit_hash,
                                     # relationship_score=relationship_score,
                                     # group_metadata=group_metadata,
+                                    token_count=current_tokens,
                                 )
                                 shards.append(shard)
 
@@ -1090,6 +1101,7 @@ class GitRepoShardingStrategy:
                         commit_hash=commit_hash,
                         # relationship_score=relationship_score,
                         # group_metadata=group_metadata,
+                        token_count=current_tokens,
                     )
                     shards.append(shard)
 
