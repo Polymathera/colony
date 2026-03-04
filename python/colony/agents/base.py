@@ -3086,6 +3086,9 @@ class AgentManagerBase:
         self._used_gpu_cores: float = 0.0
         self._used_gpu_memory_mb: int = 0
 
+        # Tracing config (set externally, e.g., by AgentSystemConfig)
+        self._tracing_config = None  # TracingConfig | None
+
         # Set by deployment initialize
         self._vcm_handle: serving.DeploymentHandle | None = None
         self._llm_cluster_handle: serving.DeploymentHandle | None = None
@@ -3109,6 +3112,21 @@ class AgentManagerBase:
         self._tool_manager_handle = get_tool_manager()
         self._llm_cluster_handle = get_llm_cluster()
         self._vcm_handle = get_vcm()
+
+        # Initialize tracing config from environment
+        self._init_tracing_config()
+
+    def _init_tracing_config(self) -> None:
+        """Initialize tracing config from environment variables."""
+        import os
+        tracing_enabled = os.environ.get("TRACING_ENABLED", "").lower() in ("true", "1", "yes")
+        if tracing_enabled:
+            from .observability.config import TracingConfig
+            self._tracing_config = TracingConfig(
+                enabled=True,
+                kafka_bootstrap=os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092"),
+                kafka_topic=os.environ.get("KAFKA_SPANS_TOPIC", "colony.spans"),
+            )
 
     @serving.endpoint(
         router_class=SoftPageAffinityRouter,
@@ -3252,6 +3270,16 @@ class AgentManagerBase:
 
             # Initialize agent
             await agent.initialize()
+
+            # Add TracingCapability if tracing is enabled
+            if self._tracing_config and self._tracing_config.enabled:
+                try:
+                    from .observability.capability import TracingCapability
+                    tracing_cap = TracingCapability(agent=agent, config=self._tracing_config)
+                    await tracing_cap.initialize()
+                    agent.add_capability(tracing_cap, events_only=True)
+                except Exception as e:
+                    logger.warning(f"Failed to initialize tracing for agent {agent_id}: {e}")
 
             # Store agent
             self._agents[agent_id] = agent

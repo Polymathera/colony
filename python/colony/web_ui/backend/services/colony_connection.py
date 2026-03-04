@@ -38,6 +38,11 @@ class ColonyConnection:
         self._connected = False
         self._handle_cache: dict[str, Any] = {}
         self._http_client: httpx.AsyncClient | None = None
+        # Observability (direct DB + Kafka access for traces)
+        self._kafka_bootstrap: str | None = None
+        self._db_pool: Any | None = None
+        self._span_consumer: Any | None = None
+        self._span_query_store: Any | None = None
 
     async def connect(self) -> None:
         """Connect to the Ray cluster via Client API."""
@@ -61,6 +66,14 @@ class ColonyConnection:
     async def disconnect(self) -> None:
         """Disconnect from the Ray cluster."""
         import ray
+
+        # Stop observability consumer
+        if self._span_consumer:
+            await self._span_consumer.stop()
+            self._span_consumer = None
+        if self._db_pool:
+            await self._db_pool.close()
+            self._db_pool = None
 
         if ray.is_initialized():
             ray.shutdown()
@@ -128,6 +141,49 @@ class ColonyConnection:
             from colony.distributed.ray_utils.serving import get_deployment
             self._handle_cache[cache_key] = get_deployment(app_name, deployment_name)
         return self._handle_cache[cache_key]
+
+    async def init_observability(
+        self,
+        pg_host: str, pg_port: int, pg_user: str, pg_password: str, pg_database: str,
+        kafka_bootstrap: str,
+    ) -> None:
+        """Initialize PostgreSQL pool, schema, and Kafka→PG span consumer."""
+        self._kafka_bootstrap = kafka_bootstrap
+        try:
+            import asyncpg
+            self._db_pool = await asyncpg.create_pool(
+                host=pg_host, port=pg_port,
+                user=pg_user, password=pg_password,
+                database=pg_database,
+                min_size=2, max_size=10,
+            )
+            # Ensure spans table exists
+            from colony.agents.observability.migrations import ensure_schema
+            await ensure_schema(self._db_pool)
+
+            # Create query store
+            from colony.agents.observability.store import SpanQueryStore
+            self._span_query_store = SpanQueryStore(self._db_pool)
+
+            # Start Kafka→PG consumer
+            from colony.agents.observability.consumer import SpanConsumer
+            self._span_consumer = SpanConsumer(
+                kafka_bootstrap=kafka_bootstrap,
+                db_pool=self._db_pool,
+            )
+            await self._span_consumer.start()
+            logger.info("Observability initialized (PG pool + Kafka consumer)")
+        except Exception as e:
+            logger.warning(f"Observability init failed: {e}. Traces will be unavailable.")
+
+    def get_span_query_store(self) -> Any:
+        """Get the SpanQueryStore for trace queries."""
+        return self._span_query_store
+
+    @property
+    def db_pool(self) -> Any:
+        """Get the asyncpg connection pool."""
+        return self._db_pool
 
     async def get_ray_cluster_status(self) -> dict[str, Any]:
         """Get Ray cluster status via the Ray Dashboard API."""

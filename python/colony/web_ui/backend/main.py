@@ -36,6 +36,16 @@ async def lifespan(app: FastAPI):
     app.state.colony = colony
     logger.info(f"Colony connected via Ray Client: {config.ray_client_address}")
 
+    # Initialize observability (Kafka→PG span consumer + query store)
+    await colony.init_observability(
+        pg_host=config.pg_host,
+        pg_port=config.pg_port,
+        pg_user=config.pg_user,
+        pg_password=config.pg_password,
+        pg_database=config.pg_database,
+        kafka_bootstrap=config.kafka_bootstrap,
+    )
+
     yield
 
     # Shutdown
@@ -71,7 +81,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     )
 
     # Register API routers
-    from .routers import infrastructure, deployments, agents, sessions, vcm, metrics, logs, blackboard, page_graph
+    from .routers import infrastructure, deployments, agents, sessions, vcm, metrics, logs, blackboard, page_graph, traces
     from .streaming import sse
 
     app.include_router(infrastructure.router, prefix="/api/v1", tags=["infrastructure"])
@@ -83,6 +93,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     app.include_router(logs.router, prefix="/api/v1", tags=["logs"])
     app.include_router(blackboard.router, prefix="/api/v1", tags=["blackboard"])
     app.include_router(page_graph.router, prefix="/api/v1", tags=["page-graph"])
+    app.include_router(traces.router, prefix="/api/v1", tags=["traces"])
     app.include_router(sse.router, prefix="/api/v1", tags=["streaming"])
 
     # Serve built frontend as static files (production mode)

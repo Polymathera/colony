@@ -39,7 +39,7 @@ async def get_status(
     return HealthStatus(
         ray_connected=colony.is_connected,
         redis_connected=redis_connected,
-        ray_cluster_status=ray_status.get("result", {}).get("status", "unknown") if isinstance(ray_status.get("result"), dict) else str(ray_status.get("status", "unknown")),
+        ray_cluster_status="active" if ray_status.get("result") is True else ray_status.get("status", "unknown"),
         node_count=len(ray_nodes),
     )
 

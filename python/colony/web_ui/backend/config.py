@@ -29,6 +29,14 @@ class DashboardConfig:
     # Frontend
     static_dir: str | None = None  # Path to built frontend files
 
+    # Observability (Kafka + PostgreSQL for traces)
+    kafka_bootstrap: str = "kafka:9092"
+    pg_host: str = "postgres"
+    pg_port: int = 5432
+    pg_user: str = "colony"
+    pg_password: str = "colony_dev"
+    pg_database: str = "colony"
+
     @classmethod
     def from_env(cls) -> DashboardConfig:
         """Load configuration from environment variables."""
@@ -39,4 +47,10 @@ class DashboardConfig:
             ray_dashboard_url=os.environ.get("RAY_DASHBOARD_URL", "http://ray-head:8265"),
             prometheus_url=os.environ.get("PROMETHEUS_URL", "http://ray-head:9090"),
             static_dir=os.environ.get("DASHBOARD_STATIC_DIR"),
+            kafka_bootstrap=os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092"),
+            pg_host=os.environ.get("RDS_HOST", "postgres"),
+            pg_port=int(os.environ.get("RDS_PORT", "5432")),
+            pg_user=os.environ.get("RDS_USER", "colony"),
+            pg_password=os.environ.get("RDS_PASSWORD", "colony_dev"),
+            pg_database=os.environ.get("RDS_DB_NAME", "colony"),
         )

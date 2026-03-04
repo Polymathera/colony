@@ -46,6 +46,9 @@ services:
       - RDS_USER=colony
       - RDS_PASSWORD=colony_dev
       - RDS_DB_NAME=colony
+      # Observability (tracing)
+      - TRACING_ENABLED=true
+      - KAFKA_BOOTSTRAP=kafka:9092
       # API keys — forwarded from host environment
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -57,6 +60,8 @@ services:
       redis:
         condition: service_started
       postgres:
+        condition: service_healthy
+      kafka:
         condition: service_healthy
     shm_size: '4gb'
     networks:
@@ -99,6 +104,9 @@ services:
       - RDS_USER=colony
       - RDS_PASSWORD=colony_dev
       - RDS_DB_NAME=colony
+      # Observability (tracing)
+      - TRACING_ENABLED=true
+      - KAFKA_BOOTSTRAP=kafka:9092
       # API keys — forwarded from host environment
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -147,6 +155,34 @@ services:
       timeout: 3s
       retries: 5
 
+  kafka:
+    image: apache/kafka:3.9.2
+    container_name: colony-kafka
+    environment:
+      - KAFKA_NODE_ID=0
+      - KAFKA_PROCESS_ROLES=controller,broker
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_LOG_RETENTION_HOURS=24
+      - KAFKA_LOG_RETENTION_BYTES=1073741824
+    ports:
+      - "${COLONY_KAFKA_PORT:-9092}:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - colony-net
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
   dashboard:
     image: colony:local
     container_name: colony-dashboard
@@ -158,8 +194,16 @@ services:
       - RAY_CLIENT_ADDRESS=ray://ray-head:10001
       - RAY_DASHBOARD_URL=http://ray-head:8265
       - PROMETHEUS_URL=http://ray-head:9090
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - RDS_HOST=postgres
+      - RDS_PORT=5432
+      - RDS_USER=colony
+      - RDS_PASSWORD=colony_dev
+      - RDS_DB_NAME=colony
     depends_on:
       ray-head:
+        condition: service_healthy
+      kafka:
         condition: service_healthy
     networks:
       - colony-net
@@ -173,6 +217,7 @@ volumes:
   colony-shared:
   redis-data:
   postgres-data:
+  kafka-data:
 
 networks:
   colony-net:

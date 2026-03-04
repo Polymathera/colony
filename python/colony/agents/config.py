@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..distributed.ray_utils import serving
+from .observability.config import TracingConfig
 
 
 @dataclass
@@ -16,6 +17,7 @@ class AgentSystemConfig:
         max_retries: Maximum number of retries for agent operations
         enable_sessions: Whether to enable session management
         default_session_ttl: Default session TTL in seconds (24 hours)
+        tracing: Configuration for observability/tracing system
     """
 
     max_retries: int = 3
@@ -26,6 +28,9 @@ class AgentSystemConfig:
 
     # Blackboard configuration
     blackboard_backend_type: str = "distributed"  # "distributed", "redis", or "memory"
+
+    # Observability / tracing
+    tracing: TracingConfig = field(default_factory=TracingConfig)
 
     def add_deployments_to_app(self, app: serving.Application, top_level: bool) -> None:
         if not top_level:

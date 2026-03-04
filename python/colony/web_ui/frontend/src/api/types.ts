@@ -135,3 +135,38 @@ export interface PageGraphData {
   group_id?: string;
   error?: string;
 }
+
+/* Observability / Tracing */
+
+export interface TraceSpan {
+  span_id: string;
+  trace_id: string;
+  parent_span_id: string | null;
+  run_id: string | null;
+  agent_id: string;
+  name: string;
+  kind: string;
+  start_wall: number;
+  duration_ms: number | null;
+  status: "running" | "ok" | "error";
+  error: string | null;
+  input_summary: Record<string, unknown>;
+  output_summary: Record<string, unknown>;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  model_name: string | null;
+  context_page_ids: string[] | null;
+  tags: string[];
+  metadata: Record<string, unknown>;
+}
+
+export interface TraceSummary {
+  trace_id: string;
+  agent_id: string;
+  status: string;
+  start_time: number;
+  span_count: number;
+  run_count: number;
+  total_tokens: number;
+}

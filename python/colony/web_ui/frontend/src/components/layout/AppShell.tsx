@@ -10,6 +10,7 @@ import { BlackboardTab } from "../blackboard/BlackboardTab";
 import { InteractTab } from "../interact/InteractTab";
 import { LogsTab } from "../logs/LogsTab";
 import { MetricsTab } from "../observability/MetricsTab";
+import { TracesTab } from "../observability/TracesTab";
 import { SettingsTab } from "../settings/SettingsTab";
 
 const TABS: Tab[] = [
@@ -21,6 +22,7 @@ const TABS: Tab[] = [
   { id: "blackboard", label: "Blackboard" },
   { id: "interact", label: "Interact" },
   { id: "logs", label: "Logs" },
+  { id: "traces", label: "Traces" },
   { id: "metrics", label: "Metrics" },
   { id: "settings", label: "Settings" },
 ];
@@ -43,6 +45,8 @@ function TabContent({ activeTab }: { activeTab: string }) {
       return <InteractTab />;
     case "logs":
       return <LogsTab />;
+    case "traces":
+      return <TracesTab />;
     case "metrics":
       return <MetricsTab />;
     case "settings":

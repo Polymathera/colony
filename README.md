@@ -7,6 +7,9 @@ Polymathera's no-RAG, multi-agent framework for extremely long, *dense* contexts
 - Powerful and composable multi-agent patterns.
 - Arbitrarily sophisticated memory hierarchies and cognitive processes.
 
+> Can Polymathera's Colony be a realization of the "_country of geniuses in a datacenter_" vision?
+
+
 ## Quick Start
 
 ### Installation
