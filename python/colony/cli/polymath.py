@@ -60,7 +60,7 @@ Example YAML config (my_test.yaml):
         coordinator_version: v2       # v1 = cache-oblivious, v2 = cache-aware
         max_agents: 10
         quality_threshold: 0.7
-        max_iterations: 3
+        max_iterations: 10
         batching_policy: hybrid
         changes:
           - file_path: "src/main.py"
@@ -468,7 +468,7 @@ class AnalysisConfig:
     coordinator_version: str = "v2"
     max_agents: int = 10
     quality_threshold: float = 0.7
-    max_iterations: int = 3
+    max_iterations: int = 10
     batching_policy: str = "hybrid"
     overlap_threshold: float = 0.3
     batch_size: int = 5
@@ -905,7 +905,7 @@ analyses:
     coordinator_version: v2    # v1 = cache-oblivious, v2 = cache-aware
     max_agents: 10
     quality_threshold: 0.7
-    max_iterations: 3
+    max_iterations: 10
     batching_policy: hybrid    # "hybrid", "clustering", or "continuous"
     overlap_threshold: 0.3
     batch_size: 5

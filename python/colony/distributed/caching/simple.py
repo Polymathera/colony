@@ -1224,7 +1224,7 @@ class DistributedSimpleCache:
 
                     # Alert on high usage if we have valid sizes
                     if total_size > 0 and used_size / total_size > 0.9:
-                        logger.warning(f"{self.namespace} cache usage above 90%")
+                        logger.debug(f"{self.namespace} cache usage above 90%")
 
                     try:
                         await asyncio.wait_for(self._shutdown_event.wait(), timeout=60)

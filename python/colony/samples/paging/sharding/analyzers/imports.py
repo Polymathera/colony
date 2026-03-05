@@ -899,7 +899,7 @@ class ImportAnalyzer(BaseAnalyzer):
             return path
 
         except Exception as e:
-            logger.error(f"Java import parsing error: {e}")
+            logger.error(f"Java import parsing error: {e}\n\t{line}")
             return None
 
     def _parse_kotlin_import(self, match: re.Match, line: str) -> str | None:

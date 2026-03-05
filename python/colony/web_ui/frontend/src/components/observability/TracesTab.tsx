@@ -300,7 +300,44 @@ function WaterfallRow({
   );
 }
 
+function TextModal({
+  title,
+  text,
+  onClose,
+}: {
+  title: string;
+  text: string;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="relative w-[80vw] max-w-4xl max-h-[80vh] rounded-lg border bg-card shadow-xl flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <h3 className="text-sm font-semibold">{title}</h3>
+          <button
+            className="text-xs text-muted-foreground hover:text-foreground"
+            onClick={onClose}
+          >
+            Close
+          </button>
+        </div>
+        <pre className="flex-1 overflow-auto p-4 text-xs font-mono text-foreground/90 whitespace-pre-wrap break-words">
+          {text}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
 function SpanDetail({ span }: { span: TraceSpan }) {
+  const [modalContent, setModalContent] = useState<{ title: string; text: string } | null>(null);
+
+  const inferPrompt = span.kind === "infer" ? (span.input_summary?.prompt as string | undefined) : undefined;
+  const inferResponse = span.kind === "infer" ? (span.output_summary?.response as string | undefined) : undefined;
+
   return (
     <div className="space-y-4 overflow-auto p-4">
       {/* Header */}
@@ -389,6 +426,28 @@ function SpanDetail({ span }: { span: TraceSpan }) {
         </div>
       )}
 
+      {/* LLM Prompt/Response buttons */}
+      {(inferPrompt || inferResponse) && (
+        <div className="flex gap-2">
+          {inferPrompt && (
+            <button
+              className="flex-1 rounded border border-pink-800/40 bg-pink-950/20 px-3 py-2 text-xs font-medium text-pink-300 hover:bg-pink-950/40 transition-colors"
+              onClick={() => setModalContent({ title: "LLM Prompt", text: inferPrompt })}
+            >
+              Prompt ({(inferPrompt.length / 1000).toFixed(1)}k chars)
+            </button>
+          )}
+          {inferResponse && (
+            <button
+              className="flex-1 rounded border border-pink-800/40 bg-pink-950/20 px-3 py-2 text-xs font-medium text-pink-300 hover:bg-pink-950/40 transition-colors"
+              onClick={() => setModalContent({ title: "LLM Response", text: inferResponse })}
+            >
+              Response ({(inferResponse.length / 1000).toFixed(1)}k chars)
+            </button>
+          )}
+        </div>
+      )}
+
       {/* VCM Pages */}
       {span.context_page_ids && span.context_page_ids.length > 0 && (
         <div>
@@ -433,6 +492,15 @@ function SpanDetail({ span }: { span: TraceSpan }) {
             ))}
           </div>
         </div>
+      )}
+
+      {/* Text modal for Prompt/Response */}
+      {modalContent && (
+        <TextModal
+          title={modalContent.title}
+          text={modalContent.text}
+          onClose={() => setModalContent(null)}
+        />
       )}
     </div>
   );

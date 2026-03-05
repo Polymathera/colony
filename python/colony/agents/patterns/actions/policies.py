@@ -387,6 +387,32 @@ class FunctionWrapperActionExecutor(ActionExecutor):
         return desc
 
 
+def _rebuild_with_forward_refs(model: type[BaseModel], func: Callable) -> None:
+    """Rebuild a dynamically-created Pydantic model, resolving forward refs.
+
+    Forward references (string annotations like ``"Action"``) that are guarded
+    behind ``TYPE_CHECKING`` aren't available at runtime in the module where
+    ``func`` was defined.  We build a namespace from the func's module *plus*
+    the colony.agents.models module (which exports Action, ActionResult, etc.)
+    so that ``model_rebuild`` can resolve them.
+    """
+    import sys
+
+    ns: dict[str, Any] = {}
+    # func's own module namespace (covers most types)
+    func_module = getattr(func, "__module__", None)
+    if func_module and func_module in sys.modules:
+        ns.update(vars(sys.modules[func_module]))
+    # colony.agents.models — exports Action, ActionResult, etc. used in forward refs
+    models_mod = sys.modules.get("colony.agents.models")
+    if models_mod:
+        ns.update(vars(models_mod))
+    try:
+        model.model_rebuild(_types_namespace=ns)
+    except Exception:
+        pass  # Best-effort — some forward refs may still be unresolvable
+
+
 def _infer_input_schema(func: Callable) -> type[BaseModel] | None:
     """Infer Pydantic input schema from function signature and type hints.
 
@@ -424,11 +450,11 @@ def _infer_input_schema(func: Callable) -> type[BaseModel] | None:
     # are JSON-serializable since action executors are called by the LLM planner.
     try:
         model = create_model(f"{func.__name__}_Input", **fields)
-        # Resolve forward references (e.g. TYPE_CHECKING imports like Action)
-        try:
-            model.model_rebuild()
-        except Exception:
-            pass  # Best-effort — fails if referenced types aren't importable
+        # Resolve forward references that live under TYPE_CHECKING in the
+        # module where `func` was defined.  We merge that module's namespace
+        # with the models module (which contains Action, ActionResult, etc.)
+        # so that Pydantic can rebuild the schema fully.
+        _rebuild_with_forward_refs(model, func)
         return model
     except PydanticSchemaGenerationError:
         _raise_non_serializable_error(func, fields)
@@ -471,10 +497,7 @@ def _infer_input_schema_excluding_first(func: Callable) -> type[BaseModel] | Non
 
     try:
         model = create_model(f"{func.__name__}_Input", **fields)
-        try:
-            model.model_rebuild()
-        except Exception:
-            pass
+        _rebuild_with_forward_refs(model, func)
         return model
     except PydanticSchemaGenerationError:
         _raise_non_serializable_error(func, fields)
@@ -2244,7 +2267,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             f"triggers={triggers_str}, strategy={strategy_str}, "
             f"new plan has {len(self.current_plan.actions)} actions."
         )
-        self.plan_blackboard.update_plan(self.current_plan)
+        await self.plan_blackboard.update_plan(self.current_plan)
 
         return self.current_plan
 

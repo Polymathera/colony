@@ -267,7 +267,11 @@ class TracingCapability(AgentCapability):
             if hasattr(action, "reasoning") and action.reasoning:
                 summary["reasoning"] = self._get_str_field(action.reasoning, max_chars)
         elif kind == SpanKind.INFER and self._config.capture_infer_inputs:
-            # Include prompt text (expensive, opt-in)
+            # Capture prompt text for UI inspection
+            max_infer = self._config.max_infer_chars
+            prompt = ctx.kwargs.get("prompt")
+            if prompt and isinstance(prompt, str):
+                summary["prompt"] = prompt[:max_infer]
             if ctx.kwargs.get("messages"):
                 msgs = ctx.kwargs["messages"]
                 summary["message_count"] = len(msgs) if isinstance(msgs, list) else 1
@@ -293,6 +297,12 @@ class TracingCapability(AgentCapability):
                     summary["metrics"] = dumped["metrics"]
             else:
                 summary["result"] = self._get_str_field(result, max_chars)
+        elif kind == SpanKind.INFER and self._config.capture_infer_inputs:
+            # Capture LLM response text for UI inspection
+            max_infer = self._config.max_infer_chars
+            generated = getattr(result, "generated_text", None)
+            if generated and isinstance(generated, str):
+                summary["response"] = generated[:max_infer]
 
         return summary
 

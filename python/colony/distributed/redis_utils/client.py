@@ -394,7 +394,7 @@ class RedisClient:
                         status="error",
                         namespace=self.config.namespace,
                     ).inc()
-                    logger.warning(
+                    logger.debug(
                         f"Connection pool exhausted. Waited {wait_time:.2f}s for connection"
                     )
 
