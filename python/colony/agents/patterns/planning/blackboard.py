@@ -23,18 +23,29 @@ logger = logging.getLogger(__name__)
 class PlanBlackboard:
     """Local object with Redis backend (NOT a Ray actor)."""
 
-    # TODO: Add tenant_id support for multi-tenant isolation and use it in keys
     def __init__(
         self,
+        *,
+        scope_id: str,
         plan_access_policy: PlanAccessPolicy | None = None,
-        scope_id: str = "agents:plan_coordination",
     ):
         """Initialize plan blackboard.
 
         Args:
-            app_name: Application name for Redis namespace
+            scope_id: Scope ID for blackboard. This scope may contain multiple
+                plans for different agents that need to coordinate.
             plan_access_policy: Policy for plan-level access control (optional)
         """
+        self.scope_id = scope_id
+        self.plan_access_policy = plan_access_policy
+        self.blackboard: EnhancedBlackboard | None = None
+        self._initialized = False
+
+    async def initialize(self) -> None:
+        """Initialize blackboard."""
+        if self._initialized:
+            return
+
         app_name = serving.get_my_app_name()
         # Build on EnhancedBlackboard for Redis persistence
         # Note: We don't pass access_policy to EnhancedBlackboard because
@@ -42,18 +53,14 @@ class PlanBlackboard:
         self.blackboard = EnhancedBlackboard(
             app_name=app_name,
             scope=BlackboardScope.SHARED,
-            scope_id=scope_id,
+            scope_id=self.scope_id,
             access_policy=None,  # Use plan_access_policy instead
-            backend_type="redis",  # TODO: Make configurable or take the backend factory.
+            backend_type=None,  # Use the globally configured blackboard backend
             enable_events=True,
         )
-        self.plan_access_policy = plan_access_policy
 
-    async def initialize(self) -> None:
-        """Initialize blackboard."""
-        if not hasattr(self, "_initialized") or not self._initialized:
-            await self.blackboard.initialize()
-            self._initialized = True
+        await self.blackboard.initialize()
+        self._initialized = True
 
     async def get_plan(self, agent_id: str) -> ActionPlan | None:
         """Get plan for specific agent."""

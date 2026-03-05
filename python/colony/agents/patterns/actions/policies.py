@@ -2579,7 +2579,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
                 team_structure=team_structure,
             )
 
-            planning_scope_id = f"tenant:{self.agent.tenant_id}:agent:{self.agent.agent_id}:planning_scope"
+            planning_scope_id = f"tenant:{self.agent.tenant_id}:agent:{self.agent.agent_id}:action_plan_scope"
             self._plan_blackboard_cached = PlanBlackboard(
                 plan_access_policy=access_policy,
                 scope_id=planning_scope_id,
