@@ -14,6 +14,7 @@ class SpanKind(str, Enum):
     """Colony-specific span types."""
 
     RUN = "run"
+    AGENT = "agent"
     AGENT_STEP = "agent_step"
     PLAN = "plan"
     ACTION = "action"

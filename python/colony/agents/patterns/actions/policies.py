@@ -423,7 +423,13 @@ def _infer_input_schema(func: Callable) -> type[BaseModel] | None:
     # Create dynamic Pydantic model — validate that all parameter types
     # are JSON-serializable since action executors are called by the LLM planner.
     try:
-        return create_model(f"{func.__name__}_Input", **fields)
+        model = create_model(f"{func.__name__}_Input", **fields)
+        # Resolve forward references (e.g. TYPE_CHECKING imports like Action)
+        try:
+            model.model_rebuild()
+        except Exception:
+            pass  # Best-effort — fails if referenced types aren't importable
+        return model
     except PydanticSchemaGenerationError:
         _raise_non_serializable_error(func, fields)
 
@@ -464,7 +470,12 @@ def _infer_input_schema_excluding_first(func: Callable) -> type[BaseModel] | Non
         return None
 
     try:
-        return create_model(f"{func.__name__}_Input", **fields)
+        model = create_model(f"{func.__name__}_Input", **fields)
+        try:
+            model.model_rebuild()
+        except Exception:
+            pass
+        return model
     except PydanticSchemaGenerationError:
         _raise_non_serializable_error(func, fields)
 
@@ -1019,7 +1030,7 @@ class ActionDispatcher:
             return result
 
     def _get_executor_for_action(self, action: Action) -> ActionExecutor | None:
-        """Get the executor for a given action."""
+        """Get the executor for a given action by exact key match."""
         action_key = str(action.action_type)
         for group in self.action_map:
             if action_key in group.executors:
@@ -2545,8 +2556,10 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
                 team_structure=team_structure,
             )
 
+            planning_scope_id = f"tenant:{self.agent.tenant_id}:agent:{self.agent.agent_id}:planning_scope"
             self._plan_blackboard_cached = PlanBlackboard(
                 plan_access_policy=access_policy,
+                scope_id=planning_scope_id,
             )
             await self._plan_blackboard_cached.initialize()
         return self._plan_blackboard_cached

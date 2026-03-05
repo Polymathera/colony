@@ -67,6 +67,10 @@ class TracingCapability(AgentCapability):
         self._config = config
         self._trace_id: str | None = None
         self._current_run_id: str | None = None
+        self._run_span_id: str | None = None   # Deterministic RUN span (shared across agents)
+        self._agent_span: Span | None = None   # Per-agent AGENT span (child of RUN)
+        self._start_mono: float = 0.0          # Monotonic clock at init (for duration calc)
+        self._start_wall: float = 0.0          # Wall clock at init
         self._buffer: deque[Span] = deque()
         self._producer: SpanProducer | None = None
         self._flush_task: asyncio.Task | None = None
@@ -77,9 +81,6 @@ class TracingCapability(AgentCapability):
         """Initialize tracing: set trace_id, start producer, register hooks."""
         if not self._config.enabled:
             return
-
-        # trace_id will be resolved lazily from session context in _resolve_trace_id()
-        # At initialize() time, session_id_context may not be set yet
 
         # Start Kafka producer
         kafka_bootstrap = self._config.kafka_bootstrap or os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
@@ -94,6 +95,52 @@ class TracingCapability(AgentCapability):
             self._config.enabled = False
             return
 
+        # Resolve trace_id eagerly now (metadata.session_id is set at blueprint time)
+        trace_id = self._resolve_trace_id()
+        now_mono = time.monotonic()
+        now_wall = time.time()
+        self._start_mono = now_mono
+        self._start_wall = now_wall
+
+        # Extract run_id from metadata
+        run_id = getattr(self.agent.metadata, "run_id", None)
+        if run_id and run_id != "default":
+            self._current_run_id = run_id
+
+        # Emit a deterministic RUN span (shared across all agents in the same run).
+        # Every agent emits it; the consumer deduplicates via ON CONFLICT (span_id).
+        if self._current_run_id:
+            self._run_span_id = f"span_run_{self._current_run_id}"
+            run_span = Span(
+                span_id=self._run_span_id,
+                trace_id=trace_id,
+                parent_span_id=None,
+                run_id=self._current_run_id,
+                agent_id=self.agent.agent_id,
+                name=f"run:{self._current_run_id}",
+                kind=SpanKind.RUN,
+                start_time=now_mono,
+                start_wall=now_wall,
+                status=SpanStatus.RUNNING,
+            )
+            self._buffer.append(run_span)
+
+        # Create a per-agent AGENT span (child of the RUN span).
+        # All run_step spans become children of this.
+        self._agent_span = Span(
+            span_id=generate_span_id(),
+            trace_id=trace_id,
+            parent_span_id=self._run_span_id,
+            run_id=self._current_run_id,
+            agent_id=self.agent.agent_id,
+            name=f"agent:{self.agent.agent_id}",
+            kind=SpanKind.AGENT,
+            start_time=now_mono,
+            start_wall=now_wall,
+            status=SpanStatus.RUNNING,
+        )
+        self._buffer.append(self._agent_span)
+
         # Register AROUND hooks
         self._register_hooks()
 
@@ -102,8 +149,8 @@ class TracingCapability(AgentCapability):
         self._flush_task = asyncio.create_task(self._flush_loop())
 
         logger.info(
-            "TracingCapability initialized (trace_id=%s, agent=%s)",
-            self._trace_id, self.agent.agent_id,
+            "TracingCapability initialized (trace_id=%s, agent=%s, agent_span=%s)",
+            self._trace_id, self.agent.agent_id, self._agent_span.span_id,
         )
 
     def _register_hooks(self) -> None:
@@ -133,15 +180,19 @@ class TracingCapability(AgentCapability):
             self._hook_ids.append(hook_id)
 
     def _resolve_trace_id(self) -> str:
-        """Resolve trace_id from session context (lazy, called inside hooks).
+        """Resolve trace_id from the agent's metadata.session_id.
 
-        At hook execution time, session_id_context IS set (run_step wraps
-        everything in session_id_context). So we can reliably get the session_id
-        here and use it as trace_id, ensuring one trace per session.
+        AgentMetadata.session_id is set at blueprint creation time (before the
+        agent starts), so it's always available when hooks fire.  Falls back to
+        agent_id only if metadata.session_id is the default placeholder.
         """
         if self._trace_id is None:
-            from ..sessions.context import get_current_session_id
-            session_id = get_current_session_id()
+            session_id = None
+            metadata = getattr(self.agent, "metadata", None)
+            if metadata is not None:
+                sid = getattr(metadata, "session_id", None)
+                if sid and sid != "default":
+                    session_id = sid
             if session_id:
                 self._trace_id = session_id
             else:
@@ -156,10 +207,12 @@ class TracingCapability(AgentCapability):
         async def handler(ctx: HookContext, proceed: Callable) -> Any:
             trace_id = self._resolve_trace_id()
             parent = get_current_span()
+            # If no parent from contextvars, use the AGENT span as parent
+            parent_id = parent.span_id if parent else (self._agent_span.span_id if self._agent_span else None)
             span = Span(
                 span_id=generate_span_id(),
                 trace_id=trace_id,
-                parent_span_id=parent.span_id if parent else None,
+                parent_span_id=parent_id,
                 run_id=self._current_run_id,
                 agent_id=self.agent.agent_id,
                 name=ctx.join_point,
@@ -186,14 +239,33 @@ class TracingCapability(AgentCapability):
 
         return handler
 
+    def _get_str_field(self, value: Any, max_chars: int) -> str:
+        """Convert a value to string and truncate if it exceeds max_chars."""
+        s = str(value)
+        if len(s) > max_chars:
+            return s[:max_chars] + "..."
+        return s
+
     def _summarize_input(self, ctx: HookContext, kind: SpanKind) -> dict[str, Any]:
         """Extract a truncated input summary from hook context."""
         max_chars = self._config.max_input_chars
         summary: dict[str, Any] = {}
 
         if kind == SpanKind.ACTION and ctx.args:
-            # dispatch(action_key, ...) — capture the action key
-            summary["action"] = str(ctx.args[0])[:max_chars] if ctx.args else None
+            # dispatch(action: Action) — extract structured fields
+            action = ctx.args[0]
+            if hasattr(action, "action_type"):
+                summary["action_type"] = self._get_str_field(action.action_type, max_chars)
+            if hasattr(action, "parameters"):
+                params = action.parameters
+                if isinstance(params, dict):
+                    # Truncate large param values
+                    summary["parameters"] = {
+                        k: self._get_str_field(v, max_chars)
+                        for k, v in list(params.items())[:10]
+                    }
+            if hasattr(action, "reasoning") and action.reasoning:
+                summary["reasoning"] = self._get_str_field(action.reasoning, max_chars)
         elif kind == SpanKind.INFER and self._config.capture_infer_inputs:
             # Include prompt text (expensive, opt-in)
             if ctx.kwargs.get("messages"):
@@ -208,11 +280,19 @@ class TracingCapability(AgentCapability):
         summary: dict[str, Any] = {}
 
         if kind == SpanKind.ACTION and self._config.capture_action_results:
-            summary["result_type"] = type(result).__name__
-            result_str = str(result)
-            if len(result_str) > max_chars:
-                result_str = result_str[:max_chars] + "..."
-            summary["result"] = result_str
+            # ActionResult is a Pydantic model — use model_dump for structured data
+            if hasattr(result, "model_dump"):
+                dumped = result.model_dump(mode="json")
+                summary["success"] = dumped.get("success")
+                if dumped.get("error"):
+                    summary["error"] = self._get_str_field(dumped["error"], max_chars)
+                output = dumped.get("output")
+                if output is not None:
+                    summary["output"] = self._get_str_field(output, max_chars)
+                if dumped.get("metrics"):
+                    summary["metrics"] = dumped["metrics"]
+            else:
+                summary["result"] = self._get_str_field(result, max_chars)
 
         return summary
 
@@ -254,6 +334,31 @@ class TracingCapability(AgentCapability):
 
     async def shutdown(self) -> None:
         """Stop the flush task and producer."""
+        now = time.monotonic()
+
+        # Close the AGENT span
+        if self._agent_span and self._agent_span.end_time is None:
+            self._agent_span.end_time = now
+            self._agent_span.status = SpanStatus.OK
+            self._buffer.append(self._agent_span)
+
+        # Close the RUN span (re-emit with end_time; consumer deduplicates via ON CONFLICT)
+        if self._run_span_id and self._trace_id:
+            run_close = Span(
+                span_id=self._run_span_id,
+                trace_id=self._trace_id,
+                parent_span_id=None,
+                run_id=self._current_run_id,
+                agent_id=self.agent.agent_id,
+                name=f"run:{self._current_run_id}",
+                kind=SpanKind.RUN,
+                start_time=self._start_mono,
+                start_wall=self._start_wall,
+                end_time=now,
+                status=SpanStatus.OK,
+            )
+            self._buffer.append(run_close)
+
         self._running = False
         if self._flush_task:
             self._flush_task.cancel()

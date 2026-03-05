@@ -10,6 +10,7 @@ import type { TraceSummary, TraceSpan } from "@/api/types";
 
 const KIND_COLORS: Record<string, string> = {
   run: "#8b5cf6",
+  agent: "#7c3aed",
   agent_step: "#3b82f6",
   plan: "#f59e0b",
   action: "#10b981",
@@ -24,6 +25,7 @@ const KIND_COLORS: Record<string, string> = {
 
 const KIND_LABELS: Record<string, string> = {
   run: "RUN",
+  agent: "AGENT",
   agent_step: "STEP",
   plan: "PLAN",
   action: "ACT",
@@ -84,12 +86,17 @@ function buildSpanTree(spans: TraceSpan[]): SpanTreeNode[] {
   return roots;
 }
 
-function flattenTree(nodes: SpanTreeNode[]): SpanTreeNode[] {
+function flattenTree(
+  nodes: SpanTreeNode[],
+  collapsed: Set<string>
+): SpanTreeNode[] {
   const result: SpanTreeNode[] = [];
   function walk(list: SpanTreeNode[]) {
     for (const node of list) {
       result.push(node);
-      walk(node.children);
+      if (!collapsed.has(node.span.span_id)) {
+        walk(node.children);
+      }
     }
   }
   walk(nodes);
@@ -159,33 +166,40 @@ function SpanTimingBar({
   span,
   traceStart,
   traceDuration,
+  zoom,
 }: {
   span: TraceSpan;
   traceStart: number;
   traceDuration: number;
+  zoom: number;
 }) {
   if (traceDuration <= 0) return null;
 
-  const offset = ((span.start_wall - traceStart) / traceDuration) * 100;
+  const offset = ((span.start_wall - traceStart) / traceDuration) * 100 * zoom;
   const width =
     span.duration_ms !== null
-      ? Math.max(0.5, (span.duration_ms / 1000 / traceDuration) * 100)
-      : 2; // Running spans get a min bar
+      ? Math.max(0.5, (span.duration_ms / 1000 / traceDuration) * 100 * zoom)
+      : 1.5; // Running/incomplete spans get a thin marker
 
   const color = KIND_COLORS[span.kind] ?? KIND_COLORS.custom;
+  const isError = span.status === "error";
+  const isRunning = span.status === "running";
+  const isIncomplete = span.duration_ms === null && !isRunning;
 
   return (
-    <div className="relative h-4 w-full rounded bg-muted/30">
+    <div className="relative h-4 w-full rounded bg-muted/30" style={{ minWidth: `${100 * zoom}%` }}>
       <div
         className={cn(
           "absolute top-0 h-full rounded",
-          span.status === "running" && "animate-pulse"
+          isRunning && "animate-pulse",
+          isError && "border border-red-500",
+          isIncomplete && "border border-dashed border-yellow-500/60"
         )}
         style={{
-          left: `${Math.min(offset, 98)}%`,
-          width: `${Math.min(width, 100 - offset)}%`,
-          backgroundColor: color,
-          opacity: span.status === "error" ? 1 : 0.7,
+          left: `${Math.min(offset, 99)}%`,
+          width: `${Math.max(0.3, Math.min(width, 100 * zoom - offset))}%`,
+          backgroundColor: isError ? `${color}` : color,
+          opacity: isError ? 1 : isIncomplete ? 0.4 : 0.7,
         }}
       />
     </div>
@@ -196,56 +210,88 @@ function WaterfallRow({
   node,
   traceStart,
   traceDuration,
+  zoom,
   isSelected,
+  isCollapsed,
   onClick,
+  onToggle,
 }: {
   node: SpanTreeNode;
   traceStart: number;
   traceDuration: number;
+  zoom: number;
   isSelected: boolean;
+  isCollapsed: boolean;
   onClick: () => void;
+  onToggle: () => void;
 }) {
-  const { span, depth } = node;
-  const indent = depth * 20;
+  const { span, depth, children } = node;
+  const indent = depth * 16;
+  const barIndent = depth * 12; // Timing bar nesting indent
+  const hasChildren = children.length > 0;
 
   return (
     <div
       className={cn(
-        "flex items-center gap-2 border-b px-3 py-1.5 transition-colors cursor-pointer hover:bg-muted/50",
+        "flex items-center gap-2 border-b px-2 py-1 transition-colors cursor-pointer hover:bg-muted/50",
         isSelected && "bg-primary/10 border-primary/20"
       )}
       onClick={onClick}
     >
-      {/* Left: indent + kind + name */}
+      {/* Left: fixed-width name column with tree indentation */}
       <div
-        className="flex items-center gap-1.5 shrink-0"
-        style={{ paddingLeft: indent, minWidth: 240 }}
+        className="flex items-center gap-1 shrink-0 w-[220px] overflow-hidden"
+        style={{ paddingLeft: indent }}
       >
+        {/* Collapse/expand toggle */}
+        <button
+          className={cn(
+            "w-4 h-4 flex items-center justify-center text-[10px] text-muted-foreground shrink-0",
+            hasChildren && "hover:text-foreground"
+          )}
+          onClick={(e) => {
+            if (hasChildren) {
+              e.stopPropagation();
+              onToggle();
+            }
+          }}
+        >
+          {hasChildren ? (isCollapsed ? "\u25B6" : "\u25BC") : ""}
+        </button>
         <SpanKindBadge kind={span.kind} />
-        <span className="text-xs font-medium truncate max-w-[160px]">
+        {span.kind === "action" && span.status !== "running" && (
+          <span className={cn(
+            "text-[10px] shrink-0 font-bold",
+            span.output_summary?.success === true ? "text-emerald-400" : "text-red-400"
+          )}>
+            {span.output_summary?.success === true ? "\u2713" : "\u2717"}
+          </span>
+        )}
+        {span.status === "error" && span.kind !== "action" && (
+          <span className="text-[10px] text-red-400 shrink-0">ERR</span>
+        )}
+        <span className="text-xs font-medium truncate">
           {span.name}
         </span>
-        {span.status === "error" && (
-          <span className="text-[10px] text-red-400">ERR</span>
-        )}
       </div>
 
-      {/* Middle: timing bar */}
-      <div className="flex-1 min-w-[120px]">
+      {/* Middle: timing bar — indented by depth for visual nesting */}
+      <div className="flex-1 min-w-0" style={{ paddingLeft: barIndent }}>
         <SpanTimingBar
           span={span}
           traceStart={traceStart}
           traceDuration={traceDuration}
+          zoom={zoom}
         />
       </div>
 
       {/* Right: duration + tokens */}
-      <div className="flex items-center gap-3 shrink-0 text-xs text-muted-foreground">
-        <span className="w-16 text-right font-mono">
+      <div className="flex items-center gap-2 shrink-0 text-xs text-muted-foreground">
+        <span className="w-14 text-right font-mono">
           {formatDurationMs(span.duration_ms)}
         </span>
         {(span.input_tokens || span.output_tokens) && (
-          <span className="w-20 text-right font-mono text-[10px]">
+          <span className="w-16 text-right font-mono text-[10px]">
             {span.input_tokens ?? 0}/{span.output_tokens ?? 0}
           </span>
         )}
@@ -401,26 +447,52 @@ function KeyValueRow({ label, value, mono }: { label: string; value: string; mon
   );
 }
 
-function ActionResultBadge({ result }: { result: Record<string, unknown> }) {
-  const success = result.success === true || result.result_type === "ActionResult";
-  const resultStr = typeof result.result === "string" ? result.result : null;
+function ActionOutputPanel({ data }: { data: Record<string, unknown> }) {
+  const success = data.success === true;
+  const error = data.error as string | undefined;
+  const output = data.output;
+  const metrics = data.metrics as Record<string, unknown> | undefined;
+
   return (
-    <div className={cn(
-      "rounded-md border p-2",
-      success ? "border-emerald-800/50 bg-emerald-950/20" : "border-red-800/50 bg-red-950/20"
-    )}>
-      <div className="flex items-center gap-1.5 mb-1">
+    <div className="space-y-2">
+      {/* Success/failure header */}
+      <div className={cn(
+        "rounded-md border px-3 py-2 flex items-center gap-2",
+        success ? "border-emerald-800/50 bg-emerald-950/20" : "border-red-800/50 bg-red-950/20"
+      )}>
         <span className={cn("text-sm", success ? "text-emerald-400" : "text-red-400")}>
           {success ? "\u2713" : "\u2717"}
         </span>
-        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-          {result.result_type ? String(result.result_type) : "Result"}
+        <span className="text-xs font-medium">
+          {success ? "Success" : "Failed"}
         </span>
+        {error && (
+          <span className="text-xs text-red-400 ml-2 font-mono">{error}</span>
+        )}
       </div>
-      {resultStr && (
-        <pre className="text-[11px] font-mono text-muted-foreground whitespace-pre-wrap break-all max-h-40 overflow-auto">
-          {tryPrettyPrint(resultStr)}
-        </pre>
+
+      {/* Output data */}
+      {output != null && (
+        <div>
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Output</p>
+          <pre className="rounded bg-muted/50 p-2 text-[11px] font-mono text-muted-foreground whitespace-pre-wrap break-all max-h-48 overflow-auto">
+            {typeof output === "string" ? tryPrettyPrint(output) : JSON.stringify(output, null, 2)}
+          </pre>
+        </div>
+      )}
+
+      {/* Metrics */}
+      {metrics && Object.keys(metrics).length > 0 && (
+        <div>
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Metrics</p>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(metrics).map(([k, v]) => (
+              <span key={k} className="rounded bg-muted/30 px-2 py-0.5 text-[10px] font-mono">
+                {k}: {String(v)}
+              </span>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -448,8 +520,8 @@ function SpanDataSection({
 
   if (Object.keys(data).length === 0) return null;
 
-  // For action outputs, render with success/failure badge
-  if (label === "Output" && kind === "action" && ("result" in data || "result_type" in data)) {
+  // For action outputs, render structured panel with success/failure
+  if (label === "Output" && kind === "action" && ("success" in data || "output" in data)) {
     return (
       <div>
         <button
@@ -459,13 +531,16 @@ function SpanDataSection({
           <span className="text-xs">{expanded ? "\u25BC" : "\u25B6"}</span>
           {label}
         </button>
-        {expanded && <ActionResultBadge result={data} />}
+        {expanded && <ActionOutputPanel data={data} />}
       </div>
     );
   }
 
-  // For action inputs, render key-value pairs
+  // For action inputs, render structured fields
   if (label === "Input" && kind === "action") {
+    const actionType = data.action_type as string | undefined;
+    const parameters = data.parameters as Record<string, unknown> | undefined;
+    const reasoning = data.reasoning as string | undefined;
     return (
       <div>
         <button
@@ -476,10 +551,22 @@ function SpanDataSection({
           {label}
         </button>
         {expanded && (
-          <div className="rounded-md border bg-muted/20 p-2 space-y-0.5">
-            {Object.entries(data).map(([k, v]) => (
-              <KeyValueRow key={k} label={k} value={typeof v === "string" ? v : JSON.stringify(v)} mono />
-            ))}
+          <div className="rounded-md border bg-muted/20 p-2 space-y-2">
+            {actionType && <KeyValueRow label="Action" value={actionType} mono />}
+            {reasoning && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Reasoning</p>
+                <p className="text-xs text-foreground/80 italic">{reasoning}</p>
+              </div>
+            )}
+            {parameters && Object.keys(parameters).length > 0 && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Parameters</p>
+                <pre className="rounded bg-muted/50 p-1.5 text-[11px] font-mono text-muted-foreground whitespace-pre-wrap break-all max-h-32 overflow-auto">
+                  {JSON.stringify(parameters, null, 2)}
+                </pre>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -575,6 +662,17 @@ function TraceWaterfallView({
   const { data: restSpans } = useTraceSpans(traceId);
   const { spans: streamedSpans, isStreaming } = useTraceStream(traceId);
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [zoom, setZoom] = useState(1);
+
+  const toggleCollapsed = useCallback((spanId: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(spanId)) next.delete(spanId);
+      else next.add(spanId);
+      return next;
+    });
+  }, []);
 
   // Merge REST + streamed spans (streamed overrides for live updates)
   const allSpans = useMemo(() => {
@@ -585,7 +683,7 @@ function TraceWaterfallView({
   }, [restSpans, streamedSpans]);
 
   const tree = useMemo(() => buildSpanTree(allSpans), [allSpans]);
-  const flat = useMemo(() => flattenTree(tree), [tree]);
+  const flat = useMemo(() => flattenTree(tree, collapsed), [tree, collapsed]);
 
   const selectedSpan = selectedSpanId
     ? allSpans.find((s) => s.span_id === selectedSpanId) ?? null
@@ -618,23 +716,38 @@ function TraceWaterfallView({
       {/* Header stats */}
       <TraceHeader spans={allSpans} traceId={traceId} isStreaming={isStreaming} />
 
-      {/* Kind legend */}
-      <div className="flex flex-wrap gap-3">
-        {Object.entries(KIND_LABELS).map(([kind, label]) => (
-          <span key={kind} className="flex items-center gap-1 text-[10px] text-muted-foreground">
-            <span
-              className="inline-block h-2 w-2 rounded-sm"
-              style={{ backgroundColor: KIND_COLORS[kind] }}
-            />
-            {label}
-          </span>
-        ))}
+      {/* Kind legend + zoom slider */}
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-wrap gap-3">
+          {Object.entries(KIND_LABELS).map(([kind, label]) => (
+            <span key={kind} className="flex items-center gap-1 text-[10px] text-muted-foreground">
+              <span
+                className="inline-block h-2 w-2 rounded-sm"
+                style={{ backgroundColor: KIND_COLORS[kind] }}
+              />
+              {label}
+            </span>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-[10px] text-muted-foreground">Zoom</span>
+          <input
+            type="range"
+            min={1}
+            max={20}
+            step={0.5}
+            value={zoom}
+            onChange={(e) => setZoom(parseFloat(e.target.value))}
+            className="w-24 h-1 accent-primary"
+          />
+          <span className="text-[10px] font-mono text-muted-foreground w-6">{zoom}x</span>
+        </div>
       </div>
 
       {/* Waterfall + Detail split */}
       <div className="flex gap-0 rounded-lg border overflow-hidden" style={{ height: "calc(100vh - 360px)" }}>
         {/* Left: waterfall */}
-        <div className={cn("overflow-auto", selectedSpan ? "w-3/5" : "w-full")}>
+        <div className={cn("h-full overflow-auto", selectedSpan ? "w-3/5" : "w-full")}>
           {flat.length === 0 ? (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               No spans recorded
@@ -646,12 +759,15 @@ function TraceWaterfallView({
                 node={node}
                 traceStart={traceStart}
                 traceDuration={traceDuration}
+                zoom={zoom}
                 isSelected={node.span.span_id === selectedSpanId}
+                isCollapsed={collapsed.has(node.span.span_id)}
                 onClick={() =>
                   setSelectedSpanId(
                     node.span.span_id === selectedSpanId ? null : node.span.span_id
                   )
                 }
+                onToggle={() => toggleCollapsed(node.span.span_id)}
               />
             ))
           )}
