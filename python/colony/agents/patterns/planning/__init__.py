@@ -76,6 +76,9 @@ from .strategies import (
     BottomUpPlanningStrategy,
     ModelPredictiveControlStrategy,
     PlanningStrategyPolicy,
+    PromptFormattingStrategy,
+    MarkdownPromptFormatting,
+    XMLPromptFormatting,
     SCOPE_SELECTION_THRESHOLD,
     ScopeSelectionResponse,
     TopDownPlanningStrategy,
@@ -121,6 +124,10 @@ __all__ = [
     "CompositeReplanningPolicy",
     # Strategies
     "PlanningStrategyPolicy",
+    # Prompt formatting
+    "PromptFormattingStrategy",
+    "MarkdownPromptFormatting",
+    "XMLPromptFormatting",
     "ModelPredictiveControlStrategy",
     "TopDownPlanningStrategy",
     "BottomUpPlanningStrategy",

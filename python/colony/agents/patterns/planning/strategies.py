@@ -109,19 +109,95 @@ class ScopeSelectionResponse(BaseModel):
 SCOPE_SELECTION_THRESHOLD: int = 6
 
 
+class PromptFormattingStrategy(ABC):
+    """Strategy for formatting action descriptions in the planner prompt.
+
+    Different formatting strategies may affect LLM accuracy on action key
+    selection. This abstraction allows experimentation and evaluation.
+    """
+
+    @abstractmethod
+    def format_action_descriptions(self, action_descriptions: list[ActionGroupDescription]) -> str:
+        """Format action group descriptions into prompt text."""
+        ...
+
+    @abstractmethod
+    def format_action_type_instruction(self) -> str:
+        """Return the instruction text for the action_type field in the JSON output format."""
+        ...
+
+
+class MarkdownPromptFormatting(PromptFormattingStrategy):
+    """Original markdown list formatting (legacy).
+
+    Action keys are presented as markdown list items:
+        ### Group description
+        - ClassName.hash.action_name: Action description
+    """
+
+    @override
+    def format_action_descriptions(self, action_descriptions: list[ActionGroupDescription]) -> str:
+        sections = []
+        for group in action_descriptions:
+            if group.group_description:
+                sections.append(f"\n### {group.group_description}")
+            for action_key, action_desc in group.action_descriptions.items():
+                sections.append(f"- {action_key}: {action_desc}")
+        return "\n".join(sections)
+
+    @override
+    def format_action_type_instruction(self) -> str:
+        return '"action_type": "<one of the available action types above>"'
+
+
+class XMLPromptFormatting(PromptFormattingStrategy):
+    """XML-structured formatting for unambiguous action key delimitation.
+
+    Action keys are presented as XML attributes, making the full key
+    structurally unambiguous:
+        <action-group key="ClassName.hash">
+          <description>Group description</description>
+          <action key="ClassName.hash.action_name">Action description</action>
+        </action-group>
+    """
+
+    @override
+    def format_action_descriptions(self, action_descriptions: list[ActionGroupDescription]) -> str:
+        sections = []
+        for group in action_descriptions:
+            sections.append(f'<action-group key="{group.group_key}">')
+            if group.group_description:
+                sections.append(f"  <description>{group.group_description}</description>")
+            for action_key, action_desc in group.action_descriptions.items():
+                sections.append(f'  <action key="{action_key}">{action_desc}</action>')
+            sections.append("</action-group>")
+        return "\n".join(sections)
+
+    @override
+    def format_action_type_instruction(self) -> str:
+        return '"action_type": "<the exact key= attribute from an <action> element above>"'
+
+
 class PlanningStrategyPolicy(ABC):
     """Policy for how to generate plans.
 
     This is NOT an enum - it's an actual implementation.
     """
 
-    def __init__(self, agent: Agent | None = None):
+    def __init__(
+        self,
+        agent: Agent | None = None,
+        prompt_formatting: PromptFormattingStrategy | None = None,
+    ):
         """Initialize planning strategy with agent reference.
-        
+
         Args:
             agent: Agent instance for LLM inference. If None, must be set via set_agent().
+            prompt_formatting: Strategy for formatting action descriptions in the
+                planner prompt. Defaults to XMLPromptFormatting.
         """
         self.agent = agent
+        self.prompt_formatting = prompt_formatting or XMLPromptFormatting()
 
     def set_agent(self, agent: Agent) -> None:
         """Set the agent reference for LLM inference."""
@@ -182,16 +258,9 @@ class PlanningStrategyPolicy(ABC):
             return text[start:end + 1]
         return text.strip()
 
-    @staticmethod
-    def _format_action_descriptions(planning_context: PlanningContext) -> str:
+    def _format_action_descriptions(self, planning_context: PlanningContext) -> str:
         """Format action descriptions from planning context into prompt text."""
-        sections = []
-        for group in planning_context.action_descriptions:
-            if group.group_description:
-                sections.append(f"\n### {group.group_description}")  # TODO: Format this using XML tags?
-            for action_key, action_desc in group.action_descriptions.items():
-                sections.append(f"- {action_key}: {action_desc}")  # TODO: Format this using XML tags?
-        return "\n".join(sections)
+        return self.prompt_formatting.format_action_descriptions(planning_context.action_descriptions)
 
     @staticmethod
     def _format_custom_data(planning_context: PlanningContext) -> str:
@@ -445,7 +514,7 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
   "reasoning": "<step-by-step reasoning>",
   "actions": [
     {{
-      "action_type": "<one of the available action types above>",
+      {self.prompt_formatting.format_action_type_instruction()},
       "description": "<what this action does>",
       "parameters": {{}},
       "reasoning": "<why this action is needed>"
@@ -493,7 +562,7 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
   "reasoning": "<why these actions are needed given current progress>",
   "actions": [
     {{
-      "action_type": "<one of the available action types above>",
+      {self.prompt_formatting.format_action_type_instruction()},
       "description": "<what this action does>",
       "parameters": {{}},
       "reasoning": "<why this action is needed>"
@@ -688,7 +757,7 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
   }},
   "actions": [
     {{
-      "action_type": "<one of the available action types above>",
+      {self.prompt_formatting.format_action_type_instruction()},
       "description": "<what this action does>",
       "parameters": {{}},
       "reasoning": "<why this action is needed>"
@@ -702,8 +771,13 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
 class ModelPredictiveControlStrategy(PlanningStrategyPolicy):
     """Model-Predictive Control strategy: plan horizon steps, execute, re-evaluate."""
 
-    def __init__(self, horizon: int = 5, agent: Agent | None = None):
-        super().__init__(agent=agent)
+    def __init__(
+        self,
+        horizon: int = 5,
+        agent: Agent | None = None,
+        prompt_formatting: PromptFormattingStrategy | None = None,
+    ):
+        super().__init__(agent=agent, prompt_formatting=prompt_formatting)
         self.horizon = horizon
 
     async def generate_plan(
@@ -861,7 +935,7 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
   "reasoning": "<why these actions are needed given current progress>",
   "actions": [
     {{
-      "action_type": "<one of the available action types above>",
+      {self.prompt_formatting.format_action_type_instruction()},
       "description": "<what this action does>",
       "parameters": {{}},
       "reasoning": "<why this action is needed>"
@@ -874,8 +948,8 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
 class TopDownPlanningStrategy(PlanningStrategyPolicy):
     """Top-down: Break goals into sub-goals first, then plan actions."""
 
-    def __init__(self, agent: Agent | None = None):
-        super().__init__(agent=agent)
+    def __init__(self, agent: Agent | None = None, prompt_formatting: PromptFormattingStrategy | None = None):
+        super().__init__(agent=agent, prompt_formatting=prompt_formatting)
 
     @override
     async def generate_plan(
@@ -986,8 +1060,8 @@ class TopDownPlanningStrategy(PlanningStrategyPolicy):
 class BottomUpPlanningStrategy(PlanningStrategyPolicy):
     """Bottom-up: Start with concrete actions, infer goal structure."""
 
-    def __init__(self, agent: Agent | None = None):
-        super().__init__(agent=agent)
+    def __init__(self, agent: Agent | None = None, prompt_formatting: PromptFormattingStrategy | None = None):
+        super().__init__(agent=agent, prompt_formatting=prompt_formatting)
 
     @override
     async def generate_plan(
