@@ -59,22 +59,16 @@ class IntentInferenceAgent(Agent):
     async def initialize(self) -> None:
         """Initialize agent with capabilities configured."""
         self.add_capability_blueprints([
-            IntentInferenceCapability.bind(),
-            MergeCapability.bind(),
+            IntentInferenceCapability.bind(
+                granularity=self.granularity,
+            ),
+            MergeCapability.bind(
+                merge_policy=IntentMergePolicy(),
+            ),
             # TODO: Participate in consensus games for intent alignment
             ConsensusGameProtocol.bind(),
         ])
         await super().initialize()
-
-        # Configure MergeCapability with IntentMergePolicy
-        merge_cap = self.get_capability_by_type(MergeCapability)
-        if merge_cap:
-            merge_cap.set_policy(IntentMergePolicy())
-
-        # Configure IntentInferenceCapability
-        intent_cap = self.get_capability_by_type(IntentInferenceCapability)
-        if intent_cap:
-            intent_cap.granularity = self.granularity
 
         logger.info(f"IntentInferenceAgent {self.agent_id} initialized")
         # NO run() method - agent is event-driven via IntentInferenceCapability
@@ -98,15 +92,12 @@ class IntentInferenceCoordinator(Agent):
         """Initialize coordinator with capabilities configured."""
         self.add_capability_blueprints([
             IntentAnalysisCapability.bind(),
-            MergeCapability.bind(),
+            MergeCapability.bind(
+                merge_policy=IntentMergePolicy(),
+            ),
             SynthesisCapability.bind(),
         ])
         await super().initialize()
-
-        # Configure MergeCapability
-        merge_cap = self.get_capability_by_type(MergeCapability)
-        if merge_cap:
-            merge_cap.set_policy(IntentMergePolicy())
 
         # IntentAnalysisCapability configures its own merge policy via get_domain_merge_policy()
         # No need to set max_agents - LLM controls parallelism via spawn_workers(max_parallel=N)

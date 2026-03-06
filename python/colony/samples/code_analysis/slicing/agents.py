@@ -51,14 +51,11 @@ class ProgramSlicingAgent(Agent):
         """Initialize agent with capabilities configured."""
         self.add_capability_blueprints([
             ProgramSlicingCapability.bind(),
-            MergeCapability.bind(),
+            MergeCapability.bind(
+                merge_policy=SliceMergePolicy(),
+            ),
         ])
         await super().initialize()
-
-        # Configure MergeCapability with SliceMergePolicy
-        merge_cap = self.get_capability_by_type(MergeCapability)
-        if merge_cap:
-            merge_cap.set_policy(SliceMergePolicy())
 
         logger.info(f"ProgramSlicingAgent {self.agent_id} initialized")
         # NO run() method - agent is event-driven via ProgramSlicingCapability
@@ -81,14 +78,11 @@ class ProgramSlicingCoordinator(Agent):
         """Initialize coordinator with capabilities configured."""
         self.add_capability_blueprints([
             SlicingAnalysisCapability.bind(),
-            MergeCapability.bind(),
+            MergeCapability.bind(
+                merge_policy=SliceMergePolicy(),
+            ),
         ])
         await super().initialize()
-
-        # Configure MergeCapability
-        merge_cap = self.get_capability_by_type(MergeCapability)
-        if merge_cap:
-            merge_cap.set_policy(SliceMergePolicy())
 
         # SlicingAnalysisCapability configures its own merge policy via get_domain_merge_policy()
         # No need to set max_agents - LLM controls parallelism via spawn_workers(max_parallel=N)

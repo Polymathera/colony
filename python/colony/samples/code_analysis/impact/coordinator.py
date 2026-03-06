@@ -1531,51 +1531,25 @@ class ChangeImpactAnalysisCoordinator(Agent):
     async def initialize(self) -> None:
         """Initialize coordinator and attach capability."""
 
+        job_quota = self.metadata.parameters.get("job_quota", self.metadata.parameters.get("max_agents", 10) * 5)
+
         self.add_capability_blueprints([
-            WorkingSetCapability.bind(), # TODO: Set working_set_size = self.metadata.parameters.get("job_quota", self.metadata.parameters.get("max_agents", 10) * 5)
+            # Add WorkingSetCapability for cache-aware coordination
+            WorkingSetCapability.bind(
+                working_set_size=job_quota,
+            ),
             CriticCapability.bind(),
             ChangeImpactAnalysisCoordinatorCapability.bind(),
-            MergeCapability.bind(), # TODO: scope_id=f"{self.agent_id}:merged_change_impact_reports"
-            SynthesisCapability.bind(), # TODO: scope_id=f"{self.agent_id}:change_impact_analysis"
+            MergeCapability.bind(
+                scope_id=f"{self.agent_id}:merged_change_impact_reports",
+                merge_policy=ImpactMergePolicy()
+            ),
+            SynthesisCapability.bind(
+                scope_id=f"{self.agent_id}:change_impact_analysis"
+            ),
         ])
 
         await super().initialize()
-
-        # Add WorkingSetCapability for cache-aware coordination
-        if not self.has_capability(WorkingSetCapability.get_capability_name()):
-            job_quota = self.metadata.parameters.get("job_quota", self.metadata.parameters.get("max_agents", 10) * 5)
-            working_set_cap = WorkingSetCapability(
-                agent=self,
-                working_set_size=job_quota,
-            )
-            self.add_capability(working_set_cap)
-
-        # Add CriticCapability for critique handling
-        if not self.has_capability(CriticCapability.get_capability_name()):
-            critic_cap = CriticCapability(self)
-            self.add_capability(critic_cap)
-
-        # Add coordinator capability
-        if not self.has_capability(ChangeImpactAnalysisCoordinatorCapability.get_capability_name()):
-            capability = ChangeImpactAnalysisCoordinatorCapability(self)
-            await capability.initialize()
-            self.add_capability(capability)
-
-        if not self.has_capability(MergeCapability.get_capability_name()):
-            capability = MergeCapability(
-                self, scope_id=f"{self.agent_id}:merged_change_impact_reports"
-            )
-            capability.set_policy(ImpactMergePolicy())
-            await capability.initialize()
-            self.add_capability(capability)
-
-        # Add synthesis capability
-        if not self.has_capability(SynthesisCapability.get_capability_name()):
-            capability = SynthesisCapability(
-                self, scope_id=f"{self.agent_id}:change_impact_analysis"
-            )
-            await capability.initialize()
-            self.add_capability(capability)
 
         self.coordinator_capability = self.get_capability(
             ChangeImpactAnalysisCoordinatorCapability.get_capability_name()

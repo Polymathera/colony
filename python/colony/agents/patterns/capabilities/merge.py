@@ -850,10 +850,11 @@ class MergeCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None
+        scope_id: str | None = None,
+        merge_policy: MergePolicy | None = None
     ):
         super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
-        self.merge_policy: MergePolicy | None = None
+        self.merge_policy: MergePolicy | None = merge_policy
 
     def get_action_group_description(self) -> str:
         return (

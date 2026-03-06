@@ -76,20 +76,10 @@ class GroundingAgent(Agent):
         """Initialize grounding agent."""
         await super().initialize()
 
-        # Get query processor from metadata or create
-        self.action_policy = CacheAwareActionPolicy(self)
-        await self.action_policy.initialize()
-
-        capability_types = [
-            GroundingCapability,
-            IncrementalQueryCapability,
-        ]
-        for capability_type in capability_types:
-            if not self.has_capability(capability_type.get_capability_name()):
-                capability = capability_type(self)
-                await capability.initialize()
-                self.add_capability(capability)
-        await self.action_policy.use_capability_blueprints([cap_cls.bind() for cap_cls in capability_types])
+        await self.action_policy.use_capability_blueprints([
+            GroundingCapability.bind(),
+            IncrementalQueryCapability.bind(),
+        ])
 
         logger.info(f"GroundingAgent {self.agent_id} initialized")
 

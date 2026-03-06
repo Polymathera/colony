@@ -82,26 +82,24 @@ class ReputationAgent(Agent):
 
     async def initialize(self) -> None:
         """Initialize reputation agent with capability and policy."""
+
+        # This shows that capabilities can be added before or after super().initialize(),
+        # but if added after, we need to call use_capability_blueprints to materialize
+        # them into the action policy.
+
         self.add_capability_blueprints([ReputationCapability.bind()])
 
         await super().initialize()
 
-        if not self.has_capability(HypothesisGameProtocol.get_capability_name()):
-            capability = HypothesisGameProtocol(
-                agent=self,
+        self.action_policy.use_capability_blueprints([
+            HypothesisGameProtocol.bind(
                 game_id=None, # TODO: Should this be set?
                 role="observer",  # Observe game outcomes
-            )
-            await capability.initialize()
-            self.add_capability(capability, events_only=True)  # Observe game outcomes
+            ).with_composition(
+                events_only=True,  # Don't expose protocol actions, just events
+            ),
+        ])
 
-        self.action_policy.use_agent_capabilities([ReputationCapability.get_capability_name()])
-
-        logger.info(f"CacheAwareActionPolicy initialized for {self.agent_id}")
-
-        # Create and initialize policy
-        self.action_policy = CacheAwareActionPolicy(self)
-        await self.action_policy.initialize()
         logger.info(f"ReputationAgent {self.agent_id} initialized with CacheAwareActionPolicy")
 
 

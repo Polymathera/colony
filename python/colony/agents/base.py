@@ -121,18 +121,9 @@ class ActionPolicy(ABC):
         Args:
             blueprints: List of capability blueprints to instantiate and use.
         """
-        for bp in blueprints:
-            if not self.agent.has_capability(bp.key):
-                capability_instance = bp.local_instance(self.agent)
-                capability_instance._capability_key = bp.key
-                await capability_instance.initialize()
-                self.agent.add_capability(
-                    capability_instance,
-                    include_actions=bp.include_actions,
-                    exclude_actions=bp.exclude_actions,
-                    events_only=bp.events_only,
-                )
+        await self.agent._instantiate_capability_blueprints(blueprints)
 
+        # Mark ALL capabilities as "used" by the action policy.
         self.use_agent_capabilities([bp.key for bp in blueprints])
 
     @classmethod
@@ -1759,10 +1750,12 @@ class Agent(BaseModel):
         self,
         blueprints: list[AgentCapabilityBlueprint],
     ) -> None:
-        """Add capability blueprints to be instantiated during _create_action_policy.
+        """Add capability blueprints to be instantiated during `_create_action_policy`.
 
-        Typically called in an agent subclass initialize() method
-        before calling super().initialize().
+        Typically called in an agent subclass `initialize()` method
+        before calling `super().initialize()`. If called after initialization,
+        the new blueprints will be added but won't be materialized into agent capabilities. You can call `agent.action_policy.use_capability_blueprints()` to materialize blueprints dynamically after agent initialization.
+        No need to call `action_policy.use_agent_capabilities()` if the blueprints are added before initialization, as they will be used automatically during the initial action policy creation.
 
         Args:
             blueprints: The capability blueprints to add
@@ -1780,6 +1773,9 @@ class Agent(BaseModel):
         events_only: bool = False,
     ) -> None:
         """Add a capability to the agent.
+        This capability must already be
+        initialized with the agent as its owner. This capability must still
+        be passed to `agent.action_policy.use_agent_capabilities()` to be included in the action policy for planning.
 
         Args:
             capability: AgentCapability instance
@@ -1983,6 +1979,34 @@ class Agent(BaseModel):
 
     # === Lifecycle Methods (Override in subclasses) ===
 
+    async def _instantiate_capability_blueprints(self, blueprints: list[AgentCapabilityBlueprint]) -> None:
+        """Instantiate capabilities from blueprints and add to agent."""
+        # Phase 1: Instantiate capability blueprints and add to agent.
+        # Do not initialize yet — capabilities may discover each other during
+        # initialization and we want them all present first.
+        capability_instances = []
+        for bp in blueprints:
+            if not self.has_capability(bp.key):
+                # local_instance creates a new instance of the capability for this agent, allowing the same blueprint to be reused across multiple agents with different internal state. It also passes other capability-specific parameters defined in the blueprint kwargs.
+                capability_instance = bp.local_instance(self)
+                capability_instance._capability_key = bp.key
+                self.add_capability(
+                    capability_instance,
+                    include_actions=bp.include_actions,
+                    exclude_actions=bp.exclude_actions,
+                    events_only=bp.events_only,
+                )
+                capability_instances.append(capability_instance)
+            else:
+                logger.warning(f"Agent {self.agent_id} already has capability {bp.key}, skipping blueprint instantiation.")
+
+        # Phase 2: Initialize all capabilities.
+        # Note that a capability's initialize() may add pre-initialized
+        # sub-capabilities (e.g., AgentPoolCapability, PageGraphCapability).
+        # So, do not use self._capabilities.values() directly in the loop, as it may mutate during iteration. Instead, snapshot the values into a list first.
+        for capability_instance in capability_instances:
+            await capability_instance.initialize()
+
     async def initialize(self) -> None:
         """Initialize agent (called after creation).
 
@@ -2024,33 +2048,20 @@ class Agent(BaseModel):
             return  # Already set
 
         # Phase 1: Instantiate capability blueprints and add to agent.
-        # Do not initialize yet — capabilities may discover each other during
-        # initialization and we want them all present first.
-        for bp in self.capability_blueprints:
-            if not self.has_capability(bp.key):
-                # local_instance creates a new instance of the capability for this agent, allowing the same blueprint to be reused across multiple agents with different internal state. It also passes other capability-specific parameters defined in the blueprint kwargs.
-                capability = bp.local_instance(self)
-                self.add_capability(
-                    capability,
-                    include_actions=bp.include_actions,
-                    exclude_actions=bp.exclude_actions,
-                    events_only=bp.events_only,
-                )
+        await self._instantiate_capability_blueprints(self.capability_blueprints)
 
-        # Phase 2: Initialize all capabilities. Snapshot via list() because a
-        # capability's initialize() may add pre-initialized sub-capabilities
-        # (e.g., AgentPoolCapability, PageGraphCapability), mutating the dict.
-        for capability in list(self._capabilities.values()):
-            await capability.initialize()
-
-        # Phase 3: Create action policy
+        # Phase 2: Create action policy
+        # NOTE: Capabilities are NOT passed as action_providers here.
+        # They are registered via use_agent_capabilities() in Phase 4,
+        # which is the single authoritative path for capability → dispatcher.
+        # action_providers is reserved for non-capability action sources
+        # (standalone functions, external objects).
         if not self.action_policy_blueprint:
             logger.warning("Agent does not have action_policy or action_policy_blueprint defined. We will create a default ActionPolicy, but consider defining a custom one for better performance and capabilities.")
             from .patterns.actions.policies import create_default_action_policy
             self.action_policy = await create_default_action_policy(
                 agent=self,
                 action_map={},  # Action executors are discovered from capabilities
-                action_providers=list(self._capabilities.values()),
                 max_iterations=self.metadata.max_iterations,
                 # TODO: Allow configuring IO schemas
                 # io=ActionPolicyIO(
@@ -2062,7 +2073,6 @@ class Agent(BaseModel):
         else:
             self.action_policy = self.action_policy_blueprint.local_instance(
                 self,
-                action_providers=list(self._capabilities.values()),
                 # TODO: Allow configuring IO schemas
                 # io=ActionPolicyIO(
                 #     inputs={"context": QueryContext, "queries": list},
@@ -2071,10 +2081,13 @@ class Agent(BaseModel):
                 **self.metadata.action_policy_config,
             )
 
+        # Phase 3: Mark ALL capabilities as "used" by the action policy.
+        # This includes both blueprint-instantiated capabilities AND
+        # capabilities added directly via add_capability() during initialize().
+        self.action_policy.use_agent_capabilities(list(self._capabilities.keys()))
+
         logger.info(f"________ Created action policy {self.action_policy.__class__.__name__} for agent {self.agent_id} with capabilities: {self.get_capability_names()}")
 
-        # Phase 4: Mark capability blueprints as "used" by the action policy
-        self.action_policy.use_agent_capabilities([bp.key for bp in self.capability_blueprints])
         await self.action_policy.initialize()
 
     async def initialize_memory_hierarchy(

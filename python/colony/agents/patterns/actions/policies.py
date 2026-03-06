@@ -1652,14 +1652,22 @@ class BaseActionPolicy(ActionPolicy):
         if self._action_dispatcher:
             return
 
-        # Collect capability providers
+        # Collect capability providers from _used_agent_capabilities (the
+        # authoritative filter for which agent capabilities are exposed).
         capability_providers = self.get_used_capabilities()
+
+        # self._action_providers may contain AgentCapability instances that
+        # overlap with capability_providers (e.g. passed at construction from
+        # agent._capabilities AND also registered via use_agent_capabilities).
+        # Deduplicate by identity to avoid duplicate action groups in the prompt.
+        seen = set(id(p) for p in capability_providers)
+        extra_providers = [p for p in self._action_providers if id(p) not in seen]
 
         self._action_dispatcher = ActionDispatcher(
             agent=self.agent,
             action_policy=self,
             action_map=self._action_map,
-            action_providers=capability_providers + self._action_providers,
+            action_providers=capability_providers + extra_providers,
         )
 
         await self._action_dispatcher.initialize()
@@ -1906,20 +1914,19 @@ class EventDrivenActionPolicy(BaseActionPolicy):
 
     def _get_event_handlers(self) -> list[Callable]:
         """Get all event handlers from capabilities and action providers.
-        
+
         Returns:
             List of event handler methods (decorated with @event_handler)
         """
         handlers = []
-        
-        # Check agent capabilities
-        for cap in self.agent.get_capabilities():
-            handlers.extend(self._get_object_event_handlers(cap))
-        
-        # Check action providers
-        for provider in self._action_providers:
-            handlers.extend(self._get_object_event_handlers(provider))
-        
+        # Deduplicate by identity — agent capabilities and _action_providers
+        # may overlap (same objects passed via both paths).
+        seen: set[int] = set()
+        for source in list(self.agent.get_capabilities()) + list(self._action_providers):
+            if id(source) in seen:
+                continue
+            seen.add(id(source))
+            handlers.extend(self._get_object_event_handlers(source))
         return handlers
     
     def _get_object_event_handlers(self, obj: Any) -> list[Callable]:
@@ -2230,10 +2237,14 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
                 PlanExhaustionReplanningPolicy(),
             ])
 
-        # Get or create current plan
+        # Get current plan (if resuming from a previous session)
+        # NOTE: Initial plan creation is NOT done here — it happens in
+        # plan_step() on the first call, so that the LLM call falls inside
+        # the STEP → PLAN span hierarchy for proper observability tracing.
+        # TODO: Add a new tracing span on Agent.initialize()
         self.current_plan = await self.plan_blackboard.get_plan(self.agent.agent_id)
-        if not self.current_plan:
-            await self._create_initial_plan()
+        ### if not self.current_plan:
+        ###     await self._create_initial_plan()
 
         # Sync plan ID and action index
         if self.current_plan:
