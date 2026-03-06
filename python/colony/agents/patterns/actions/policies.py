@@ -47,6 +47,7 @@ from ...models import (
     Ref,
     PlanStatus,
     ActionSharedDataDependency,
+    LifecycleMode,
 )
 from ...base import Agent, ActionPolicy, ActionPolicyIterationResult, AgentCapability
 from ...blackboard import BlackboardEvent
@@ -66,6 +67,8 @@ from ..planning import (
     ReplanningPolicy,
     ReplanningDecision,
     PeriodicReplanningPolicy,
+    PlanExhaustionReplanningPolicy,
+    CompositeReplanningPolicy,
 )
 # NOTE: Class-based ActionExecutors from executors.py are deprecated.
 # Use @action_executor decorated methods on AgentCapability classes instead.
@@ -1729,6 +1732,15 @@ class BaseActionPolicy(ActionPolicy):
                         policy_completed=True
                     )
 
+                # Check if policy signaled idle (no work, but not completed)
+                if state.custom.get("idle"):
+                    logger.warning(f"    ⚙ EXEC_ITER: idle=True → IDLE")
+                    return ActionPolicyIterationResult(
+                        success=True,
+                        policy_completed=False,
+                        idle=True,
+                    )
+
                 # Otherwise just skip this iteration (policy continues)
                 logger.warning(f"    ⚙ EXEC_ITER: next_action=None → skipping iteration")
                 return ActionPolicyIterationResult(
@@ -2117,7 +2129,8 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             action_providers: Additional action providers
             io: Policy I/O contract (inputs/outputs)
             replanning_policy: Policy that decides WHEN to replan and what
-                strategy to use. Defaults to PeriodicReplanningPolicy.
+                strategy to use. Defaults to CompositeReplanningPolicy with
+                PeriodicReplanningPolicy + PlanExhaustionReplanningPolicy.
         """
         super().__init__(
             agent=agent,
@@ -2209,10 +2222,13 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             if hasattr(self.planner, 'planning_params'):
                 replan_every_n = self.planner.planning_params.replan_every_n_steps
                 replan_on_failure = self.planner.planning_params.replan_on_failure
-            self.replanning_policy = PeriodicReplanningPolicy(
-                replan_every_n_steps=replan_every_n,
-                replan_on_failure=replan_on_failure,
-            )
+            self.replanning_policy = CompositeReplanningPolicy([
+                PeriodicReplanningPolicy(
+                    replan_every_n_steps=replan_every_n,
+                    replan_on_failure=replan_on_failure,
+                ),
+                PlanExhaustionReplanningPolicy(),
+            ])
 
         # Get or create current plan
         self.current_plan = await self.plan_blackboard.get_plan(self.agent.agent_id)
@@ -2336,108 +2352,6 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             logger.warning(f"Failed to get memory architecture guidance: {e}")
             return None
 
-    @override
-    async def execute_iteration(
-        self,
-        state: ActionPolicyExecutionState
-    ) -> ActionPolicyIterationResult:
-        """Execute one planning iteration (model-predictive control)."""
-        # THIS METHOD IS NOT USED - iT IS SUPPOSED TO BE REPLACED BY plan_step below.
-        # Review and remove.
-
-        # TODO: Move all policy state to the state: ActionPolicyExecutionState parameter
-
-        # Check if plan is already complete
-        # Get latest plan from blackboard
-        state.current_plan = await self.plan_blackboard.get_plan(self.agent.agent_id)
-
-        if not state.current_plan:
-            # No plan - create initial plan
-            await self._create_initial_plan()
-            return ActionPolicyIterationResult(success=True, policy_completed=False)
-
-        if state.current_plan.current_action_index >= len(state.current_plan.actions):
-            state.current_plan.status = PlanStatus.COMPLETED
-            state.current_plan.completed_at = time.time()
-            await self.plan_blackboard.update_plan(state.current_plan)
-            return ActionPolicyIterationResult(
-                success=True,
-                policy_completed=True,
-                requires_termination=True,
-                action_executed=None,
-                result=None,
-                blocked_reason=None
-            )
-
-        # Check if replanning needed via policy (MPC)
-        decision = await self.replanning_policy.evaluate_replanning_need(
-            plan=state.current_plan,
-            last_result=None,  # execute_iteration checks before dispatch
-        )
-        if decision.should_replan:
-            await self._replan_horizon(decision)
-
-        # Execute next action (REPL provides dataflow via ActionDispatcher)
-        next_action = state.current_plan.actions[state.current_plan.current_action_index]
-        result: ActionResult = await self.dispatch(next_action)
-
-        # Update plan context
-        state.current_plan.current_action_index += 1
-        state.current_plan.execution_context.completed_action_ids.append(next_action.action_id)
-        state.current_plan.execution_context.action_results[next_action.action_id] = result
-
-        # Check if this was the last action
-        plan_complete = state.current_plan.current_action_index >= len(state.current_plan.actions)
-        if plan_complete:
-            state.current_plan.status = PlanStatus.COMPLETED
-            state.current_plan.completed_at = time.time()
-
-        # Always persist plan state (index, results) — even on failure.
-        # Without this, the re-fetch from blackboard resets the index.
-        await self.plan_blackboard.update_plan(state.current_plan)
-        self.current_plan_id = state.current_plan.plan_id
-        self.current_action_index = state.current_plan.current_action_index
-
-        # Handle iteration result
-        if not result.success:
-            logger.warning(
-                f"Agent {self.agent.agent_id} failed to execute plan "
-                f"{state.current_plan.plan_id} iteration"
-            )
-            # Check if blocked (may need to wait for dependencies)
-            if result.blocked_reason:
-                logger.info(f"Agent {self.agent.agent_id} blocked: {result.blocked_reason}")
-                # Suspend agent until dependencies resolved
-                await self.agent.suspend(reason=f"Blocked: {result.blocked_reason}")
-                return ActionPolicyIterationResult(
-                    success=False,
-                    policy_completed=False,
-                    blocked_reason=result.blocked_reason
-                )
-            # Otherwise just log failure and continue
-            return ActionPolicyIterationResult(
-                success=False,
-                policy_completed=False,
-                action_executed=next_action,
-                result=result,
-            )
-
-        # Check if plan is complete
-        if state.current_plan.is_complete():
-            # Learn from execution outcome
-            await self.planner.learn_from_plan_execution(state.current_plan)
-
-            logger.info(f"Agent {self.agent.agent_id} completed plan {state.current_plan.plan_id}")
-
-        return ActionPolicyIterationResult(
-            success=result.success,
-            policy_completed=plan_complete,
-            requires_termination=plan_complete,
-            action_executed=next_action,
-            result=result,
-            blocked_reason=result.blocked_reason,
-        )
-
     async def plan_step(
         self,
         state: ActionPolicyExecutionState
@@ -2472,8 +2386,6 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             )
         else:
             logger.warning(f"      📋 PLAN_STEP: got plan → None")
-
-        if not state.current_plan:
             # No plan - create initial plan
             logger.warning(
                 f"\n"
@@ -2524,12 +2436,37 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
 
             state.custom["last_action_id"] = None
 
-        # Check if plan complete
+        # MPC: Evaluate replanning need via policy (handles both periodic and plan exhaustion)
         logger.warning(
             f"      📋 PLAN_STEP: idx={state.current_plan.current_action_index} / "
             f"{len(state.current_plan.actions)} actions"
         )
-        if state.current_plan.current_action_index >= len(state.current_plan.actions):
+        decision = await self.replanning_policy.evaluate_replanning_need(
+            state=state,
+            last_result=last_result,
+        )
+
+        if decision.should_replan:
+            logger.warning(f"      📋 PLAN_STEP: !!! REPLANNING triggered: {decision.reason}")
+            # Try to extend the plan via replanning (MPC continuation).
+            # The planner sees the full execution_context (completed actions + results)
+            # and decides if more work is needed or if the goal is satisfied.
+            await self._replan_horizon(decision)
+            # _replan_horizon calls revise_plan which keeps completed actions
+            # and appends new ones. Refresh from self.current_plan.
+            state.current_plan = self.current_plan
+
+            if decision.plan_exhausted and state.current_plan.has_remaining_actions():
+                # Plan exhaustion replan produced continuation actions — keep going
+                logger.warning(
+                    f"      📋 PLAN_STEP: replan produced "
+                    f"{len(state.current_plan.actions) - state.current_plan.current_action_index} "
+                    f"new actions, continuing"
+                )
+                return None  # Will get next action on next iteration
+
+        if decision.plan_exhausted and not state.current_plan.has_remaining_actions():
+            # True completion: plan exhausted AND (planner says done OR budget exceeded)
             logger.warning(f"      📋 PLAN_STEP: ★★★ PLAN COMPLETE ★★★")
             state.current_plan.status = PlanStatus.COMPLETED
             state.current_plan.completed_at = time.time()
@@ -2539,18 +2476,17 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             await self.planner.learn_from_plan_execution(state.current_plan)
 
             logger.info(f"Agent {self.agent.agent_id} completed plan {state.current_plan.plan_id}")
-            state.custom["policy_complete"] = True
-            return None
 
-        # Check if replanning needed via policy (MPC)
-        logger.warning(f"      📋 PLAN_STEP: evaluating replanning need")
-        decision = await self.replanning_policy.evaluate_replanning_need(
-            plan=state.current_plan,
-            last_result=last_result,
-        )
-        if decision.should_replan:
-            logger.warning(f"      📋 PLAN_STEP: !!! REPLANNING triggered: {decision.reason}")
-            await self._replan_horizon(decision)
+            if self.agent.metadata.lifecycle_mode == LifecycleMode.CONTINUOUS:
+                # Signal IDLE via state.custom → execute_iteration reads it → returns idle=True
+                # Agent.run_step() reads idle=True and transitions agent state
+                state.custom["idle"] = True
+                self.replanning_policy.reset_state(state)  # Reset for next work cycle
+                return None
+            else:
+                # ONE_SHOT: signal completion → execute_iteration returns policy_completed=True
+                state.custom["policy_complete"] = True
+                return None
 
         # Get next action and advance index
         next_action = state.current_plan.actions[state.current_plan.current_action_index]
@@ -2558,6 +2494,8 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         state.custom["last_action_id"] = next_action.action_id
 
         # Persist the incremented index so re-fetch from blackboard sees it
+        # Always persist plan state (index, results) — even on failure.
+        # Without this, the re-fetch from blackboard resets the index.
         await self.plan_blackboard.update_plan(state.current_plan)
         self.current_plan_id = state.current_plan.plan_id
         self.current_action_index = state.current_plan.current_action_index

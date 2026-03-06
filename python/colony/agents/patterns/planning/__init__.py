@@ -69,6 +69,7 @@ from .replanning import (
     ReplanningPolicy,
     PeriodicReplanningPolicy,
     AdaptiveReplanningPolicy,
+    PlanExhaustionReplanningPolicy,
     CompositeReplanningPolicy,
 )
 from .strategies import (
@@ -116,6 +117,7 @@ __all__ = [
     "ReplanningPolicy",
     "PeriodicReplanningPolicy",
     "AdaptiveReplanningPolicy",
+    "PlanExhaustionReplanningPolicy",
     "CompositeReplanningPolicy",
     # Strategies
     "PlanningStrategyPolicy",

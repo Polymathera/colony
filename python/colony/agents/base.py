@@ -2437,7 +2437,7 @@ class Agent(BaseModel):
         management. This is necessary for distributed agents that may be
         suspended and resumed across different replicas.
         """
-        if self.state != AgentState.RUNNING:
+        if self.state not in (AgentState.RUNNING, AgentState.IDLE):
             logger.warning(
                 f"Agent {self.agent_id} in state {self.state}, cannot run step"
             )
@@ -2472,9 +2472,22 @@ class Agent(BaseModel):
             logger.warning(
                 f"  ◀ RUN_STEP returned: success={iteration_result.success} "
                 f"completed={iteration_result.policy_completed} "
+                f"idle={iteration_result.idle} "
                 f"action={iteration_result.action_executed}"
             )
-            self.state = AgentState.STOPPED if iteration_result.policy_completed else self.state
+
+            # Policy-driven state transitions
+            if iteration_result.policy_completed:
+                self.state = AgentState.STOPPED
+            elif iteration_result.idle:
+                if self.state != AgentState.IDLE:
+                    self._idle_since = time.time()
+                self.state = AgentState.IDLE
+            elif self.state == AgentState.IDLE:
+                # Policy returned work while we were IDLE — wake up
+                self.state = AgentState.RUNNING
+                self._idle_since = None
+
             if self.state == AgentState.SUSPENDED:
                 logger.info(f"Agent {self.agent_id} has entered SUSPENDED state")
                 # Suspend agent until dependencies resolved
@@ -2485,6 +2498,17 @@ class Agent(BaseModel):
                 # Stop agent gracefully
                 await self.stop()
 
+            if self.state == AgentState.IDLE:
+                timeout = self.metadata.idle_timeout
+                if timeout is not None and hasattr(self, '_idle_since'):
+                    if (time.time() - self._idle_since) > timeout:
+                        logger.info(
+                            f"Agent {self.agent_id} idle timeout ({timeout}s) reached, stopping"
+                        )
+                        await self.stop()
+                        return
+                await self.on_idle()
+
             if iteration_result.error_context:
                 logger.error(
                     f"Agent {self.agent_id} encountered error in run_step: "
@@ -2493,7 +2517,22 @@ class Agent(BaseModel):
                 # Optionally, could set state to FAILED here
                 # self.state = AgentState.FAILED
 
-            await asyncio.sleep(0.1)
+            # Sleep interval: longer when IDLE to avoid busy-looping
+            sleep_interval = (
+                self.metadata.idle_sleep_interval
+                if self.state == AgentState.IDLE
+                else 0.1
+            )
+            await asyncio.sleep(sleep_interval)
+
+    @hookable
+    async def on_idle(self) -> None:
+        """Called each idle cycle. Hook for background work.
+
+        Override or register AROUND/AFTER hooks for memory consolidation,
+        intrinsic goals, health checks, or other idle-time activities.
+        """
+        pass
 
     # === Context Access (Delegated to manager) ===
 

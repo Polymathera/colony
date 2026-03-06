@@ -347,6 +347,7 @@ class RevisionTrigger(str, Enum):
     TIME_LIMIT = "time_limit"  # Execution time exceeded
     EXTERNAL_REQUEST = "external_request"  # External agent/system requests revision
     PERIODIC = "periodic"  # Periodic re-evaluation (MPC)
+    PLAN_EXHAUSTED = "plan_exhausted"  # All actions executed, horizon reached
 
 
 class RevisionStrategy(str, Enum):
@@ -1647,6 +1648,16 @@ class AgentState(str, Enum):
     FAILED = "failed"  # Failed with error
 
 
+class PlanExhaustionBehavior(str, Enum):
+    """What to do when all actions in the current plan have been executed."""
+    REPLAN = "replan"  # Ask planner for continuation (default for MPC agents)
+    STOP = "stop"  # Terminate immediately (legacy behavior)
+
+
+class LifecycleMode(str, Enum):
+    """What to do when the planner confirms no more work is needed."""
+    ONE_SHOT = "one_shot"  # Goal satisfied → STOPPED (default, backward-compatible)
+    CONTINUOUS = "continuous"  # Goal satisfied → IDLE, wait for new events/runs
 
 
 class ActionPolicyIterationResult(BaseModel):
@@ -1663,6 +1674,7 @@ class ActionPolicyIterationResult(BaseModel):
     error_context: ErrorContext | None = None
     requires_termination: bool = False
     blocked_reason: str | None = None
+    idle: bool = False  # Policy requests IDLE state (no work available)
 
     # TODO: Do we need these fields?
     action_executed: Action | None = None
@@ -2577,6 +2589,14 @@ class AgentMetadata(BaseModel):
         ge=1,
         le=100,
         description="Maximum reasoning loop iterations"
+    )
+
+    lifecycle_mode: LifecycleMode = LifecycleMode.ONE_SHOT
+    idle_sleep_interval: float = Field(
+        default=1.0, description="Seconds between idle checks"
+    )
+    idle_timeout: float | None = Field(
+        default=None, description="Seconds in IDLE before auto-stop (None=forever)"
     )
 
     resuming_from_suspension: bool = False

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-
+from overrides import override
 from pydantic import BaseModel, Field
 
 from ...models import (
@@ -28,6 +28,8 @@ from ...models import (
     ActionStatus,
     RevisionStrategy,
     RevisionTrigger,
+    ActionPolicyExecutionState,
+    PlanExhaustionBehavior,
 )
 from .evaluator import PlanEvaluator
 
@@ -42,6 +44,7 @@ class ReplanningDecision(BaseModel):
     """
 
     should_replan: bool = False
+    plan_exhausted: bool = False
     triggers: list[RevisionTrigger] = Field(default_factory=list)
     strategy: RevisionStrategy = RevisionStrategy.INCREMENTAL_REPAIR
     reason: str = ""
@@ -64,7 +67,7 @@ class ReplanningPolicy(ABC):
     @abstractmethod
     async def evaluate_replanning_need(
         self,
-        plan: ActionPlan,
+        state: ActionPolicyExecutionState,
         last_result: ActionResult | None,
     ) -> ReplanningDecision:
         """Evaluate whether the current plan needs replanning.
@@ -72,12 +75,22 @@ class ReplanningPolicy(ABC):
         Called after each action execution in plan_step().
 
         Args:
-            plan: Current plan with execution state
+            state: Current execution state of the action policy
             last_result: Result of last executed action (None on first call
                 or when no previous action result is available)
 
         Returns:
             ReplanningDecision with should_replan, triggers, strategy, reason
+        """
+        ...
+
+    @abstractmethod
+    def reset_state(self, state: ActionPolicyExecutionState) -> None:
+        """Reset any internal state of the replanning policy.
+
+        Called when the current plan is abandoned or completed but the agent
+        is running in continuous mode. This allows policies to clear
+        counters, flags, or other state that should not persist across plans.
         """
         ...
 
@@ -102,9 +115,15 @@ class PeriodicReplanningPolicy(ReplanningPolicy):
         self.replan_every_n_steps = replan_every_n_steps
         self.replan_on_failure = replan_on_failure
 
+    @override
+    def reset_state(self, state: ActionPolicyExecutionState) -> None:
+        """No internal state to reset for periodic replanning."""
+        pass
+
+    @override
     async def evaluate_replanning_need(
         self,
-        plan: ActionPlan,
+        state: ActionPolicyExecutionState,
         last_result: ActionResult | None,
     ) -> ReplanningDecision:
         """Evaluate based on periodic schedule and optional failure detection."""
@@ -119,7 +138,7 @@ class PeriodicReplanningPolicy(ReplanningPolicy):
 
         # Check periodic trigger
         completed = sum(
-            1 for a in plan.actions if a.status == ActionStatus.COMPLETED
+            1 for a in state.current_plan.actions if a.status == ActionStatus.COMPLETED
         )
         if (
             completed > 0
@@ -170,19 +189,25 @@ class AdaptiveReplanningPolicy(ReplanningPolicy):
         self.quality_threshold = quality_threshold
         self.replan_every_n_steps = replan_every_n_steps
 
+    @override
+    def reset_state(self, state: ActionPolicyExecutionState) -> None:
+        """No internal state to reset for periodic replanning."""
+        pass
+
+    @override
     async def evaluate_replanning_need(
         self,
-        plan: ActionPlan,
+        state: ActionPolicyExecutionState,
         last_result: ActionResult | None,
     ) -> ReplanningDecision:
         """Evaluate using multi-signal trigger detection + strategy selection."""
-        triggers = await self._detect_triggers(plan, last_result)
+        triggers = await self._detect_triggers(state.current_plan, last_result)
 
         if not triggers:
             # Also check periodic (as fallback)
             if self.replan_every_n_steps > 0:
                 completed = sum(
-                    1 for a in plan.actions if a.status == ActionStatus.COMPLETED
+                    1 for a in state.current_plan.actions if a.status == ActionStatus.COMPLETED
                 )
                 if completed > 0 and completed % self.replan_every_n_steps == 0:
                     triggers.append(RevisionTrigger.PERIODIC)
@@ -190,7 +215,7 @@ class AdaptiveReplanningPolicy(ReplanningPolicy):
         if not triggers:
             return ReplanningDecision(should_replan=False)
 
-        strategy = self._select_strategy(triggers, plan)
+        strategy = self._select_strategy(triggers, state.current_plan)
         return ReplanningDecision(
             should_replan=True,
             triggers=triggers,
@@ -279,6 +304,80 @@ class AdaptiveReplanningPolicy(ReplanningPolicy):
         return RevisionStrategy.INCREMENTAL_REPAIR
 
 
+class PlanExhaustionReplanningPolicy(ReplanningPolicy):
+    """Triggers replanning when plan is exhausted (no pending actions) but goals not met."""
+
+    def __init__(
+        self,
+        plan_exhaustion_behavior: PlanExhaustionBehavior = PlanExhaustionBehavior.REPLAN,
+        max_replan_cycles: int = 5,
+    ):
+        """Initialize plan exhaustion replanning policy.
+
+        Args:
+            plan_exhaustion_behavior: Behavior when plan is exhausted
+            max_replan_cycles: Maximum number of replan cycles
+        """
+        self._plan_exhaustion_behavior = plan_exhaustion_behavior
+        self._max_replan_cycles = max_replan_cycles
+
+    @override
+    def reset_state(self, state: ActionPolicyExecutionState) -> None:
+        """Reset internal state for periodic replanning."""
+        state.custom["_replan_cycle_count"] = 0
+
+    @override
+    async def evaluate_replanning_need(
+        self,
+        state: ActionPolicyExecutionState,
+        last_result: ActionResult | None,
+    ) -> ReplanningDecision:
+        """Evaluate if replanning is needed due to plan exhaustion."""
+        if state.current_plan.current_action_index < len(state.current_plan.actions):
+            return ReplanningDecision(
+                should_replan=False,
+                plan_exhausted=False,
+            )
+
+        # Plan horizon exhausted — all current actions executed
+        replan_count = state.custom.get("_replan_cycle_count", 0)
+
+        if (
+            self._plan_exhaustion_behavior == PlanExhaustionBehavior.REPLAN
+            and replan_count < self._max_replan_cycles
+        ):
+            # Try to extend the plan via replanning (MPC continuation).
+            # The planner sees the full execution_context (completed actions + results)
+            # and decides if more work is needed or if the goal is satisfied.
+            state.custom["_replan_cycle_count"] = replan_count + 1
+            logger.warning(
+                f"      📋 PLAN_STEP: plan horizon exhausted, "
+                f"attempting replan cycle {replan_count + 1}/{self._max_replan_cycles}"
+            )
+            return ReplanningDecision(
+                should_replan=True,
+                plan_exhausted=True,
+                triggers=[RevisionTrigger.PLAN_EXHAUSTED],
+                strategy=RevisionStrategy.ADD_ACTIONS,
+                reason=(
+                    f"Plan horizon exhausted after {len(state.current_plan.actions)} actions "
+                    f"(replan cycle {replan_count + 1}/{self._max_replan_cycles})"
+                ),
+            )
+
+        # True completion: plan exhausted AND (no replan OR planner says done OR budget exceeded)
+        return ReplanningDecision(
+            should_replan=False,
+            plan_exhausted=True,
+            reason=(
+                f"Plan horizon exhausted after {len(state.current_plan.actions)} actions "
+                f"(replan cycle {replan_count + 1}/{self._max_replan_cycles})"
+            ),
+        )
+
+
+
+
 class CompositeReplanningPolicy(ReplanningPolicy):
     """Runs multiple replanning policies. Triggers if ANY sub-policy says yes.
 
@@ -307,20 +406,37 @@ class CompositeReplanningPolicy(ReplanningPolicy):
             raise ValueError("CompositeReplanningPolicy requires at least one policy")
         self.policies = policies
 
+    @override
+    def reset_state(self, state: ActionPolicyExecutionState) -> None:
+        """Reset the state for all sub-policies."""
+        for policy in self.policies:
+            policy.reset_state(state)
+
+    @override
     async def evaluate_replanning_need(
         self,
-        plan: ActionPlan,
+        state: ActionPolicyExecutionState,
         last_result: ActionResult | None,
     ) -> ReplanningDecision:
         """Evaluate all sub-policies. Trigger if ANY says yes."""
-        decisions: list[ReplanningDecision] = []
+        replan_decisions: list[ReplanningDecision] = []
+        plan_exhausted = False
+        exhaustion_reason = ""
         for policy in self.policies:
-            decision = await policy.evaluate_replanning_need(plan, last_result)
+            decision = await policy.evaluate_replanning_need(state, last_result)
+            if decision.plan_exhausted:
+                plan_exhausted = True
+                if decision.reason:
+                    exhaustion_reason = decision.reason
             if decision.should_replan:
-                decisions.append(decision)
+                replan_decisions.append(decision)
 
-        if not decisions:
-            return ReplanningDecision(should_replan=False)
+        if not replan_decisions:
+            return ReplanningDecision(
+                should_replan=False,
+                plan_exhausted=plan_exhausted,
+                reason=exhaustion_reason,
+            )
 
         # Merge: collect all triggers, use highest-priority strategy
         all_triggers: list[RevisionTrigger] = []
@@ -328,7 +444,7 @@ class CompositeReplanningPolicy(ReplanningPolicy):
         best_strategy = RevisionStrategy.INCREMENTAL_REPAIR
         best_priority = 0
 
-        for d in decisions:
+        for d in replan_decisions:
             all_triggers.extend(d.triggers)
             if d.reason:
                 all_reasons.append(d.reason)
@@ -342,6 +458,7 @@ class CompositeReplanningPolicy(ReplanningPolicy):
 
         return ReplanningDecision(
             should_replan=True,
+            plan_exhausted=plan_exhausted,
             triggers=unique_triggers,
             strategy=best_strategy,
             reason="; ".join(all_reasons),
