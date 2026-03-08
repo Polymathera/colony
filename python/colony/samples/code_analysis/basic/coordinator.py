@@ -613,8 +613,8 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
                 page_graph=page_graph,
                 available_pages=all_page_ids,
                 run_context=RunContext(
-                    goal=self.agent.metadata.parameters.get("goal", "code analysis"),
-                    run_id=self.agent.metadata.run_id,  # TODO: Get it from session context instead of metadata --- IGNORE ---
+                    analysis_goal=self.agent.metadata.parameters.get("goal", "code analysis"),
+                    run_id=self.agent.metadata.run_id,
                 )
             )
 

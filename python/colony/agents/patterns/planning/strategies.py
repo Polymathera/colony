@@ -430,15 +430,43 @@ class PlanningStrategyPolicy(ABC):
 
     @staticmethod
     def _format_recalled_memories(planning_context: PlanningContext) -> str:
-        """Format recalled memories into prompt text."""
+        """Format recalled memories into prompt text.
+
+        Handles different memory entry types stored by producer hooks:
+        - Action entries (from ActionDispatcher.dispatch hook): value is an Action object
+        - Plan entries (from plan creation/replan hooks): value is an ActionPlan object
+        - Generic entries: falls back to string representation
+        """
         if not planning_context.recalled_memories:
             return ""
         lines = ["## Recalled Memories"]
-        for mem in planning_context.recalled_memories[:10]:
-            content = mem.get("content", mem.get("text", str(mem)))
-            scope = mem.get("scope", "")
-            prefix = f"[{scope}] " if scope else ""
-            lines.append(f"- {prefix}{content}")
+        for mem in planning_context.recalled_memories[:10]:  # TODO: make this limit configurable
+            tags = set(mem.get("tags", []))
+            value = mem.get("value")
+
+            # Action entries stored by extract_action_from_dispatch
+            if "action" in tags and hasattr(value, "action_type"):
+                status = value.status.value if hasattr(value.status, "value") else str(value.status)
+                desc = value.description if hasattr(value, "description") else ""
+                result_info = ""
+                if value.result:
+                    result_info = " (success)" if value.result.success else " (failed)"
+                lines.append(f"- [action] {value.action_type}: {desc}{result_info} [{status}]")
+                continue
+
+            # Plan entries stored by extract_plan_from_policy
+            if "plan" in tags and hasattr(value, "actions"):
+                n_actions = len(value.actions) if value.actions else 0
+                plan_status = value.status.value if hasattr(value.status, "value") else str(value.status)
+                lines.append(f"- [plan] {n_actions} actions, status={plan_status}")
+                continue
+
+            # Generic entries — try content/text keys, then str(value)
+            if isinstance(value, str):
+                lines.append(f"- {value}")
+            else:
+                content = str(value)[:200] if value is not None else "(empty)"
+                lines.append(f"- {content}")
         return "\n".join(lines)
 
     @staticmethod
@@ -470,10 +498,10 @@ class PlanningStrategyPolicy(ABC):
     def _build_scope_selection_prompt(self, planning_context: PlanningContext) -> str:
         """Build a lightweight prompt for scope selection (Phase 1).
 
-        Includes only: system identity, goals, minimal execution context, and group summaries.
-        Omits: full action descriptions, memory guidance, recalled memories — those go in Phase 2.
+        Includes: system prompt (agent identity, role, goals, constraints), minimal
+        execution context, and group summaries.
+        Omits: full action descriptions, recalled memories, custom data — those go in Phase 2.
         """
-        goals_str = "\n".join(f"- {g}" for g in planning_context.goals)
         summaries_str = self._format_action_group_summaries(planning_context.action_group_summaries)
 
         # Minimal execution context — just enough for the LLM to know what phase we're in
@@ -484,11 +512,9 @@ class PlanningStrategyPolicy(ABC):
             if completed > 0:
                 exec_hint = f"\n\nExecution progress: {completed} actions completed."
 
-        return f"""You are selecting which action groups are relevant for the current planning step.
+        return f"""{planning_context.system_prompt}
 
-## Goals
-
-{goals_str}
+## Task: Select Relevant Action Groups
 {exec_hint}
 
 ## Available Action Groups
@@ -780,7 +806,7 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
         """Resolve an action key against valid keys.
 
         Returns (resolved_key, resolution_type) where resolution_type is one of:
-        "exact", "suffix", "prefix_strip", "unresolved".
+        "exact", "suffix", "prefix_strip", "method_name", "unresolved".
         """
         if raw_key in valid_keys:
             return raw_key, "exact"
@@ -790,12 +816,17 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
         if len(suffix_matches) == 1:
             return suffix_matches[0], "suffix"
 
-        # Prefix-strip: LLM added a spurious prefix
+        # Prefix-strip: LLM added a spurious prefix (e.g. "working.working_memory_store")
         parts = raw_key.split(".")
         for start in range(1, len(parts)):
             candidate = ".".join(parts[start:])
+            # Check if candidate is a valid key directly
             if candidate in valid_keys:
                 return candidate, "prefix_strip"
+            # Check if candidate matches as a suffix of a valid key
+            candidate_suffix_matches = [k for k in valid_keys if k.endswith(f".{candidate}")]
+            if len(candidate_suffix_matches) == 1:
+                return candidate_suffix_matches[0], "method_name"
 
         return raw_key, "unresolved"
 

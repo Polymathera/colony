@@ -339,7 +339,7 @@ Respond with a structured analysis."""
         return prompt
 
     @action_executor(action_key="reflect")
-    async def reflect(self, context: ReflectionContext) -> Reflection:
+    async def reflect(self, context: ReflectionContext | dict) -> Reflection:
         """Perform self-reflection using memory-gathered context.
 
         Queries memory for recent action results with reflection learnings,
@@ -354,6 +354,9 @@ Respond with a structured analysis."""
 
         # TODO: Do not ask the LLM planner to provide a ReflectionContext.
         # Most of its fields should be gathered from the agent's state directly.
+
+        if isinstance(context, dict):
+            context = ReflectionContext(**context)
 
         focus = context.focus
 

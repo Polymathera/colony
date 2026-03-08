@@ -569,7 +569,7 @@ class WorkingSetCapability(AgentCapability):
         # Create RunContext if needed
         from ...models import RunContext
         if run_context is None:
-            run_context = RunContext(goal="", context={})
+            run_context = RunContext(analysis_goal="")
         elif isinstance(run_context, dict):
             run_context = RunContext(**run_context)
 

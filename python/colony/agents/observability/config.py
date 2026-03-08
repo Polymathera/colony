@@ -28,7 +28,7 @@ class TracingConfig:
     sample_rate: float = 1.0
     max_input_chars: int = 500
     max_output_chars: int = 500
-    max_infer_chars: int = 30000
+    max_infer_chars: int = 200000
     flush_interval: float = 0.5
     flush_batch_size: int = 50
     capture_infer_inputs: bool = True

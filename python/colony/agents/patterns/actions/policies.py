@@ -432,9 +432,17 @@ def _infer_input_schema(func: Callable) -> type[BaseModel] | None:
         hints = {}
 
     fields = {}
+    has_var_keyword = False
     for name, param in sig.parameters.items():
         # Skip 'self' parameter
         if name == 'self':
+            continue
+        # Skip *args and **kwargs — these can't be represented as fixed schema fields.
+        # When **kwargs is present, the generated model is configured with extra="allow"
+        # so that additional fields pass validation and flow through to the function.
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                has_var_keyword = True
             continue
 
         # Get type hint (default to Any)
@@ -453,6 +461,9 @@ def _infer_input_schema(func: Callable) -> type[BaseModel] | None:
     # are JSON-serializable since action executors are called by the LLM planner.
     try:
         model = create_model(f"{func.__name__}_Input", **fields)
+        if has_var_keyword:
+            # Function accepts **kwargs — allow extra fields so they flow through
+            model.model_config["extra"] = "allow"
         # Resolve forward references that live under TYPE_CHECKING in the
         # module where `func` was defined.  We merge that module's namespace
         # with the models module (which contains Action, ActionResult, etc.)
@@ -482,10 +493,16 @@ def _infer_input_schema_excluding_first(func: Callable) -> type[BaseModel] | Non
         hints = {}
 
     fields = {}
+    has_var_keyword = False
     params = list(sig.parameters.items())
 
     # Skip first parameter (the Agent param that gets auto-injected)
     for name, param in params[1:]:
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                has_var_keyword = True
+            continue
+
         # Get type hint (default to Any)
         field_type = hints.get(name, Any)
 
@@ -500,6 +517,8 @@ def _infer_input_schema_excluding_first(func: Callable) -> type[BaseModel] | Non
 
     try:
         model = create_model(f"{func.__name__}_Input", **fields)
+        if has_var_keyword:
+            model.model_config["extra"] = "allow"
         _rebuild_with_forward_refs(model, func)
         return model
     except PydanticSchemaGenerationError:
@@ -2377,6 +2396,13 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
                 ### ],
             )
 
+            # Diagnostic: log what gather_context returned
+            action_entries = [e for e in entries if e.tags and "action" in e.tags]
+            logger.warning(
+                f"gather_context returned {len(entries)} entries "
+                f"({len(action_entries)} actions): {[e.key for e in entries[:10]]}"
+            )
+
             # Convert BlackboardEntry objects to dicts for the planning context
             recalled_memories = []
             for entry in entries:
@@ -2475,6 +2501,18 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
                 # Update plan execution context
                 state.current_plan.execution_context.completed_action_ids.append(last_action_id)
                 state.current_plan.execution_context.action_results[last_action_id] = last_result
+
+                # Update the action's status in the plan so it survives
+                # blackboard round-trips (get_plan re-deserializes the plan,
+                # losing in-memory status changes made by dispatch())
+                last_action = state.current_plan.get_action_by_id(last_action_id)
+                if last_action:
+                    last_action.status = ActionStatus.COMPLETED if last_result.success else ActionStatus.FAILED
+                    last_action.result = last_result
+                else:
+                    logger.warning(
+                        f"Could not find last action {last_action_id} in current plan for agent {self.agent.agent_id}"
+                    )
 
                 # Handle failure
                 if not last_result.success:

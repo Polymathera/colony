@@ -706,9 +706,8 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             page_graph=page_graph,
             available_pages=page_ids,
             run_context=RunContext(
-                goal=f"Impact analysis: {change_description}",
-                change_description=change_description,
-                run_id=run_id,  # TODO: Get it from session context
+                analysis_goal=f"Impact analysis: {change_description}",
+                run_id=run_id,
             )
         )
 

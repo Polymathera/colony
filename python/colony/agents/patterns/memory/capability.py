@@ -1221,7 +1221,7 @@ class MemoryCapability(AgentCapability):
                     if not hasattr(data, "get_blackboard_key"):
                         logger.debug(
                             f"Memory producer data from {ctx.join_point} does not have "
-                            f"get_blackboard_key, skipping storage"
+                            f"get_blackboard_key (type={type(data).__name__}), skipping storage"
                         )
                         continue
 

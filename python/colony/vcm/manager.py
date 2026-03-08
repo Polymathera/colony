@@ -463,7 +463,7 @@ class VirtualContextManager:
             return True
 
         # Add to page fault queue (with lock request if specified)
-        fault_id = self.issue_page_fault(
+        fault_id = await self.issue_page_fault(
             page_ids=[page_id],
             requester_id=agent_id or "unknown",
             priority=priority,

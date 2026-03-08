@@ -331,12 +331,14 @@ class VCMAnalysisCapability(AgentCapability, ABC):
             agent_type=self.get_worker_agent_type(),
             capabilities=[self.get_worker_capability_class().__name__],
             bound_pages=bound_pages,
-            metadata=AgentMetadata({
-                "page_id": page_id,
-                "analysis_params": analysis_params,
-                "coordinator_id": self.agent.agent_id,
-                "scope_id": self.scope_id,
-            }),
+            metadata=AgentMetadata(
+                parameters={
+                    "page_id": page_id,
+                    "analysis_params": analysis_params,
+                    "coordinator_id": self.agent.agent_id,
+                    "scope_id": self.scope_id,
+                },
+            ),
             role=f"worker_{page_id}",
         )
 

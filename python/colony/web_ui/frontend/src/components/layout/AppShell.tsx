@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { TabBar, type Tab } from "./TabBar";
 import { StatusBar } from "./StatusBar";
 import { OverviewTab } from "../dashboard/OverviewTab";
@@ -27,33 +27,49 @@ const TABS: Tab[] = [
   { id: "settings", label: "Settings" },
 ];
 
+// Maps tab id to its component. Lazy-mounted: a tab's component is only created
+// the first time that tab is visited, then kept alive (hidden via display:none)
+// so that component state (e.g. expand/collapse in Traces) survives tab switches.
+const TAB_COMPONENTS: Record<string, React.FC> = {
+  overview: OverviewTab,
+  agents: AgentsTab,
+  sessions: SessionsTab,
+  vcm: VCMTab,
+  graph: PageGraphTab,
+  blackboard: BlackboardTab,
+  interact: InteractTab,
+  logs: LogsTab,
+  traces: TracesTab,
+  metrics: MetricsTab,
+  settings: SettingsTab,
+};
+
 function TabContent({ activeTab }: { activeTab: string }) {
-  switch (activeTab) {
-    case "overview":
-      return <OverviewTab />;
-    case "agents":
-      return <AgentsTab />;
-    case "sessions":
-      return <SessionsTab />;
-    case "vcm":
-      return <VCMTab />;
-    case "graph":
-      return <PageGraphTab />;
-    case "blackboard":
-      return <BlackboardTab />;
-    case "interact":
-      return <InteractTab />;
-    case "logs":
-      return <LogsTab />;
-    case "traces":
-      return <TracesTab />;
-    case "metrics":
-      return <MetricsTab />;
-    case "settings":
-      return <SettingsTab />;
-    default:
-      return null;
-  }
+  const [mounted, setMounted] = useState<Set<string>>(() => new Set([activeTab]));
+
+  useEffect(() => {
+    setMounted((prev) => {
+      if (prev.has(activeTab)) return prev;
+      const next = new Set(prev);
+      next.add(activeTab);
+      return next;
+    });
+  }, [activeTab]);
+
+  return (
+    <>
+      {TABS.map(({ id }) => {
+        if (!mounted.has(id)) return null;
+        const Component = TAB_COMPONENTS[id];
+        if (!Component) return null;
+        return (
+          <div key={id} style={{ display: activeTab === id ? "block" : "none" }}>
+            <Component />
+          </div>
+        );
+      })}
+    </>
+  );
 }
 
 export function AppShell() {

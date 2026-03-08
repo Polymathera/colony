@@ -1285,6 +1285,13 @@ class ActionPlan(BaseModel):
             return self.actions[self.current_action_index]
         return None
 
+    def get_action_by_id(self, action_id: str) -> Action | None:
+        """Get action by ID (searches all actions including sub-plans)."""
+        for action in self.get_all_actions_recursive():
+            if action.action_id == action_id:
+                return action
+        return None
+
     def advance(self) -> None:
         """Move to next action."""
         self.current_action_index += 1

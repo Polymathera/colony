@@ -343,7 +343,7 @@ def extract_action_from_dispatch(ctx: HookContext, result: Any) -> MemoryTagsMet
 
         # Extract learnings from result if available
         # Action executors write learnings to result.output["_reflection_learnings"] and ["_critique_learnings"]
-        if action.result and action.result.output:
+        if action.result and action.result.output and isinstance(action.result.output, dict):
             # Extract reflection learnings for ReflectionCapability
             reflection_learnings = action.result.output.get("_reflection_learnings")
             if reflection_learnings:
@@ -354,7 +354,8 @@ def extract_action_from_dispatch(ctx: HookContext, result: Any) -> MemoryTagsMet
             if critique_learnings:
                 metadata["_critique_learnings"] = critique_learnings
 
-            # Add success/failure tag for easier filtering
+        # Add success/failure tag for easier filtering
+        if action.result:
             if action.result.success:
                 tags.add("success")
             else:
