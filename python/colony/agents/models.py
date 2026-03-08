@@ -336,6 +336,15 @@ class PlanningStrategy(str, Enum):
     MPC = "mpc"  # Model-predictive control (plan horizon, re-evaluate)
 
 
+class PromptFormattingType(str, Enum):
+    """Strategy for formatting action descriptions in the planner prompt."""
+
+    XML = "xml"            # XML tags with explicit copy instructions (default)
+    MARKDOWN = "markdown"  # Markdown list formatting (legacy)
+    ALIAS = "alias"        # Short unique aliases resolved by framework
+    NUMERIC = "numeric"    # Sequential numeric IDs resolved by framework
+
+
 class RevisionTrigger(str, Enum):
     """Triggers that cause plan revision."""
 
@@ -872,6 +881,7 @@ class PlanningParameters(BaseModel):
 
     # Strategy
     strategy: PlanningStrategy = PlanningStrategy.MPC
+    prompt_formatting: PromptFormattingType = PromptFormattingType.XML
 
     # Planning horizon (MPC)
     planning_horizon: int = 5
@@ -2602,6 +2612,10 @@ class AgentMetadata(BaseModel):
     resuming_from_suspension: bool = False
     resumption_priority: int = 0
 
+    enable_repl: bool = Field(
+        default=True,
+        description="Automatically create REPLCapability during agent initialization"
+    )
     action_policy_config: dict[str, Any] = Field(default_factory=dict)
     suspended_agent_id: str | None = None
     max_suspension_duration: float | None = None

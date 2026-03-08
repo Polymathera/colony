@@ -2050,6 +2050,25 @@ class Agent(BaseModel):
         # Phase 1: Instantiate capability blueprints and add to agent.
         await self._instantiate_capability_blueprints(self.capability_blueprints)
 
+        # Phase 1b: Auto-create REPLCapability if enabled and not already present.
+        if self.metadata.enable_repl:
+            from .patterns.actions.repl import REPLCapability
+            if not any(
+                isinstance(cap, REPLCapability) for cap in self._capabilities.values()
+            ):
+                repl_cap = REPLCapability(
+                    agent=self,
+                    capability_key="repl",
+                    allowed_imports=None,     # TODO: Make configurable
+                    restrict_builtins=True,   # TODO: Make configurable
+                    max_execution_time=10.0,  # TODO: Make configurable
+                )
+                await repl_cap.initialize()
+                self.add_capability(
+                    repl_cap,
+                    events_only=False,
+                )
+
         # Phase 2: Create action policy
         # NOTE: Capabilities are NOT passed as action_providers here.
         # They are registered via use_agent_capabilities() in Phase 4,

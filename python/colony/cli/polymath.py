@@ -474,6 +474,8 @@ class AnalysisConfig:
     batch_size: int = 5
     prefetch_depth: int = 2
     extra_capabilities: list[str] = field(default_factory=list)
+    # Planning parameters (strategy, prompt_formatting, horizon, etc.)
+    planning_params: dict[str, Any] = field(default_factory=dict)
     # Analysis-specific parameters (e.g., changes for impact, criteria for slicing)
     parameters: dict[str, Any] = field(default_factory=dict)
 
@@ -895,6 +897,20 @@ paging:
 # --- Analysis Configurations ---
 # Each entry spawns a coordinator agent that manages a team of workers.
 # Multiple analyses can run concurrently on the same paged codebase.
+#
+# Common fields (apply to all analysis types):
+#   type, coordinator_version, max_agents, quality_threshold, max_iterations,
+#   batching_policy, overlap_threshold, batch_size, prefetch_depth,
+#   extra_capabilities, planning_params
+#
+# Analysis-specific fields are extracted into metadata.parameters automatically.
+# Each analysis type declares its own keys in ANALYSIS_REGISTRY["extra_metadata_keys"]:
+#   impact:     changes, change_description
+#   slicing:    slice_criteria
+#   compliance: compliance_types
+#   intent:     granularity
+#   contracts:  formalism
+#   basic:      (none)
 analyses:
 
   # 1. Change Impact Analysis
@@ -910,6 +926,17 @@ analyses:
     overlap_threshold: 0.3
     batch_size: 5
     prefetch_depth: 2
+
+    # --- Planning Parameters ---
+    # Controls the planning strategy and prompt formatting for action selection.
+    # All fields are optional; defaults are used when omitted.
+    # planning_params:
+    #   strategy: mpc              # "mpc", "top_down", "bottom_up", or "hybrid"
+    #   prompt_formatting: xml     # "xml", "markdown", "alias", or "numeric"
+    #   planning_horizon: 5
+    #   replan_every_n_steps: 3
+    #   replan_on_failure: true
+
     changes:
       - file_path: "src/main.py"
         change_type: modification
@@ -1563,6 +1590,7 @@ async def run_integration_test(
                 },
                 "prefetch_depth": analysis.prefetch_depth,
                 "analysis_type": analysis.type,
+                "planning_params": analysis.planning_params,
                 **analysis.parameters,
             },
         )

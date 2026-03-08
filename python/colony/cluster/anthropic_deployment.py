@@ -83,8 +83,10 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             top_p: Nucleus sampling parameter
-            json_schema: Optional JSON schema (not natively supported by Anthropic,
-                         but we can instruct via prompt)
+            json_schema: Accepted for interface compatibility but intentionally
+                         unused. Anthropic has no native schema enforcement at the decoding level.
+                         Callers include format instructions in the prompt, and
+                         responses are validated via model_validate_json().
 
         Returns:
             Normalized APIResponse with usage and cost data
@@ -100,6 +102,28 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         # Add system prompt if present
         if "system" in messages:
             kwargs["system"] = messages["system"]
+
+        ### # When json_schema is provided, inject it as a constraint instruction
+        ### # into the last user message. Anthropic doesn't have native schema
+        ### # enforcement like OpenAI's strict mode, but Claude follows schema
+        ### # instructions reliably when given explicitly.
+        ### if json_schema:
+        ###     import json as _json
+        ###     schema_instruction = (
+        ###         "\n\nYou MUST respond with JSON that conforms to the following JSON schema. "
+        ###         "Do NOT include any text outside the JSON object.\n"
+        ###         f"```json\n{_json.dumps(json_schema, indent=2)}\n```"
+        ###     )
+        ###     msgs = kwargs["messages"]
+        ###     if msgs and isinstance(msgs[-1].get("content"), list):
+        ###         # Append to the last text block of the last user message
+        ###         last_content = msgs[-1]["content"]
+        ###         for block in reversed(last_content):
+        ###             if isinstance(block, dict) and block.get("type") == "text":
+        ###                 block["text"] += schema_instruction
+        ###                 break
+        ###     elif msgs and isinstance(msgs[-1].get("content"), str):
+        ###         msgs[-1]["content"] += schema_instruction
 
         logger.info(
             f"Anthropic API request: model={self.config.model_name}, "

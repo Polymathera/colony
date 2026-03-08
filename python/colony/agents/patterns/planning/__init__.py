@@ -73,8 +73,10 @@ from .replanning import (
     CompositeReplanningPolicy,
 )
 from .strategies import (
+    AliasPromptFormatting,
     BottomUpPlanningStrategy,
     ModelPredictiveControlStrategy,
+    NumericIDPromptFormatting,
     PlanningStrategyPolicy,
     PromptFormattingStrategy,
     MarkdownPromptFormatting,
@@ -128,6 +130,8 @@ __all__ = [
     "PromptFormattingStrategy",
     "MarkdownPromptFormatting",
     "XMLPromptFormatting",
+    "AliasPromptFormatting",
+    "NumericIDPromptFormatting",
     "ModelPredictiveControlStrategy",
     "TopDownPlanningStrategy",
     "BottomUpPlanningStrategy",

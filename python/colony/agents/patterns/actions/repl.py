@@ -43,9 +43,11 @@ from ....utils import setup_logger
 from ...models import PolicyREPL
 from .backing_store import BackingStore, BlackboardBackingStore, StorageHint
 
+from ...base import AgentCapability
+
 if TYPE_CHECKING:
     from ...base import Agent
-    from ...models import Action, ActionResult
+    from ...models import Action, ActionResult, AgentSuspensionState
 
 logger = setup_logger(__name__)
 
@@ -984,7 +986,7 @@ class PolicyPythonREPL(PolicyREPL):
 # =============================================================================
 
 
-class REPLCapability:
+class REPLCapability(AgentCapability):
     """Capability that provides REPL execution context.
 
     Wraps PolicyPythonREPL and exposes it as an AgentCapability
@@ -1004,11 +1006,18 @@ class REPLCapability:
         # ActionDispatcher discovers it automatically
         # LLM can now generate EXECUTE_CODE actions
         ```
+
+    Agents can also enable REPL via metadata:
+        ```python
+        agent = Agent(metadata=AgentMetadata(enable_repl=True))
+        # REPLCapability is created automatically during initialization
+        ```
     """
 
     def __init__(
         self,
         agent: "Agent",
+        capability_key: str = "repl",
         backing_stores: dict[str, BackingStore] | None = None,
         allowed_imports: list[str] | None = None,
         restrict_builtins: bool = True,
@@ -1018,13 +1027,17 @@ class REPLCapability:
 
         Args:
             agent: Agent that owns this capability
+            capability_key: Unique key for this capability within the agent (default: "repl")
             backing_stores: Map of store name -> BackingStore implementation
             allowed_imports: List of allowed import module names
             restrict_builtins: If True, restrict dangerous builtins
             max_execution_time: Max seconds for code execution
         """
-        self._agent = agent
-        self._scope_id = f"repl:{agent.agent_id}"
+        super().__init__(
+            agent=agent,
+            scope_id=f"repl:{agent.agent_id}",
+            capability_key=capability_key
+        )
 
         # Create underlying REPL
         self._repl = PolicyPythonREPL(
@@ -1040,22 +1053,16 @@ class REPLCapability:
         self._initialized = False
 
     @property
-    def agent(self) -> "Agent":
-        """Get the owning agent."""
-        return self._agent
-
-    @property
-    def scope_id(self) -> str:
-        """Get the capability scope ID."""
-        return self._scope_id
-
-    @property
     def repl(self) -> PolicyPythonREPL:
         """Get the underlying REPL instance."""
         return self._repl
 
+    @override
     async def initialize(self) -> None:
         """Initialize capability."""
+        if self._initialized:
+            return
+        await super().initialize()
         self._initialized = True
 
     async def execute_code(self, code: str) -> dict[str, Any]:
@@ -1140,6 +1147,18 @@ class REPLCapability:
         if repl_data:
             capability._repl = PolicyPythonREPL.from_dict(repl_data, agent)
         return capability
+
+    @override
+    async def serialize_suspension_state(self, state: "AgentSuspensionState") -> "AgentSuspensionState":
+        state.custom_data[self.capability_key] = self.to_dict()
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: "AgentSuspensionState") -> None:
+        data = state.custom_data.get(self.capability_key, {})
+        repl_data = data.get("repl_state", {})
+        if repl_data:
+            self._repl = PolicyPythonREPL.from_dict(repl_data, self.agent)
 
 
 # =============================================================================

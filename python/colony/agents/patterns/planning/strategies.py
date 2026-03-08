@@ -126,6 +126,15 @@ class PromptFormattingStrategy(ABC):
         """Return the instruction text for the action_type field in the JSON output format."""
         ...
 
+    def resolve_action_key(self, raw_key: str) -> str | None:
+        """Resolve a key emitted by the LLM back to the full action key.
+
+        Override in strategies that use aliases or numeric IDs. Returns None
+        if this strategy has no special resolution (fall through to default
+        suffix/prefix matching in _resolve_action_key).
+        """
+        return None
+
 
 class MarkdownPromptFormatting(PromptFormattingStrategy):
     """Original markdown list formatting (legacy).
@@ -159,6 +168,8 @@ class XMLPromptFormatting(PromptFormattingStrategy):
           <description>Group description</description>
           <action key="ClassName.hash.action_name">Action description</action>
         </action-group>
+
+    Includes explicit copy instructions (strategy A2) to reduce truncation.
     """
 
     @override
@@ -171,11 +182,153 @@ class XMLPromptFormatting(PromptFormattingStrategy):
             for action_key, action_desc in group.action_descriptions.items():
                 sections.append(f'  <action key="{action_key}">{action_desc}</action>')
             sections.append("</action-group>")
+        sections.append("")
+        sections.append(
+            "CRITICAL: The action_type value MUST be copied EXACTLY from the key= attribute "
+            "of an <action> element above. Include ALL parts: ClassName.hash.method_name. "
+            "Do NOT abbreviate, truncate, or modify the key in any way."
+        )
         return "\n".join(sections)
 
     @override
     def format_action_type_instruction(self) -> str:
         return '"action_type": "<the exact key= attribute from an <action> element above>"'
+
+
+class AliasPromptFormatting(PromptFormattingStrategy):
+    """Short alias formatting — LLM outputs human-readable action aliases, framework resolves.
+
+    Generates short, unique aliases from the method name suffix of each action key.
+    The LLM outputs the alias; the framework resolves it to the full key.
+
+    Example prompt output:
+        <action-group name="consciousness">
+          <action alias="update_self_concept" key="ConsciousnessCapability.b79b5858.consciousness_update_self_concept">
+            Update the agent's self-concept...
+          </action>
+        </action-group>
+
+    LLM outputs: "action_type": "update_self_concept"
+    Framework resolves to: "ConsciousnessCapability.b79b5858.consciousness_update_self_concept"
+    """
+
+    def __init__(self):
+        self._alias_to_key: dict[str, str] = {}
+
+    @staticmethod
+    def _generate_alias(full_key: str, all_keys: list[str]) -> str:
+        """Extract shortest unambiguous suffix as alias."""
+        parts = full_key.split(".")
+        if len(parts) < 2:
+            return full_key
+        suffix = parts[-1]
+        # Check if suffix is unique across all keys
+        if sum(1 for k in all_keys if k.split(".")[-1] == suffix) == 1:
+            return suffix
+        # Prefix with short group name for disambiguation
+        group = parts[0].replace("Capability", "").lower()
+        return f"{group}.{suffix}"
+
+    @override
+    def format_action_descriptions(self, action_descriptions: list[ActionGroupDescription]) -> str:
+        self._alias_to_key.clear()
+        all_keys = [
+            key
+            for group in action_descriptions
+            for key in group.action_descriptions
+        ]
+
+        # Pre-compute aliases and detect collisions
+        key_to_alias: dict[str, str] = {}
+        alias_counts: dict[str, int] = {}
+        for full_key in all_keys:
+            alias = self._generate_alias(full_key, all_keys)
+            alias_counts[alias] = alias_counts.get(alias, 0) + 1
+            key_to_alias[full_key] = alias
+
+        # Resolve collisions: if alias maps to multiple keys, use the full key
+        for full_key, alias in key_to_alias.items():
+            if alias_counts[alias] > 1:
+                key_to_alias[full_key] = full_key
+
+        sections = []
+        for group in action_descriptions:
+            group_name = group.group_key.split(".")[0].replace("Capability", "").lower() if group.group_key else "unknown"
+            sections.append(f'<action-group name="{group_name}">')
+            if group.group_description:
+                sections.append(f"  <description>{group.group_description}</description>")
+            for action_key, action_desc in group.action_descriptions.items():
+                alias = key_to_alias[action_key]
+                self._alias_to_key[alias] = action_key
+                sections.append(
+                    f'  <action alias="{alias}" key="{action_key}">{action_desc}</action>'
+                )
+            sections.append("</action-group>")
+        sections.append("")
+        sections.append(
+            'Use the alias= value for action_type (e.g. "update_self_concept"), '
+            "NOT the full key. The framework resolves aliases automatically."
+        )
+        return "\n".join(sections)
+
+    @override
+    def format_action_type_instruction(self) -> str:
+        return '"action_type": "<the alias= value from an <action> element above>"'
+
+    @override
+    def resolve_action_key(self, raw_key: str) -> str | None:
+        return self._alias_to_key.get(raw_key)
+
+
+class NumericIDPromptFormatting(PromptFormattingStrategy):
+    """Numeric ID formatting — LLM outputs an integer, framework resolves to full key.
+
+    Assigns each action a sequential integer. The LLM outputs just the number,
+    eliminating the string-copying problem entirely.
+
+    Example prompt output:
+        ## Available Actions
+        [1] Update self-concept (ConsciousnessCapability) — Update the agent's self-concept...
+        [2] Get self-concept (ConsciousnessCapability) — Get the agent's current self-concept...
+
+    LLM outputs: "action_type": 1
+    Framework resolves to: "ConsciousnessCapability.b79b5858.consciousness_update_self_concept"
+    """
+
+    def __init__(self):
+        self._id_to_key: dict[str, str] = {}
+
+    @override
+    def format_action_descriptions(self, action_descriptions: list[ActionGroupDescription]) -> str:
+        self._id_to_key.clear()
+        sections = ["## Available Actions\n"]
+        idx = 1
+        for group in action_descriptions:
+            group_name = group.group_key.split(".")[0] if group.group_key else "Unknown"
+            if group.group_description:
+                sections.append(f"### {group.group_description}")
+            for action_key, action_desc in group.action_descriptions.items():
+                self._id_to_key[str(idx)] = action_key
+                # Show short method name + group for readability
+                method = action_key.split(".")[-1] if "." in action_key else action_key
+                sections.append(f"[{idx}] {method} ({group_name}) — {action_desc}")
+                idx += 1
+            sections.append("")
+        sections.append(
+            "Use the number in brackets (e.g. 1, 2, 3) as the action_type value. "
+            "Do NOT use the action name or full key."
+        )
+        return "\n".join(sections)
+
+    @override
+    def format_action_type_instruction(self) -> str:
+        return '"action_type": <number from the brackets [N] above>'
+
+    @override
+    def resolve_action_key(self, raw_key: str) -> str | None:
+        # Handle both "1" and 1 (LLM may emit either)
+        key = str(raw_key).strip().strip('"')
+        return self._id_to_key.get(key)
 
 
 class PlanningStrategyPolicy(ABC):
@@ -608,22 +761,100 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
                 actions=[],
             )
 
-    def _convert_actions(self, action_specs: list[ActionSpec]) -> list[Action]:
+    @staticmethod
+    def _get_valid_action_keys(planning_context: PlanningContext) -> set[str]:
+        """Extract all valid action keys from planning context action descriptions."""
+        valid_keys: set[str] = set()
+        for group in planning_context.action_descriptions:
+            for key in group.action_descriptions:
+                valid_keys.add(key)
+        # Also include built-in ActionType enum values
+        for at in ActionType:
+            valid_keys.add(at.value)
+        return valid_keys
+
+    @staticmethod
+    def _resolve_action_key(
+        raw_key: str, valid_keys: set[str]
+    ) -> tuple[str, str]:
+        """Resolve an action key against valid keys.
+
+        Returns (resolved_key, resolution_type) where resolution_type is one of:
+        "exact", "suffix", "prefix_strip", "unresolved".
+        """
+        if raw_key in valid_keys:
+            return raw_key, "exact"
+
+        # Suffix match: LLM emitted just the method name
+        suffix_matches = [k for k in valid_keys if k.endswith(f".{raw_key}")]
+        if len(suffix_matches) == 1:
+            return suffix_matches[0], "suffix"
+
+        # Prefix-strip: LLM added a spurious prefix
+        parts = raw_key.split(".")
+        for start in range(1, len(parts)):
+            candidate = ".".join(parts[start:])
+            if candidate in valid_keys:
+                return candidate, "prefix_strip"
+
+        return raw_key, "unresolved"
+
+    def _convert_actions(
+        self,
+        action_specs: list[ActionSpec],
+        valid_action_keys: set[str] | None = None,
+    ) -> list[Action]:
         """Convert ActionSpec objects to Action objects.
 
         action_type may be an ActionType enum value (e.g. "tool_use") or a
         capability action key (e.g. "AgentContextEngine.8dd64d54.inspect_memory_map").
         Action.action_type is typed ActionType | str, and the dispatcher uses
         str(action.action_type) for executor lookup, so both forms work.
+
+        If valid_action_keys is provided, validates and attempts to resolve
+        invalid keys via suffix/prefix matching.  Logs metrics for monitoring.
         """
         actions = []
+        exact_matches = 0
+        fuzzy_matches = 0
+        unresolved = 0
+
         for i, spec in enumerate(action_specs):
+            raw_key = spec.action_type
+
+            # Validate and resolve if valid keys are available
+            if valid_action_keys is not None:
+                # First, try the formatting strategy's alias/numeric resolution
+                strategy_resolved = self.prompt_formatting.resolve_action_key(raw_key)
+                if strategy_resolved and strategy_resolved in valid_action_keys:
+                    exact_matches += 1
+                    raw_key = strategy_resolved
+                else:
+                    resolved_key, resolution = self._resolve_action_key(
+                        raw_key, valid_action_keys
+                    )
+                    if resolution == "exact":
+                        exact_matches += 1
+                    elif resolution in ("suffix", "prefix_strip"):
+                        fuzzy_matches += 1
+                        logger.warning(
+                            f"Action key resolved ({resolution}): "
+                            f"'{raw_key}' → '{resolved_key}'"
+                        )
+                        raw_key = resolved_key
+                    else:
+                        unresolved += 1
+                        logger.error(
+                            f"Unresolved action key: '{raw_key}' — "
+                            f"no match in {len(valid_action_keys)} valid keys"
+                        )
+
             # Prefer ActionType enum when it matches; otherwise keep the raw
             # action key string — the dispatcher resolves it against executors.
             try:
-                action_type: ActionType | str = ActionType(spec.action_type)
+                action_type: ActionType | str = ActionType(raw_key)
             except ValueError:
-                action_type = spec.action_type
+                action_type = raw_key
 
             actions.append(
                 Action(
@@ -636,6 +867,15 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
                     expected_outcome=spec.expected_outcome,
                 )
             )
+
+        total = len(action_specs)
+        if valid_action_keys is not None and total > 0:
+            logger.info(
+                f"Action key accuracy: {exact_matches}/{total} exact, "
+                f"{fuzzy_matches}/{total} fuzzy-resolved, "
+                f"{unresolved}/{total} unresolved"
+            )
+
         return actions
 
     def _build_planning_prompt(
@@ -835,8 +1075,9 @@ class ModelPredictiveControlStrategy(PlanningStrategyPolicy):
                 "parent": goal_node.parent,
             }
 
-        # Convert actions
-        actions = self._convert_actions(plan_response.actions)[: params.planning_horizon]
+        # Convert actions (with key validation)
+        valid_keys = self._get_valid_action_keys(planning_context)
+        actions = self._convert_actions(plan_response.actions, valid_keys)[: params.planning_horizon]
 
         return ActionPlan(
             plan_id=f"plan_{int(time.time() * 1000)}",
@@ -882,7 +1123,8 @@ class ModelPredictiveControlStrategy(PlanningStrategyPolicy):
 
         # Parse using pydantic
         replan_response = self._parse_replanning_response(response)
-        new_actions = self._convert_actions(replan_response.actions)[: params.planning_horizon]
+        valid_keys = self._get_valid_action_keys(planning_context)
+        new_actions = self._convert_actions(replan_response.actions, valid_keys)[: params.planning_horizon]
         return new_actions
 
     def _build_replanning_prompt(self, plan: ActionPlan, planning_context: PlanningContext, params: PlanningParameters) -> str:
@@ -1006,7 +1248,8 @@ class TopDownPlanningStrategy(PlanningStrategyPolicy):
             json_schema=ReplanningResponse.model_json_schema(),  # Reuse replanning response for actions
         )
         action_data = self._parse_replanning_response(action_response)
-        actions = self._convert_actions(action_data.actions)[: params.planning_horizon]
+        valid_keys = self._get_valid_action_keys(planning_context)
+        actions = self._convert_actions(action_data.actions, valid_keys)[: params.planning_horizon]
 
         return ActionPlan(
             plan_id=f"plan_{int(time.time() * 1000)}",
@@ -1054,7 +1297,8 @@ class TopDownPlanningStrategy(PlanningStrategyPolicy):
             json_schema=ReplanningResponse.model_json_schema(),
         )
         replan_data = self._parse_replanning_response(response)
-        return self._convert_actions(replan_data.actions)[: params.planning_horizon]
+        valid_keys = self._get_valid_action_keys(planning_context)
+        return self._convert_actions(replan_data.actions, valid_keys)[: params.planning_horizon]
 
 
 class BottomUpPlanningStrategy(PlanningStrategyPolicy):
@@ -1087,7 +1331,8 @@ class BottomUpPlanningStrategy(PlanningStrategyPolicy):
             json_schema=ReplanningResponse.model_json_schema(),
         )
         action_data = self._parse_replanning_response(action_response)
-        actions = self._convert_actions(action_data.actions)[: params.planning_horizon]
+        valid_keys = self._get_valid_action_keys(planning_context)
+        actions = self._convert_actions(action_data.actions, valid_keys)[: params.planning_horizon]
 
         # Step 2: Infer goal hierarchy from actions
         hierarchy_prompt = f"""Given these actions, infer the goal hierarchy:
@@ -1176,24 +1421,42 @@ Respond with ONLY a JSON object (no markdown fences, no surrounding text) in thi
             json_schema=ReplanningResponse.model_json_schema(),
         )
         replan_data = self._parse_replanning_response(response)
-        return self._convert_actions(replan_data.actions)[: params.planning_horizon]
+        valid_keys = self._get_valid_action_keys(planning_context)
+        return self._convert_actions(replan_data.actions, valid_keys)[: params.planning_horizon]
+
+
+def _get_prompt_formatting(params: PlanningParameters) -> PromptFormattingStrategy:
+    """Resolve prompt formatting strategy from parameters."""
+    from ...models import PromptFormattingType
+
+    fmt = params.prompt_formatting
+    if fmt == PromptFormattingType.MARKDOWN:
+        return MarkdownPromptFormatting()
+    elif fmt == PromptFormattingType.ALIAS:
+        return AliasPromptFormatting()
+    elif fmt == PromptFormattingType.NUMERIC:
+        return NumericIDPromptFormatting()
+    else:  # XML (default)
+        return XMLPromptFormatting()
 
 
 def get_default_planning_strategy(params: PlanningParameters, agent: Agent | None = None) -> PlanningStrategyPolicy:
     """Get default planning strategy based on parameters.
-    
+
     Args:
         params: Planning parameters
         agent: Optional agent reference (can be set later via set_agent())
     """
     from ...models import PlanningStrategy
 
+    formatting = _get_prompt_formatting(params)
+
     if params.strategy == PlanningStrategy.MPC:
-        return ModelPredictiveControlStrategy(horizon=params.planning_horizon, agent=agent)
+        return ModelPredictiveControlStrategy(horizon=params.planning_horizon, agent=agent, prompt_formatting=formatting)
     elif params.strategy == PlanningStrategy.TOP_DOWN:
-        return TopDownPlanningStrategy(agent=agent)
+        return TopDownPlanningStrategy(agent=agent, prompt_formatting=formatting)
     elif params.strategy == PlanningStrategy.BOTTOM_UP:
-        return BottomUpPlanningStrategy(agent=agent)
+        return BottomUpPlanningStrategy(agent=agent, prompt_formatting=formatting)
     else:  # HYBRID
-        return ModelPredictiveControlStrategy(horizon=params.planning_horizon, agent=agent)
+        return ModelPredictiveControlStrategy(horizon=params.planning_horizon, agent=agent, prompt_formatting=formatting)
 

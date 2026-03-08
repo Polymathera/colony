@@ -1056,12 +1056,64 @@ class ActionDispatcher:
             return result
 
     def _get_executor_for_action(self, action: Action) -> ActionExecutor | None:
-        """Get the executor for a given action by exact key match."""
+        """Get the executor for a given action by exact key match,
+        followed by fuzzy fallback.
+
+        Tries exact match first.  If that fails, attempts suffix matching
+        (the most common LLM error is emitting only the method-name suffix
+        instead of the full ``ClassName.hash.method_name`` compound key).
+        """
         action_key = str(action.action_type)
+
+        # 1. Exact match
         for group in self.action_map:
             if action_key in group.executors:
                 return group.executors[action_key]
+
+        # 2. Suffix match — handles the common LLM truncation error
+        resolved_key, executor = self._resolve_action_key_fuzzy(action_key)
+        if executor is not None:
+            logger.warning(
+                f"Resolved truncated action key: '{action_key}' → '{resolved_key}'"
+            )
+            # Patch the action so downstream code sees the correct key
+            action.action_type = resolved_key
+            return executor
+
         return None
+
+    def _resolve_action_key_fuzzy(
+        self, raw_key: str
+    ) -> tuple[str | None, ActionExecutor | None]:
+        """Attempt to resolve an invalid action key via suffix or similarity matching.
+
+        Returns (resolved_key, executor) or (None, None) if no match.
+        """
+        all_executors: dict[str, ActionExecutor] = {}
+        for group in self.action_map:
+            all_executors.update(group.executors)
+
+        if not all_executors:
+            return None, None
+
+        # Suffix match: raw_key might be just the method name
+        suffix_matches = [
+            (k, e) for k, e in all_executors.items()
+            if k.endswith(f".{raw_key}")
+        ]
+        if len(suffix_matches) == 1:
+            return suffix_matches[0]
+
+        # Prefix-stripped match: raw_key has a spurious prefix
+        # e.g., "working.WorkingMemoryCapability.abc123.store" → try removing
+        # tokens from the front until we get a match.
+        parts = raw_key.split(".")
+        for start in range(1, len(parts)):
+            candidate = ".".join(parts[start:])
+            if candidate in all_executors:
+                return candidate, all_executors[candidate]
+
+        return None, None
 
     async def _dispatch_action(
         self,
