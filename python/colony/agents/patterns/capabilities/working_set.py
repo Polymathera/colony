@@ -557,7 +557,10 @@ class WorkingSetCapability(AgentCapability):
             - pages_loaded: Number of pages loaded
         """
         if self.coordination_policy is None:
-            return {"initialized": False, "reason": "no_coordination_policy"}
+            from ...cache_coordination import create_default_cache_aware_coordination_policy
+            self.coordination_policy = await create_default_cache_aware_coordination_policy(
+                agent=self.agent
+            )
 
         # Load page graph
         page_graph: nx.DiGraph | None = await self.agent.load_page_graph()

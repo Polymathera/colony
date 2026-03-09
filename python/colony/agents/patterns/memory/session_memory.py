@@ -224,12 +224,17 @@ class SessionMemoryCapability(MemoryCapability):
         effective_query = query or MemoryQuery()
 
         if session_id:
-            # Add session tag filter
-            session_tags = set(effective_query.tags) if effective_query.tags else set()
-            session_tags.add(f"session:{session_id}")
+            # Add session tag to the all_of filter
+            from .types import TagFilter
+            merged_all_of = set(effective_query.tag_filter.all_of)
+            merged_all_of.add(f"session:{session_id}")
             effective_query = MemoryQuery(
                 query=effective_query.query,
-                tags=session_tags,
+                tag_filter=TagFilter(
+                    all_of=merged_all_of,
+                    any_of=effective_query.tag_filter.any_of,
+                    none_of=effective_query.tag_filter.none_of,
+                ),
                 max_results=effective_query.max_results,
                 min_relevance=effective_query.min_relevance,
                 include_expired=effective_query.include_expired,

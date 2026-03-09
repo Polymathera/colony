@@ -1,6 +1,8 @@
 
 
 ```shell
+poetry lock --no-update && poetry install --all-extras
+
 cd colony/test_runs
 
 ../python/colony/cli/polymath init-config --output my_analysis.yaml

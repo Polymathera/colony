@@ -29,40 +29,106 @@ if TYPE_CHECKING:
     from ...models import Action
 
 
+class TagFilter(BaseModel):
+    """Logical filter expression over entry tags.
+
+    Supports AND (all_of), OR (any_of), NOT (none_of) combinators.
+    The LLM planner constructs these to do precise tag-based retrieval.
+
+    Example:
+        ```python
+        # Entries that are actions AND successful
+        TagFilter(all_of={"action", "success"})
+
+        # Entries that are either infer or plan actions
+        TagFilter(any_of={"action_type:infer", "action_type:plan"})
+
+        # Successful actions, excluding infer
+        TagFilter(all_of={"action", "success"}, none_of={"action_type:infer"})
+        ```
+    """
+
+    all_of: set[str] = Field(
+        default_factory=set,
+        description="Entry must have ALL of these tags",
+    )
+    any_of: set[str] = Field(
+        default_factory=set,
+        description="Entry must have at least ONE of these tags",
+    )
+    none_of: set[str] = Field(
+        default_factory=set,
+        description="Entry must have NONE of these tags",
+    )
+
+    def matches(self, entry_tags: set[str]) -> bool:
+        """Check if a set of entry tags satisfies this filter."""
+        if self.all_of and not self.all_of.issubset(entry_tags):
+            return False
+        if self.any_of and not self.any_of.intersection(entry_tags):
+            return False
+        if self.none_of and self.none_of.intersection(entry_tags):
+            return False
+        return True
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.all_of and not self.any_of and not self.none_of
+
+
 class MemoryQuery(BaseModel):
     """Query parameters for recalling memories.
 
     Used by `MemoryCapability.recall()` and `AgentContextEngine.gather_context()`.
 
-    This is the interface exposed to the LLM for memory retrieval. The LLM
-    can specify what kind of memories to retrieve based on:
-    - Semantic similarity (query string)
-    - Tags (categorical filtering)
-    - Recency (temporal filtering)
-    - Access patterns (frequency-based filtering)
+    Supports three query modes based on which fields are populated:
+    - **Semantic**: `query` text for vector similarity search
+    - **Logical**: `tag_filter`, `time_range`, `key_pattern` for structured filtering
+    - **Hybrid**: both semantic + logical (results are filtered then ranked by similarity)
+
+    The LLM planner constructs MemoryQuery objects. Use `list_tags` action to
+    discover available tags before constructing tag-based queries.
 
     Example:
         ```python
-        # LLM-generated query
-        memories = await stm.recall(MemoryQuery(
-            query="What did the user say about authentication?",
-            tags=["user_input", "security"],
+        # Semantic query
+        MemoryQuery(query="What authentication approach was used?")
+
+        # Logical query by tags
+        MemoryQuery(tag_filter=TagFilter(all_of={"action", "success"}))
+
+        # Hybrid: semantic + tag filter
+        MemoryQuery(
+            query="security analysis results",
+            tag_filter=TagFilter(any_of={"action_type:infer", "action_type:plan"}),
             max_results=10,
-            min_relevance=0.7,
-        ))
+        )
         ```
     """
 
+    # Semantic search
     query: str | None = Field(
         default=None,
-        description="Semantic query string for similarity search"
+        description="Natural language query for semantic similarity search",
     )
 
-    tags: set[str] = Field(
-        default_factory=set,
-        description="Filter by tags (intersection with entry tags)"
+    # Logical filters
+    tag_filter: TagFilter = Field(
+        default_factory=TagFilter,
+        description="Tag filter with AND/OR/NOT logic for precise retrieval",
     )
 
+    time_range: tuple[float, float] | None = Field(
+        default=None,
+        description="(start_timestamp, end_timestamp) absolute time filter",
+    )
+
+    key_pattern: str | None = Field(
+        default=None,
+        description="Key glob pattern filter (e.g., 'scope:Action:*')",
+    )
+
+    # Result control
     max_results: int = Field(
         default=10,
         ge=1,
@@ -74,7 +140,7 @@ class MemoryQuery(BaseModel):
         default=0.0,
         ge=0.0,
         le=1.0,
-        description="Minimum relevance score for semantic search (0-1)"
+        description="Minimum relevance score (0-1). Applied to semantic scores.",
     )
 
     include_expired: bool = Field(
@@ -86,6 +152,21 @@ class MemoryQuery(BaseModel):
         default=None,
         description="Only return memories created within this time window"
     )
+
+    @property
+    def has_semantic(self) -> bool:
+        """Whether this query requests semantic similarity search."""
+        return bool(self.query)
+
+    @property
+    def has_logical(self) -> bool:
+        """Whether this query has logical filter constraints."""
+        return (
+            not self.tag_filter.is_empty
+            or self.time_range is not None
+            or self.key_pattern is not None
+            or self.max_age_seconds is not None
+        )
 
 
 class MemoryRecord(BaseModel):

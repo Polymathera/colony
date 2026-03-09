@@ -26,8 +26,8 @@ class TracingConfig:
     kafka_bootstrap: str = "kafka:9092"
     kafka_topic: str = "colony.spans"
     sample_rate: float = 1.0
-    max_input_chars: int = 500
-    max_output_chars: int = 500
+    max_input_chars: int = 1500
+    max_output_chars: int = 1500
     max_infer_chars: int = 200000
     flush_interval: float = 0.5
     flush_batch_size: int = 50

@@ -69,6 +69,28 @@ class FileGrouperWithGraph(FileGrouper):
         self._last_graph: nx.DiGraph | None = None
         self._last_graph_metadata: dict[str, Any] = {}
 
+    async def group_files(self, group_id, repo, files):
+        """Override to ensure _last_graph is set even when loaded from cache."""
+        result = await super().group_files(group_id, repo, files)
+
+        # _build_graph sets _last_graph when the graph is built fresh.
+        # When the base class loads a cached graph, _build_graph is NOT called
+        # and _last_graph stays None. Load from the file graph cache in that case.
+        if self._last_graph is None:
+            commit_hash = repo.head.commit.hexsha
+            cached = await self.file_graph_cache.get(
+                key=f"{group_id}:{commit_hash}",
+                version=self._get_graph_version(files),
+            )
+            if cached is not None:
+                self._last_graph = cached
+                logger.info(
+                    f"Captured cached relationship graph: "
+                    f"{cached.number_of_nodes()} nodes, {cached.number_of_edges()} edges"
+                )
+
+        return result
+
     def get_relationship_graph(self) -> nx.DiGraph | None:
         """Get the file relationship graph from the last group_files() call.
 

@@ -762,9 +762,17 @@ class UtilityScorer(Protocol):
 
 
 class RecencyRetrieval:
-    """Default retrieval strategy: most recent first.
+    """Default retrieval strategy: routes by query type.
 
-    Suitable for sensory and working memory where recency is primary.
+    Supports three query modes based on MemoryQuery fields:
+    - Semantic (query.has_semantic): vector similarity via HybridStorageBackend
+    - Logical (query.has_logical): tag/time/pattern filters via blackboard
+    - Hybrid (both): semantic search + logical post-filtering
+    - Neither: return all entries scored by recency
+
+    When the backend is a HybridStorageBackend (has search_semantic),
+    semantic queries are routed to ChromaDB. Otherwise, only logical
+    queries are supported and semantic queries return empty results.
     """
 
     async def retrieve(
@@ -773,12 +781,40 @@ class RecencyRetrieval:
         backend: StorageBackend,
         context: "RetrievalContext | None" = None,
     ) -> list["ScoredEntry"]:
-        """Retrieve by recency (most recent first)."""
+        """Retrieve entries based on query type."""
         import time
         from .types import ScoredEntry
 
+        # Route semantic queries to the vector backend if available
+        if query.has_semantic and hasattr(backend, "search_semantic"):
+            scored = await backend.search_semantic(
+                query.query, query.max_results * 2,
+            )
+
+            # Hybrid: apply logical filters to semantic results
+            if query.has_logical:
+                scored = self._apply_logical_filters(scored, query)
+
+            # Apply min_relevance threshold
+            if query.min_relevance > 0:
+                scored = [s for s in scored if s.score >= query.min_relevance]
+
+            # Apply TTL/expiration filtering
+            now = time.time()
+            scored = self._apply_temporal_filters(scored, query, now)
+
+            return scored[:query.max_results]
+
+        # Logical query path (or fallback when no vector backend)
+        # Resolve tags for the blackboard query (blackboard only supports all_of)
+        effective_tags = None
+        if not query.tag_filter.is_empty and query.tag_filter.all_of:
+            effective_tags = query.tag_filter.all_of
+
         entries = await backend.query(
-            tags=query.tags if query.tags else None,
+            pattern=query.key_pattern,
+            tags=effective_tags,
+            time_range=query.time_range,
             limit=query.max_results * 2,  # Over-fetch to allow filtering
         )
 
@@ -786,6 +822,13 @@ class RecencyRetrieval:
         scored: list[ScoredEntry] = []
 
         for entry in entries:
+            # Apply any_of and none_of filters (blackboard only handles all_of)
+            if not query.tag_filter.is_empty:
+                if query.tag_filter.any_of and not query.tag_filter.any_of.intersection(entry.tags):
+                    continue
+                if query.tag_filter.none_of and query.tag_filter.none_of.intersection(entry.tags):
+                    continue
+
             # Filter expired unless include_expired
             if not query.include_expired and entry.ttl_seconds:
                 if now > entry.created_at + entry.ttl_seconds:
@@ -808,12 +851,36 @@ class RecencyRetrieval:
             ))
 
         # Sort by recency (most recent first)
-        # TODO: Semantic search if query.query is provided
-        # This would use embeddings stored in metadata
-        # For now, just return by recency
         scored.sort(key=lambda s: s.score, reverse=True)
 
         return scored[:query.max_results]
+
+    def _apply_logical_filters(
+        self, scored: list["ScoredEntry"], query: "MemoryQuery",
+    ) -> list["ScoredEntry"]:
+        """Apply tag_filter constraints to pre-scored semantic results."""
+        result = []
+        for se in scored:
+            if not query.tag_filter.matches(se.entry.tags):
+                continue
+            result.append(se)
+        return result
+
+    def _apply_temporal_filters(
+        self, scored: list["ScoredEntry"], query: "MemoryQuery", now: float,
+    ) -> list["ScoredEntry"]:
+        """Apply TTL and age filters to scored entries."""
+        result = []
+        for se in scored:
+            entry = se.entry
+            if not query.include_expired and entry.ttl_seconds:
+                if now > entry.created_at + entry.ttl_seconds:
+                    continue
+            if query.max_age_seconds is not None:
+                if now - entry.created_at > query.max_age_seconds:
+                    continue
+            result.append(se)
+        return result
 
 
 class TTLMaintenancePolicy:

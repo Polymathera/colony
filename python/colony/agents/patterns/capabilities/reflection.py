@@ -239,7 +239,7 @@ class ReflectionCapability(AgentCapability):
             List of action contexts with their learnings
         """
         from ..memory.capability import MemoryCapability
-        from ..memory.types import MemoryQuery
+        from ..memory.types import MemoryQuery, TagFilter
 
         # Try to get memory capability
         try:
@@ -254,7 +254,7 @@ class ReflectionCapability(AgentCapability):
         try:
             entries = await memory.recall(
                 MemoryQuery(
-                    tags={"action"},
+                    tag_filter=TagFilter(all_of={"action"}),
                     max_results=max_results,
                     max_age_seconds=3600,  # Last hour
                 )

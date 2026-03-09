@@ -107,31 +107,61 @@ metrics = RedisOMMetricsMonitor()
 def track_operation(operation: str):
     """Decorator to track Redis operation metrics"""
     def decorator(func):
-        @wraps(func)
-        async def wrapper(self, *args, **kwargs):
-            start_time = time.time()
-            try:
-                result = await func(self, *args, **kwargs)
-                metrics.REDIS_OP_COUNT.labels(
-                    operation=operation,
-                    status="success",
-                    namespace=self.namespace
-                ).inc()
-                return result
-            except Exception as e:
-                metrics.REDIS_OP_COUNT.labels(
-                    operation=operation,
-                    status="error",
-                    namespace=self.namespace
-                ).inc()
-                raise
-            finally:
-                duration = time.time() - start_time
-                metrics.REDIS_OP_DURATION.labels(
-                    operation=operation,
-                    namespace=self.namespace
-                ).observe(duration)
-        return wrapper
+        import inspect
+        if inspect.isasyncgenfunction(func):
+            # Async generator: wrap with an async generator that tracks metrics
+            @wraps(func)
+            async def async_gen_wrapper(self, *args, **kwargs):
+                start_time = time.time()
+                try:
+                    async for item in func(self, *args, **kwargs):
+                        yield item
+                    metrics.REDIS_OP_COUNT.labels(
+                        operation=operation,
+                        status="success",
+                        namespace=self.namespace
+                    ).inc()
+                except Exception as e:
+                    metrics.REDIS_OP_COUNT.labels(
+                        operation=operation,
+                        status="error",
+                        namespace=self.namespace
+                    ).inc()
+                    raise
+                finally:
+                    duration = time.time() - start_time
+                    metrics.REDIS_OP_DURATION.labels(
+                        operation=operation,
+                        namespace=self.namespace
+                    ).observe(duration)
+            return async_gen_wrapper
+        else:
+            # Regular async function
+            @wraps(func)
+            async def wrapper(self, *args, **kwargs):
+                start_time = time.time()
+                try:
+                    result = await func(self, *args, **kwargs)
+                    metrics.REDIS_OP_COUNT.labels(
+                        operation=operation,
+                        status="success",
+                        namespace=self.namespace
+                    ).inc()
+                    return result
+                except Exception as e:
+                    metrics.REDIS_OP_COUNT.labels(
+                        operation=operation,
+                        status="error",
+                        namespace=self.namespace
+                    ).inc()
+                    raise
+                finally:
+                    duration = time.time() - start_time
+                    metrics.REDIS_OP_DURATION.labels(
+                        operation=operation,
+                        namespace=self.namespace
+                    ).observe(duration)
+            return wrapper
     return decorator
 
 """

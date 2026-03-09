@@ -581,7 +581,8 @@ class GitRepoShardingStrategy:
             shards, file_grouper = await self._create_shards_internal(group_id, repo)
 
             # Extract file relationship graph from FileGrouperWithGraph
-            file_graph = file_grouper.get_relationship_graph()
+            # file_grouper is None when shards were loaded from cache
+            file_graph = file_grouper.get_relationship_graph() if file_grouper else None
             if file_graph:
                 # Build page graph from file graph
                 page_graph = await self._build_page_graph_from_file_graph(file_graph, shards)

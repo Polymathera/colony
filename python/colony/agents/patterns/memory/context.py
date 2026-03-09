@@ -182,7 +182,7 @@ class AgentContextEngine(AgentCapability):
     # LLM-Plannable Actions
     # -------------------------------------------------------------------------
 
-    @action_executor(action_key="gather_context", planning_summary="Gather relevant memories across scopes for a query.")
+    @action_executor(action_key="gather_context", planning_summary="Gather relevant memories across all memory scopes. Supports semantic search (query text), logical filters (tag_filter with all_of/any_of/none_of), or hybrid. Use list_all_tags first to discover available tags.")
     async def gather_context(
         self,
         query: MemoryQuery | str | None = None,
@@ -272,6 +272,30 @@ class AgentContextEngine(AgentCapability):
         total = sum(c for c in results.values() if c >= 0)
         logger.info(f"Ingestion complete: {total} total entries ingested")
         return results
+
+    @action_executor(
+        action_key="list_all_tags",
+        planning_summary=(
+            "List all tags across all memory scopes with counts. "
+            "Use this to discover available tags for constructing "
+            "tag-based queries with gather_context or recall."
+        ),
+    )
+    async def list_all_tags(self) -> dict[str, dict[str, int]]:
+        """List all tags across all memory scopes.
+
+        Returns:
+            Dict mapping scope_id to {tag: count} dicts.
+        """
+        result: dict[str, dict[str, int]] = {}
+        for cap in self._memory_capabilities:
+            try:
+                tags = await cap.list_tags()
+                if tags:
+                    result[cap.scope_id] = tags
+            except Exception as e:
+                logger.error(f"Error listing tags for {cap.scope_id}: {e}")
+        return result
 
     @action_executor(action_key="maintain_memories", planning_summary="Run maintenance (TTL, capacity, decay) on memory scopes.")
     async def maintain(
@@ -536,10 +560,11 @@ class AgentContextEngine(AgentCapability):
         - Locate where specific information is stored
         - Understand what you know about a topic
         """
+        from .types import TagFilter
         max_results = max(1, min(max_results, 100))
         mem_query = MemoryQuery(
             query=query,
-            tags=set(tags) if tags else set(),
+            tag_filter=TagFilter(all_of=set(tags)) if tags else TagFilter(),
             max_results=max_results,
             min_relevance=min_relevance,
         )
@@ -750,12 +775,12 @@ class AgentContextEngine(AgentCapability):
         return (
             f"Memory Introspection & Context Engine ({scope_count} scopes: "
             f"{', '.join(scope_types)}). "
-            f"Use these actions to inspect, search, and reason about your memory system."
+            f"Use these actions to inspect, search, and reason about your memory system. "
             "Unified cross-scope interface for the entire memory system. "
-            "gather_context queries across all scopes without needing to know the architecture. "
+            "gather_context queries across all scopes using semantic search (text query), "
+            "logical filters (tag_filter with all_of/any_of/none_of), or hybrid, without needing to know the architecture. "
             "inspect_memory_map reveals scope structure, relationships, and dataflow. "
-            "search_memory does semantic search across all scopes. "
-            "Read-only orchestrator — delegates actual storage to individual MemoryCapability instances."
+            "list_all_tags discovers available tags across all scopes — use before constructing tag queries. "
         )
 
     # -------------------------------------------------------------------------

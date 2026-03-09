@@ -124,6 +124,7 @@ Usage:
 
 # Core types
 from .types import (
+    TagFilter,
     MemoryQuery,
     MemorySubscription,
     MaintenanceConfig,
@@ -223,6 +224,7 @@ from .defaults import (
 
 __all__ = [
     # Core types
+    "TagFilter",
     "MemoryQuery",
     "MemorySubscription",
     "MaintenanceConfig",

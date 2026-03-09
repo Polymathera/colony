@@ -93,7 +93,7 @@ Example:
     await working.store(observation)
 
     # Recall memories
-    memories = await stm.recall(MemoryQuery(tags={"authentication"}))
+    memories = await stm.recall(MemoryQuery(tag_filter=TagFilter(all_of={"authentication"})))
     ```
 """
 
@@ -335,9 +335,11 @@ class MemoryCapability(AgentCapability):
 
     def get_action_group_description(self) -> str:
         return (
-            f"Memory Scope ({self.scope_id}) — single-scope storage with recall, maintenance, and ingestion. "
-            "recall is the most common operation (semantic search within this scope). "
-            "store adds entries; forget/prune/deduplicate maintain quality. "
+            f"Memory Scope ({self.scope_id}) — single-scope storage with tag-based and semantic retrieval/recall, maintenance, and ingestion. "
+            "recall retrieves memories using tags (tag_filter with all_of/any_of/none_of), "
+            "natural language text (semantic similarity search), or both (hybrid). "
+            "Use list_tags to discover available tags before constructing tag-based queries. "
+            "store adds entries with tags; forget/prune/deduplicate maintain quality. "
             "Subscriptions auto-collect from other scopes; ingest_now processes pending immediately. "
             "Background maintenance runs on schedule (TTL, capacity, dedup, prune)."
         )
@@ -403,8 +405,11 @@ class MemoryCapability(AgentCapability):
             return
 
         # Resolve storage backend factory (for accessing other scopes)
+        # Default to HybridStorageBackendFactory (blackboard + ChromaDB for semantic search)
+        # Falls back to blackboard-only if chromadb is not installed
         if self._storage_backend_factory is None:
-            self._storage_backend_factory = BlackboardStorageBackendFactory(self.agent)
+            from .backends.hybrid import HybridStorageBackendFactory
+            self._storage_backend_factory = HybridStorageBackendFactory(self.agent)
 
         # Resolve storage backend for THIS scope
         if self._storage_backend is None:
@@ -621,7 +626,7 @@ class MemoryCapability(AgentCapability):
         logger.debug(f"MemoryCapability: stored {key}")
         return key
 
-    @action_executor(action_key="memory_recall_with_scores", planning_summary="Recall memories with relevance scores. Supports query filtering, lenses, and goal-aware retrieval.")
+    @action_executor(action_key="memory_recall_with_scores", planning_summary="Recall memories with relevance scores. Supports semantic search (query text), logical filters (tag_filter), or hybrid. Use list_tags first to discover available tags.")
     async def recall_with_scores(
         self,
         query: MemoryQuery | str | None = None,
@@ -672,7 +677,7 @@ class MemoryCapability(AgentCapability):
 
         return scored_entries
 
-    @action_executor(action_key="memory_recall", planning_summary="Recall memories matching a query, lens, or retrieval context.")
+    @action_executor(action_key="memory_recall", planning_summary="Recall memories. Supports semantic search (query text), logical filters (tag_filter with all_of/any_of/none_of), or hybrid. Use list_tags first to discover available tags.")
     async def recall(
         self,
         query: MemoryQuery | str | None = None,
@@ -879,6 +884,65 @@ class MemoryCapability(AgentCapability):
             Number of entries written after processing
         """
         return await self._execute_ingestion()
+
+    # =========================================================================
+    # MEMORY EXPLORATION (Discovery actions for LLM planner)
+    # =========================================================================
+
+    @action_executor(
+        action_key="memory_list_tags",
+        planning_summary=(
+            "List all tags stored in this memory scope with their counts. "
+            "Use this BEFORE constructing tag-based queries to discover available tags."
+        ),
+    )
+    async def list_tags(self) -> dict[str, int]:
+        """List all unique tags and their counts in this scope.
+
+        Returns:
+            Dict mapping tag name to entry count, sorted by count descending.
+        """
+        entries = await self.storage.query(limit=100000) # TODO: WTF? There are better ways.
+        tag_counts: dict[str, int] = {}
+        for entry in entries:
+            for tag in entry.tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        return dict(sorted(tag_counts.items(), key=lambda x: -x[1]))
+
+    @action_executor(
+        action_key="memory_stats",
+        planning_summary=(
+            "Get statistics about this memory scope: entry count, "
+            "tag distribution, age range."
+        ),
+    )
+    async def stats(self) -> dict[str, Any]:
+        """Get statistics about stored memories.
+
+        Returns:
+            Dict with entry_count, unique_tags, oldest/newest entry age,
+            and top 20 tags by count.
+        """
+        entries = await self.storage.query(limit=100000) # TODO: WTF? There are better ways.
+        if not entries:
+            return {"entry_count": 0}
+
+        now = time.time()
+        tag_counts: dict[str, int] = {}
+        for entry in entries:
+            for tag in entry.tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+        ages = [now - e.created_at for e in entries]
+        top_tags = dict(sorted(tag_counts.items(), key=lambda x: -x[1])[:20])
+
+        return {
+            "entry_count": len(entries),
+            "unique_tags": len(tag_counts),
+            "oldest_entry_age_seconds": round(max(ages), 1),
+            "newest_entry_age_seconds": round(min(ages), 1),
+            "tag_counts": top_tags,
+        }
 
     # =========================================================================
     # UTILITY FEEDBACK (Memory as self-optimizing)
@@ -1244,9 +1308,23 @@ class MemoryCapability(AgentCapability):
 
     def _apply_lens(self, lens: MemoryLens, query: MemoryQuery) -> MemoryQuery:
         """Apply lens configuration to query."""
+        from .types import TagFilter
+
+        # Merge lens tags into the query's tag filter
+        merged_all_of = set(query.tag_filter.all_of)
+        if lens.tags_include:
+            merged_all_of |= lens.tags_include
+        merged_none_of = set(query.tag_filter.none_of)
+        if lens.tags_exclude:
+            merged_none_of |= lens.tags_exclude
+
         return MemoryQuery(
             query=query.query,
-            tags=query.tags | (lens.tags_include or set()),
+            tag_filter=TagFilter(
+                all_of=merged_all_of,
+                any_of=query.tag_filter.any_of,
+                none_of=merged_none_of,
+            ),
             max_results=min(query.max_results, lens.max_results),
             min_relevance=query.min_relevance,
             include_expired=query.include_expired,

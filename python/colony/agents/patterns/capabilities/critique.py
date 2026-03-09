@@ -759,7 +759,7 @@ class CriticCapability(AgentCapability):
         # results of child agents).
         # =========================================================================
         from ..memory.capability import MemoryCapability
-        from ..memory.types import MemoryQuery
+        from ..memory.types import MemoryQuery, TagFilter
 
         context: dict[str, Any] = {
             "action_type": str(action.action_type),
@@ -792,7 +792,7 @@ class CriticCapability(AgentCapability):
         try:
             action_entries = await memory.recall(
                 MemoryQuery(
-                    tags={"action"},
+                    tag_filter=TagFilter(all_of={"action"}),
                     max_results=max_results,
                     max_age_seconds=3600,  # Last hour
                 )
@@ -831,7 +831,7 @@ class CriticCapability(AgentCapability):
         try:
             critique_entries = await memory.recall(
                 MemoryQuery(
-                    tags={"critique"},
+                    tag_filter=TagFilter(all_of={"critique"}),
                     max_results=5,
                     max_age_seconds=7200,  # Last 2 hours
                 )
