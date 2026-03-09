@@ -278,10 +278,7 @@ The framework then maps the number back to the full key.
 - (-) Anthropic's JSON mode is less strict than OpenAI's — no enum guarantee
 - (-) Large enums (100+ keys) can cause compilation delays with some constrained decoding engines
 
-**Applicability to Colony**: Very promising. The plan output is already JSON. We could define a JSON schema per planning request with the current action keys as an enum. This requires provider-level support but works with OpenAI and open-source models (via Outlines/XGrammar).
-
-> **NOTE**: The `Agent.infer` method already supports a parameter `json_schema` which can be used to pass the schema, and it is used throughout the codebase. It is supported by our vLLM and OpenRouter deployments. When you created the `AnthropicLLMDeployment`, you didn't hook up the `json_schema` parameter to the underlying Anthropic API call. To use this feature, you would need to modify the planning code to generate a JSON schema with the current action keys and pass it to `infer`.
-
+**Applicability to Colony**: Very promising. The plan output is already JSON. Colony's `Agent.infer` method already supports a `json_schema` parameter, used throughout the codebase and supported by the vLLM and OpenRouter deployments. To use this for action key enforcement, the planning code would generate a JSON schema per request with the current action keys as an enum and pass it to `infer`. **Gap**: The `AnthropicLLMDeployment` does not currently hook up the `json_schema` parameter to the underlying Anthropic API call — this needs to be addressed for Anthropic-hosted models.
 
 **Source**: OpenAI Structured Outputs (2024), JsonSchemaBench (2025)
 
@@ -575,9 +572,7 @@ result = await agent.working_memory.store(key="analysis", value=result)
 
 **Source**: CodeAct (ICML 2024), AgentScript (2025), Anthropic Programmatic Tool Calling (2025)
 
-**Applicability to Colony**: Interesting for future exploration but requires fundamental redesign of the planning → execution pipeline.
-
-> **NOTE**: Colony already support a Python REPL as an agent capability.
+**Applicability to Colony**: Colony already supports a Python REPL as an agent capability (`REPLCapability` extending `AgentCapability`, wrapping `PolicyPythonREPL`). `REPLCapability` is auto-created during agent initialization when `AgentMetadata.enable_repl=True` (the default). `ActionDispatcher` discovers the REPL lazily and adds `EXECUTE_CODE` to action descriptions when present. A CodeAct-style approach could leverage this existing capability, though it would still require changes to the planning pipeline to generate code instead of JSON plans.
 
 
 ### E4. Anthropic Programmatic Tool Calling
@@ -666,9 +661,7 @@ Framework resolves: ConsciousnessCapability.b79b5858.update_self_concept
 - (-) Stage 1 errors cascade
 - (-) More complex orchestration
 
-<mark>**Applicability to Colony**: **Highly recommended.** Colony already has group-level structure (action groups / capabilities). This aligns naturally with the existing `_format_action_descriptions` which iterates over `ActionGroupDescription` objects.</mark>
-
-> **NOTE**: We already do this 2-stage selection.
+**Applicability to Colony**: **Already implemented.** Colony uses a 2-stage action selection process via `PlanningStrategyPolicy._apply_scope_selection()`. When the number of action groups exceeds `SCOPE_SELECTION_THRESHOLD` (currently 6), a first LLM call selects relevant capability groups, then the second call plans using only those groups' actions. This pattern is proven in the codebase and could be extended further (e.g., per-group action selection as a third stage).
 
 
 
@@ -826,19 +819,9 @@ Based on the survey, here are recommended strategies ordered by **implementation
 
 These should be implemented first as they provide the best ROI.
 
-#### 1a. Fuzzy/Suffix Matching Fallback (D1)
+#### 1a. Fuzzy/Suffix Matching Fallback (D1) — ✅ IMPLEMENTED
 
-Add a post-processing step in `ActionDispatcher.dispatch()` that tries suffix matching when exact key lookup fails. This catches the most common error (truncation) with zero prompt overhead.
-
-```python
-# In ActionDispatcher or action resolution:
-if action_type not in self._action_map:
-    # Try suffix match
-    suffix_matches = [k for k in self._action_map if k.endswith(f".{action_type}")]
-    if len(suffix_matches) == 1:
-        action_type = suffix_matches[0]
-        logger.warning(f"Resolved truncated action key: {action_type}")
-```
+Implemented in `ActionDispatcher._get_executor_for_action()` and `_resolve_action_key_fuzzy()`. Tries exact match first, then suffix match (handles truncation), then prefix-stripped match (handles spurious prefixes). Also implemented at the planning level in `PlanningStrategyPolicy._resolve_action_key()` and `_convert_actions()` with accuracy metrics logging.
 
 **Expected impact**: Catches 70-80% of observed errors.
 
@@ -871,13 +854,9 @@ class AliasPromptFormatting(PromptFormattingStrategy):
 
 ### Tier 2: Medium effort, High impact
 
-#### 2a. Two-Stage Selection (G1)
+#### 2a. Two-Stage Selection (G1) — ✅ IMPLEMENTED
 
-For the planning prompt, split into:
-1. Goal analysis + capability group selection
-2. Per-group action selection
-
-This aligns with Colony's existing `ActionGroupDescription` structure.
+Already implemented as `PlanningStrategyPolicy._apply_scope_selection()`. When `>6` action groups exist, a first LLM call selects relevant capability groups, then only those groups' actions are included in the planning prompt. Could be extended with a third stage (per-group action selection) for very large action sets.
 
 **Expected impact**: Near-perfect for the capability/group selection stage. Overall 90%+ accuracy.
 
@@ -931,13 +910,23 @@ For self-hosted models, fine-tune a LoRA adapter on Colony's action key format.
 
 ### Recommended Implementation Order
 
-1. **Now**: Add fuzzy/suffix matching fallback (D1) — safety net for all strategies
-2. **Now**: Add explicit copy instructions (A2) — low-effort prompt improvement
-3. **Next**: Implement `AliasPromptFormatting` strategy (E2) — highest single-strategy impact
-4. **Next**: Implement `NumericIDPromptFormatting` strategy (E1) — alternative to aliases
-5. **Later**: Implement JSON Schema enum constraint (B2) for OpenAI/vLLM
-6. **Later**: Implement two-stage selection (G1) for large action sets
-7. **Future**: Evaluate CodeAct approach (E3) for next-gen planning
+**Already implemented:**
+- ✅ XML-structured action descriptions (A1) — `XMLPromptFormatting`
+- ✅ Two-stage scope selection (G1) — `_apply_scope_selection()` with `SCOPE_SELECTION_THRESHOLD = 6`
+- ✅ Fuzzy/suffix matching fallback (D1) — in `ActionDispatcher._get_executor_for_action()` and `_resolve_action_key_fuzzy()`
+- ✅ Plan validation pipeline (G2) — action key validation + accuracy metrics in `_convert_actions()`
+- ✅ Exact key match accuracy metric — logged after every plan generation
+
+- ✅ `AliasPromptFormatting` strategy (E2) — short unique aliases resolved by framework, with collision detection
+- ✅ Explicit copy instructions (A2) — integrated into `XMLPromptFormatting.format_action_descriptions()`
+- ✅ `NumericIDPromptFormatting` strategy (E1) — sequential numeric IDs resolved by framework
+- ✅ `json_schema` support in `AnthropicLLMDeployment` (B2 prerequisite) — injected as prompt instruction
+- ✅ `PromptFormattingType` enum + `PlanningParameters.prompt_formatting` field — configurable strategy selection via YAML/config
+- ✅ `REPLCapability` extends `AgentCapability` + `AgentMetadata.enable_repl` auto-creation
+
+**Next:**
+1. Evaluate CodeAct approach (E3) leveraging existing `REPLCapability`
+2. JSON Schema enum constraint (B2) for OpenAI/vLLM — constrain `action_type` to valid keys at decoding level
 
 ---
 

@@ -9,6 +9,14 @@ tenant_id: "test-tenant"
 # session_id: "auto-generated-if-omitted"
 # run_id: "auto-generated-if-omitted"
 
+# --- Repository ---
+# Specify the git repository to analyze.  Use origin_url for remote repos
+# (https://...) or for local repos as file:///path/to/repo.
+# The CLI --origin-url and --local-repo flags override this value.
+# origin_url: "https://github.com/org/repo"
+# branch: "main"
+# commit: "HEAD"
+
 # --- LLM Cluster Configuration ---
 # Controls which LLM deployments are created and deployed.
 #
@@ -38,14 +46,23 @@ cluster:
   #   num_replicas: 1
 
   # --- Remote embedding (API-based, no GPU required) ---
-  # Mutually exclusive with embedding_config above.
-  remote_embedding_config:
-    model_name: "google/gemini-embedding-001"
-    provider: "openrouter"           # "openai", "gemini", or "openrouter"
-    api_key_env_var: "OPENROUTER_API_KEY"  # Auto-detected from provider
-    # dimensions: null           # null = model default (1536 for small)
-    # max_batch_size: 2048       # OpenAI: 2048, Gemini: 100
-    # num_replicas: 1
+  # Mutually exclusive with embedding_config and st_embedding_config.
+  # remote_embedding_config:
+  #   model_name: "text-embedding-3-small"
+  #   provider: "openai"           # "openai", "gemini", or "openrouter"
+  #   # api_key_env_var: "OPENAI_API_KEY"  # Auto-detected from provider
+  #   # dimensions: null           # null = model default (1536 for small)
+  #   # max_batch_size: 2048       # OpenAI: 2048, Gemini: 100
+  #   # num_replicas: 1
+
+  # --- SentenceTransformer embedding (CPU or GPU, no API key needed) ---
+  # Mutually exclusive with embedding_config and remote_embedding_config.
+  # st_embedding_config:
+  #   model_name: "all-MiniLM-L6-v2"      # See STEmbeddingModel enum for options
+  #   # fallback_model: "all-MiniLM-L6-v2"
+  #   # enable_gpu: false
+  #   # max_content_length: 2048
+  #   # chunk_large_files: true
 
   # --- Remote LLM deployments (no GPUs required) ---
   remote_deployments:
@@ -94,6 +111,20 @@ paging:
 # --- Analysis Configurations ---
 # Each entry spawns a coordinator agent that manages a team of workers.
 # Multiple analyses can run concurrently on the same paged codebase.
+#
+# Common fields (apply to all analysis types):
+#   type, coordinator_version, max_agents, quality_threshold, max_iterations,
+#   batching_policy, overlap_threshold, batch_size, prefetch_depth,
+#   extra_capabilities, planning_params
+#
+# Analysis-specific fields are extracted into metadata.parameters automatically.
+# Each analysis type declares its own keys in ANALYSIS_REGISTRY["extra_metadata_keys"]:
+#   impact:     changes, change_description
+#   slicing:    slice_criteria
+#   compliance: compliance_types
+#   intent:     granularity
+#   contracts:  formalism
+#   basic:      (none)
 analyses:
 
   # 1. Change Impact Analysis
@@ -104,11 +135,22 @@ analyses:
     coordinator_version: v2    # v1 = cache-oblivious, v2 = cache-aware
     max_agents: 10
     quality_threshold: 0.7
-    max_iterations: 3
+    max_iterations: 50
     batching_policy: hybrid    # "hybrid", "clustering", or "continuous"
     overlap_threshold: 0.3
     batch_size: 5
     prefetch_depth: 2
+
+    # --- Planning Parameters ---
+    # Controls the planning strategy and prompt formatting for action selection.
+    # All fields are optional; defaults are used when omitted.
+    planning_params:
+      strategy: mpc              # "mpc", "top_down", "bottom_up", or "hybrid"
+      prompt_formatting: alias   # "xml", "markdown", "alias", or "numeric"
+      planning_horizon: 5
+      replan_every_n_steps: 3
+      replan_on_failure: true
+
     changes:
       - file_path: "src/main.py"
         change_type: modification
@@ -123,6 +165,7 @@ analyses:
   - type: compliance
     coordinator_version: v2
     max_agents: 8
+    max_iterations: 50
     compliance_types:
       - license
       - security
@@ -135,6 +178,7 @@ analyses:
     coordinator_version: v2
     max_agents: 8
     granularity: "function"    # "function", "class", or "module"
+    max_iterations: 50
 
   # 4. Contract Inference
   #    Coordinator → per-page ContractInferenceAgent workers
