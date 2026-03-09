@@ -39,7 +39,7 @@ from enum import Enum
 from re import Pattern
 import aiohttp
 
-from colony.distributed.metrics.common import BaseMetricsMonitor
+from polymathera.colony.distributed.metrics.common import BaseMetricsMonitor
 
 from .types import SecurityError
 

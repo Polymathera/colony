@@ -119,11 +119,11 @@ from pydantic import Field
 from pygments.lexers import guess_lexer_for_filename
 from pygments.token import Token
 
-from colony.distributed.caching.simple import CacheConfig
-from colony.distributed.config import ConfigComponent, register_polymathera_config
-from colony.distributed import get_polymathera
-from colony.distributed.metrics.common import BaseMetricsMonitor
-from colony.utils import create_dynamic_asyncio_task, cleanup_dynamic_asyncio_tasks, call_async_in_executor
+from polymathera.colony.distributed.caching.simple import CacheConfig
+from polymathera.colony.distributed.config import ConfigComponent, register_polymathera_config
+from polymathera.colony.distributed import get_polymathera
+from polymathera.colony.distributed.metrics.common import BaseMetricsMonitor
+from polymathera.colony.utils import create_dynamic_asyncio_task, cleanup_dynamic_asyncio_tasks, call_async_in_executor
 
 from .languages.code_splitting import (
     CustomRule,

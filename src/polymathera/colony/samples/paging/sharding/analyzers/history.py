@@ -14,12 +14,12 @@ import numpy as np
 import xxhash
 from overrides import override
 
-from colony.distributed.config import register_polymathera_config
-from colony.distributed import get_polymathera
-from colony.distributed.metrics.common import BaseMetricsMonitor
-from colony.utils import setup_logger
-from colony.utils.retry import standard_retry
-from colony.utils.git.clients import GitHubClient, GitLabClient, GitClientBase
+from polymathera.colony.distributed.config import register_polymathera_config
+from polymathera.colony.distributed import get_polymathera
+from polymathera.colony.distributed.metrics.common import BaseMetricsMonitor
+from polymathera.colony.utils import setup_logger
+from polymathera.colony.utils.retry import standard_retry
+from polymathera.colony.utils.git.clients import GitHubClient, GitLabClient, GitClientBase
 
 from .base import AnalyzerConfig, BaseAnalyzer, FileContentCache
 

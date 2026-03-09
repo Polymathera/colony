@@ -161,7 +161,7 @@ def get_deployment_names() -> DeploymentNames:
     Example:
         ```python
         from polymathera.colony.deployment_names import get_deployment_names
-        import colony.distributed.ray_utils.serving as serving
+        import polymathera.colony.distributed.ray_utils.serving as serving
 
         names = get_deployment_names()
         vcm_handle = serving.get_deployment(app_name, names.vcm)

@@ -15,10 +15,10 @@ Prerequisites:
 import asyncio
 import logging
 
-from colony.vcm.sources import BuilInContextPageSourceType
-from colony.vcm.models import MmapConfig, MmapResult
-from colony.agents.models import AgentMetadata
-from colony.samples.code_analysis.basic.coordinator import CodeAnalysisCoordinator
+from polymathera.colony.vcm.sources import BuilInContextPageSourceType
+from polymathera.colony.vcm.models import MmapConfig, MmapResult
+from polymathera.colony.agents.models import AgentMetadata
+from polymathera.colony.samples.code_analysis.basic.coordinator import CodeAnalysisCoordinator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ async def analyze_repository(
     # 1. Create ContextPageSource
     logger.info("Creating ContextPageSource...")
     # Map the repository to VCM pages using the built-in file grouper source type
-    from colony.system import get_agent_system, get_vcm
+    from polymathera.colony.system import get_agent_system, get_vcm
     vcm_handle = get_vcm()
     mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
         scope_id="repo-123",

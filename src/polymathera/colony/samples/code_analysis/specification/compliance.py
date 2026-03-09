@@ -27,16 +27,16 @@ from typing import Any
 from overrides import override
 from pydantic import BaseModel, Field
 
-from colony.agents.patterns import (
+from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
 )
-from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
-from colony.agents.patterns.actions import action_executor
-from colony.agents.patterns.events import event_handler, EventProcessingResult
-from colony.agents.blackboard import EnhancedBlackboard, ObligationGraph, BlackboardEvent, ComplianceRelationship
-from colony.agents.base import Agent, AgentCapability, CapabilityResultFuture
-from colony.agents.models import Action, PolicyREPL, AgentSuspensionState
+from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraphCapability
+from polymathera.colony.agents.patterns.actions import action_executor
+from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
+from polymathera.colony.agents.blackboard import EnhancedBlackboard, ObligationGraph, BlackboardEvent, ComplianceRelationship
+from polymathera.colony.agents.base import Agent, AgentCapability, CapabilityResultFuture
+from polymathera.colony.agents.models import Action, PolicyREPL, AgentSuspensionState
 from ..contracts.types import Contract, ContractType, FunctionContract
 
 logger = logging.getLogger(__name__)

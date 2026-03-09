@@ -4,11 +4,11 @@ from pydantic import BaseModel, Field
 import time
 from typing import Any
 
-from colony.agents.patterns import (
+from polymathera.colony.agents.patterns import (
     ScopeAwareResult,
     RelationshipGraph,
 )
-from colony.agents.blackboard import CausalityTimeline
+from polymathera.colony.agents.blackboard import CausalityTimeline
 
 
 

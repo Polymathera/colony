@@ -15,16 +15,16 @@ Polymathera's no-RAG, multi-agent framework for extremely long, *dense* contexts
 ### Installation
 
 ```bash
-pip install colony
+pip install polymathera-colony
 ```
 
 With optional extras:
 
 ```bash
-pip install colony[code_analysis]    # Code analysis tools
-pip install colony[gpu]              # GPU inference (vLLM, PyTorch)
-pip install colony[cpu]              # CPU-only inference (Anthropic API)
-pip install colony --all-extras      # Everything
+pip install polymathera-colony[code_analysis]    # Code analysis tools
+pip install polymathera-colony[gpu]              # GPU inference (vLLM, PyTorch)
+pip install polymathera-colony[cpu]              # CPU-only inference (Anthropic API)
+pip install polymathera-colony --all-extras      # Everything
 ```
 
 ### Local Test Environment
@@ -91,7 +91,7 @@ colony-env dashboard --port 9090
 For frontend development, run the Vite dev server on the host with hot-reload:
 
 ```bash
-cd python/colony/web_ui/frontend
+cd src/polymathera/colony/web_ui/frontend
 npm install
 npm run dev     # Starts on localhost:5173, proxies /api to localhost:8080
 ```
@@ -127,6 +127,6 @@ except ImportError:
 def feature_function():
     if heavy_dep is None:
         raise ImportError(
-            "Install with: pip install colony[feature_name]"
+            "Install with: pip install polymathera-colony[feature_name]"
         )
 ```

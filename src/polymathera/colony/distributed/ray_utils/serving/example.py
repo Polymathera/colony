@@ -12,7 +12,7 @@ import os
 
 import ray
 
-from colony.distributed.ray_utils import serving
+from polymathera.colony.distributed.ray_utils import serving
 
 # Configure logging for driver
 log_level = os.environ.get("POLYMATHERA_LOG_LEVEL", "INFO").upper()

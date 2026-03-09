@@ -16,12 +16,12 @@ import magic  # python-magic for file type detection
 import networkx as nx
 from circuitbreaker import circuit
 
-from colony.distributed.caching.simple import CacheConfig
-from colony.distributed.config import ConfigComponent, register_polymathera_config
-from colony.distributed import get_polymathera
-from colony.distributed.metrics.common import BaseMetricsMonitor
-from colony.utils.git import validate_git_repository, configure_git_safety
-from colony.utils.retry import standard_retry
+from polymathera.colony.distributed.caching.simple import CacheConfig
+from polymathera.colony.distributed.config import ConfigComponent, register_polymathera_config
+from polymathera.colony.distributed import get_polymathera
+from polymathera.colony.distributed.metrics.common import BaseMetricsMonitor
+from polymathera.colony.utils.git import validate_git_repository, configure_git_safety
+from polymathera.colony.utils.retry import standard_retry
 
 from .types import RepositoryShard, ShardFileSegment, ShardMetadata, ShardingError
 from .prompting import ShardedInferencePromptStrategy
@@ -257,7 +257,7 @@ class GitRepoShardCache:
         )
 
     async def cleanup(self) -> None:
-        from colony.utils import cleanup_dynamic_asyncio_tasks
+        from polymathera.colony.utils import cleanup_dynamic_asyncio_tasks
         try:
             await cleanup_dynamic_asyncio_tasks(self, raise_exceptions=False)
             await self.cache.cleanup()

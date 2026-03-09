@@ -23,10 +23,10 @@ import logging
 import uuid
 from pydantic import BaseModel, Field
 
-from colony.agents.base import Agent
-from colony.agents.patterns.capabilities.merge import MergeCapability
-from colony.agents.patterns.capabilities.synthesis import SynthesisCapability
-from colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
+from polymathera.colony.agents.base import Agent
+from polymathera.colony.agents.patterns.capabilities.merge import MergeCapability
+from polymathera.colony.agents.patterns.capabilities.synthesis import SynthesisCapability
+from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
 
 from .capabilities import (
     ContractMergePolicy,

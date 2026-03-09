@@ -260,7 +260,7 @@ class DockerComposeProvider(DeploymentProvider):
             cmd.append("-it")
 
         cmd.append(head)
-        cmd.extend(["python", "-m", "colony.cli.polymath", "run"])
+        cmd.extend(["python", "-m", "polymathera.colony.cli.polymath", "run"])
 
         if origin_url:
             cmd.extend(["--origin-url", origin_url])

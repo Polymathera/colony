@@ -4,8 +4,8 @@ from typing import Any, TYPE_CHECKING
 
 import networkx as nx
 
-from colony.agents.base import Agent
-from colony.agents.patterns.capabilities.prefetching import PrefetchPolicy
+from polymathera.colony.agents.base import Agent
+from polymathera.colony.agents.patterns.capabilities.prefetching import PrefetchPolicy
 
 if TYPE_CHECKING:
     pass

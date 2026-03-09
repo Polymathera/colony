@@ -16,18 +16,18 @@ import logging
 from collections import defaultdict
 from overrides import override
 
-from colony.agents.base import Agent, AgentState, AgentCapability
-from colony.agents.models import (
+from polymathera.colony.agents.base import Agent, AgentState, AgentCapability
+from polymathera.colony.agents.models import (
     AgentSuspensionState,
     AttentionContext,
 )
-from colony.agents.patterns.attention import PageQuery
-from colony.cluster import InferenceResponse
-from colony.vcm.sources import PageCluster
-from colony.agents.patterns.attention.query_routing import PageQueryRoutingPolicy, create_page_query_router2
+from polymathera.colony.agents.patterns.attention import PageQuery
+from polymathera.colony.cluster import InferenceResponse
+from polymathera.colony.vcm.sources import PageCluster
+from polymathera.colony.agents.patterns.attention.query_routing import PageQueryRoutingPolicy, create_page_query_router2
 
-from colony.agents.patterns.scope import ScopeAwareResult
-from colony.agents.patterns.actions.policies import (
+from polymathera.colony.agents.patterns.scope import ScopeAwareResult
+from polymathera.colony.agents.patterns.actions.policies import (
     action_executor,
 )
 

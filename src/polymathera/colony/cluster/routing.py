@@ -202,7 +202,7 @@ class ContextAwareRouter(RequestRouter):
 
     Example:
         ```python
-        from colony.distributed.ray_utils import serving
+        from polymathera.colony.distributed.ray_utils import serving
         from polymathera.colony import VLLMDeployment, ContextAwareRouter
 
         app = serving.Application(name="llm-cluster")

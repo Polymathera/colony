@@ -48,24 +48,24 @@ import uuid
 from typing import Any
 from overrides import override
 
-from colony.agents.patterns import (
+from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
     RelationshipGraph,
 )
-from colony.agents.patterns.capabilities.critique import CriticCapability
-from colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
-from colony.agents.base import Agent, AgentCapability
-from colony.agents.patterns.actions.policies import action_executor
-from colony.agents.patterns.capabilities.reflection import ReflectionCapability
-from colony.agents.patterns.events import event_handler, EventProcessingResult
-from colony.agents.models import (
+from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
+from polymathera.colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
+from polymathera.colony.agents.base import Agent, AgentCapability
+from polymathera.colony.agents.patterns.actions.policies import action_executor
+from polymathera.colony.agents.patterns.capabilities.reflection import ReflectionCapability
+from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
+from polymathera.colony.agents.models import (
     ActionResult,
     ActionType,
     PolicyREPL,
     AgentSuspensionState,
 )
-from colony.agents.patterns.games.hypothesis.agents import HypothesisGameAgent
+from polymathera.colony.agents.patterns.games.hypothesis.agents import HypothesisGameAgent
 
 from .types import (
     CodeChange,

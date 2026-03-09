@@ -14,7 +14,7 @@ import networkx as nx
 from .file_grouping import FileGrouper, FileGrouperConfig
 from .analyzers.base import FileContentCache
 from .tokenization import TokenManager
-from colony.utils import setup_logger
+from polymathera.colony.utils import setup_logger
 
 logger = setup_logger(__name__)
 

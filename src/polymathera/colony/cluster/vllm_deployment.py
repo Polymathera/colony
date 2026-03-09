@@ -131,7 +131,7 @@ class VLLMDeployment(AgentManagerBase):
 
     Example:
         ```python
-        from colony.distributed.ray_utils import serving
+        from polymathera.colony.distributed.ray_utils import serving
         from polymathera.colony import VLLMDeployment
 
         # Deploy vLLM instance

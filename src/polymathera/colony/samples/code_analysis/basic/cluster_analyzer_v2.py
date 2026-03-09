@@ -17,32 +17,32 @@ import logging
 from typing import Any
 from overrides import override
 
-from colony.agents.base import Agent, AgentCapability
-from colony.agents.models import (
+from polymathera.colony.agents.base import Agent, AgentCapability
+from polymathera.colony.agents.models import (
     ActionType,
     ActionResult,
     AgentSuspensionState,
     AttentionContext,
 )
-from colony.cluster.models import InferenceResponse
-from colony.agents.patterns.actions.policies import (
+from polymathera.colony.cluster.models import InferenceResponse
+from polymathera.colony.agents.patterns.actions.policies import (
     create_default_action_policy,
     action_executor,
 )
-from colony.agents.patterns.capabilities.reflection import ReflectionCapability
-from colony.agents.patterns.capabilities.critique import CriticCapability
-from colony.agents.patterns.capabilities.result import ResultCapability
-from colony.agents.patterns.capabilities.query_attention import QueryAttentionCapability
-from colony.agents.patterns.models import Critique
-from colony.agents.patterns.attention import (
+from polymathera.colony.agents.patterns.capabilities.reflection import ReflectionCapability
+from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
+from polymathera.colony.agents.patterns.capabilities.result import ResultCapability
+from polymathera.colony.agents.patterns.capabilities.query_attention import QueryAttentionCapability
+from polymathera.colony.agents.patterns.models import Critique
+from polymathera.colony.agents.patterns.attention import (
     PageKey,
     QueryGenerator,
     DependencyQueryGenerator,
     HybridKeyGenerator,
 )
-from colony.agents.patterns.attention.key_registry import GlobalPageKeyRegistry
-from colony.agents.patterns.attention.query_routing import PageQueryRoutingPolicy, create_page_query_router2
-from colony.vcm.sources import PageCluster
+from polymathera.colony.agents.patterns.attention.key_registry import GlobalPageKeyRegistry
+from polymathera.colony.agents.patterns.attention.query_routing import PageQueryRoutingPolicy, create_page_query_router2
+from polymathera.colony.vcm.sources import PageCluster
 
 from .config import ClusterAnalyzerConfig
 
@@ -463,7 +463,7 @@ Output format (JSON):
             ActionResult with cluster summary
         """
         import json
-        from colony.cluster.models import InferenceResponse
+        from polymathera.colony.cluster.models import InferenceResponse
 
         try:
             # Build synthesis prompt
@@ -840,7 +840,7 @@ Output ONLY valid JSON."""
                 # Try to reconstruct PageKey if possible, otherwise store as-is
                 if isinstance(v, dict) and 'page_id' in v:
                     try:
-                        from colony.agents.patterns.attention import PageKey
+                        from polymathera.colony.agents.patterns.attention import PageKey
                         self.page_keys[k] = PageKey(**v)
                     except Exception:
                         self.page_keys[k] = v

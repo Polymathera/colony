@@ -22,7 +22,7 @@ Example:
     )
 
     # Spawn coordinator agent
-    from colony.system import spawn_agents
+    from polymathera.colony.system import spawn_agents
     coordinator_bp = CodeAnalysisCoordinator.bind(
         metadata=AgentMetadata(
             tenant_id="tenant-1",

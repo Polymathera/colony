@@ -133,7 +133,7 @@ class EmbeddingDeployment:
 
     Example:
         ```python
-        from colony.distributed.ray_utils import serving
+        from polymathera.colony.distributed.ray_utils import serving
         from polymathera.colony import EmbeddingDeployment
 
         # Deploy embedding instance

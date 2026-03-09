@@ -15,8 +15,8 @@ from overrides import override
 from pydantic import BaseModel, Field
 import time
 
-from colony.agents.base import Agent, AgentState, AgentCapability
-from colony.agents.models import (
+from polymathera.colony.agents.base import Agent, AgentState, AgentCapability
+from polymathera.colony.agents.models import (
     Action,
     ActionResult,
     AgentMetadata,
@@ -25,22 +25,22 @@ from colony.agents.models import (
     RunContext,
     PolicyREPL,
 )
-from colony.system import get_agent_system
-from colony.vcm.sources import PageCluster
-from colony.agents.patterns.capabilities.critique import (
+from polymathera.colony.system import get_agent_system
+from polymathera.colony.vcm.sources import PageCluster
+from polymathera.colony.agents.patterns.capabilities.critique import (
     CriticCapability,
     CritiqueContext,
     OutputRelationship,
 )
-from colony.agents.blackboard import KeyPatternFilter, BlackboardEvent
-from colony.agents.patterns.attention import HierarchicalAttentionRouting
-from colony.agents.patterns.actions.policies import action_executor
-from colony.agents.patterns.events import event_handler, EventProcessingResult
-from colony.agents.patterns.capabilities.working_set import WorkingSetCapability
-from colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
-from colony.agents.patterns.capabilities.result import ResultCapability
-from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
-from colony.agents.patterns.capabilities.batching import (
+from polymathera.colony.agents.blackboard import KeyPatternFilter, BlackboardEvent
+from polymathera.colony.agents.patterns.attention import HierarchicalAttentionRouting
+from polymathera.colony.agents.patterns.actions.policies import action_executor
+from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
+from polymathera.colony.agents.patterns.capabilities.working_set import WorkingSetCapability
+from polymathera.colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
+from polymathera.colony.agents.patterns.capabilities.result import ResultCapability
+from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraphCapability
+from polymathera.colony.agents.patterns.capabilities.batching import (
     BatchingPolicy,
     ClusteringBatchPolicy,
     HybridBatchPolicy,
@@ -412,8 +412,8 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
 
             agent_system = get_agent_system()
 
-            from colony.samples.code_analysis.basic.cluster_analyzer import ClusterAnalyzer
-            from colony.cluster import LLMClientRequirements
+            from polymathera.colony.samples.code_analysis.basic.cluster_analyzer import ClusterAnalyzer
+            from polymathera.colony.cluster import LLMClientRequirements
 
             cluster_count = 0
             blueprints = []

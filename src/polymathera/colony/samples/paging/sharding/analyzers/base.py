@@ -12,11 +12,11 @@ import xxhash
 from circuitbreaker import circuit
 from cachetools import TTLCache
 
-from colony.distributed.caching.simple import CacheConfig
-from colony.distributed.config import ConfigComponent, register_polymathera_config
-from colony.distributed import get_polymathera
-from colony.distributed.metrics.common import BaseMetricsMonitor
-from colony.utils import setup_logger
+from polymathera.colony.distributed.caching.simple import CacheConfig
+from polymathera.colony.distributed.config import ConfigComponent, register_polymathera_config
+from polymathera.colony.distributed import get_polymathera
+from polymathera.colony.distributed.metrics.common import BaseMetricsMonitor
+from polymathera.colony.utils import setup_logger
 
 from ..languages.utils import detect_language
 
@@ -301,7 +301,7 @@ class BaseAnalyzer(ABC):
 
     async def cleanup(self):
         """Cleanup any resources used by the analyzer"""
-        from colony.utils import cleanup_dynamic_asyncio_tasks
+        from polymathera.colony.utils import cleanup_dynamic_asyncio_tasks
 
         try:
             await cleanup_dynamic_asyncio_tasks(self, raise_exceptions=False)

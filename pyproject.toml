@@ -1,11 +1,22 @@
 [tool.poetry]
-name = "colony"
+name = "polymathera-colony"
 version = "0.1.0"
 description = "Polymathera's no-RAG, multi-agent framework for extremely long, dense contexts (1B+ tokens)."
 authors = ["Ahmed Nassar <amam.nassar@gmail.com>"]
-license = "Apache-2.0 license"
+license = "Apache-2.0"
 readme = "README.md"
-packages = [{include = "colony", from = "python"}]
+homepage = "https://github.com/polymathera/colony"
+repository = "https://github.com/polymathera/colony"
+keywords = ["multi-agent", "llm", "context", "cache-aware", "agents", "no-rag"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+packages = [{include = "polymathera", from = "src"}]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<=3.12"
@@ -71,7 +82,7 @@ uvicorn = { version = ">=0.30", extras = ["standard"], optional = true }
 httpx = { version = ">=0.27", optional = true }
 
 [tool.poetry.scripts]
-colony-env = "colony.cli.deploy.cli:app"
+colony-env = "polymathera.colony.cli.deploy.cli:app"
 
 [tool.poetry.extras]
 code_analysis = [

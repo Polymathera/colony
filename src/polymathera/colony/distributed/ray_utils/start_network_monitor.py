@@ -19,8 +19,8 @@ import ray
 # Assume NetworkMonitor is defined here. Adjust the import path as necessary.
 # Ensure this path is correct relative to how the script is run or PYTHONPATH
 try:
-    from colony.distributed.ray_utils.network_monitor import NetworkMonitor
-    from colony.utils import setup_logger
+    from polymathera.colony.distributed.ray_utils.network_monitor import NetworkMonitor
+    from polymathera.colony.utils import setup_logger
 except ImportError:
     # Handle case where the script might be run from a different context
     # This might require adjusting PYTHONPATH when running the script

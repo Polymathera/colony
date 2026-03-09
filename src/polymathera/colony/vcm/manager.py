@@ -16,7 +16,7 @@ Key Features:
 
 Example:
     ```python
-    from colony.distributed.ray_utils import serving
+    from polymathera.colony.distributed.ray_utils import serving
     from polymathera.colony.vcm import VirtualContextManager
 
     app = serving.Application(name="vcm-app")

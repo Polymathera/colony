@@ -8,13 +8,13 @@ from overrides import override
 
 import numpy as np
 
-from colony.distributed.config import register_polymathera_config, ConfigComponent
-from colony.distributed import get_polymathera
-from colony.distributed.caching.simple import CacheConfig
-from colony.distributed.metrics.common import BaseMetricsMonitor
-from colony.cluster.embedding import TextChunkerBase
-from colony.system import get_llm_cluster
-from colony.utils import setup_logger, cleanup_dynamic_asyncio_tasks
+from polymathera.colony.distributed.config import register_polymathera_config, ConfigComponent
+from polymathera.colony.distributed import get_polymathera
+from polymathera.colony.distributed.caching.simple import CacheConfig
+from polymathera.colony.distributed.metrics.common import BaseMetricsMonitor
+from polymathera.colony.cluster.embedding import TextChunkerBase
+from polymathera.colony.system import get_llm_cluster
+from polymathera.colony.utils import setup_logger, cleanup_dynamic_asyncio_tasks
 
 from .base import AnalyzerConfig, BaseAnalyzer, FileContentCache
 
@@ -49,7 +49,7 @@ class ChunkingConfig(ConfigComponent):
             "typescript": r"(class|interface|function|const.*=>)\s+\w+.*{$",
             "go": r"func\s+\w+.*{$",
             # TODO: Add more languages
-            # TODO: Reuse code from colony.samples.paging.sharding.code_splitting
+            # TODO: Reuse code from polymathera.colony.samples.paging.sharding.code_splitting
         }
     )
 

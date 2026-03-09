@@ -22,8 +22,8 @@ from __future__ import annotations
 import logging
 from pydantic import BaseModel, Field
 
-from colony.agents.patterns import MergeCapability
-from colony.agents.base import Agent
+from polymathera.colony.agents.patterns import MergeCapability
+from polymathera.colony.agents.base import Agent
 from .types import ComplianceType
 from .capabilities import (
     ComplianceVCMCapability,  # New VCMAnalysisCapability-based coordinator

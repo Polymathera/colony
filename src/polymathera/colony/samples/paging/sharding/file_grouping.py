@@ -20,11 +20,11 @@ try:
 except ImportError:
     xxhash = None
 
-from colony.distributed.metrics.common import BaseMetricsMonitor
-from colony.distributed.caching.simple import CacheConfig
-from colony.distributed.config import ConfigComponent, register_polymathera_config
-from colony.distributed import get_initialized_polymathera
-from colony.utils import setup_logger
+from polymathera.colony.distributed.metrics.common import BaseMetricsMonitor
+from polymathera.colony.distributed.caching.simple import CacheConfig
+from polymathera.colony.distributed.config import ConfigComponent, register_polymathera_config
+from polymathera.colony.distributed import get_initialized_polymathera
+from polymathera.colony.utils import setup_logger
 
 from .analyzers.base import FileContentCache
 from .analyzers.dependency import DependencyAnalyzer
@@ -425,7 +425,7 @@ class FileGrouper:
 
     async def cleanup(self) -> None:
         """Cleanup background tasks and resources"""
-        from colony.utils import cleanup_dynamic_asyncio_tasks
+        from polymathera.colony.utils import cleanup_dynamic_asyncio_tasks
 
         try:
             await cleanup_dynamic_asyncio_tasks(self, raise_exceptions=False)

@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import logging
 
-from colony.agents.patterns.capabilities.merge import MergeCapability
-from colony.agents.base import Agent
+from polymathera.colony.agents.patterns.capabilities.merge import MergeCapability
+from polymathera.colony.agents.base import Agent
 from .capabilities import (
     SliceMergePolicy,
     ProgramSlicingCapability,

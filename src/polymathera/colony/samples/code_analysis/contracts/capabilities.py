@@ -28,28 +28,28 @@ from typing import Any
 from overrides import override
 from pydantic import BaseModel, Field
 
-from colony.agents.patterns import (
+from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
 )
-from colony.agents.patterns.capabilities.merge import MergePolicy, MergeContext, MergeCapability
-from colony.agents.patterns.capabilities.validation import ValidationResult
-from colony.agents.patterns.capabilities.synthesis import SynthesisCapability
-from colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
-from colony.agents.patterns.capabilities.result import ResultCapability
-from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
-from colony.agents.patterns.capabilities.batching import BatchingPolicy
-from colony.agents.patterns.capabilities.vcm_analysis import VCMAnalysisCapability
-from colony.agents.patterns.actions import action_executor
-from colony.agents.patterns.events import event_handler, EventProcessingResult
-from colony.agents.patterns.models import Hypothesis
-from colony.agents.blackboard import TaskGraph, BlackboardEvent
-from colony.agents.base import Agent, AgentCapability, CapabilityResultFuture
-from colony.agents.models import Action, ActionType, AgentMetadata, PolicyREPL, AgentResourceRequirements, AgentSuspensionState
-from colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
-from colony.cluster.models import LLMClientRequirements
-from colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
-from colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
+from polymathera.colony.agents.patterns.capabilities.merge import MergePolicy, MergeContext, MergeCapability
+from polymathera.colony.agents.patterns.capabilities.validation import ValidationResult
+from polymathera.colony.agents.patterns.capabilities.synthesis import SynthesisCapability
+from polymathera.colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
+from polymathera.colony.agents.patterns.capabilities.result import ResultCapability
+from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraphCapability
+from polymathera.colony.agents.patterns.capabilities.batching import BatchingPolicy
+from polymathera.colony.agents.patterns.capabilities.vcm_analysis import VCMAnalysisCapability
+from polymathera.colony.agents.patterns.actions import action_executor
+from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
+from polymathera.colony.agents.patterns.models import Hypothesis
+from polymathera.colony.agents.blackboard import TaskGraph, BlackboardEvent
+from polymathera.colony.agents.base import Agent, AgentCapability, CapabilityResultFuture
+from polymathera.colony.agents.models import Action, ActionType, AgentMetadata, PolicyREPL, AgentResourceRequirements, AgentSuspensionState
+from polymathera.colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
+from polymathera.colony.cluster.models import LLMClientRequirements
+from polymathera.colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
+from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
 
 from .types import (
     Contract,

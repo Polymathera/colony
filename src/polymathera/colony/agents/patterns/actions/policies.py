@@ -407,7 +407,7 @@ def _rebuild_with_forward_refs(model: type[BaseModel], func: Callable) -> None:
     if func_module and func_module in sys.modules:
         ns.update(vars(sys.modules[func_module]))
     # colony.agents.models — exports Action, ActionResult, etc. used in forward refs
-    models_mod = sys.modules.get("colony.agents.models")
+    models_mod = sys.modules.get("polymathera.colony.agents.models")
     if models_mod:
         ns.update(vars(models_mod))
     try:

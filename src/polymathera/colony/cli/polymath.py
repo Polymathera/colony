@@ -175,9 +175,9 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "Uses multi-hop dependency propagation, hypothesis games for "
             "validating critical impacts, and game-theoretic merge policies."
         ),
-        "coordinator_v1": "colony.samples.code_analysis.impact.coordinator.ChangeImpactAnalysisCoordinator",
-        "coordinator_v2": "colony.samples.code_analysis.impact.coordinator.ChangeImpactAnalysisCoordinator",
-        "worker": "colony.samples.code_analysis.impact.page_analyzer.ChangeImpactAnalysisAgent",
+        "coordinator_v1": "polymathera.colony.samples.code_analysis.impact.coordinator.ChangeImpactAnalysisCoordinator",
+        "coordinator_v2": "polymathera.colony.samples.code_analysis.impact.coordinator.ChangeImpactAnalysisCoordinator",
+        "worker": "polymathera.colony.samples.code_analysis.impact.page_analyzer.ChangeImpactAnalysisAgent",
         "coordinator_capabilities": [
             "ChangeImpactAnalysisCoordinatorCapability",
             "WorkingSetCapability",
@@ -219,9 +219,9 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "expression. Supports backward, forward, chopping, dynamic, and "
             "conditioned slices with LLM-based dependency reasoning."
         ),
-        "coordinator_v1": "colony.samples.code_analysis.slicing.agents.ProgramSlicingCoordinator",
-        "coordinator_v2": "colony.samples.code_analysis.slicing.agents.ProgramSlicingCoordinator",
-        "worker": "colony.samples.code_analysis.slicing.agents.ProgramSlicingAgent",
+        "coordinator_v1": "polymathera.colony.samples.code_analysis.slicing.agents.ProgramSlicingCoordinator",
+        "coordinator_v2": "polymathera.colony.samples.code_analysis.slicing.agents.ProgramSlicingCoordinator",
+        "worker": "polymathera.colony.samples.code_analysis.slicing.agents.ProgramSlicingAgent",
         "coordinator_capabilities": [
             "SlicingAnalysisCapability",
             "MergeCapability",
@@ -256,9 +256,9 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "Uses LLM-based semantic understanding of license terms and builds "
             "obligation graphs for tracking compliance requirements."
         ),
-        "coordinator_v1": "colony.samples.code_analysis.compliance.agents.ComplianceAnalysisCoordinator",
-        "coordinator_v2": "colony.samples.code_analysis.compliance.agents.ComplianceAnalysisCoordinator",
-        "worker": "colony.samples.code_analysis.compliance.agents.ComplianceAnalysisAgent",
+        "coordinator_v1": "polymathera.colony.samples.code_analysis.compliance.agents.ComplianceAnalysisCoordinator",
+        "coordinator_v2": "polymathera.colony.samples.code_analysis.compliance.agents.ComplianceAnalysisCoordinator",
+        "worker": "polymathera.colony.samples.code_analysis.compliance.agents.ComplianceAnalysisAgent",
         "coordinator_capabilities": [
             "ComplianceVCMCapability",
             "MergeCapability",
@@ -294,9 +294,9 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "implementation details. Builds intent graphs and detects "
             "misalignments using consensus game protocols."
         ),
-        "coordinator_v1": "colony.samples.code_analysis.intent.agents.IntentInferenceCoordinator",
-        "coordinator_v2": "colony.samples.code_analysis.intent.agents.IntentInferenceCoordinator",
-        "worker": "colony.samples.code_analysis.intent.agents.IntentInferenceAgent",
+        "coordinator_v1": "polymathera.colony.samples.code_analysis.intent.agents.IntentInferenceCoordinator",
+        "coordinator_v2": "polymathera.colony.samples.code_analysis.intent.agents.IntentInferenceCoordinator",
+        "worker": "polymathera.colony.samples.code_analysis.intent.agents.IntentInferenceAgent",
         "coordinator_capabilities": [
             "IntentAnalysisCapability",
             "MergeCapability",
@@ -334,9 +334,9 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "invariants. Uses hypothesis games to validate contracts and "
             "produces specifications at configurable formalism levels."
         ),
-        "coordinator_v1": "colony.samples.code_analysis.contracts.agents.ContractInferenceCoordinator",
-        "coordinator_v2": "colony.samples.code_analysis.contracts.agents.ContractInferenceCoordinator",
-        "worker": "colony.samples.code_analysis.contracts.agents.ContractInferenceAgent",
+        "coordinator_v1": "polymathera.colony.samples.code_analysis.contracts.agents.ContractInferenceCoordinator",
+        "coordinator_v2": "polymathera.colony.samples.code_analysis.contracts.agents.ContractInferenceCoordinator",
+        "worker": "polymathera.colony.samples.code_analysis.contracts.agents.ContractInferenceAgent",
         "coordinator_capabilities": [
             "ContractAnalysisCapability",
             "MergeCapability",
@@ -373,9 +373,9 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "ClusterAnalyzer agents that perform key generation, local page "
             "analysis, cross-page query resolution, and cluster-level synthesis."
         ),
-        "coordinator_v1": "colony.samples.code_analysis.basic.coordinator.CodeAnalysisCoordinator",
-        "coordinator_v2": "colony.samples.code_analysis.basic.coordinator.CodeAnalysisCoordinatorV2",
-        "worker": "colony.samples.code_analysis.basic.cluster_analyzer.ClusterAnalyzer",
+        "coordinator_v1": "polymathera.colony.samples.code_analysis.basic.coordinator.CodeAnalysisCoordinator",
+        "coordinator_v2": "polymathera.colony.samples.code_analysis.basic.coordinator.CodeAnalysisCoordinatorV2",
+        "worker": "polymathera.colony.samples.code_analysis.basic.cluster_analyzer.ClusterAnalyzer",
         "coordinator_capabilities": [
             "CodeAnalysisCoordinatorCapability",
             "CriticCapability",
@@ -404,43 +404,43 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
 # Capabilities that can be attached to any agent for cross-cutting concerns.
 EXTRA_CAPABILITIES_REGISTRY: dict[str, dict[str, str]] = {
     "ReflectionCapability": {
-        "path": "colony.agents.patterns.capabilities.reflection.ReflectionCapability",
+        "path": "polymathera.colony.agents.patterns.capabilities.reflection.ReflectionCapability",
         "description": "Enables agent self-reflection on actions with SystemDocumentation support.",
     },
     "ConsciousnessCapability": {
-        "path": "colony.agents.patterns.capabilities.consciousness.ConsciousnessCapability",
+        "path": "polymathera.colony.agents.patterns.capabilities.consciousness.ConsciousnessCapability",
         "description": "Provides self-awareness via AgentSelfConcept and SystemDocumentation.",
     },
     "ReputationCapability": {
-        "path": "colony.agents.patterns.capabilities.reputation.ReputationCapability",
+        "path": "polymathera.colony.agents.patterns.capabilities.reputation.ReputationCapability",
         "description": "No-regret learning using multiplicative weights for agent reputation.",
     },
     "ValidationCapability": {
-        "path": "colony.agents.patterns.capabilities.validation.ValidationCapability",
+        "path": "polymathera.colony.agents.patterns.capabilities.validation.ValidationCapability",
         "description": "Multi-level validation (cross-shard, evidence-based, consensus).",
     },
     "GroundingCapability": {
-        "path": "colony.agents.patterns.capabilities.grounding.GroundingCapability",
+        "path": "polymathera.colony.agents.patterns.capabilities.grounding.GroundingCapability",
         "description": "Validates claims against evidence with query expansion.",
     },
     "ObjectiveGuardCapability": {
-        "path": "colony.agents.patterns.capabilities.goal_alignment.ObjectiveGuardCapability",
+        "path": "polymathera.colony.agents.patterns.capabilities.goal_alignment.ObjectiveGuardCapability",
         "description": "Prevents goal drift by monitoring outputs against original goals.",
     },
     "ConsistencyCapability": {
-        "path": "colony.agents.patterns.capabilities.consistency.ConsistencyCapability",
+        "path": "polymathera.colony.agents.patterns.capabilities.consistency.ConsistencyCapability",
         "description": "Detects contradictions using the epistemic layer.",
     },
     "HypothesisTrackingCapability": {
-        "path": "colony.agents.patterns.games.hypothesis.tracking.HypothesisTrackingCapability",
+        "path": "polymathera.colony.agents.patterns.games.hypothesis.tracking.HypothesisTrackingCapability",
         "description": "Tracks hypotheses across agent interactions.",
     },
     "WorkingMemoryCapability": {
-        "path": "colony.agents.patterns.memory.working.WorkingMemoryCapability",
+        "path": "polymathera.colony.agents.patterns.memory.working.WorkingMemoryCapability",
         "description": "Token-bounded working memory with compaction.",
     },
     "SessionMemoryCapability": {
-        "path": "colony.agents.patterns.memory.session_memory.SessionMemoryCapability",
+        "path": "polymathera.colony.agents.patterns.memory.session_memory.SessionMemoryCapability",
         "description": "Session-level memory tracking for cross-session continuity.",
     },
 }
@@ -1217,25 +1217,25 @@ async def run_integration_test(
     # We use absolute imports so the CLI can run both as a module
     # (python -m colony.cli.polymath) and as a direct script (./polymath.py).
     # -----------------------------------------------------------------------
-    from colony.distributed import get_initialized_polymathera
-    from colony.vcm.sources import BuilInContextPageSourceType, ContextPageSourceFactory
-    from colony.vcm.models import MmapConfig, MmapResult
-    from colony.agents import AgentMetadata, AgentHandle, AgentRunEvent
-    from colony.system import (
+    from polymathera.colony.distributed import get_initialized_polymathera
+    from polymathera.colony.vcm.sources import BuilInContextPageSourceType, ContextPageSourceFactory
+    from polymathera.colony.vcm.models import MmapConfig, MmapResult
+    from polymathera.colony.agents import AgentMetadata, AgentHandle, AgentRunEvent
+    from polymathera.colony.system import (
         PolymatheraCluster, PolymatheraClusterConfig,
         get_vcm, get_session_manager,
     )
-    from colony.cluster.config import ClusterConfig, LLMDeploymentConfig
-    from colony.cluster.remote_config import RemoteLLMDeploymentConfig
-    from colony.vcm.config import VCMConfig
-    from colony.agents.config import AgentSystemConfig
-    from colony.agents.sessions import AgentRun
-    from colony.agents import AgentSelfConcept
+    from polymathera.colony.cluster.config import ClusterConfig, LLMDeploymentConfig
+    from polymathera.colony.cluster.remote_config import RemoteLLMDeploymentConfig
+    from polymathera.colony.vcm.config import VCMConfig
+    from polymathera.colony.agents.config import AgentSystemConfig
+    from polymathera.colony.agents.sessions import AgentRun
+    from polymathera.colony.agents import AgentSelfConcept
 
     # Import built-in page source modules to trigger their @register decorators.
     # User-defined page sources from working_dir should also be imported here
     # (or in user startup code) before publish_to_env() is called.
-    import colony.samples.paging  # noqa: F401 — registers file_grouper
+    import polymathera.colony.samples.paging  # noqa: F401 — registers file_grouper
     # blackboard is already registered via colony.agents.blackboard import chain
 
     # Publish registered page source module paths to an env var so Ray workers
@@ -1346,7 +1346,7 @@ async def run_integration_test(
         )
 
     # Build remote embedding config from YAML (if specified)
-    from colony.cluster.embedding import RemoteEmbeddingConfig, STEmbeddingDeploymentConfig, STEmbeddingModel
+    from polymathera.colony.cluster.embedding import RemoteEmbeddingConfig, STEmbeddingDeploymentConfig, STEmbeddingModel
 
     remote_embedding_deployment_config = None
     if config.cluster.remote_embedding_config is not None:

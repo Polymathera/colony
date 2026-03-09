@@ -3,7 +3,7 @@
 Manages the Ray connection and provides cached deployment handles
 for calling Colony's serving deployments (AgentSystem, SessionManager, VCM).
 
-Uses the proper system helpers from colony.system (get_session_manager,
+Uses the proper system helpers from polymathera.colony.system (get_session_manager,
 get_agent_system, get_vcm, etc.) which resolve deployment names through
 colony.deployment_names.get_deployment_names().
 """
@@ -96,8 +96,8 @@ class ColonyConnection:
         if name_attr in self._handle_cache:
             return self._handle_cache[name_attr]
 
-        from colony.deployment_names import get_deployment_names
-        from colony.distributed.ray_utils.serving import get_deployment
+        from polymathera.colony.deployment_names import get_deployment_names
+        from polymathera.colony.distributed.ray_utils.serving import get_deployment
 
         names = get_deployment_names()
         deployment_name = getattr(names, name_attr)
@@ -138,7 +138,7 @@ class ColonyConnection:
         """
         cache_key = f"{app_name}/{deployment_name}"
         if cache_key not in self._handle_cache:
-            from colony.distributed.ray_utils.serving import get_deployment
+            from polymathera.colony.distributed.ray_utils.serving import get_deployment
             self._handle_cache[cache_key] = get_deployment(app_name, deployment_name)
         return self._handle_cache[cache_key]
 
@@ -158,15 +158,15 @@ class ColonyConnection:
                 min_size=2, max_size=10,
             )
             # Ensure spans table exists
-            from colony.agents.observability.migrations import ensure_schema
+            from polymathera.colony.agents.observability.migrations import ensure_schema
             await ensure_schema(self._db_pool)
 
             # Create query store
-            from colony.agents.observability.store import SpanQueryStore
+            from polymathera.colony.agents.observability.store import SpanQueryStore
             self._span_query_store = SpanQueryStore(self._db_pool)
 
             # Start Kafka→PG consumer
-            from colony.agents.observability.consumer import SpanConsumer
+            from polymathera.colony.agents.observability.consumer import SpanConsumer
             self._span_consumer = SpanConsumer(
                 kafka_bootstrap=kafka_bootstrap,
                 db_pool=self._db_pool,

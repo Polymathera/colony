@@ -21,8 +21,8 @@ class StandaloneAgentDeployment(AgentManagerBase):
 
     Example:
         ```python
-        from colony.distributed.ray_utils import serving
-        from colony.agents import StandaloneAgentDeployment
+        from polymathera.colony.distributed.ray_utils import serving
+        from polymathera.colony.agents import StandaloneAgentDeployment
 
         app = serving.Application(name="agent-app")
         app.add_deployment(

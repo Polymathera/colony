@@ -10,43 +10,43 @@ from overrides import override
 import itertools
 
 
-from colony.agents.patterns import (
+from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
     Relationship,
     RelationshipGraph,
     Hypothesis,
 )
-from colony.agents.patterns.capabilities.synthesis import SynthesisCapability
-from colony.agents.patterns.capabilities.merge import MergeCapability, MergePolicy, MergeContext
-from colony.agents.patterns.capabilities.validation import ValidationResult
-from colony.agents.patterns.capabilities.critique import CriticCapability
-from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
-from colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
-from colony.agents.base import Agent, AgentCapability, AgentMetadata
-from colony.agents.patterns.actions.policies import action_executor
-from colony.agents.patterns.planning.policies import CacheAwarePlanningPolicy
-from colony.agents.patterns.planning.strategies import ModelPredictiveControlStrategy
-from colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
-from colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
-from colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
-from colony.agents.patterns.events import event_handler, EventProcessingResult
-from colony.agents.patterns.capabilities import WorkingSetCapability, AgentPoolCapability
-from colony.agents.patterns.capabilities.page_graph import PageGraphCapability
-from colony.agents.patterns.capabilities.batching import (
+from polymathera.colony.agents.patterns.capabilities.synthesis import SynthesisCapability
+from polymathera.colony.agents.patterns.capabilities.merge import MergeCapability, MergePolicy, MergeContext
+from polymathera.colony.agents.patterns.capabilities.validation import ValidationResult
+from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
+from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraphCapability
+from polymathera.colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
+from polymathera.colony.agents.base import Agent, AgentCapability, AgentMetadata
+from polymathera.colony.agents.patterns.actions.policies import action_executor
+from polymathera.colony.agents.patterns.planning.policies import CacheAwarePlanningPolicy
+from polymathera.colony.agents.patterns.planning.strategies import ModelPredictiveControlStrategy
+from polymathera.colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
+from polymathera.colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
+from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
+from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
+from polymathera.colony.agents.patterns.capabilities import WorkingSetCapability, AgentPoolCapability
+from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraphCapability
+from polymathera.colony.agents.patterns.capabilities.batching import (
     BatchingPolicy,
     ClusteringBatchPolicy,
     HybridBatchPolicy,
     ContinuousBatchPolicy,
 )
-from colony.agents.models import (
+from polymathera.colony.agents.models import (
     Action,
     ActionType,
     AgentSuspensionState,
     RunContext,
     PolicyREPL,
 )
-from colony.cluster.models import LLMClientRequirements
+from polymathera.colony.cluster.models import LLMClientRequirements
 from .types import (
     CodeChange,
     ChangeType,

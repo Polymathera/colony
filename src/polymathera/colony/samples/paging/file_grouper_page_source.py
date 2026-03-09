@@ -7,10 +7,10 @@ from overrides import override
 from typing import Any, AsyncIterator, Literal
 import networkx as nx
 
-from colony.vcm.sources import ContextPageSource, ContextPageSourceFactory, BuilInContextPageSourceType
-from colony.vcm.models import MmapConfig, ContextPageId, VirtualContextPage
-from colony.vcm.page_storage import PageStorage, PageStorageConfig
-from colony.distributed import get_polymathera
+from polymathera.colony.vcm.sources import ContextPageSource, ContextPageSourceFactory, BuilInContextPageSourceType
+from polymathera.colony.vcm.models import MmapConfig, ContextPageId, VirtualContextPage
+from polymathera.colony.vcm.page_storage import PageStorage, PageStorageConfig
+from polymathera.colony.distributed import get_polymathera
 
 from .sharding.file_grouping_wrapper import FileGrouperWithGraph
 from .sharding.strategy_wrapper import GitRepoShardingWithMapping
@@ -77,7 +77,7 @@ class FileGrouperContextPageSource(ContextPageSource):
         if self.page_storage is not None and self.page_graph is not None:
             return  # Already initialized
 
-        from colony.system import get_vcm
+        from polymathera.colony.system import get_vcm
         vcm_handle = get_vcm()
         config: PageStorageConfig | None = await vcm_handle.get_page_storage_config()
         if not config:

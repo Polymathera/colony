@@ -13,11 +13,11 @@ import re
 import time
 from overrides import override
 
-from colony.agents.base import Agent, AgentCapability
-from colony.agents.models import AgentSuspensionState
-from colony.cluster.models import InferenceResponse
-from colony.agents.patterns.scope import ScopeAwareResult
-from colony.agents.patterns.actions.policies import action_executor
+from polymathera.colony.agents.base import Agent, AgentCapability
+from polymathera.colony.agents.models import AgentSuspensionState
+from polymathera.colony.cluster.models import InferenceResponse
+from polymathera.colony.agents.patterns.scope import ScopeAwareResult
+from polymathera.colony.agents.patterns.actions.policies import action_executor
 
 
 logger = logging.getLogger(__name__)

@@ -75,7 +75,7 @@ RUN groupadd -r ${RAY_CONTAINER_USER} 2>/dev/null || true && \
 COPY --chown=${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} . .
 
 # Build dashboard frontend
-RUN cd python/colony/web_ui/frontend && npm install && npm run build && rm -rf node_modules
+RUN cd src/polymathera/colony/web_ui/frontend && npm install && npm run build && rm -rf node_modules
 
 # Fix permissions
 # /mnt/shared is the mount point for the colony-shared Docker volume.
@@ -90,7 +90,7 @@ RUN mkdir -p /tmp/ray /mnt/shared \
     chown -R ${RAY_CONTAINER_USER}:users /home/${RAY_CONTAINER_USER}/.local
 
 ENV RAY_DISABLE_DOCKER_CPU_WARNING=1
-ENV PYTHONPATH=${APP_MOUNT_PATH}/python
+ENV PYTHONPATH=${APP_MOUNT_PATH}/src
 
 USER ${RAY_CONTAINER_USER}
 CMD ["/bin/bash"]

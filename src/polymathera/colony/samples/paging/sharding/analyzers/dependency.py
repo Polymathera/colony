@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 from overrides import override
 
-from colony.utils import setup_logger
-from colony.utils.git.clients import GitHubClient, GitLabClient, GitClientBase
+from polymathera.colony.utils import setup_logger
+from polymathera.colony.utils.git.clients import GitHubClient, GitLabClient, GitClientBase
 
 from ..languages.dependency import DependencyConfig
 from .base import BaseAnalyzer, FileContentCache

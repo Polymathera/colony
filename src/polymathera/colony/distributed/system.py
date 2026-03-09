@@ -107,8 +107,8 @@ class PolymatheraApp:
         # Try to connect to existing Ray cluster (on EKS)
         try:
             py_modules = py_modules or []
-            import colony
-            py_modules.append(colony)  # Ensure colony modules are included in worker processes
+            import polymathera.colony as _colony_mod
+            py_modules.append(_colony_mod)  # Ensure colony modules are included in worker processes
 
             # Try to connect to the cluster
             ray.init(
