@@ -22,7 +22,7 @@ classifiers = [
 packages = [{include = "polymathera", from = "src"}]
 
 [tool.poetry.dependencies]
-python = ">=3.11,<=3.12"
+python = ">=3.11,<3.13"
 ray = {extras = ["data", "serve", "train", "tune"], version = "=2.49.0"}
 msgpack = "^1.1.2"
 sqlalchemy = "^2.0.46"

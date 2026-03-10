@@ -51,9 +51,7 @@ jobs:
       - name: Configure Poetry
         run: poetry config virtualenvs.create false
       - name: Install dependencies
-        run: |
-          poetry install --no-interaction --extras "code_analysis cpu dashboard observability" \
-            --without gpu
+        run: poetry install --no-interaction --extras "code_analysis cpu dashboard observability"
       - name: Run tests
         run: |
           pytest src/ \
