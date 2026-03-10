@@ -1,0 +1,108 @@
+site_name: Colony
+site_description: "Polymathera's no-RAG, cache-aware multi-agent framework for extremely long context (1B+ tokens)"
+site_url: https://polymathera.github.io/colony
+repo_url: https://github.com/polymathera/colony
+repo_name: polymathera/colony
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - content.code.annotate
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.mark
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+    - Key Concepts: getting-started/concepts.md
+  - Philosophy:
+    - Overview: philosophy/index.md
+    - "The NoRAG Paradigm": philosophy/no-rag.md
+    - "Agents All the Way Down": philosophy/agents-all-the-way-down.md
+    - Cache-Aware Patterns: philosophy/cache-awareness.md
+  - Architecture:
+    - Overview: architecture/index.md
+    - Virtual Context Memory: architecture/virtual-context-memory.md
+    - Agent System: architecture/agent-system.md
+    - Memory System: architecture/memory-system.md
+    - Action Policies & Planning: architecture/action-policies.md
+    - Blackboard Pattern: architecture/blackboard.md
+    - Hook System: architecture/hook-system.md
+    - Game Engine: architecture/game-engine.md
+  - Design Insights:
+    - Overview: design-insights/index.md
+    - Capabilities as AOP Aspects: design-insights/capabilities-as-aspects.md
+    - Game-Theoretic Correctness: design-insights/game-theoretic-correctness.md
+    - Abstraction Patterns: design-insights/abstraction-patterns.md
+  - Guides:
+    - colony-env: guides/colony-env.md
+    - Web Dashboard: guides/web-dashboard.md
+    - Publishing & CI/CD: guides/publishing.md
+  - API Reference:
+    - reference/index.md
+    - Agent: reference/agent.md
+    - Models: reference/models.md
+    - Action Policies: reference/policies.md
+    - Memory: reference/memory.md
+    - Blackboard: reference/blackboard.md
+    - CLI: reference/cli.md
+  - Contributing: contributing.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: true
+            show_root_heading: true
+            show_symbol_type_heading: true
+            members_order: source
+            docstring_style: google
+            merge_init_into_class: true
+            show_if_no_docstring: false
+            filters:
+              - "!^_"
+              - "^__init__$"

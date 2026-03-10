@@ -2725,10 +2725,10 @@ class Agent(BaseModel):
         """Get blackboard for reading/writing shared state.
 
         Args:
-            `scope`: Blackboard scope (`"local"`, `"shared"`, `"global"`)
-            `scope_id`: Scope identifier (defaults to `agent_id` for shared scope)
-            `backend_type`: Backend type for the blackboard (e.g., "redis")
-            `enable_events`: Whether to enable events on the blackboard
+            scope: Blackboard scope (`"local"`, `"shared"`, `"global"`)
+            scope_id: Scope identifier (defaults to `agent_id` for shared scope)
+            backend_type: Backend type for the blackboard (e.g., "redis")
+            enable_events: Whether to enable events on the blackboard
 
         Returns:
             Blackboard instance

@@ -1864,7 +1864,7 @@ class BaseActionPolicy(ActionPolicy):
         Returns:
             - Action: Execute this action
             - None: Skip this iteration. Set `state.custom["policy_complete"] = True`
-              before returning None to signal that the policy is finished.
+                before returning None to signal that the policy is finished.
 
         Example:
             ```python

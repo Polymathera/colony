@@ -15,6 +15,6 @@ colony-env run --local-repo /home/anassar/workspace/agents/crewAI --config my_an
 
 colony-env down && \
 colony-env up --workers 3 && \
-colony-env run --local-repo /home/anassar/workspace//distributed/ray --config my_analysis.yaml --verbose
+colony-env run --local-repo /home/anassar/workspace/distributed/ray --config my_analysis.yaml --verbose
 ```
 

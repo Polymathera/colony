@@ -130,3 +130,24 @@ def feature_function():
             "Install with: pip install polymathera-colony[feature_name]"
         )
 ```
+
+### Documentation
+
+Documentation is built with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/) and API reference is auto-generated from docstrings via [mkdocstrings](https://mkdocstrings.github.io/).
+
+```bash
+# Install dev dependencies (includes mkdocs + plugins)
+poetry install --all-extras
+
+# Start local docs server with hot-reload
+mkdocs serve                  # --dev-addr http://127.0.0.1:8000/
+
+# Build static site (output in site/)
+mkdocs build
+
+# Build with strict mode (treat warnings as errors)
+mkdocs build --strict
+```
+
+> The server has **hot-reload** — any edits to `docs/` or source files will auto-rebuild.
+

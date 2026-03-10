@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Lint
+        run: ruff check src/
+      - name: Format check
+        run: ruff format --check src/
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Poetry
+        run: pip install poetry
+      - name: Configure Poetry
+        run: poetry config virtualenvs.create false
+      - name: Install dependencies
+        run: |
+          poetry install --no-interaction --extras "code_analysis cpu dashboard observability" \
+            --without gpu
+      - name: Run tests
+        run: |
+          pytest src/ \
+            --timeout=120 \
+            --ignore=src/polymathera/colony/vcm/ \
+            -x -q \
+            --tb=short
+        env:
+          REDIS_URL: redis://localhost:6379
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Poetry
+        run: pip install poetry
+      - name: Configure Poetry
+        run: poetry config virtualenvs.create false
+      - name: Install dependencies
+        run: poetry install --no-interaction --extras "code_analysis cpu dashboard"
+      - name: Build docs
+        run: mkdocs build
