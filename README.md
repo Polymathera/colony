@@ -8,11 +8,18 @@
 
 **A no-RAG, cache-aware multi-agent framework for extremely long, dense contexts (1B+ tokens).**
 
+---
 > [!WARNING]
-> Colony is still in pre-alpha early access. It is under active development and the API is not stable. Join the waitlist for updates: https://polymathera.com/colony
+> Colony is still in pre-alpha early access. It is under active development and the API is not stable.
 
+---
 
-Colony is a framework for building tightly-coupled, self-evolving multi-agent systems (*agent colonies*) that reason over extremely long context without retrieval-augmented generation. Instead of fragmenting context into chunks and retrieving snippets, Colony keeps the entire context *live* across a cluster of LLMs through a virtual memory system that manages GPU KV caches the same way an operating system manages virtual memory over finite physical RAM.
+> [!WARNING]
+> Colony is not intended for consumer apps. It is intended to run over a Ray cluster and it can be resource-intensive and expensive.
+
+---
+
+Colony is a framework for building tightly-coupled, self-evolving multi-agent systems (***agent colonies***) that reason over extremely long context without retrieval-augmented generation. Instead of fragmenting context into chunks and retrieving snippets, Colony keeps the entire context *live* across a **cluster of LLMs** through a virtual memory system that manages GPU KV caches the same way an operating system manages virtual memory over finite physical RAM.
 
 > Colony's goal is to be the most efficient *country of geniuses in a datacenter*?
 
@@ -25,6 +32,7 @@ Most agent frameworks treat context as something to retrieve or manage. Colony t
 - *Business intelligence*: making strategic decisions based on a wide range of internal and external data, where relevant information may be siloed and require cross-domain reasoning
 - *Long-form content creation*: writing a book or comprehensive report that requires maintaining a coherent narrative across a large amount of information
 
+Colony's core innovations are:
 - **NoRAG** -- Colony keeps the full context live and accessible, not filtered through retrieval. Colony manages all kinds of context (code, text, data) through distributed KV cache paging, not vector search.
 
 - **Cache-Aware Agents** -- Agents are aware of what's in GPU memory (at the cluster level) and consciously plan their work to maximize cache reuse.
@@ -35,7 +43,8 @@ Most agent frameworks treat context as something to retrieve or manage. Colony t
 
 Read the full [Philosophy](https://polymathera.github.io/colony/philosophy/) for the ideas behind the framework.
 
-P.S. Colony is currently in early access. Join the waitlist for updates: https://polymathera.com/colony
+
+> P.S. Colony does not preclude agents from using retrieval or vector search -- those can be implemented as capabilities that agents use when appropriate. Colony's point is that retrieval is not the only way to manage long context, and for certain domains, it's not the best way.
 
 
 ## Architecture
