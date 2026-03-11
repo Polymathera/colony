@@ -150,7 +150,7 @@ class LLMCluster:
             state_key=cluster_state_key,
         )
 
-        logger.info(f"LLMCluster deployment initialized (awaiting app ready for handle discovery)")
+        logger.info("LLMCluster deployment initialized (awaiting app ready for handle discovery)")
 
     @serving.on_app_ready
     async def on_ready(self):
@@ -162,7 +162,7 @@ class LLMCluster:
         if self.top_level:
             return
 
-        logger.info(f"LLMCluster app ready — discovering deployment handles")
+        logger.info("LLMCluster app ready — discovering deployment handles")
         await self._discover_deployment_handles()
 
         logger.info(

@@ -185,7 +185,7 @@ async def test_task_graph_dag():
     )
     await graph.add_task(subtask2)
 
-    print(f"✓ Added subtasks with dependencies")
+    print("✓ Added subtasks with dependencies")
 
     # Test cycle detection (should fail)
     try:
@@ -404,7 +404,7 @@ async def test_integration_with_patterns():
         agent_id="analyzer_001"
     )
 
-    print(f"✓ Completed task with ScopeAwareResult:")
+    print("✓ Completed task with ScopeAwareResult:")
     print(f"  - Complete: {result.is_complete()}")
     print(f"  - Confidence: {result.scope.confidence}")
     print(f"  - Missing context: {len(result.get_missing_context())} items")
@@ -413,7 +413,7 @@ async def test_integration_with_patterns():
     updated_task = await task_graph.get_task(task.task_id)
     assert updated_task is not None
     assert updated_task.status == TaskStatus.COMPLETED
-    print(f"✓ Task scope updated from result")
+    print("✓ Task scope updated from result")
 
     print("✅ Pattern integration test passed!")
     return True

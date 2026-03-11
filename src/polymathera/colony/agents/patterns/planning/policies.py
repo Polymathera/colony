@@ -1010,7 +1010,7 @@ class ConflictResolver:
                 # Mark resources as shareable
                 plan.metadata["resource_sharing_enabled"] = True
 
-        logger.info(f"Resolved conflict by efficiency optimization")
+        logger.info("Resolved conflict by efficiency optimization")
         return plans
 
     async def _resolve_by_negotiation(

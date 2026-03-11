@@ -876,8 +876,8 @@ class MergeCapability(AgentCapability):
         """Get policy, raising if not configured."""
         if self.merge_policy is None:
             raise RuntimeError(
-                f"MergeCapability.set_policy() must be called before use. "
-                f"Configure with a MergePolicy implementation."
+                "MergeCapability.set_policy() must be called before use. "
+                "Configure with a MergePolicy implementation."
             )
         return self.merge_policy
 

@@ -268,11 +268,11 @@ class GitRepoShardCache:
         """Get shard from cache"""
         logger.info(f"________ get_shards: 0 {key}")
         if not self.config.enable_caching:
-            logger.info(f"________ get_shards: 1 cache not enabled")
+            logger.info("________ get_shards: 1 cache not enabled")
             return None
 
         try:
-            logger.info(f"________ get_shards: 1 cache enabled")
+            logger.info("________ get_shards: 1 cache enabled")
             shards = await self.cache.get(key)
             logger.info(f"________ get_shards: 2 - {len(shards) if shards else 0} shards")
             return shards
@@ -286,14 +286,14 @@ class GitRepoShardCache:
             # Skip binary files if configured
             logger.info(f"________ set_shards: 0 - {len(shards)} shards")
             if not self.cache_binary_files and any(shard.metadata.binary_files for shard in shards):
-                logger.info(f"________ set_shards: 1 cache binary files not enabled")
+                logger.info("________ set_shards: 1 cache binary files not enabled")
                 return
 
             # TODO: Track metrics
             # Store in cache
-            logger.info(f"________ set_shards: 2 cache enabled")
+            logger.info("________ set_shards: 2 cache enabled")
             await self.cache.set(key, shards)
-            logger.info(f"________ set_shards: 3 cache set")
+            logger.info("________ set_shards: 3 cache set")
         except Exception as e:
             logger.error(f"Error storing shards: {e}")
 
@@ -709,7 +709,7 @@ class GitRepoShardingStrategy:
                 file_content_cache=self._file_content_cache,
             )
             await file_grouper.initialize()
-            logger.info(f"________ create_shards: 3 file grouper initialized")
+            logger.info("________ create_shards: 3 file grouper initialized")
             # Group related files together
             # TODO: Ensure this is cached
             file_groups = await file_grouper.group_files(group_id, repo, files)

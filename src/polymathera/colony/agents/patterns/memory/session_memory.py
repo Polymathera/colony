@@ -181,8 +181,8 @@ class SessionMemoryCapability(MemoryCapability):
 
         if not session_id:
             logger.warning(
-                f"SessionMemoryCapability.store called outside session context. "
-                f"Entry will not be session-tagged."
+                "SessionMemoryCapability.store called outside session context. "
+                "Entry will not be session-tagged."
             )
 
         # Session_id is automatically added to tags/metadata by EnhancedBlackboard.write()

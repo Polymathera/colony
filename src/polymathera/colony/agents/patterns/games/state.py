@@ -664,7 +664,7 @@ class GameState(BaseModel):
     @classmethod
     def get_key_pattern(cls) -> str:
         """Get blackboard key pattern for game states."""
-        return f"game:*:state"
+        return "game:*:state"
 
     # -------------------------------------------------------------------------
     # Memory System Integration

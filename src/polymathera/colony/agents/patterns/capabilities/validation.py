@@ -652,7 +652,7 @@ class ContradictionResolver:
                             result1_id=result1.result_id,
                             result2_id=result2.result_id,
                             contradiction_type="confidence_mismatch",
-                            details=f"Related results have very different confidence levels",
+                            details="Related results have very different confidence levels",
                             severity="medium"
                         ))
 

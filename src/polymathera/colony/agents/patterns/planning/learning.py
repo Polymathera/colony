@@ -156,7 +156,7 @@ class ExecutionHistoryStore:
         successful = sum(
             1
             for e in entries
-            if f"outcome:success" in e.tags or f"outcome:partial" in e.tags
+            if "outcome:success" in e.tags or "outcome:partial" in e.tags
         )
 
         durations = [

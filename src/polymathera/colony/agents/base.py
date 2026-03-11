@@ -3946,8 +3946,8 @@ class AgentManagerBase:
             class_id=agent_class_id,
             base_class=Agent,
             search_packages=[
-                f"polymathera.colony.agents",  # e.g., agents.CodeAnalyzer
-                f"polymathera.agents",  # Legacy location
+                "polymathera.colony.agents",  # e.g., agents.CodeAnalyzer
+                "polymathera.agents",  # Legacy location
             ],
         )
 
@@ -3956,8 +3956,8 @@ class AgentManagerBase:
             class_id=action_policy_class_id,
             base_class=ActionPolicy,
             search_packages=[
-                f"polymathera.colony.agents",  # e.g., agents.SimpleActionPolicy
-                f"polymathera.agents",  # Legacy location
+                "polymathera.colony.agents",  # e.g., agents.SimpleActionPolicy
+                "polymathera.agents",  # Legacy location
             ],
         )
         # Resolve capability classes if provided
@@ -3967,8 +3967,8 @@ class AgentManagerBase:
                 class_id=cap_class_id,
                 base_class=AgentCapability,
                 search_packages=[
-                    f"polymathera.colony.agents",  # e.g., agents.WebBrowsingCapability
-                    f"polymathera.agents",  # Legacy location
+                    "polymathera.colony.agents",  # e.g., agents.WebBrowsingCapability
+                    "polymathera.agents",  # Legacy location
                 ],
             )
             if cap_class:

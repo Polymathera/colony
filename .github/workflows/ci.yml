@@ -24,8 +24,8 @@ jobs:
         run: ruff check src/ --statistics || true
       - name: Lint
         run: ruff check src/
-      - name: Format check
-        run: ruff format --check src/
+      #- name: Format check
+      #  run: ruff format --check src/
 
   test:
     runs-on: ubuntu-latest

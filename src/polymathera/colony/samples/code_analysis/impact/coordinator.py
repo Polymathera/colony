@@ -944,8 +944,8 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
                 claim=f"CRITICAL impact on {impact.component_id}: {impact.description}",
                 test_queries=[
                     f"What evidence supports this critical impact on {impact.component_id}?",
-                    f"What evidence contradicts this critical impact?",
-                    f"Are there alternative explanations for the observed behavior?"
+                    "What evidence contradicts this critical impact?",
+                    "Are there alternative explanations for the observed behavior?"
                 ],
                 confidence=impact.confidence,
                 created_by=self.agent.agent_id

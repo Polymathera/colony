@@ -1552,7 +1552,7 @@ class ActionDispatcher:
                 await self.repl.set(
                     name=var_name,
                     value=output[var_name],
-                    description=f"Declared output variable",  # TODO: Allow writes to have descriptions
+                    description="Declared output variable",  # TODO: Allow writes to have descriptions
                     created_by=f"action_type{action.action_type}:{action.action_id}",
                 )
             elif len(writes) == 1:
@@ -1560,7 +1560,7 @@ class ActionDispatcher:
                 await self.repl.set(
                     name=var_name,
                     value=output,
-                    description=f"Declared output variable",  # TODO: Allow writes to have descriptions
+                    description="Declared output variable",  # TODO: Allow writes to have descriptions
                     created_by=f"action_type{action.action_type}:{action.action_id}",
                 )
 
@@ -1805,7 +1805,7 @@ class BaseActionPolicy(ActionPolicy):
             if next_action is None:
                 # Check if policy signaled completion
                 if state.custom.get("policy_complete"):
-                    logger.warning(f"    ⚙ EXEC_ITER: policy_complete=True → TERMINATING")
+                    logger.warning("    ⚙ EXEC_ITER: policy_complete=True → TERMINATING")
                     return ActionPolicyIterationResult(
                         success=True,
                         policy_completed=True
@@ -1813,7 +1813,7 @@ class BaseActionPolicy(ActionPolicy):
 
                 # Check if policy signaled idle (no work, but not completed)
                 if state.custom.get("idle"):
-                    logger.warning(f"    ⚙ EXEC_ITER: idle=True → IDLE")
+                    logger.warning("    ⚙ EXEC_ITER: idle=True → IDLE")
                     return ActionPolicyIterationResult(
                         success=True,
                         policy_completed=False,
@@ -1821,7 +1821,7 @@ class BaseActionPolicy(ActionPolicy):
                     )
 
                 # Otherwise just skip this iteration (policy continues)
-                logger.warning(f"    ⚙ EXEC_ITER: next_action=None → skipping iteration")
+                logger.warning("    ⚙ EXEC_ITER: next_action=None → skipping iteration")
                 return ActionPolicyIterationResult(
                     success=True,
                     policy_completed=False
@@ -2121,7 +2121,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
                     return immediate_actions[0]
                 elif len(immediate_actions) > 1:
                     logger.info(
-                        f"Multiple immediate actions from event handlers; passing them to the LLM planner to decide among them."
+                        "Multiple immediate actions from event handlers; passing them to the LLM planner to decide among them."
                     )
                     # TODO: Ensure that these actions are not identical.
                     # Pass all to LLM planner via context
@@ -2462,7 +2462,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             logger.warning(f"      📋 PLAN_STEP: event produced immediate action → {event_action}")
             return event_action
         if state.custom.get("policy_complete"):
-            logger.warning(f"      📋 PLAN_STEP: policy_complete set by event handler")
+            logger.warning("      📋 PLAN_STEP: policy_complete set by event handler")
             return None
 
         # Get plan from blackboard
@@ -2474,7 +2474,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
                 f"idx={state.current_plan.current_action_index}, status={state.current_plan.status}"
             )
         else:
-            logger.warning(f"      📋 PLAN_STEP: got plan → None")
+            logger.warning("      📋 PLAN_STEP: got plan → None")
             # No plan - create initial plan
             logger.warning(
                 f"\n"
@@ -2568,7 +2568,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
 
         if decision.plan_exhausted and not state.current_plan.has_remaining_actions():
             # True completion: plan exhausted AND (planner says done OR budget exceeded)
-            logger.warning(f"      📋 PLAN_STEP: ★★★ PLAN COMPLETE ★★★")
+            logger.warning("      📋 PLAN_STEP: ★★★ PLAN COMPLETE ★★★")
             state.current_plan.status = PlanStatus.COMPLETED
             state.current_plan.completed_at = time.time()
             await self.plan_blackboard.update_plan(state.current_plan)
@@ -2746,7 +2746,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         Returns the created plan for hook-based capture.
         """
 
-        logger.warning(f"        🧠 _create_initial_plan: building planning context...")
+        logger.warning("        🧠 _create_initial_plan: building planning context...")
         planning_context = await self._get_planning_context(
             execution_context=PlanExecutionContext()
         )
@@ -2758,11 +2758,11 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         )
 
         logger.warning(
-            f"\n"
-            f"        ╔════════════════════════════════════════╗\n"
-            f"        ║  🔮 CALLING planner.create_plan()      ║\n"
-            f"        ║  (THIS IS THE LLM INFERENCE CALL)      ║\n"
-            f"        ╚════════════════════════════════════════╝"
+            "\n"
+            "        ╔════════════════════════════════════════╗\n"
+            "        ║  🔮 CALLING planner.create_plan()      ║\n"
+            "        ║  (THIS IS THE LLM INFERENCE CALL)      ║\n"
+            "        ╚════════════════════════════════════════╝"
         )
         plan: ActionPlan = await self.planner.create_plan(planning_context)
         logger.warning(

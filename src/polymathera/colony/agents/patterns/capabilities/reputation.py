@@ -790,7 +790,7 @@ class ReputationUpdateRequest(BaseModel):
     @classmethod
     def get_key_pattern(cls) -> str:
         """Get blackboard key pattern for reputation update requests."""
-        return f"*:reputation:request:*"
+        return "*:reputation:request:*"
 
 
 # ============================================================================

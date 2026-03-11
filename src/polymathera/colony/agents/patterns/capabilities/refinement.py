@@ -652,8 +652,8 @@ class RefinementCapability(AgentCapability):
         """Get policy, raising if not configured."""
         if self.refinement_policy is None:
             raise RuntimeError(
-                f"RefinementCapability.set_policy() must be called before use. "
-                f"Configure with a RefinementPolicy implementation."
+                "RefinementCapability.set_policy() must be called before use. "
+                "Configure with a RefinementPolicy implementation."
             )
         return self.refinement_policy
 

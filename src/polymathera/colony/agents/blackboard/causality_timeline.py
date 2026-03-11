@@ -885,7 +885,7 @@ class CausalityTimeline:
                         "type": "concurrent_execution",
                         "event1": event1_id,
                         "event2": event2_id,
-                        "message": f"Events are concurrent but should be ordered",
+                        "message": "Events are concurrent but should be ordered",
                         "event1_clock": event1.vector_clock.to_string(),
                         "event2_clock": event2.vector_clock.to_string()
                     })
@@ -894,7 +894,7 @@ class CausalityTimeline:
                         "type": "reversed_order",
                         "event1": event1_id,
                         "event2": event2_id,
-                        "message": f"Events are in reversed order",
+                        "message": "Events are in reversed order",
                         "event1_clock": event1.vector_clock.to_string(),
                         "event2_clock": event2.vector_clock.to_string()
                     })

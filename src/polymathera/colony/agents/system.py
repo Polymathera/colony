@@ -1103,14 +1103,14 @@ class AgentSystemDeployment:
 
                 elif strategy == ResourceExhaustedStrategy.REPLICATE_PAGES:
                     logger.warning(
-                        f"REPLICATE_PAGES strategy is no longer supported (simplified design)"
+                        "REPLICATE_PAGES strategy is no longer supported (simplified design)"
                     )
                     continue
 
                 elif strategy == ResourceExhaustedStrategy.SCALE_DEPLOYMENT:
                     logger.warning(
-                        f"SCALE_DEPLOYMENT strategy is not applicable for VLLM agents "
-                        f"(page affinity prevents simple scaling)"
+                        "SCALE_DEPLOYMENT strategy is not applicable for VLLM agents "
+                        "(page affinity prevents simple scaling)"
                     )
                     continue
 

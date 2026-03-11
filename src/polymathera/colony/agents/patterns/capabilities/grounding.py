@@ -113,7 +113,7 @@ class GroundingRequest(BaseModel):
 
     @staticmethod
     def get_key_pattern() -> str:
-        return f"*:grounding_request:*:performative:inform"
+        return "*:grounding_request:*:performative:inform"
 
 
 class GroundingResult(BaseModel):
@@ -398,7 +398,7 @@ class GroundingCapability(AgentCapability):
                 result.issues.append(ValidationIssue(
                     severity="critical",
                     issue_type="contradictory_evidence",
-                    description=f"Found evidence contradicting claim",
+                    description="Found evidence contradicting claim",
                     suggestion="Revise claim or explain contradiction"
                 ))
 

@@ -250,7 +250,7 @@ class RedisClient:
             ### os.environ['REDIS_PERSISTENCE_DIR'] = persistence_dir
             ### logger.info(f"Created persistence directory: {persistence_dir}")
         else:
-            logger.info(f"Redis persistence disabled")
+            logger.info("Redis persistence disabled")
 
         # Basic Redis configuration
         pool_kwargs = {

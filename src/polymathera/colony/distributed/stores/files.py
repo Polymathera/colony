@@ -363,7 +363,8 @@ class ScalableDistributedFileSystem(FileSystemInterface):
         self.efs_mount_path = Path(self.config.efs_mount_path)
         self.compression_level = self.config.compression_level
 
-        import asyncio, time
+        import asyncio
+        import time
 
         async def _path_exists(p: Path) -> bool:
             """Run blocking Path.exists in a thread so we can time-out."""

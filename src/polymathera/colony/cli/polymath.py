@@ -1411,7 +1411,7 @@ async def run_integration_test(
 
     # Display deployment info
     deploy_lines = [
-        f"[bold]Step 0.5:[/bold] Deploying PolymatheraCluster",
+        "[bold]Step 0.5:[/bold] Deploying PolymatheraCluster",
         f"  App:    {effective_app_name}",
     ]
     for vd in vllm_deployment_configs:

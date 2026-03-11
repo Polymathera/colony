@@ -752,8 +752,8 @@ class Application:
                     )
 
         except Exception as e:
-            logger.warning(f"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+            logger.warning("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
             logger.warning(f"Error during cleanup: {e}")
-            logger.warning(f"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+            logger.warning("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
             # Don't fail deployment if cleanup fails
 

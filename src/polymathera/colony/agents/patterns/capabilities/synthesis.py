@@ -283,8 +283,8 @@ class SynthesisCapability(AgentCapability):
         cap = self.agent.get_capability_by_type(MergeCapability)
         if cap is None:
             raise RuntimeError(
-                f"SynthesisCapability requires MergeCapability. "
-                f"Add MergeCapability to agent's capabilities list."
+                "SynthesisCapability requires MergeCapability. "
+                "Add MergeCapability to agent's capabilities list."
             )
         return cap
 
