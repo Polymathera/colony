@@ -21,16 +21,16 @@ from ..models import Action
 
 class EventProcessingResult(BaseModel):
     """Result of processing an event by a capability.
-    
+
     Capabilities return this to:
     1. Add context for LLM planning (stored in scope for action executors)
     2. Execute rule-based decisions immediately (skip LLM planning)
     3. Signal terminal states (stop processing)
-    
+
     NOTE: Event handlers do NOT manage transactions. Transaction management
     belongs in action executors that modify shared state (e.g., submit_move).
     This ensures transaction lifetime matches the action that needs it.
-    
+
     Example:
         ```python
         @event_handler
@@ -42,15 +42,15 @@ class EventProcessingResult(BaseModel):
             game_event = self._parse_event(event)
             if game_event is None:
                 return None  # Not relevant to this capability
-            
+
             # Check for terminal state
             if game_event.game_state.is_terminal():
                 return EventProcessingResult(done=True)
-            
+
             # Check for rule-based response
             if action := self._rule_based_response(game_event):
                 return EventProcessingResult(immediate_action=action)
-            
+
             # Provide context for LLM planning (no transactions here!)
             return EventProcessingResult(
                 context={
@@ -62,6 +62,7 @@ class EventProcessingResult(BaseModel):
             )
         ```
     """
+
     context_key: str = Field(
         default="default",
         description=(
@@ -73,14 +74,14 @@ class EventProcessingResult(BaseModel):
     # Additional context for LLM planner (merged into scope.bindings["event_context"])
     # Action executors can read this to validate state versions before modifying
     context: BaseModel | dict[str, Any] | None = Field(default=None)
-    
+
     # If set, skip LLM planning and execute this action immediately
     # Use for rule-based responses that don't need LLM reasoning
     immediate_action: Action | None = Field(default=None)
-    
+
     # If True, stop processing (terminal state, game over, task complete)
     done: bool = Field(default=False)
-    
+
     model_config = {"arbitrary_types_allowed": True}
 
 
@@ -195,6 +196,7 @@ def event_handler(
                 ...
         ```
     """
+
     def decorator(fn: Callable) -> Callable:
         @functools.wraps(fn)
         async def wrapper(self, event, scope):

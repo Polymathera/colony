@@ -6,6 +6,7 @@ Backends are responsible for:
 3. Transactions with optimistic locking
 4. TTL enforcement (backend-specific strategy)
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -270,4 +271,3 @@ class ConcurrentModificationError(Exception):
     """Raised when optimistic locking detects concurrent modification."""
 
     pass
-

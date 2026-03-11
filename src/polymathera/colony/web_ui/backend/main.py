@@ -70,8 +70,8 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
-            "http://localhost:5173",   # Vite dev server
-            "http://localhost:8080",   # Dashboard itself
+            "http://localhost:5173",  # Vite dev server
+            "http://localhost:8080",  # Dashboard itself
             "http://127.0.0.1:5173",
             "http://127.0.0.1:8080",
         ],
@@ -81,7 +81,18 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     )
 
     # Register API routers
-    from .routers import infrastructure, deployments, agents, sessions, vcm, metrics, logs, blackboard, page_graph, traces
+    from .routers import (
+        infrastructure,
+        deployments,
+        agents,
+        sessions,
+        vcm,
+        metrics,
+        logs,
+        blackboard,
+        page_graph,
+        traces,
+    )
     from .streaming import sse
 
     app.include_router(infrastructure.router, prefix="/api/v1", tags=["infrastructure"])

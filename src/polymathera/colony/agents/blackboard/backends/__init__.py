@@ -1,4 +1,5 @@
 """Storage backends for blackboard."""
+
 from .memory import InMemoryBackend
 from .distributed import DistributedBackend
 from .redis import RedisBackend

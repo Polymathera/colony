@@ -5,7 +5,7 @@ modules with module-level Counter/Gauge definitions are imported
 via different import paths during test collection.
 """
 
-from prometheus_client import CollectorRegistry, REGISTRY
+from prometheus_client import REGISTRY
 
 
 def pytest_configure(config):

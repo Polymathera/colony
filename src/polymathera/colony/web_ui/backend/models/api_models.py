@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 class HealthStatus(BaseModel):
     """Overall cluster health summary."""
+
     ray_connected: bool = False
     redis_connected: bool = False
     ray_cluster_status: str = "unknown"
@@ -20,6 +21,7 @@ class HealthStatus(BaseModel):
 
 class RedisInfo(BaseModel):
     """Subset of Redis INFO for the dashboard."""
+
     connected_clients: int = 0
     used_memory_human: str = ""
     total_commands_processed: int = 0
@@ -30,6 +32,7 @@ class RedisInfo(BaseModel):
 
 class DeploymentSummary(BaseModel):
     """Summary of a serving deployment."""
+
     app_name: str
     deployment_name: str
     proxy_actor_name: str
@@ -37,6 +40,7 @@ class DeploymentSummary(BaseModel):
 
 class ApplicationSummary(BaseModel):
     """Summary of a serving application."""
+
     app_name: str
     created_at: float
     deployments: list[DeploymentSummary] = Field(default_factory=list)
@@ -44,6 +48,7 @@ class ApplicationSummary(BaseModel):
 
 class AgentSummary(BaseModel):
     """Lightweight agent info for list views."""
+
     agent_id: str
     agent_type: str = ""
     state: str = ""
@@ -52,6 +57,7 @@ class AgentSummary(BaseModel):
 
 class SessionSummary(BaseModel):
     """Lightweight session info for list views."""
+
     session_id: str
     tenant_id: str = ""
     state: str = ""
@@ -61,6 +67,7 @@ class SessionSummary(BaseModel):
 
 class RunSummary(BaseModel):
     """Lightweight run info for list views."""
+
     run_id: str
     session_id: str = ""
     agent_id: str = ""
@@ -73,6 +80,7 @@ class RunSummary(BaseModel):
 
 class PageSummary(BaseModel):
     """Lightweight page info for the VCM tab."""
+
     page_id: str
     source: str = ""
     tokens: int = 0
@@ -82,6 +90,7 @@ class PageSummary(BaseModel):
 
 class AgentHierarchyNode(BaseModel):
     """Agent with parent-child relationship info for hierarchy view."""
+
     agent_id: str
     agent_type: str = ""
     state: str = ""
@@ -94,6 +103,7 @@ class AgentHierarchyNode(BaseModel):
 
 class VCMStats(BaseModel):
     """VCM statistics summary."""
+
     total_pages: int = 0
     loaded_pages: int = 0
     page_groups: int = 0

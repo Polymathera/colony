@@ -14,6 +14,7 @@ from typing import Any
 
 try:
     import pynvml
+
     PYNVML_AVAILABLE = True
 except ImportError:
     PYNVML_AVAILABLE = False
@@ -21,6 +22,7 @@ except ImportError:
 
 try:
     from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
+
     VLLM_AVAILABLE = True
 except ImportError:
     VLLM_AVAILABLE = False
@@ -67,9 +69,9 @@ async def test_hypothesis_1_prefix_sharing():
 
     Expected: Memory increase ≈ 1x base + 5x suffix, NOT 5x (base + suffix)
     """
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("HYPOTHESIS 1: Shared Prefix → Shared KV Blocks")
-    print("="*80)
+    print("=" * 80)
 
     if not VLLM_AVAILABLE:
         print("SKIPPED: vLLM not available")
@@ -135,9 +137,9 @@ async def test_hypothesis_1_prefix_sharing():
             results.append(output)
 
     # Analysis
-    print("\n" + "-"*80)
+    print("\n" + "-" * 80)
     print("RESULTS:")
-    print("-"*80)
+    print("-" * 80)
     print(f"✓ Completed {len(results)} requests")
     print(f"📊 Memory efficiency: {mem_increase / 1e6 / len(results):.2f} MB per request")
     print(f"📊 Total memory overhead: {mem_increase / 1e6:.2f} MB")
@@ -161,9 +163,9 @@ async def test_hypothesis_2_full_prompt_sharing():
 
     Expected: Memory increase ≈ 1x prompt size (for all 10 requests combined)
     """
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("HYPOTHESIS 2: Identical Full Prompts → Maximum Sharing")
-    print("="*80)
+    print("=" * 80)
 
     if not VLLM_AVAILABLE:
         print("SKIPPED: vLLM not available")
@@ -218,9 +220,9 @@ async def test_hypothesis_2_full_prompt_sharing():
             results.append(output)
 
     # Analysis
-    print("\n" + "-"*80)
+    print("\n" + "-" * 80)
     print("RESULTS:")
-    print("-"*80)
+    print("-" * 80)
     print(f"✓ Completed {len(results)} requests")
     print(f"📊 Total memory increase: {mem_increase / 1e6:.2f} MB")
     print(f"📊 Average per request: {mem_increase / 10 / 1e6:.2f} MB")
@@ -249,9 +251,9 @@ async def test_hypothesis_3_concurrent_safety():
     Expected: All 50 requests complete successfully without errors, crashes, or
     race conditions.
     """
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("HYPOTHESIS 3: No Explicit Locking Needed")
-    print("="*80)
+    print("=" * 80)
 
     if not VLLM_AVAILABLE:
         print("SKIPPED: vLLM not available")
@@ -293,9 +295,9 @@ async def test_hypothesis_3_concurrent_safety():
     print("✓ All 50 requests completed")
 
     # Analysis
-    print("\n" + "-"*80)
+    print("\n" + "-" * 80)
     print("RESULTS:")
-    print("-"*80)
+    print("-" * 80)
     print(f"✅ Completed 50 concurrent requests in {elapsed:.2f}s")
     print(f"📊 Average latency: {elapsed / 50:.3f}s per request")
     print(f"🚀 Throughput: {50 / elapsed:.1f} requests/s")
@@ -316,9 +318,9 @@ async def test_hypothesis_4_memory_scaling():
 
     Expected: Memory scales with number of **unique** suffixes, not total requests.
     """
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("HYPOTHESIS 4: Memory Scales with Unique Suffixes, Not Total Requests")
-    print("="*80)
+    print("=" * 80)
 
     if not VLLM_AVAILABLE:
         print("SKIPPED: vLLM not available")
@@ -378,12 +380,12 @@ async def test_hypothesis_4_memory_scaling():
             results.append(output)
 
     # Analysis
-    print("\n" + "-"*80)
+    print("\n" + "-" * 80)
     print("RESULTS:")
-    print("-"*80)
+    print("-" * 80)
     print(f"✓ Completed {len(results)} requests")
     print(f"📊 Memory for 90 requests (3 unique suffixes): {mem_increase / 1e6:.2f} MB")
-    print(f"📊 Expected: base + 3*suffix")
+    print("📊 Expected: base + 3*suffix")
     print(f"📊 Would be without sharing: base + 90*suffix ≈ {mem_increase * 30 / 1e6:.2f} MB")
 
     print("\nEXPLANATION:")
@@ -399,9 +401,9 @@ async def test_hypothesis_4_memory_scaling():
 
 async def run_all_tests():
     """Run all concurrency tests sequentially."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("vLLM KV CACHE SHARING: CONCURRENCY TESTS")
-    print("="*80)
+    print("=" * 80)
     print("\nThis test suite validates vLLM's Automatic Prefix Caching (APC)")
     print("behavior for concurrent requests with shared prefixes.\n")
 
@@ -422,9 +424,9 @@ async def run_all_tests():
     await test_hypothesis_4_memory_scaling()
 
     # Summary
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("TEST SUITE COMPLETE")
-    print("="*80)
+    print("=" * 80)
     print("\nAll hypotheses have been tested. Review the results above.")
     print("\nNext steps:")
     print("1. Document findings in SPECS_VCM.md")

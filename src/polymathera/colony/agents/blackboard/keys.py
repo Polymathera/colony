@@ -103,7 +103,7 @@ class BlackboardKeySchema:
             Glob pattern string suitable for blackboard subscriptions.
         """
         result = self.template
-        variables = set(re.findall(r'\{(\w+)\}', self.template))
+        variables = set(re.findall(r"\{(\w+)\}", self.template))
         for var in variables:
             if var not in parts:
                 result = result.replace(f"{{{var}}}", "*")
@@ -152,7 +152,7 @@ class BlackboardKeySchema:
             auto["agent_id"] = agent.agent_id
         all_parts = {**auto, **parts}
         result = self.template
-        variables = set(re.findall(r'\{(\w+)\}', self.template))
+        variables = set(re.findall(r"\{(\w+)\}", self.template))
         for var in variables:
             if var in all_parts:
                 result = result.replace(f"{{{var}}}", all_parts[var])

@@ -27,7 +27,7 @@ from .misc import (
     we_are_running_in_a_docker_container,
     is_docker_available,
     call_async_in_executor,
-    call_async
+    call_async,
 )
 
 # Import retry utilities

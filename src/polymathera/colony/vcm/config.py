@@ -33,14 +33,14 @@ class VCMConfig:
     def add_deployments_to_app(self, app: serving.Application, top_level: bool) -> None:
         if not top_level:
             from . import VirtualContextManager
+
             app.add_deployment(
                 VirtualContextManager.bind(
                     caching_policy=self.caching_policy,
                     allocation_strategy=self.allocation_strategy,
                     page_storage_backend_type=self.page_storage_backend_type,
                     page_storage_path=self.page_storage_path,
-                    reconciliation_interval_s=self.reconciliation_interval_s
+                    reconciliation_interval_s=self.reconciliation_interval_s,
                 ),
-                name="vcm"
+                name="vcm",
             )
-

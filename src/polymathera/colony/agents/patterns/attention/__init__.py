@@ -61,7 +61,7 @@ from .query_routing import (
     HybridQueryRouting,
     BatchedQueryRouting,
     create_page_query_router1,
-    create_page_query_router2
+    create_page_query_router2,
 )
 
 __all__ = [
@@ -110,5 +110,5 @@ __all__ = [
     "HybridQueryRouting",
     "BatchedQueryRouting",
     "create_page_query_router1",
-    "create_page_query_router2"
+    "create_page_query_router2",
 ]

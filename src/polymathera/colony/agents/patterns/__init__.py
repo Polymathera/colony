@@ -19,6 +19,7 @@ Core patterns:
 
 All patterns follow policy-based design for pluggability and customization.
 """
+
 from .scope import (
     AnalysisScope,
     ScopeAwareResult,
@@ -36,7 +37,6 @@ __all__ = [
     "AnalysisScope",
     "ScopeAwareResult",
     "merge_scopes",
-
     # Critique
     "Critique",
     "CritiqueContext",
@@ -46,7 +46,6 @@ __all__ = [
     "LLMCritiquePolicy",
     "MetricBasedCritiquePolicy",
     "OutputRelationship",
-
     # Merging
     "MergePolicy",
     "MergeContext",
@@ -57,7 +56,6 @@ __all__ = [
     "ListMergePolicy",
     "DictMergePolicy",
     "HierarchicalMerger",
-
     # Refinement
     "RefinementPolicy",
     "RefinementContext",
@@ -65,12 +63,10 @@ __all__ = [
     "LLMRefinementPolicy",
     "IncrementalRefiner",
     "ProgressiveRefinementTracker",
-
     # Confidence
     "ConfidenceTracker",
     "UncertaintyPropagator",
     "ConfidenceMetrics",
-
     # Validation
     "AnalysisValidationPolicy",
     "ValidationContext",
@@ -83,12 +79,10 @@ __all__ = [
     "ConsensusValidator",
     "ContradictionResolver",
     "Contradiction",
-
     # Relationships
     "Relationship",
     "RelationshipGraph",
     "RelationshipGraphBuilder",
-
     # Hypothesis game system (unified)
     "Hypothesis",
     "SubjectType",
@@ -117,30 +111,24 @@ __all__ = [
     "RuleBasedEvaluation",
     "TrackedHypothesis",
     "HypothesisTrackingCapability",
-
     # Legacy hypothesis (deprecated)
     "HypothesisTestResult",
     "HypothesisDrivenExplorer",
-
     # Query-driven discovery
     "QueryDrivenExplorationCapability",
     "ScopeBasedQueryGenerator",
     "AdaptiveQueryGenerator",
     "ExplorationResult",
     "IncrementalQueryCapability",
-
     # Synthesis
     "IncrementalSynthesizer",
     "SynthesisCapability",
     "SynthesisUpdate",
-
     # Models
     "Reflection",
-
     # Consciousness
     "ConsciousnessCapability",
     "SystemDocumentation",
-
     # Hooks
     "hookable",
     "register_hook",
@@ -151,12 +139,10 @@ __all__ = [
     "HookContext",
     "RegisteredHook",
     "AgentHookRegistry",
-
     # Event processing
     "event_handler",
     "EventProcessingResult",
     "PROCESSED",
-
     # Capabilities (multi-agent execution framework primitives)
     "WorkingSetCapability",
     "PageGraphCapability",
@@ -336,6 +322,7 @@ _LAZY_IMPORTS = {
 def __getattr__(name: str):
     if name in _LAZY_IMPORTS:
         import importlib
+
         module = importlib.import_module(_LAZY_IMPORTS[name], __name__)
         value = getattr(module, name)
         globals()[name] = value  # cache for subsequent access

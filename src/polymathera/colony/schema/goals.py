@@ -284,7 +284,8 @@ def get_default_intrinsic_goals() -> list[GoalGroup]:
                 "goal": "Enhance monitoring and observability",
                 "examples": [
                     "Implement distributed tracing",
-                    "Set up comprehensive dashboards" "Implement monitoring",
+                    "Set up comprehensive dashboards",
+                    "Implement monitoring",
                     "Implement logging",
                     "Implement metrics",
                     "Implement alerts",
@@ -513,9 +514,7 @@ def get_default_intrinsic_goals() -> list[GoalGroup]:
             },
             {
                 "goal": "Transfer learnings across repositories perhaps across language barriers",
-                "examples": [
-                    "Apply successful testing strategies from a Python project to a JavaScript project"
-                ],
+                "examples": ["Apply successful testing strategies from a Python project to a JavaScript project"],
             },
             {
                 "goal": "Explore emerging technologies",
@@ -702,4 +701,3 @@ def get_default_intrinsic_goals() -> list[GoalGroup]:
         for group_name, goals in intrinsic_goals.items()
     ]
     return intrinsic_goals
-

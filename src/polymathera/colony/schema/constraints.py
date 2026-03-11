@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 
+
 class ExplorationConstraints(BaseModel):
     time_limit: int = 24 * 60 * 60  # 24 hours in seconds
     max_depth: int = 5  # Maximum depth of exploration
@@ -36,10 +37,9 @@ def get_default_exploration_constraints() -> ExplorationConstraints:
         allowed_technologies=["Python", "JavaScript", "Java", "C++", "Rust"],
         excluded_paths=["tests/", "docs/", "legacy/"],
         priority_areas=["security", "performance", "scalability"],
-        ethical_constraints= [
+        ethical_constraints=[
             "respect_user_privacy",
             "avoid_biased_algorithms",
             "ensure_data_protection",
         ],
     )
-

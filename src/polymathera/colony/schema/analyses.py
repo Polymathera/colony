@@ -30,5 +30,3 @@ class LLMStaticCodeAnalysisDescription(BaseModel):
         default="Repository",
         description="The scope of the analysis. Possible values: 'Repository', 'File', 'Function', 'Class', 'Method', 'Module', etc.",
     )
-
-

@@ -177,6 +177,7 @@ _LAZY_IMPORTS = {
 def __getattr__(name: str):
     if name in _LAZY_IMPORTS:
         import importlib
+
         module = importlib.import_module(_LAZY_IMPORTS[name], __name__)
         value = getattr(module, name)
         globals()[name] = value  # cache for subsequent access
