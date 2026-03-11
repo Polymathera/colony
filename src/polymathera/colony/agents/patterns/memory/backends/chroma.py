@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 _chroma_client = None
 _chroma_lock = asyncio.Lock()
 
-DEFAULT_PERSIST_DIR = "/mnt/shared/chromadb"
+DEFAULT_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", "/tmp/colony_chromadb")
 DEFAULT_COLLECTION_PREFIX = "colony_memory"
 
 

@@ -34,7 +34,7 @@ class DashboardConfig:
     pg_host: str = "postgres"
     pg_port: int = 5432
     pg_user: str = "colony"
-    pg_password: str = "colony_dev"
+    pg_password: str = ""
     pg_database: str = "colony"
 
     @classmethod
@@ -51,6 +51,6 @@ class DashboardConfig:
             pg_host=os.environ.get("RDS_HOST", "postgres"),
             pg_port=int(os.environ.get("RDS_PORT", "5432")),
             pg_user=os.environ.get("RDS_USER", "colony"),
-            pg_password=os.environ.get("RDS_PASSWORD", "colony_dev"),
+            pg_password=os.environ.get("RDS_PASSWORD", ""),
             pg_database=os.environ.get("RDS_DB_NAME", "colony"),
         )

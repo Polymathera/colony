@@ -20,6 +20,17 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 packages = [{include = "polymathera", from = "src"}]
+exclude = [
+    "src/**/tests/",
+    "src/**/test_*.py",
+    "src/**/*_test.py",
+    "src/**/*.md",
+    "src/**/conftest.py",
+    "src/**/cli/deploy/docker/",
+    "src/**/cli/deploy/.env",
+    "src/**/cli/deploy/.env.template",
+    "src/**/web_ui/frontend/node_modules/",
+]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.13"

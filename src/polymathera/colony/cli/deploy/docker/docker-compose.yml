@@ -44,7 +44,7 @@ services:
       - RDS_HOST=postgres
       - RDS_PORT=5432
       - RDS_USER=colony
-      - RDS_PASSWORD=colony_dev
+      - RDS_PASSWORD=${COLONY_PG_PASSWORD:-colony_dev}
       - RDS_DB_NAME=colony
       # Observability (tracing)
       - TRACING_ENABLED=true
@@ -102,7 +102,7 @@ services:
       - RDS_HOST=postgres
       - RDS_PORT=5432
       - RDS_USER=colony
-      - RDS_PASSWORD=colony_dev
+      - RDS_PASSWORD=${COLONY_PG_PASSWORD:-colony_dev}
       - RDS_DB_NAME=colony
       # Observability (tracing)
       - TRACING_ENABLED=true
@@ -141,7 +141,7 @@ services:
     container_name: colony-postgres
     environment:
       - POSTGRES_USER=colony
-      - POSTGRES_PASSWORD=colony_dev
+      - POSTGRES_PASSWORD=${COLONY_PG_PASSWORD:-colony_dev}
       - POSTGRES_DB=colony
     ports:
       - "${COLONY_POSTGRES_PORT:-5432}:5432"
@@ -198,7 +198,7 @@ services:
       - RDS_HOST=postgres
       - RDS_PORT=5432
       - RDS_USER=colony
-      - RDS_PASSWORD=colony_dev
+      - RDS_PASSWORD=${COLONY_PG_PASSWORD:-colony_dev}
       - RDS_DB_NAME=colony
     depends_on:
       ray-head:

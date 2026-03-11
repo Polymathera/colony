@@ -190,7 +190,11 @@ class AuthConfig(ConfigComponent):
         description="Enable authentication. Disable for local mode.",
         json_schema_extra={"env": "AUTH_ENABLED"},
     )
-    jwt_secret: str = Field(default="polymathera-jwt-secret")
+    jwt_secret: str = Field(
+        default="",
+        description="JWT signing secret. Must be set via JWT_SECRET env var when auth is enabled.",
+        json_schema_extra={"env": "JWT_SECRET", "optional": lambda config: not config.enable_auth},
+    )
     permissions_table: str = Field(
         default="PolymatheraAuthPermissions",
         json_schema_extra={"env": "AUTH_PERMISSIONS_DDB_TABLE_NAME", "optional": lambda config: not config.enable_auth},
@@ -259,8 +263,16 @@ class StorageConfig(ConfigComponent):
 
 @register_polymathera_config()
 class UserChatServiceConfig(ConfigComponent):
-    slack_bot_token: str = Field(default="polymathera-slack-bot-token")
-    slack_app_token: str = Field(default="polymathera-slack-app-token")
+    slack_bot_token: str = Field(
+        default="",
+        description="Slack bot token. Set via SLACK_BOT_TOKEN env var.",
+        json_schema_extra={"env": "SLACK_BOT_TOKEN"},
+    )
+    slack_app_token: str = Field(
+        default="",
+        description="Slack app token. Set via SLACK_APP_TOKEN env var.",
+        json_schema_extra={"env": "SLACK_APP_TOKEN"},
+    )
 
     CONFIG_PATH: ClassVar[str] = "chat.user_chat_service"
 

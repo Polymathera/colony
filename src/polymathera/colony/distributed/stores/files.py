@@ -864,7 +864,8 @@ class ScalableDistributedFileSystem1(FileSystemInterface):
         return self.regions[hash(file_name) % len(self.regions)]
 
     def _get_mount_point(self, region: str, file_system_id: str) -> Path:
-        return Path(f"/mnt/efs/{region}/{file_system_id}")
+        base = getattr(self.config, "efs_mount_path", "/mnt/efs")
+        return Path(f"{base}/{region}/{file_system_id}")
 
     @override
     async def exists(self, path: Path) -> bool:
