@@ -1,14 +1,71 @@
 # Colony
 
-Polymathera's no-RAG, multi-agent framework for extremely long, *dense* contexts (1B+ tokens). It provides:
+[![PyPI](https://img.shields.io/pypi/v/polymathera-colony)](https://pypi.org/project/polymathera-colony/)
+[![Python](https://img.shields.io/pypi/pyversions/polymathera-colony)](https://pypi.org/project/polymathera-colony/)
+[![License](https://img.shields.io/github/license/polymathera/colony)](LICENSE)
+[![CI](https://github.com/polymathera/colony/actions/workflows/ci.yml/badge.svg)](https://github.com/polymathera/colony/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-polymathera.github.io%2Fcolony-blue)](https://polymathera.github.io/colony)
 
-- A cluster-level **virtual context memory** with user-defined context paging.
-- Cache-aware agent action policies.
-- Powerful and composable multi-agent patterns.
-- Arbitrarily sophisticated memory hierarchies and cognitive processes.
+**A no-RAG, cache-aware multi-agent framework for extremely long, dense contexts (1B+ tokens).**
 
-> Can Polymathera's Colony be a realization of the "_country of geniuses in a datacenter_" vision?
+> [!WARNING]
+> Colony is still in pre-alpha early access. It is under active development and the API is not stable. Join the waitlist for updates: https://polymathera.com/colony
 
+
+Colony is a framework for building tightly-coupled, self-evolving multi-agent systems (*agent colonies*) that reason over extremely long context without retrieval-augmented generation. Instead of fragmenting context into chunks and retrieving snippets, Colony keeps the entire context *live* across a cluster of LLMs through a virtual memory system that manages GPU KV caches the same way an operating system manages virtual memory over finite physical RAM.
+
+> Colony's goal is to be the most efficient *country of geniuses in a datacenter*?
+
+## Why Colony?
+
+Most agent frameworks treat context as something to retrieve or manage. Colony treats it as something to be *brought to life*. Certain domains require *reasoning deep and wide*. Examples include:
+- *Scientific research*: synthesizing novel insights from a vast literature requires complex integration
+- *Cyber-physical systems*: understanding the full context of a complex system (code, physical environment, requirements, regulations) is essential for architecting solutions and identifying edge cases and failure modes
+- *Systemic vulnerability analysis*: identifying security risks in a complex system by reasoning over a large attack surface and many potential interactions.
+- *Business intelligence*: making strategic decisions based on a wide range of internal and external data, where relevant information may be siloed and require cross-domain reasoning
+- *Long-form content creation*: writing a book or comprehensive report that requires maintaining a coherent narrative across a large amount of information
+
+- **NoRAG** -- Colony keeps the full context live and accessible, not filtered through retrieval. Colony manages all kinds of context (code, text, data) through distributed KV cache paging, not vector search.
+
+- **Cache-Aware Agents** -- Agents are aware of what's in GPU memory (at the cluster level) and consciously plan their work to maximize cache reuse.
+
+- **Agents All the Way Down** -- General intelligence emerges from the right composition of *agent capabilities* and *multi-agent patterns*. Every cognitive process -- attention, memory, planning, confidence tracking -- is a pluggable policy with a default implementation.
+
+- **Game-Theoretic Correctness** -- Multi-agent game protocols (hypothesis games, contract nets, negotiation) combat specific LLM failure modes: hallucination, laziness, and goal drift.
+
+Read the full [Philosophy](https://polymathera.github.io/colony/philosophy/) for the ideas behind the framework.
+
+P.S. Colony is currently in early access. Join the waitlist for updates: https://polymathera.com/colony
+
+
+## Architecture
+
+```
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                                 Agent Colony                                      │
+│                                                                                   │
+│  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐                      │
+│  │     Agent       │ │     Agent       │ │     Agent       │  ...                 │
+│  │┌──────────────┐ │ │┌──────────────┐ │ │┌──────────────┐ │                      │
+│  ││ Capabilities │ │ ││ Capabilities │ │ ││ Capabilities │ │                      │
+│  ││ Action Policy│ │ ││ Action Policy│ │ ││ Action Policy│ │                      │
+│  ││    Planner   │ │ ││    Planner   │ │ ││    Planner   │ │                      │
+│  │└──────────────┘ │ │└──────────────┘ │ │└──────────────┘ │                      │
+│  └─────────────────┘ └─────────────────┘ └─────────────────┘                      │
+│  ┌─────────────────────────────────────┐ ┌─────────────────────────────────────┐  │
+│  │         Blackboard (Redis)          │ │     Virtual Context Memory (VCM)    │  │
+│  │    Events · OCC · Shared Scopes     │ │   Page Table · Cache Scheduling     │  │
+│  └─────────────────────────────────────┘ └─────────────────────────────────────┘  │
+│                                          ┌─────────┐ ┌─────────┐                  │
+│                                          │ LLM N1  │ │ LLM N2  │  ...             │
+│                                          │ KV Cache│ │ KV Cache│                  │
+│                                          └─────────┘ └─────────┘                  │
+└───────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Each **Agent** composes pluggable [capabilities](src/polymathera/colony/agents/patterns/capabilities) (memory, attention, games, confidence tracking, grounding, reflection, cache awareness, etc.) coordinated by an **`ActionPolicy`** that consults an LLM **Planner**. Agents share state through a Redis-backed **`Blackboard`** with optimistic concurrency control (OCC) and causal ordering. The **Virtual Context Memory** (VCM) manages distributed GPU KV caches as pages, enabling agents to reason over contexts far larger than any single model's window.
+
+See the full [Architecture docs](https://polymathera.github.io/colony/architecture/).
 
 ## Quick Start
 
@@ -57,7 +114,7 @@ colony-env down
 colony-env doctor
 ```
 
-All Colony dependencies run inside Docker — no local GPU drivers, Ray, or Redis installation required. The `colony-env run` command copies your codebase to be analyzed into the cluster and executes inside the Ray head container with full access to the framework.
+All Colony dependencies run inside Docker -- no local GPU drivers, Ray, or Redis installation required. The `colony-env run` command copies your codebase to be analyzed into the cluster and executes inside the Ray head container with full access to the framework.
 
 **Services started by `colony-env up`:**
 
@@ -76,6 +133,7 @@ The Colony dashboard starts automatically with `colony-env up` at [localhost:808
 - **Agents** — list registered agents, view state, capabilities, and details
 - **Sessions** — browse sessions and their agent runs with token usage
 - **VCM** — page table, working set, and virtual context statistics
+- **Traces** — detailed tracing of agent actions, VCM operations, and system events for debugging and performance analysis
 
 ```bash
 # Run the agent colony
@@ -96,6 +154,18 @@ npm install
 npm run dev     # Starts on localhost:5173, proxies /api to localhost:8080
 ```
 
+## Key Features
+
+| Feature | Description | Docs |
+|---------|-------------|------|
+| Virtual Context Memory | OS-style virtual memory for LLM KV caches with page tables and cache-aware scheduling | [VCM](https://polymathera.github.io/colony/architecture/virtual-context-memory/) |
+| Agent Capabilities | Composable cognitive modules (memory, attention, games, confidence) attached to agents via AOP-inspired patterns | [Agent System](https://polymathera.github.io/colony/architecture/agent-system/) |
+| Action Policies | LLM-centric planning with Model Predictive Control -- the LLM is the planner, not the framework | [Action Policies](https://polymathera.github.io/colony/architecture/action-policies/) |
+| Blackboard | Redis-backed shared state with optimistic concurrency, causal timelines, and event-driven coordination | [Blackboard](https://polymathera.github.io/colony/architecture/blackboard/) |
+| Memory Hierarchies | Unified memory system with sensory, working, short-term, and long-term memory -- all backed by blackboards | [Memory](https://polymathera.github.io/colony/architecture/memory-system/) |
+| Game Engine | Hypothesis games, contract nets, negotiation, and consensus protocols for multi-agent coordination | [Games](https://polymathera.github.io/colony/architecture/game-engine/) |
+| Hook System | AOP-inspired hooks for cross-cutting concerns (logging, metrics, memory triggers) | [Hooks](https://polymathera.github.io/colony/architecture/hook-system/) |
+
 ## Development
 
 ```bash
@@ -104,50 +174,23 @@ cd colony
 poetry install --all-extras
 ```
 
-### Optional Dependencies
+### Running Tests
 
-Dependencies that require system libraries (CUDA, native extensions) are declared as optional extras in `pyproject.toml`:
-
-```toml
-[tool.poetry.dependencies]
-some-dep = { version = "^1.0", optional = true }
-
-[tool.poetry.extras]
-feature_name = ["some-dep"]
-```
-
-Guard optional imports in code:
-
-```python
-try:
-    import heavy_dep
-except ImportError:
-    heavy_dep = None
-
-def feature_function():
-    if heavy_dep is None:
-        raise ImportError(
-            "Install with: pip install polymathera-colony[feature_name]"
-        )
+```bash
+pytest src/ --timeout=120 -x -q
 ```
 
 ### Documentation
 
-Documentation is built with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/) and API reference is auto-generated from docstrings via [mkdocstrings](https://mkdocstrings.github.io/).
-
 ```bash
-# Install dev dependencies (includes mkdocs + plugins)
-poetry install --all-extras
-
-# Start local docs server with hot-reload
-mkdocs serve                  # --dev-addr http://127.0.0.1:8000/
-
-# Build static site (output in site/)
-mkdocs build
-
-# Build with strict mode (treat warnings as errors)
-mkdocs build --strict
+poetry run mkdocs serve     # Local docs server at http://127.0.0.1:8000/
+poetry run mkdocs build     # Build static site
 ```
 
-> The server has **hot-reload** — any edits to `docs/` or source files will auto-rebuild.
+## Contributing
 
+We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code conventions, and the PR process.
+
+## License
+
+Apache 2.0 -- see [LICENSE](LICENSE).
