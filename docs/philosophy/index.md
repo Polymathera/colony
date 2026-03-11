@@ -38,3 +38,4 @@ graph TD
 - [The NoRAG Paradigm](no-rag.md) -- Why retrieval-augmented generation is the wrong abstraction for deep reasoning
 - [Agents All the Way Down](agents-all-the-way-down.md) -- How general intelligence emerges from composition
 - [Cache-Aware Patterns](cache-awareness.md) -- Why cache management is a first-class concern, not an optimization
+- [The Consciousness-Intuition Interface](consciousness-intuition.md) -- How Colony models cognition as layered intuition + deliberate policies

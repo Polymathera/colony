@@ -9,6 +9,7 @@
 **A no-RAG, cache-aware multi-agent framework for extremely long, dense contexts (1B+ tokens).**
 
 ---
+
 > [!WARNING]
 > Colony is still in pre-alpha early access. It is under active development and the API is not stable.
 
@@ -21,7 +22,7 @@
 
 Colony is a framework for building tightly-coupled, self-evolving multi-agent systems (***agent colonies***) that reason over extremely long context without retrieval-augmented generation. Instead of fragmenting context into chunks and retrieving snippets, Colony keeps the entire context *live* across a **cluster of LLMs** through a virtual memory system that manages GPU KV caches the same way an operating system manages virtual memory over finite physical RAM.
 
-> Colony's goal is to be the most efficient *country of geniuses in a datacenter*?
+> Colony's goal is to be the most efficient *country of geniuses in a datacenter* — the ideal substrate for **civilization-building AI**.
 
 ## Why Colony?
 
@@ -30,6 +31,7 @@ Most agent frameworks treat context as something to retrieve or manage. Colony t
 - *Cyber-physical systems*: understanding the full context of a complex system (code, physical environment, requirements, regulations) is essential for architecting solutions and identifying edge cases and failure modes
 - *Systemic vulnerability analysis*: identifying security risks in a complex system by reasoning over a large attack surface and many potential interactions.
 - *Business intelligence*: making strategic decisions based on a wide range of internal and external data, where relevant information may be siloed and require cross-domain reasoning
+- *Economic modeling*: simulating and understanding complex economic systems with many interacting agents and factors and long supply chains
 - *Long-form content creation*: writing a book or comprehensive report that requires maintaining a coherent narrative across a large amount of information
 
 Colony's core innovations are:
