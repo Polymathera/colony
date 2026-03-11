@@ -22,13 +22,13 @@ async def redis():
 @pytest.fixture
 def cache(redis):
     """Cache fixture with JSON serialization."""
-    return DistributedCache(redis, "test", default_ttl=60, use_json=True)
+    return DistributedCache(redis, "test", default_ttl=60, use_pickle=False)
 
 
 @pytest.fixture
 def pickle_cache(redis):
     """Cache fixture with pickle serialization."""
-    return DistributedCache(redis, "test", default_ttl=60, use_json=False)
+    return DistributedCache(redis, "test", default_ttl=60, use_pickle=True)
 
 
 @pytest.mark.asyncio
