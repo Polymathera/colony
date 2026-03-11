@@ -202,7 +202,7 @@ testpaths = ["src"]
 asyncio_mode = "auto"
 timeout = 120
 pythonpath = ["src"]
-import_mode = "importlib"
+importmode = "importlib"
 
 [build-system]
 requires = ["poetry-core"]
