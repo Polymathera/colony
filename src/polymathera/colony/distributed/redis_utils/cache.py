@@ -80,17 +80,10 @@ class DistributedCache(BaseStore):
 
         async def _set(client: Redis | Pipeline, *args: Any) -> None:
             await client.set(full_key, serialized)
-            if self.use_pickle:
-                await client.set(full_key, serialized)
-            else:
-                await client.hset(full_key, mapping=serialized)
             if ttl is not None:
                 await client.expire(full_key, ttl)
 
-        if self.use_pickle:
-            await self._execute_atomic("set", _set)
-        else:
-            await self._execute_atomic("hset", _set)
+        await self._execute_atomic("set", _set)
 
     async def get(
         self,
@@ -110,10 +103,7 @@ class DistributedCache(BaseStore):
         full_key = self._build_key(key)
 
         async def _get(client: Redis | Pipeline, *args: Any) -> Any:
-            if self.use_pickle:
-                return await client.get(full_key)
-            else:
-                return await client.hgetall(full_key)
+            return await client.get(full_key)
 
         data = await self._execute_atomic("get", _get)
         if not data:

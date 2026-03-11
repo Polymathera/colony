@@ -2,7 +2,7 @@
 
 **Polymathera's no-RAG, cache-aware multi-agent framework for extremely long, dense contexts (1B+ tokens).**
 
-Colony is a framework for building *tightly-coupled multi-agent systems* (**agent colonies**) that reason over extremely long context without retrieval-augmented generation (RAG). Instead of fragmenting context into chunks and retrieving snippets, Colony keeps the entire context "live" over a cluster of *one or more* LLMs through a cluster-level virtual memory system that manages LLM KV caches in the same way an operating system manages (almost unlimited) virtual memory over finite physical memory.
+Colony is a framework for building *tightly-coupled, self-evolving, self-improving multi-agent systems* (**agent colonies**) that reason over extremely long context without retrieval-augmented generation (RAG). Instead of fragmenting context into chunks and retrieving snippets, Colony keeps the entire context "live" over a cluster of *one or more* LLMs through a cluster-level virtual memory system that manages LLM KV caches in the same way an operating system manages (almost unlimited) virtual memory over finite physical memory.
 
 ## Key Ideas
 
