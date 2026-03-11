@@ -8,21 +8,21 @@
 
 **A no-RAG, cache-aware multi-agent framework for extremely long, dense contexts (1B+ tokens).**
 
----
 
-> [!WARNING]
-> Colony is still in pre-alpha early access. It is under active development and the API is not stable.
+Colony is a framework for building *tightly-coupled, self-improving, self-aware multi-agent systems* (***agent colonies***) that reason over extremely long context without retrieval-augmented generation (RAG). Instead of fragmenting context into chunks and retrieving snippets, Colony keeps the entire context *live* across a **cluster of LLMs** through a virtual memory system that manages GPU KV caches the same way an operating system manages (almost unlimited) virtual memory over finite physical memory.
 
----
+!!! tip "Colony's Vision"
+    Colony's goal is to be the most efficient *country of geniuses in a datacenter* — the ideal substrate for **civilization-building AI**.
 
-> [!WARNING]
-> Colony is not intended for consumer apps. It is intended to run over a Ray cluster and it can be resource-intensive and expensive.
 
----
+!!! tip "Pre-Alpha Early Access"
 
-Colony is a framework for building tightly-coupled, self-evolving multi-agent systems (***agent colonies***) that reason over extremely long context without retrieval-augmented generation. Instead of fragmenting context into chunks and retrieving snippets, Colony keeps the entire context *live* across a **cluster of LLMs** through a virtual memory system that manages GPU KV caches the same way an operating system manages virtual memory over finite physical RAM.
+    Colony is still in pre-alpha early access. The API is not stable and the framework is under active development. We welcome feedback and contributions, but be aware that breaking changes may occur.
 
-> Colony's goal is to be the most efficient *country of geniuses in a datacenter* — the ideal substrate for **civilization-building AI**.
+
+!!! tip "Who should use Colony?"
+
+    Colony is designed for **engineers building complex multi-agent systems** that require reasoning over extremely long contexts. It is not a general-purpose agent framework or a consumer product. If you are looking for a simple agent orchestration tool or a way to add tool use to an LLM, Colony may not be the right fit. It runs over a Ray cluster (local or in the cloud) and it can be resource-intensive and expensive.
 
 ## Why Colony?
 
@@ -52,26 +52,36 @@ Read the full [Philosophy](https://polymathera.github.io/colony/philosophy/) for
 ## Architecture
 
 ```
-┌───────────────────────────────────────────────────────────────────────────────────┐
-│                                 Agent Colony                                      │
-│                                                                                   │
-│  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐                      │
-│  │     Agent       │ │     Agent       │ │     Agent       │  ...                 │
-│  │┌──────────────┐ │ │┌──────────────┐ │ │┌──────────────┐ │                      │
-│  ││ Capabilities │ │ ││ Capabilities │ │ ││ Capabilities │ │                      │
-│  ││ Action Policy│ │ ││ Action Policy│ │ ││ Action Policy│ │                      │
-│  ││    Planner   │ │ ││    Planner   │ │ ││    Planner   │ │                      │
-│  │└──────────────┘ │ │└──────────────┘ │ │└──────────────┘ │                      │
-│  └─────────────────┘ └─────────────────┘ └─────────────────┘                      │
-│  ┌─────────────────────────────────────┐ ┌─────────────────────────────────────┐  │
-│  │         Blackboard (Redis)          │ │     Virtual Context Memory (VCM)    │  │
-│  │    Events · OCC · Shared Scopes     │ │   Page Table · Cache Scheduling     │  │
-│  └─────────────────────────────────────┘ └─────────────────────────────────────┘  │
-│                                          ┌─────────┐ ┌─────────┐                  │
-│                                          │ LLM N1  │ │ LLM N2  │  ...             │
-│                                          │ KV Cache│ │ KV Cache│                  │
-│                                          └─────────┘ └─────────┘                  │
-└───────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                               Agent Colony                                     │
+│                                                                                │
+│   ┌────────────────┐   ┌────────────────┐   ┌────────────────┐                 │
+│   │    Agent 1     │   │    Agent 2     │   │    Agent N     │                 │
+│   │ Capabilities   │   │ Capabilities   │   │ Capabilities   │   ...           │
+│   │ Action Policy  │   │ Action Policy  │   │ Action Policy  │                 │
+│   │ Planner (LLM)  │   │ Planner (LLM)  │   │ Planner (LLM)  │                 │
+│   └──────┬─────────┘   └──────┬─────────┘   └──────┬─────────┘                 │
+│          │ read/write         │                    │ infer_with_suffix         │
+│     ┌────┴────────────────────┴────────────────────┴──────┐                    │
+│     ▼                                                     ▼                    │
+│  ┌────────────────────────────┐   ┌────────────────────────────────────────┐   │
+│  │    Blackboard (Redis)      │   │     Virtual Context Memory (VCM)       │   │
+│  │                            │   │                                        │   │
+│  │  Shared state & events     │   │  Page Table · Page Graph               │   │
+│  │  OCC · Memory scopes       │   │  Cache Scheduling · Page Faults        │   │
+│  │  Agent coordination        │   │                                        │   │
+│  └─────────────┬──────────────┘   │  ┌──────────┐ ┌──────────┐             │   │
+│                │                  │  │ LLM N1   │ │ LLM N2   │   ...       │   │
+│                │ mmap             │  │ KV Cache │ │ KV Cache │             │   │
+│                └─────────────────►│  └──────────┘ └──────────┘             │   │
+│                                   │                                        │   │
+│  ┌────────────────────────────┐   │  Context Sources (mapped as pages):    │   │
+│  │    External Sources        │   │  ┌────────┐ ┌──────────┐ ┌─────────┐   │   │
+│  │  Git repos, documents,     │   │  │ Repos  │ │Knowledge │ │Blackbrd │   │   │
+│  │  knowledge bases, data     ├──►│  │        │ │  Bases   │ │  Data   │   │   │
+│  └────────────────────────────┘   │  └────────┘ └──────────┘ └─────────┘   │   │
+│                                   └────────────────────────────────────────┘   │
+└────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Each **Agent** composes pluggable [capabilities](src/polymathera/colony/agents/patterns/capabilities) (memory, attention, games, confidence tracking, grounding, reflection, cache awareness, etc.) coordinated by an **`ActionPolicy`** that consults an LLM **Planner**. Agents share state through a Redis-backed **`Blackboard`** with optimistic concurrency control (OCC) and causal ordering. The **Virtual Context Memory** (VCM) manages distributed GPU KV caches as pages, enabling agents to reason over contexts far larger than any single model's window.
