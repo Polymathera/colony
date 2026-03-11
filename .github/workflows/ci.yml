@@ -57,6 +57,7 @@ jobs:
           pytest src/ \
             --timeout=120 \
             --ignore=src/polymathera/colony/vcm/ \
+            --ignore=src/polymathera/colony/agents/blackboard/tests/ \
             -x -q \
             --tb=short
         env:

@@ -178,7 +178,7 @@ async def test_error_handling(cache, redis):
 
 
 @pytest.mark.asyncio
-async def test_serialization_error_handling(cache):
+async def test_serialization_error_handling(cache, redis):
     """Test handling of serialization errors."""
     # Invalid JSON
     key = f"{cache.namespace}:invalid"

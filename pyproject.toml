@@ -201,6 +201,8 @@ known-first-party = ["polymathera"]
 testpaths = ["src"]
 asyncio_mode = "auto"
 timeout = 120
+pythonpath = ["src"]
+import_mode = "importlib"
 
 [build-system]
 requires = ["poetry-core"]

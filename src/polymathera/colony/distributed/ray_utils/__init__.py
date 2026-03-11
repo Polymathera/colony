@@ -74,18 +74,30 @@ class WorkerDeploymentOptions(BaseModel):
 logger = logging.getLogger(__name__)
 
 
-# Metrics
-actor_creation_attempts = Counter(
-    "actor_creation_attempts_total",
+# Metrics — use REGISTRY to avoid duplicate registration errors in tests
+from prometheus_client import REGISTRY as _REGISTRY
+
+def _get_or_create_counter(name, description, labelnames):
+    if name in _REGISTRY._names_to_collectors:
+        return _REGISTRY._names_to_collectors[name]
+    return Counter(name, description, labelnames)
+
+def _get_or_create_histogram(name, description, labelnames):
+    if name in _REGISTRY._names_to_collectors:
+        return _REGISTRY._names_to_collectors[name]
+    return Histogram(name, description, labelnames)
+
+actor_creation_attempts = _get_or_create_counter(
+    "actor_creation_attempts",
     "Number of actor creation attempts",
     ["environment", "actor_class", "status"],
 )
-actor_method_calls = Histogram(
+actor_method_calls = _get_or_create_histogram(
     "actor_method_duration_seconds",
     "Duration of actor method calls",
     ["environment", "actor_class", "method"],
 )
-actor_errors = Counter(
+actor_errors = _get_or_create_counter(
     "actor_errors_total",
     "Number of actor errors",
     ["environment", "actor_class", "error_type"],
