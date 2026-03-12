@@ -11,18 +11,20 @@
 
 Colony is a framework for building *tightly-coupled, self-improving, self-aware multi-agent systems* (***agent colonies***) that reason over extremely long context without retrieval-augmented generation (RAG). Instead of fragmenting context into chunks and retrieving snippets, Colony keeps the entire context *live* across a **cluster of LLMs** through a virtual memory system that manages GPU KV caches the same way an operating system manages (almost unlimited) virtual memory over finite physical memory.
 
-!!! tip "Colony's Vision"
-    Colony's goal is to be the most efficient *country of geniuses in a datacenter* — the ideal substrate for **civilization-building AI**.
+<table style="border:1.5px solid #00bcd4; border-radius:4px; border-collapse:collapse; width:100%; margin:12px 0;">
+  <tr><td style="background:#00bcd4; padding:6px 12px; color:#fff; font-weight:600;">💡 Colony's Vision</td></tr>
+  <tr><td style="background:#e0f7fa; padding:10px 12px;">Colony's goal is to be the most efficient <em>country of geniuses in a datacenter</em> — the ideal substrate for <strong>civilization-building AI</strong>.</td></tr>
+</table>
 
+<table style="border:1.5px solid #ff9100; border-radius:4px; border-collapse:collapse; width:100%; margin:12px 0;">
+  <tr><td style="background:#ff9100; padding:6px 12px; color:#fff; font-weight:600;">⚠️ Pre-Alpha Early Access</td></tr>
+  <tr><td style="background:#fff8e1; padding:10px 12px;">Colony is still in pre-alpha early access. The API is not stable and the framework is under active development. We welcome feedback and contributions, but be aware that breaking changes may occur.</td></tr>
+</table>
 
-!!! tip "Pre-Alpha Early Access"
-
-    Colony is still in pre-alpha early access. The API is not stable and the framework is under active development. We welcome feedback and contributions, but be aware that breaking changes may occur.
-
-
-!!! tip "Who should use Colony?"
-
-    Colony is designed for **engineers building complex multi-agent systems** that require reasoning over extremely long contexts. It is not a general-purpose agent framework or a consumer product. If you are looking for a simple agent orchestration tool or a way to add tool use to an LLM, Colony may not be the right fit. It runs over a Ray cluster (local or in the cloud) and it can be resource-intensive and expensive.
+<table style="border:1.5px solid #448aff; border-radius:4px; border-collapse:collapse; width:100%; margin:12px 0;">
+  <tr><td style="background:#448aff; padding:6px 12px; color:#fff; font-weight:600;">ℹ️ Who should use Colony?</td></tr>
+  <tr><td style="background:#e8f0fe; padding:10px 12px;">Colony is designed for <strong>engineers building complex multi-agent systems</strong> that require reasoning over extremely long contexts. It is not a general-purpose agent framework or a consumer product. If you are looking for a simple agent orchestration tool or a way to add tool use to an LLM, Colony may not be the right fit. It runs over a Ray cluster (local or in the cloud) and it can be resource-intensive and expensive.</td></tr>
+</table>
 
 ## Why Colony?
 
