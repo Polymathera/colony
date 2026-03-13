@@ -25,7 +25,7 @@ Colony is a framework for building *tightly-coupled, self-evolving, self-improvi
 
 - **Agents All the Way Down**: General intelligence emerges from the right composition of *agent capabilities* and *multi-agent patterns*. Every cognitive process -- attention, memory, planning, confidence tracking -- is a pluggable policy with a default implementation.
 
-- **Game-Theoretic Correctness**: Multi-agent game protocols (hypothesis games, contract nets, negotiation) combat specific LLM failure modes like hallucination, laziness, and goal drift.
+- **Distributed Reasoning Patterns**: Multi-agent game protocols (hypothesis games, contract nets, negotiation) combat specific LLM failure modes like hallucination, laziness, and goal drift.
 
 ## Getting Started
 
@@ -37,7 +37,6 @@ See the [Installation](getting-started/installation.md) guide and [Quick Start](
 
 ## Architecture at a Glance
 
-<div class="arch-diagram">
 <style>
 /* ── Architecture Diagram ── */
 .arch-svg { width: 100%; max-width: 940px; margin: 0 auto; display: block; }
@@ -60,11 +59,6 @@ See the [Installation](getting-started/installation.md) guide and [Quick Start](
 .arch-svg .arrow       { stroke-width: 1.6; fill: none; marker-end: url(#ah); }
 .arch-svg .arrow-label { font-size: 13px; fill: #6b7280; font-weight: 500; }
 
-/* Tooltips (appear on group hover) */
-.arch-svg .tip       { opacity: 0; transition: opacity .2s; pointer-events: none; }
-.arch-svg .group:hover .tip { opacity: 1; }
-.arch-svg .tip rect  { fill: #1e1b4b; rx: 5; }
-.arch-svg .tip text  { fill: #f5f3ff; font-size: 10.5px; }
 
 /* Animated flow dash */
 @keyframes flowDash { to { stroke-dashoffset: -14; } }
@@ -88,7 +82,8 @@ See the [Installation](getting-started/installation.md) guide and [Quick Start](
 [data-md-color-scheme="slate"] .arch-svg .r-ext  { fill: #18181b; stroke: #52525b; }
 [data-md-color-scheme="slate"] .arch-svg .r-inf  { fill: #1e293b; stroke: #475569; }
 </style>
-<svg class="arch-svg" viewBox="0 0 940 530" xmlns="http://www.w3.org/2000/svg">
+<div>
+<svg class="arch-svg" viewBox="0 0 940 544" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <marker id="ah" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
       <path d="M0,0 L10,3.5 L0,7 Z" fill="#7c3aed"/>
@@ -136,19 +131,14 @@ See the [Installation](getting-started/installation.md) guide and [Quick Start](
     <text class="detail" x="648" y="110" text-anchor="start">Confidence · Reflection · Planning</text>
     <text class="detail" x="648" y="124" text-anchor="start">Games (Hypothesis, Contract Net,</text>
     <text class="detail" x="648" y="138" text-anchor="start">Negotiation, Consensus)</text>
-    <!-- Tooltip -->
-    <g class="tip" transform="translate(580,12)">
-      <rect x="0" y="0" width="280" height="24"/>
-      <text x="10" y="16">Composable capabilities + LLM-driven planning</text>
-    </g>
   </g>
   </a>
 
   <!-- ══════════ ARROWS: Agents → Blackboard / VCM ══════════ -->
   <line class="arrow flow" x1="150" y1="150" x2="150" y2="196" stroke="#8b5cf6"/>
-  <text class="arrow-label" x="164" y="178">read / write</text>
+  <text class="arrow-label" x="164" y="178">read / write / query / mmap</text>
   <line class="arrow flow" x1="630" y1="150" x2="630" y2="196" stroke="#8b5cf6"/>
-  <text class="arrow-label" x="644" y="178">infer_with_suffix</text>
+  <text class="arrow-label" x="644" y="178">infer_with_suffix / page_graph_ops</text>
 
   <!-- ══════════ BLACKBOARD ══════════ -->
   <a href="architecture/blackboard/">
@@ -161,11 +151,6 @@ See the [Installation](getting-started/installation.md) guide and [Quick Start](
     <text class="body"  x="36" y="298">Memory scopes:</text>
     <text class="detail" x="36" y="314">Working · STM · LTM</text>
     <text class="detail" x="36" y="328">Episodic · Semantic · Procedural</text>
-    <!-- Tooltip -->
-    <g class="tip" transform="translate(30,110)">
-      <rect x="0" y="0" width="230" height="24"/>
-      <text x="10" y="16">Single source of truth for all agent state</text>
-    </g>
   </g>
   </a>
 
@@ -208,26 +193,22 @@ See the [Installation](getting-started/installation.md) guide and [Quick Start](
     <!-- VCM features -->
     <text class="detail" x="630" y="438" text-anchor="middle">Nonuniform pages · Soft/hard affinity · Advisory/mandatory groups · Prefetching</text>
     <text class="detail" x="630" y="454" text-anchor="middle">Amortized cost: O(N²) → O(N log N) as page graph stabilizes</text>
-    <!-- Tooltip -->
-    <g class="tip" transform="translate(490,204)">
-      <rect x="0" y="0" width="304" height="24"/>
-      <text x="10" y="16">OS-style virtual memory for distributed LLM KV caches</text>
-    </g>
   </g>
   </a>
 
   <!-- ══════════ ARROWS: BB / External → VCM context sources (mmap) ══════════ -->
   <line class="arrow flow" x1="280" y1="340" x2="340" y2="370" stroke="#3b82f6" style="marker-end:url(#ah-blue)"/>
-  <text class="arrow-label" x="282" y="350" text-anchor="start">mmap</text>
+  <text class="arrow-label" x="282" y="350" text-anchor="start">mmap / munmap</text>
   <line class="arrow flow" x1="280" y1="391" x2="340" y2="391" stroke="#78716c" style="marker-end:url(#ah-gray)"/>
-  <text class="arrow-label" x="290" y="385" text-anchor="middle">mmap</text>
+  <text class="arrow-label" x="290" y="385" text-anchor="middle">mmap / munmap</text>
 
   <!-- ══════════ INFRASTRUCTURE BAR ══════════ -->
-  <rect class="box r-inf" x="20" y="492" width="900" height="36" fill="#f1f5f9" stroke="#cbd5e1"/>
-  <text class="title" x="470" y="515" text-anchor="middle">Infrastructure: Ray Cluster (actors, autoscaling) · Redis (state, pub/sub)</text>
+  <rect class="box r-inf" x="20" y="492" width="900" height="50" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text class="title" x="470" y="522" text-anchor="middle">Infrastructure: Ray Cluster (actors, autoscaling) · Redis (state, pub/sub)</text>
 
 </svg>
 </div>
+
 
 ## Documentation
 

@@ -43,7 +43,7 @@ Colony's core innovations are:
 
 - **Agents All the Way Down** -- General intelligence emerges from the right composition of *agent capabilities* and *multi-agent patterns*. Every cognitive process -- attention, memory, planning, confidence tracking -- is a pluggable policy with a default implementation.
 
-- **Game-Theoretic Correctness** -- Multi-agent game protocols (hypothesis games, contract nets, negotiation) combat specific LLM failure modes: hallucination, laziness, and goal drift.
+- **Distributed Reasoning Patterns** -- Multi-agent game protocols (hypothesis games, contract nets, negotiation) combat specific LLM failure modes: hallucination, laziness, and goal drift.
 
 Read the full [Philosophy](https://polymathera.github.io/colony/philosophy/) for the ideas behind the framework.
 
@@ -54,36 +54,37 @@ Read the full [Philosophy](https://polymathera.github.io/colony/philosophy/) for
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────────────────────┐
-│                               Agent Colony                                     │
-│                                                                                │
-│   ┌────────────────┐   ┌────────────────┐   ┌────────────────┐                 │
-│   │    Agent 1     │   │    Agent 2     │   │    Agent N     │                 │
-│   │ Capabilities   │   │ Capabilities   │   │ Capabilities   │   ...           │
-│   │ Action Policy  │   │ Action Policy  │   │ Action Policy  │                 │
-│   │ Planner (LLM)  │   │ Planner (LLM)  │   │ Planner (LLM)  │                 │
-│   └──────┬─────────┘   └──────┬─────────┘   └──────┬─────────┘                 │
-│          │ read/write         │                    │ infer_with_suffix         │
-│     ┌────┴────────────────────┴────────────────────┴──────┐                    │
-│     ▼                                                     ▼                    │
-│  ┌────────────────────────────┐   ┌────────────────────────────────────────┐   │
-│  │    Blackboard (Redis)      │   │     Virtual Context Memory (VCM)       │   │
-│  │                            │   │                                        │   │
-│  │  Shared state & events     │   │  Page Table · Page Graph               │   │
-│  │  OCC · Memory scopes       │   │  Cache Scheduling · Page Faults        │   │
-│  │  Agent coordination        │   │                                        │   │
-│  └─────────────┬──────────────┘   │  ┌──────────┐ ┌──────────┐             │   │
-│                │                  │  │ LLM N1   │ │ LLM N2   │   ...       │   │
-│                │ mmap             │  │ KV Cache │ │ KV Cache │             │   │
-│                └─────────────────►│  └──────────┘ └──────────┘             │   │
-│                                   │                                        │   │
-│  ┌────────────────────────────┐   │  Context Sources (mapped as pages):    │   │
-│  │    External Sources        │   │  ┌────────┐ ┌──────────┐ ┌─────────┐   │   │
-│  │  Git repos, documents,     │   │  │ Repos  │ │Knowledge │ │Blackbrd │   │   │
-│  │  knowledge bases, data     ├──►│  │        │ │  Bases   │ │  Data   │   │   │
-│  └────────────────────────────┘   │  └────────┘ └──────────┘ └─────────┘   │   │
-│                                   └────────────────────────────────────────┘   │
-└────────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                             Agent Colony                                          │
+│                                                                                                   │
+│                 ┌────────────────┐   ┌────────────────┐   ┌────────────────┐                      │
+│                 │    Agent 1     │   │    Agent 2     │   │    Agent N     │                      │
+│                 │ Capabilities   │   │ Capabilities   │   │ Capabilities   │   ...                │
+│                 │ Action Policy  │   │ Action Policy  │   │ Action Policy  │                      │
+│                 │ Planner (LLM)  │   │ Planner (LLM)  │   │ Planner (LLM)  │                      │
+│                 └──────┬─────────┘   └──────┬─────────┘   └──────┬─────────┘                      │
+│ read/write/query/mmap  │                    │                    │         infer_with_suffix      │
+│   ┌────────────────────┴────────────────────┴────────────────────┴──────┐  page_graph_ops         │
+│   │                                                                     ▼                         │
+│   │    ┌────────────────────────────┐                 ┌────────────────────────────────────────┐  │
+│   │    │    Blackboard (Redis)      │                 │     Virtual Context Memory (VCM)       │  │
+│   │    │                            │                 │                                        │  │
+│   ┠───►│  Shared state & events     │                 │  Page Table · Page Graph               │  │
+│   │    │  OCC · Memory scopes       │                 │  Cache Scheduling · Page Faults        │  │
+│   │    │  Agent coordination        │                 │                                        │  │
+│   │    └─────────────┬──────────────┘                 │  ┌──────────┐ ┌──────────┐             │  │
+│   │                  │                                │  │ LLM N1   │ │ LLM N2   │   ...       │  │
+│   │                  │      mmap/munmap/invalidate    │  │ KV Cache │ │ KV Cache │             │  │
+│   │                  └───────────────────────────────►│  └──────────┘ └──────────┘             │  │
+│   │                         mmap/munmap/invalidate    │                                        │  │
+│   │                  ┌───────────────────────────────►│                                        │  │
+│   │                  │                                │  Context Sources (mapped as pages):    │  │
+│   │    ┌─────────────┴──────────────┐                 │  ┌────────┐ ┌──────────┐ ┌─────────┐   │  │
+│   │    │    External Sources        │                 │  │ Repos  │ │Knowledge │ │Blackbrd │   │  │
+│   └───►│  Git repos, documents,     │                 │  │        │ │  Bases   │ │  Data   │   │  │
+│        │  knowledge bases, data     │                 │  └────────┘ └──────────┘ └─────────┘   │  │
+│        └────────────────────────────┘                 └────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Each **Agent** composes pluggable [capabilities](src/polymathera/colony/agents/patterns/capabilities) (memory, attention, games, confidence tracking, grounding, reflection, cache awareness, etc.) coordinated by an **`ActionPolicy`** that consults an LLM **Planner**. Agents share state through a Redis-backed **`Blackboard`** with optimistic concurrency control (OCC) and causal ordering. The **Virtual Context Memory** (VCM) manages distributed GPU KV caches as pages, enabling agents to reason over contexts far larger than any single model's window.
@@ -187,7 +188,7 @@ npm run dev     # Starts on localhost:5173, proxies /api to localhost:8080
 | Blackboard | Redis-backed shared state with optimistic concurrency, causal timelines, and event-driven coordination | [Blackboard](https://polymathera.github.io/colony/architecture/blackboard/) |
 | Memory Hierarchies | Unified memory system with sensory, working, short-term, and long-term memory -- all backed by blackboards | [Memory](https://polymathera.github.io/colony/architecture/memory-system/) |
 | Game Engine | Hypothesis games, contract nets, negotiation, and consensus protocols for multi-agent coordination | [Games](https://polymathera.github.io/colony/architecture/game-engine/) |
-| Hook System | AOP-inspired hooks for cross-cutting concerns (logging, metrics, memory triggers) | [Hooks](https://polymathera.github.io/colony/architecture/hook-system/) |
+| Hook System | AOP-inspired hooks for cross-cutting concerns (logging, tracing, metrics, memory triggers) | [Hooks](https://polymathera.github.io/colony/architecture/hook-system/) |
 
 ## Development
 

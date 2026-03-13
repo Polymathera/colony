@@ -2,10 +2,11 @@
 
 Colony is built on a single, testable conjecture:
 
-> **General intelligence is emergent from the right composition of LLM-based reasoning agents.**
+> **General intelligence is emergent from the right composition of LLM-based reasoning policy and action space.**
 
-This is not a vague aspiration. It is a specific architectural claim with specific consequences for how the framework is built.
+This architectural claim has specific consequences for how the framework is built.
 
+<!-->
 ## The Argument from Bounded Depth
 
 A single LLM call has finite reasoning depth. No matter how capable the model, its forward pass executes a fixed number of layers, and the chain-of-thought it produces in a single generation has practical limits. This is not a flaw -- it is a fundamental property of any finite computational process.
@@ -14,32 +15,23 @@ But many real-world tasks require reasoning depth that exceeds what any single c
 
 Colony's answer: **iterative deepening**. If a single LLM call produces finite-depth reasoning, then iterative deepening of that reasoning -- with reflection, learning, and accumulated context -- produces unbounded-depth reasoning. Each iteration builds on the findings of the previous one, effectively traversing arbitrary path lengths through the implicit knowledge graph.
 
-```mermaid
-graph TD
-    subgraph "Single LLM Call"
-        A1[Input] --> A2[Finite Depth Reasoning]
-        A2 --> A3[Output]
-    end
-    subgraph "Iterative Deepening"
-        B1[Input] --> B2[Depth 1: Initial Analysis]
-        B2 --> B3[Reflect + Learn]
-        B3 --> B4[Depth 2: Deeper Analysis]
-        B4 --> B5[Reflect + Learn]
-        B5 --> B6[Depth N: Arbitrarily Deep]
-        B6 --> B7[Output]
-    end
-```
 
 !!! tip "Unbounded Depth, Unbounded Context"
-    Iterative deepening gives unbounded reasoning *depth* (arbitrary path length in the knowledge graph). Distributed reasoning over partitioned context gives unbounded reasoning *breadth* (relationships with arbitrary degree in the knowledge hypergraph). Colony combines both.
+    Iterative deepening gives unbounded reasoning *depth* (arbitrary path length in the knowledge hypergraph). **Distributed reasoning over partitioned context** gives unbounded reasoning *breadth* (relationships with arbitrary degree in the knowledge hypergraph). Colony combines both.
 
 ## The Argument from Bounded Context
+-->
 
-A single LLM has a finite context window. Even with million-token windows, many tasks involve context that exceeds what one model instance can hold. And for tasks requiring dense reasoning, the *quality* of reasoning degrades well before the context window is technically exhausted.
+A single LLM has a finite context window. Even with million-token windows, many tasks involve context that exceeds what one model instance can hold. And for tasks requiring **dense reasoning**, the *quality* of reasoning degrades well before the context window is technically exhausted.
 
 Colony's answer: **distributed reasoning** over extremely long context. Multiple agents, each with their own context window, collectively reason over a corpus that no single agent could process. A cache-aware scheduler ensures that agents are routed to nodes where their required pages are already loaded, and a page attention graph guides which pages to load next.
 
 This produces reasoning over unbounded-length context: relationships with arbitrary degree in the knowledge hypergraph, discovered by agents that coordinate their exploration.
+
+
+!!! tip "Agent-Page (Soft) Affinity"
+    If Colony is deployed with self-hosted LLMs, to optimize context loading and reduce latency, an agent can be bound to specific pages, in which case the agent is constrained to run on the Ray node caching those pages in its LLM instance KV cache.
+
 
 ## The Virtual Agent
 
@@ -89,27 +81,31 @@ This maps directly to `polymathera.colony`'s capability system:
 - The `ActionPolicy` is the **aspect weaver** -- it decides which capabilities to activate and how to compose them, based on current context and goals.
 - The result is emergent behavior from the combinatorial explosion of possible action interleavings, without explicitly modeling all possible paths in code.
 
-## Software Complexity: O(log N)
+!!! note "Add Agent Block Diagram"
+    A diagram here would show how different `AgentCapabilities` interact through the `ActionPolicy` to produce emergent behavior.
+
+
+## Software Complexity: $O(log N)$
 
 A common objection to multi-agent systems is that they add complexity. Colony argues the opposite: the right multi-agent abstractions *reduce* complexity growth from $O(N)$ to $O(\log N)$, where $N$ is the size of the system's components.
 
 The key is **minimal ontological commitment**. Higher-level abstractions do not force specific structures on lower levels. Primitives are independently usable and composable into arbitrary algorithms. Specific strategies (clustering, batching, coordination) are implemented as pluggable policies, not hardcoded control flow.
 
-When you add a new `AgentCapability`, existing capabilities continue to work. New primitives are **additive**. The LLM-based action policy handles the combinatorial complexity of composing capabilities, which is exactly the kind of problem LLMs are good at -- pattern-matching over a large space of possibilities given context about the current situation.
+> When you add a new `AgentCapability`, existing capabilities continue to work. New primitives are **additive**. The LLM-based action policy handles the combinatorial complexity of composing capabilities, which is exactly the kind of problem LLMs are good at -- pattern-matching over a large space of possibilities given context about the current situation.
 
 !!! warning "The Monolithic Alternative"
     A monolithic agent with all capabilities hardcoded must handle every interaction between features explicitly. Adding feature N+1 requires considering its interaction with all N existing features: $O(N)$ integration work. Colony's capability system decouples features and delegates composition to the action policy, reducing integration work to $O(\log N)$ because each capability only needs to interact with the policy interface and the shared memory system.
 
 ## What This Means in Practice
 
-The "agents all the way down" philosophy is not just theory. It produces concrete architectural decisions:
+The "agents all the way down" philosophy produces concrete architectural decisions:
 
-1. **No hardcoded control flow.** The framework gives context, asks the LLM "what's next?", executes the chosen action, and feeds back results. Plans are the LLM's current thinking plus history, not fixed sequences.
+1. **No hardcoded control flow.** The framework gives context, asks the LLM "what's next?", executes the chosen action, and feeds back results. <s>Plans are the LLM's current thinking plus history, not fixed sequences.</s>
 
-2. **Dynamic hierarchies.** The agent hierarchy is not fixed at design time. Agents spawn sub-agents, form teams, play games, and dissolve -- all decided at runtime by the action policy based on the task.
+2. **Dynamic hierarchies.** The agent hierarchy is not fixed at design time. Agents spawn sub-agents and agent pools, form teams and coalitions, play games, and dissolve -- all decided at runtime by the action policy based on the task.
 
-3. **Games as correctness mechanisms.** Hypothesis games catch hallucination. Contract nets prevent laziness. Objective guards detect goal drift. These are not social simulations -- they are formal mechanisms with game-theoretic foundations (VCG incentives, no-regret learning, social choice aggregation).
+3. **Games as error correction mechanisms.** Hypothesis games catch hallucination. Contract nets prevent laziness. Objective guards detect goal drift. These are not social simulations -- they are formal mechanisms with game-theoretic foundations (VCG incentives, no-regret learning, social choice aggregation).
 
-4. **Memory as environment.** Agent memory is not a passive store. It is an `AgentCapability` -- part of the agent's environment -- that provides actions to read, write, consolidate, and forget. Memories observe agent behavior via hooks. Agents observe their memories via retrieval. This bidirectional observer relationship is the substrate on which emergent intelligence is built.
+4. **Memory as environment.** Agent memory is not a passive store. It is an `AgentCapability` -- part of the agent's environment -- that provides actions to read, write, query, consolidate, and forget. Memories observe agent behavior via hooks. Agents observe their memories via retrieval. This bidirectional observer relationship is the substrate on which emergent intelligence is built.
 
-The conjecture is bold: compose enough LLM-based agents with the right abstractions, and general intelligence emerges. Colony is the testbed for that conjecture.
+The conjecture is bold: compose enough LLM-based agents with the right mix of capabilities, and general intelligence emerges. Colony is the testbed for that conjecture.
