@@ -15,6 +15,11 @@ jobs:
           python-version: "3.11"
       - name: Install Poetry
         run: pip install poetry
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "Setting version to $VERSION"
+          poetry version "$VERSION"
       - name: Build package
         run: poetry build
       - uses: actions/upload-artifact@v4

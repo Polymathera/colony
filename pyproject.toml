@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "polymathera-colony"
-version = "0.1.0"
+version = "0.1.1"
 description = "Polymathera's no-RAG, multi-agent framework for extremely long, dense contexts (1B+ tokens)."
 authors = ["Ahmed Nassar <amam.nassar@gmail.com>"]
 license = "Apache-2.0"
