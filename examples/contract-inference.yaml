@@ -1,0 +1,46 @@
+# Colony Example: Contract Inference
+# ===================================
+# Infers function contracts — preconditions, postconditions, and
+# invariants. Uses hypothesis games to validate contracts and
+# produces specifications at configurable formalism levels.
+#
+# Run:
+#   colony-env run --local-repo /path/to/codebase --config contract-inference.yaml
+
+repo_id: "my-project"
+tenant_id: "example"
+
+cluster:
+  app_name: "polymathera"
+  remote_deployments:
+    - model_name: "claude-sonnet-4-20250514"
+      provider: "anthropic"
+      api_key_env_var: "ANTHROPIC_API_KEY"
+      max_cached_pages: 50
+      max_cached_tokens: 2000000
+      ttl: "1h"
+      num_replicas: 1
+
+paging:
+  flush_threshold: 20
+  flush_token_budget: 4096
+
+analyses:
+  - type: contracts
+    coordinator_version: v2
+    max_agents: 8
+
+    # --- Formalism level ---
+    # "natural"     = English descriptions
+    # "semi_formal" = structured but not machine-checkable
+    # "formal"      = machine-checkable specifications
+    # "code"        = executable assertions
+    formalism: "semi_formal"
+
+hierarchy:
+  extra_capabilities:
+    - ReflectionCapability
+
+output_dir: "./results"
+timeout_seconds: 600
+# budget_usd: 5.00

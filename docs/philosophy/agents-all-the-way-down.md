@@ -4,6 +4,10 @@ Colony is built on a single, testable conjecture:
 
 > **General intelligence is emergent from the right composition of LLM-based reasoning policy and action space.**
 
+!!! tip "General Intelligence Emerges from Composition"
+    The **action space** is as important to foster intelligent behavior as the reasoning model itself. By providing the right set of actions, we can guide the LLM to both **learn** (*at training time*) and **reason** (*at inference time*) in more effective ways. This is corroborated by embodied AI research which shows that <u>*the action space available to an agent significantly influences its ability to learn and perform tasks*.</u>
+
+
 The conjecture is bold: compose enough LLM-based agents with the right mix of capabilities, and general intelligence emerges. Colony is the testbed for that conjecture.
 
 This architectural claim has specific consequences for how the framework is built.

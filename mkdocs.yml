@@ -61,7 +61,15 @@ nav:
     - Installation: getting-started/installation.md
     - Quick Start: getting-started/quickstart.md
     - Key Concepts: getting-started/concepts.md
-    - Example Gallery: getting-started/example-gallery.md
+  - Examples:
+    - Gallery: examples/index.md
+    - Codebase Analysis: examples/basic-analysis.md
+    - Change Impact Analysis: examples/impact-analysis.md
+    - Compliance Audit: examples/compliance-audit.md
+    - Intent Inference: examples/intent-inference.md
+    - Contract Inference: examples/contract-inference.md
+    - Program Slicing: examples/program-slicing.md
+    - Multi-Analysis Workflow: examples/multi-analysis.md
   - Philosophy:
     - Overview: philosophy/index.md
     - "The NoRAG Paradigm": philosophy/no-rag.md

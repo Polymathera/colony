@@ -1,0 +1,43 @@
+# Colony Example: Intent Inference
+# =================================
+# Infers code purpose and developer intentions — business goals vs.
+# implementation details. Builds intent graphs and detects
+# misalignments using consensus game protocols.
+#
+# Run:
+#   colony-env run --local-repo /path/to/codebase --config intent-inference.yaml
+
+repo_id: "my-project"
+tenant_id: "example"
+
+cluster:
+  app_name: "polymathera"
+  remote_deployments:
+    - model_name: "claude-sonnet-4-20250514"
+      provider: "anthropic"
+      api_key_env_var: "ANTHROPIC_API_KEY"
+      max_cached_pages: 50
+      max_cached_tokens: 2000000
+      ttl: "1h"
+      num_replicas: 1
+
+paging:
+  flush_threshold: 20
+  flush_token_budget: 4096
+
+analyses:
+  - type: intent
+    coordinator_version: v2
+    max_agents: 8
+
+    # --- Granularity ---
+    # "function" = per-function intent, "class" = per-class, "module" = per-module
+    granularity: "function"
+
+hierarchy:
+  extra_capabilities:
+    - ReflectionCapability
+
+output_dir: "./results"
+timeout_seconds: 600
+# budget_usd: 5.00

@@ -9,6 +9,10 @@ Most multi-agent frameworks intended for consumer applications typically model a
 
 In Colony, an `AgentCapability` is not a mixin. It is an **aspect** in the AOP sense -- a modular unit of cross-cutting concern that can be composed with other aspects without explicit knowledge of them. Each encapsulates a coherent set of **actions**, **events**, **services**, **hooks**, and **interaction protocols**. The `ActionPolicy` plays the role of the **aspect weaver**, deciding at each step which capabilities activate, in what order, and with what parameters. The result is emergent behavior from the combinatorial explosion of possible action interleavings, without explicitly modeling all possible paths in code.
 
+
+Colony is a multi-agent programming model where `AgentCapabilities` are very *loosely coupled* and need not be aware of each other (which simplifies each `AgentCapability`), but can still interact with each by virtue of `MemoryCapabilities` which observe and aggregate the activities of all `AgentCapabilities` (including themselves) for the `ActionPolicy` to compose actions from various capabilities in intricate, interesting and unanticipated ways. This avoids complexity by *disentangling agent behavior* into separate "**aspects**" and delegating the "**weaving**" of all these "aspects" to the action policy aided by memory.
+
+
 !!! info "Action Policy REPL"
     The `PolicyREPL` provides a dataflow medium among executed actions, allowing capabilities to interact and share information dynamically.
 

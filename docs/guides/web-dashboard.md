@@ -53,6 +53,11 @@ Detailed tracing of agent actions, VCM operations, and system events for debuggi
 
 ![Dashboard Traces](images/dashboard-traces-tab.png)
 
+
+!!! bug "Add details on how to tracing on user code and custom capabilities."
+    Document the tracing API for user code and custom capabilities, and how those traces appear in the dashboard. Include examples of how to use it for debugging and performance analysis. See `colony_docs/markdown/agents/observability_plan.md`
+
+
 ## Frontend Development
 
 For developing the dashboard frontend with hot-reload:

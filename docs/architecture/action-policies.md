@@ -13,6 +13,11 @@ Colony does not emphasize rigid plan graphs, state machines, or rule-based orche
 
 A "plan" in Colony is the LLM's current thinking plus execution history -- not a fixed sequence. The LLM can revise or abandon its plan at any point based on new information.
 
+!!! tip "Real-Time Adaptability"
+    Strategies can adapt to data at runtime rather than following prescribed workflows.
+
+
+
 ## `ActionPolicy` Base Class
 
 `polymathera.colony.agents.base.ActionPolicy` defines the contract:

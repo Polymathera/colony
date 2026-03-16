@@ -1,0 +1,62 @@
+# Colony Example: Multi-Analysis Workflow
+# ========================================
+# Runs multiple analyses concurrently on the same paged codebase.
+# All agent teams share the same VCM and page graph — pages loaded
+# for one analysis are reusable by others via the shared KV cache.
+#
+# Run:
+#   colony-env run --local-repo /path/to/codebase --config multi-analysis.yaml
+
+repo_id: "my-project"
+tenant_id: "example"
+
+cluster:
+  app_name: "polymathera"
+  remote_deployments:
+    - model_name: "claude-sonnet-4-20250514"
+      provider: "anthropic"
+      api_key_env_var: "ANTHROPIC_API_KEY"
+      max_cached_pages: 50
+      max_cached_tokens: 2000000
+      ttl: "1h"
+      num_replicas: 1
+
+paging:
+  flush_threshold: 20
+  flush_token_budget: 4096
+
+# Three analyses run concurrently on the same paged codebase.
+analyses:
+
+  # 1. What breaks when we change the auth flow?
+  - type: impact
+    coordinator_version: v2
+    max_agents: 10
+    batching_policy: hybrid
+    changes:
+      - file_path: "src/auth/handler.py"
+        change_type: modification
+        description: "Migrated from JWT to session tokens"
+
+  # 2. Are we violating any license or security policies?
+  - type: compliance
+    coordinator_version: v2
+    max_agents: 8
+    compliance_types:
+      - license
+      - security
+
+  # 3. What is each function actually trying to do?
+  - type: intent
+    coordinator_version: v2
+    max_agents: 8
+    granularity: "function"
+
+hierarchy:
+  extra_capabilities:
+    - ReflectionCapability
+    - ConsciousnessCapability
+
+output_dir: "./results"
+timeout_seconds: 900
+# budget_usd: 15.00

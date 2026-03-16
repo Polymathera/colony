@@ -19,7 +19,7 @@ LLMs learn vast amounts of knowledge during training, but this knowledge is *imp
 ## Why Not RAG?
 
 !!! abstract "The RAG Problem"
-    RAG activates only sparse subsets of a corpus at a time. For tasks that require **local (sparse) reasoning** -- adding type annotations to a codebase, answering factual questions from a knowledge base -- this is fine. But Colony targets a different class of problems: tasks requiring **global (systemic, dense) reasoning** that synthesize insights from many disparate parts of the context across many iterative passes.
+    RAG activates only sparse subsets of a corpus at a time, missing the dense, cross-cutting connections essential for breakthrough insights. For tasks that require **local (sparse) reasoning** -- adding type annotations to a codebase, answering factual questions from a knowledge base -- this is fine. But Colony targets a different class of problems: tasks requiring **global (systemic, dense) reasoning** that synthesize insights from many disparate parts of the context across many iterative passes.
 
 
 !!! abstract "The NoRAG Advantage"

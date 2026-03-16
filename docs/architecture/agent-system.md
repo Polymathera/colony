@@ -110,8 +110,10 @@ Capabilities provide:
 
 - **Action executors**: Methods decorated with `@action_executor` that the `ActionPolicy` can invoke (conscious cognitive processes)
 - **Hookables**: Methods marked `@hookable` that other components can intercept
-- **Hooks**: Hooks the capability registers on other components (via `register_hook()`)
-- **Background processes**: Subconscious cognitive processes (consolidation, rehearsal)
+- **Hooks** (*method call interceptors*): Hooks the capability registers on other components (via `register_hook()`)
+- **Event streams**: Capabilities can publish events to their scoped blackboard, which other agents can subscribe to (e.g., for game protocols or parent-child communication)
+- **Event handlers**: Capabilities can subscribe to events from other capabilities or agents, enabling reactive behavior and emergent coordination patterns
+- **Services** or **background processes**: Subconscious *cognitive* processes (consolidation, rehearsal)
 
 ```python
 class PageGraphCapability(AgentCapability):
@@ -133,6 +135,19 @@ class PageGraphCapability(AgentCapability):
 
 !!! tip "Capabilities as AOP Aspects"
     Each `AgentCapability` is an "aspect" in the aspect-oriented programming sense. The `ActionPolicy` plays the role of the "aspect weaver," deciding which capabilities to activate and in what order. Emergent behavior arises from the combinatorial explosion of possible capability interleavings -- the framework does not model all paths explicitly.
+
+
+!!! bug "Merge with `docs/design-insights/capabilities-as-aspects.md` and reference here."
+
+
+!!! tip "LLM-Decidable Actions"
+    The LLM should be able to reason about when/how to use each `AgentCapability` action.
+
+
+!!! bug "Add subconscious processes to planning prompt"
+    Subconscious processes (e.g., memory consolidation) are not directly invoked by the LLM, but they affect the agent's state and capabilities. The LLM should be aware of these processes and their effects when making decisions. Add explanation of how to include subconscious processes in the planning prompt and how they interact with conscious actions.
+
+
 
 ### Scope-Based Communication
 

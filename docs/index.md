@@ -23,7 +23,7 @@ Colony is a framework for building *tightly-coupled, self-evolving, self-improvi
 
 ## Key Ideas
 
-- **NoRAG**: Colony keeps the full context live and accessible, not filtered through retrieval. Colony manages all kinds of context (code, text, data) through distributed KV cache paging, not vector search.
+- **NoRAG**: Colony keeps the full context live and accessible, not filtered through retrieval. Colony manages all kinds of context (code, text, data) through <u>***distributed KV cache paging***</u>, not vector search.
 
 - **Cache-Aware Agents**: Agents are aware of what's in GPU memory (at the cluster level) and consciously plan their work to maximize cache reuse.
 
@@ -218,8 +218,11 @@ See the [Installation](getting-started/installation.md) guide and [Quick Start](
 
 | Section | Description |
 |---------|-------------|
+| [Getting Started](getting-started/installation.md) | Installation and initial setup instructions |
+| [Examples Gallery](examples/index.md) | Collection of example use cases and applications |
 | [Philosophy](philosophy/index.md) | Why Colony exists and what makes it different |
 | [Architecture](architecture/index.md) | Technical architecture of each subsystem |
 | [Design Insights](design-insights/index.md) | Deep dives into novel design decisions |
 | [Guides](guides/colony-env.md) | Practical how-to guides |
+| [API Reference](reference/index.md) | Detailed API documentation |
 | [Contributing](contributing.md) | How to contribute to Colony |

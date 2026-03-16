@@ -21,6 +21,10 @@ Three philosophical pillars support Colony's architecture:
 
 3. **Agents All the Way Down** -- General intelligence is not a property of any single model. It emerges from the right composition of LLM-based reasoning agents that communicate, coordinate, and collaborate across unbounded context.
 
+4. **Parallelized, Distributed Reasoning** -- Parallelized, distributed reasoning over partitioned context is the key to unbounded depth and breadth of reasoning.
+
+!!! bug "Add a page on **Parallelized, Distributed Reasoning**"
+
 <!--
 <s>These are not incremental improvements on existing agent frameworks. They represent a different mental model for what multi-agent systems are *for* and how they should be built.</s>
 -->
