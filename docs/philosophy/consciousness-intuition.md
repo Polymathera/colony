@@ -1,20 +1,59 @@
 # The Consciousness-Intuition Interface
 
-Colony draws a specific, architecturally consequential analogy between its multi-agent system and cognitive science. This is not a metaphor used for marketing -- it maps directly to code and determines how agents are structured.
+<!--
+Colony draws a specific, architecturally consequential analogy between its multi-agent system and cognitive science.
+-->
 
-## Two Layers of Cognition
+Most agent frameworks treat the LLM as the complete behavior: prompt in, actions out.
+
+```
+┌─────────────────────────────────────────┐
+│                                         │
+│                   LLM                   │
+│                                         │
+└─────────────────────────────────────────┘
+┌──────────┐┌──────────┐       ┌──────────┐
+│          ││          │       │          │
+│  Tool 1  ││  Tool 2  │  ...  │  Tool N  │
+│          ││          │       │          │
+└──────────┘└──────────┘       └──────────┘
+
+```
+
+
+!!! info "Two Layers of Cognition"
+    The LLM provides raw reasoning power -- remarkable **leaps of insight**, but also confabulation, laziness, and drift. By design, Colony provides structure -- sequencing, verification, and correction of those intuitions into reliable behavior. Colony enforces the most useful cognitive processes, general reasoning tasks and multi-agent collaboration patterns by factoring them out into `AgentCapabilities` and treating the LLM as the source of **intuition** to be infused in all those capabilities. Colony then uses an `ActionPolicy` to compose all these deliberative, reflective, and meta-cognitive processes that the LLM alone cannot sustain over long reasoning chains.
+
+
 
 | Layer | Cognitive Analogy | Colony Implementation | Properties |
 |-------|------------------|-----------------------|------------|
-| **Intuition** | Fast, associative, pattern-matching | The LLM itself | Parallel, immediate, prone to hallucination and overconfidence |
+| **Intuition** | Fast, associative, pattern-matching | The LLM itself | Parallel, immediate, capable of remarkable leaps but also prone to hallucination and overconfidence |
 | **Consciousness** | Slow, deliberate, sequential | Cognitive policies + action policy | Planning, reflection, error correction, goal tracking |
 
-The LLM provides raw reasoning power -- remarkable leaps of insight, but also confabulation, laziness, and drift. The policy layer provides structure -- sequencing, verification, and correction of those intuitions into reliable behavior.
 
-Every cognitive process in Colony is a pluggable **policy** with a well-defined interface and a default implementation. Planning, reflection, conflict resolution, memory consolidation, hypothesis evaluation, confidence tracking -- each is a policy that can be swapped, customized, or composed. The LLM provides the "intuition" that each policy step draws on, while the policy structure provides the "consciousness" that sequences and governs those intuitions.
+Any cognitive process in Colony is a pluggable `AgentCapability` with a well-defined interface and a default implementation. Planning, reflection, conflict resolution, memory consolidation, hypothesis evaluation, confidence tracking -- each is an `AgentCapability` that can be swapped, customized, or composed. The LLM provides the "**intuition**" that drives each `AgentCapability` as well as the agent's `ActionPolicy` composing them, while the `ActionPolicy` structure provides the "consciousness" that sequences and governs those intuitions.
 
-!!! info "Why this matters"
-    Most agent frameworks treat the LLM as the complete behavior: prompt in, action out. Colony treats the LLM as one layer -- the intuition layer -- wrapped in a policy layer that adds the deliberative, reflective, and meta-cognitive processes that the LLM alone cannot sustain over long reasoning chains.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐┌──────┐
+│                                                                                                                 ││      │
+│                                      ActionPolicy                                                               ││      │
+│                                                                                                                 ││      │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘│      │
+  ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────┐│      │
+ ┌───────────────────┐│ ┌───────────────────┐│ ┌───────────────────┐│ ┌───────────────────┐│ ┌───────────────────┐││      │
+┌───────────────────┐││┌───────────────────┐││┌───────────────────┐││┌───────────────────┐││┌───────────────────┐│││      │
+│      Tool         ││││       Game        ││││  Cache-Awareness  ││││    Reasoning      ││││    Cognitive      │││| LLM  |
+│   Capabilities    ││││    Capabilities   ││││   Capabilities    ││││   Capabilities    ││││   Capabilities    │││|      |
+│   ┌──────────┐    ││││   (negotiation,   ││││   (working-set,   ││││  (Reflection,     ││││  (Memories,       │││|      |
+│   │   Tools  │    ││││    consensus,     ││││    page graph,    ││││   refinement,     ││││   consciousness,  │││|      |
+│   │  1...N   │    ││││    coalition,     ││││    VCM analysis,  ││││   grounding,      ││││   attention)      │││|      |
+│   │          │    ││┘│    hypothesis)    ││┘│    prefetching)   ││┘│   goal alignment, ││┘│                   ││┘|      |
+│   └──────────┘    │┘ │                   │┘ │                   │┘ │   consistency)    │┘ │                   │┘ |      |
+└───────────────────┘  └───────────────────┘  └───────────────────┘  └───────────────────┘  └───────────────────┘  └──────┘
+```
+
 
 ## Conscious vs. Subconscious Processes
 
@@ -32,6 +71,21 @@ Capabilities export `@action_executor` methods -- deliberate actions that the `A
 
 The LLM planner decides *which* conscious process to invoke and *when*, based on current context and goals.
 
+```python
+class ReflectionCapability(AgentCapability):
+    # Conscious: LLM planner selects this action during its reasoning loop
+    @action_executor()
+    async def reflect_on_progress(self, goal: str) -> Reflection:
+        """Assess progress toward a goal and suggest strategy adjustments."""
+        ...
+
+    # Conscious: exposed to planner for deliberate memory search
+    @action_executor()
+    async def recall_similar_experiences(self, query: str) -> list[MemoryEntry]:
+        """Search episodic memory for relevant past experiences."""
+        ...
+```
+
 ### Subconscious Processes
 
 Capabilities also run background processes that operate without LLM involvement:
@@ -42,7 +96,30 @@ Capabilities also run background processes that operate without LLM involvement:
 - **Decay and pruning**: Reduce relevance of stale memories, remove duplicates
 - **Event monitoring**: Watch for blackboard events that may require attention
 
-These run continuously or periodically as async tasks, at different time scales, triggered by blackboard events or timer intervals. They keep the agent's cognitive infrastructure healthy without consuming LLM inference cycles.
+These run continuously or periodically as `async` tasks, at different time scales, triggered by blackboard events or timer intervals. They keep the agent's cognitive infrastructure healthy without consuming LLM inference cycles.
+
+
+```python
+# Subconscious: memory consolidation runs via MemoryCapability subscriptions
+stm = MemoryCapability(
+    agent=agent,
+    scope_id=MemoryScope.agent_stm(agent_id),
+    ingestion_policy=MemoryIngestPolicy(
+        subscriptions=[
+            MemorySubscription(source_scope_id=MemoryScope.agent_working(agent_id)),
+        ],
+        transformer=SummarizingTransformer(agent=agent, prompt="..."),
+    ),
+    maintenance=MaintenanceConfig(decay_rate=0.01, prune_threshold=0.1),
+)
+
+# Subconscious: auto-capture agent behavior via hooks
+MemoryProducerConfig(
+    pointcut=Pointcut.pattern("ActionDispatcher.dispatch"),
+    extractor=extract_action_from_dispatch,  # (ctx, result) -> (data, tags, metadata)
+    ttl_seconds=3600,
+)
+```
 
 ```mermaid
 graph TB
@@ -94,7 +171,7 @@ The BDI mapping is not decorative. It structures how agents reason about their o
 
 This self-inspection capability -- reasoning *about* one's own cognitive state -- is what distinguishes Colony's approach from frameworks where agents simply execute a prompt-to-action loop.
 
-## AgentSelfConcept
+## `AgentSelfConcept`
 
 Each agent carries an `AgentSelfConcept` that defines its identity independently of its capabilities:
 

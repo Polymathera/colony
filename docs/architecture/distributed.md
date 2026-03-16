@@ -1,16 +1,32 @@
 # Distributed Architecture
 
-Colony is natively distributed. Agents are long-lived Ray actors, not task-scoped threads or in-process coroutines. The framework provides its own lightweight serving layer built on Ray Core that manages deployment, routing, autoscaling, and fault tolerance without HTTP serialization overhead.
+Colony is natively distributed. Agents are regular Python objects, not Ray actors, with their lifecycle managed by `AgentManager` replicas. The framework provides its own lightweight serving layer built on Ray Core that manages deployment, routing, autoscaling, and fault tolerance.
+
+!!! tip "Why distributed?"
+
+    The workloads Colony targets require more memory and compute than a single machine can provide. A distributed architecture allows Colony to scale horizontally across a GPU cluster, keeping the entire context live and accessible without retrieval. It also enables flexible routing strategies that optimize for cache locality, latency, or tenant isolation.
+
+
+!!! tip "Agents are *not* Ray actors"
+    `AgentManager` replicas (e.g., LLM instances) are Ray actors that manage the lifecycle of `Agent` instances, which are regular Python objects. This allows the same `AgentManager` to manage multiple agents on the same Ray actor, enabling more efficient resource utilization and flexible scheduling. Agents can be spawned, suspended, resumed, migrated, or evicted to free up resources.
+
 
 ## Why Not Ray Serve?
 
-Colony requires lower latency and more flexible routing than Ray Serve provides. The framework's serving layer communicates via pure Ray actor calls (Python object passing) rather than HTTP+JSON serialization. This eliminates serialization overhead for the high-frequency inter-deployment communication that multi-agent systems demand -- agent-to-VCM, agent-to-blackboard, planner-to-scheduler calls happen thousands of times per session.
+Colony requires lower latency and more flexible routing than Ray Serve provides. The framework's serving layer communicates via pure Ray actor calls (Python object passing).
+
+!!! tip "Why not Ray Serve?"
+    Ray Serve is designed for high-throughput, stateless HTTP APIs. Colony's workloads are *stateful*, and require complex routing based on VCM page locality and agent affinity. By stateful we mean that routing of one request may depend on the routing of previous requests. Building a custom serving layer on Ray Core allows Colony to implement these features without the constraints of Serve's routing model.
+
+!!! tip "Syntactic sugar for Ray actors"
+    The `@deployment` decorator and `DeploymentHandle` proxy provide syntactic sugar for defining and calling Ray actors without directly interacting with the Ray API using `ray.get` or `ray.remote`.
+
 
 ## Serving Framework
 
 The serving framework lives in `polymathera.colony.distributed.ray_utils.serving` and provides:
 
-### @deployment Decorator
+### `@deployment` Decorator
 
 Marks a class as a deployable service with lifecycle management, health checking, and autoscaling:
 
@@ -34,6 +50,10 @@ class MyService:
 
 Only `@endpoint`-decorated methods can be called remotely via deployment handles. This provides a clear API boundary.
 
+!!! tip "`polymathera.colony.serving.Applications`"
+    The `Application` class manages a collection of deployments. When you call `deploy()`, it starts all deployments and their replicas, ensuring that lifecycle hooks are called in the correct order. Deployments can discover each other through `serving.get_deployment()` after deployment.
+
+
 ### Lifecycle Hooks
 
 | Decorator | When | Purpose |
@@ -43,9 +63,9 @@ Only `@endpoint`-decorated methods can be called remotely via deployment handles
 | `@cleanup_deployment` | Before replica destruction | Resource cleanup |
 | `@periodic_health_check(interval_s)` | On interval | Background health monitoring |
 
-### DeploymentHandle
+### `DeploymentHandle`
 
-Client-side proxy returned by `serving.get_deployment()`. Method calls on the handle are transparently routed to a replica:
+Client-side proxy returned by `serving.get_deployment()`. Method calls on the handle are transparently routed to a replica. The called method name must match an `@endpoint` method on the deployment class:
 
 ```python
 # Get handle to a deployment
@@ -56,6 +76,10 @@ result = await service.process(data=my_data)
 ```
 
 ## Request Routing
+
+!!! bug "Explain routing in detail"
+    Explain how the `DeploymentProxyRayActor` routes requests to replicas based on `RoutingHints` that it extracts, how health monitoring and autoscaling work, and how custom routers can be implemented for tenant-aware sharding or capability-based routing.
+
 
 Colony's routing is context-aware by design. Every request carries optional `RoutingHints` that inform the router:
 
@@ -71,6 +95,10 @@ class RoutingHints:
 
 ### Built-in Routers
 
+!!! bug "Explain the request journey in detail"
+    Explain how a request travels from the `DeploymentHandle` to the `DeploymentProxyRayActor`, how the proxy extracts `RoutingHints`, selects a router, and routes to a replica. Also explain how health monitoring and autoscaling interact with routing decisions.
+
+
 | Router | Strategy | Use Case |
 |--------|----------|----------|
 | `LeastLoadedRouter` | Route to replica with shortest queue | Default, general-purpose |
@@ -78,7 +106,38 @@ class RoutingHints:
 | `ContextAwareRouter` | Score replicas by page locality | LLM inference with VCM pages |
 | `PageAffinityRouter` | Only route to replicas with ALL required pages | Latency-critical inference |
 
-The `ContextAwareRouter` is the most important for Colony's workload. It scores each replica by how many of the requested VCM pages are already in its KV cache, preferring replicas where cache hits are likely. The `PageAffinityRouter` is stricter -- it refuses to route to a replica that lacks required pages, used when a cache miss would make execution impractical.
+The `ContextAwareRouter` is the most important for Colony's workload. It scores each replica:
+
+```python
+# ContextAwareRouter scoring formula
+score = (PAGE_HIT_WEIGHT * (pages_loaded / total_pages)       # 100.0 × hit ratio
+       - LOAD_WEIGHT     * (current_load / max_load)          # 10.0 × load factor
+       + CAPACITY_WEIGHT * (available_capacity / total_capacity))  # 5.0 × capacity
+```
+
+The `PageAffinityRouter` is stricter -- it refuses to route to a replica that lacks required pages, used when a cache miss would make execution impractical.
+
+For agent placement, `SoftPageAffinityRouter` scores replicas by how many of the agent's bound pages are already loaded:
+
+```python
+class SoftPageAffinityRouter(RequestRouter):
+    """Route agent spawning to replicas with best page affinity.
+
+    - Hard affinity: Only consider replicas with ALL bound pages
+    - Soft affinity: Select replica with maximum bound pages loaded
+    """
+
+    async def route_request(self, request, replicas) -> DeploymentReplicaInfo:
+        bound_pages = request.routing_hints.metadata.get("bound_pages", [])
+        soft_affinity = request.routing_hints.metadata.get("soft_affinity", False)
+        page_locations = await self._get_page_locations(vcm_handle, bound_pages)
+        ranked_replicas = await self._rank_replicas_by_affinity(
+            replicas, bound_pages, page_locations
+        )
+        ...
+```
+
+`AgentAffinityRouter` routes lifecycle calls (suspend, stop, get_state) to the replica that owns the agent.
 
 ### Custom Routers
 
@@ -134,19 +193,31 @@ graph TB
         SM[SessionManagerDeployment<br/>Session & run tracking]
         AS[AgentSystemDeployment<br/>Agent lifecycle & coordination]
         VCM[VCMDeployment<br/>Page table & cache scheduling]
-        vLLM[VLLMDeployment<br/>LLM inference + KV cache]
+        subgraph "LLM Cluster"
+            llms[LLMClusterDeployment<br/>Manages heterogeneous LLM deployments]
+            vLLM_q[[VLLMDeployment-Qwen3.5<br/>LLM inference + KV cache]]
+            vLLM_l[[VLLMDeployment-Llama3.2<br/>LLM inference + KV cache]]
+            vLLM_o[[VLLMDeployment-opus4.6<br/>LLM inference + KV cache]]
+        end
         Dash[DashboardDeployment<br/>Web UI backend]
     end
 
     subgraph "Infrastructure"
         Redis[(Redis<br/>Blackboard + events)]
-        Ray[Ray Cluster<br/>Actor runtime]
+    end
+
+    subgraph "3rd Party Services"
+        Anthropic[(Anthropic<br/>LLM API)]
     end
 
     AS --> SM
     AS --> VCM
-    AS --> vLLM
-    VCM --> vLLM
+    AS --> llms
+    VCM --> llms
+    llms --> vLLM_q
+    llms --> vLLM_l
+    llms --> vLLM_o
+    vLLM_o --> Anthropic
     SM --> Redis
     AS --> Redis
     Dash --> SM
@@ -160,6 +231,41 @@ graph TB
 | `AgentSystemDeployment` | Creates, manages, coordinates agents | `get_agent_system(app_name)` |
 | `VCMDeployment` | Page table, fault handling, cache scheduling | `get_vcm(app_name)` |
 | `VLLMDeployment` | LLM inference with KV cache management | `get_vllm_deployment(app_name)` |
+| `LLMClusterDeployment` | Manages heterogeneous LLM deployments | `get_llm_cluster(app_name)` |
+
+### Deployment Configuration
+
+```python
+@dataclass
+class PolymatheraClusterConfig:
+    app_name: str
+    llm_cluster_config: ClusterConfig
+    vcm_config: VCMConfig = field(default_factory=VCMConfig)
+    agent_system_config: AgentSystemConfig = field(default_factory=AgentSystemConfig)
+    cleanup_on_init: bool = False
+
+    def add_deployments_to_app(self, app: serving.Application, top_level: bool) -> None:
+        """Add all Polymathera components to the application."""
+        self.llm_cluster_config.add_deployments_to_app(app, top_level=False)
+        self.vcm_config.add_deployments_to_app(app, top_level=False)
+        self.agent_system_config.add_deployments_to_app(app, top_level=False)
+```
+
+LLM deployment configuration supports heterogeneous models:
+
+```python
+class LLMDeploymentConfig(BaseModel):
+    model_name: str                                   # HuggingFace model name or path
+    quantization: str | None = None
+    tensor_parallel_size: int = 1
+    gpu_memory_utilization: float = 0.9
+    max_model_len: int | None = None
+    capabilities: set[str] = {"structured_output"}
+    lora_adapters: list[LoRAAdapterConfig] | None = None
+    num_replicas: int = 2
+    default_router_class: str = "ContextAwareRouter"
+    max_agents_per_replica: int = 100
+```
 
 ### Deployment Flow
 
@@ -168,6 +274,24 @@ graph TB
 3. `VCMConfig` adds the VCM deployment
 4. `AgentSystemConfig` adds agent system + session manager
 5. The `Application` starts all deployments, calls `@initialize_deployment` hooks, then `@on_app_ready` hooks
+
+### Spawning Agents
+
+!!! bug "Explain the blueprint pattern in detail"
+    Explain how the `spawn_agents()` function takes a list of blueprints that define agent configurations (capability blueprints, action policy blueprints, initial pages, etc.) and spawns them on the cluster.
+
+
+```python
+from polymathera.colony.system import spawn_agents
+
+agent_ids = await spawn_agents(
+    blueprints=[blueprint1, blueprint2],
+    requirements=LLMClientRequirements(min_context_window=128_000),
+    soft_affinity=True,       # Best-effort page locality
+    suspend_agents=False,     # Don't suspend existing agents to make room
+    app_name="my-app",
+)
+```
 
 ## Autoscaling
 
@@ -216,6 +340,9 @@ class DeploymentResponse(BaseModel):
 
 ## Multi-Tenancy
 
+!!! bug "Explain multi-tenancy in detail"
+    Explain how `RoutingHints.tenant_id` enables tenant-aware routing, how VCM tracks pages per tenant, and how deployments can implement tenant isolation or sharding strategies. Also explain how resource usage and costs can be tracked per tenant in the session manager.
+
 Colony supports multi-tenancy through `RoutingHints.tenant_id`:
 
 - Routers can implement tenant-aware sharding (route tenant A to replicas 1-3, tenant B to replicas 4-6)
@@ -225,7 +352,7 @@ Colony supports multi-tenancy through `RoutingHints.tenant_id`:
 
 ## Service Discovery
 
-Deployments discover each other through Ray's actor naming:
+Deployments discover each other using `serving.get_deployment` (which uses Ray's actor naming under the hood):
 
 ```python
 # Within any deployment (safe after @on_app_ready)
@@ -237,7 +364,9 @@ Deployment handles are cached after first lookup. Environment variables (`POLYMA
 
 ## LLM Cluster Management
 
-Colony manages a heterogeneous cluster of LLM deployments:
+!!! bug "Explain how fields of `LLMClientRequirements` map to LLM types"
+
+Colony manages a heterogeneous cluster of LLM deployments (one or more deployments of self-hosted vLLM possibly with different models, remote API models) with unified routing and memory management:
 
 - Each model type gets its own `VLLMDeployment` with independent scaling
 - `LLMClientRequirements` in routing hints match requests to compatible models (context window, capabilities)
@@ -245,3 +374,4 @@ Colony manages a heterogeneous cluster of LLM deployments:
 - Page loading and eviction decisions are cluster-wide, not per-replica
 
 This is a key differentiator: Colony treats the LLM cluster as a unified resource with cluster-level memory management, not as isolated inference endpoints.
+

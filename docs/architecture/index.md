@@ -1,6 +1,9 @@
 # Architecture Overview
 
-Colony is a cache-aware multi-agent framework for reasoning over extremely long context (billion-token scale) without RAG. Instead of retrieving fragments, Colony keeps the entire context "live" through paged distributed KV caching across a GPU cluster, allowing agents to perform deep, iterative reasoning over the full input.
+!!! bug "Duplicated Docs and Diagrams"
+    Unify with `distributed.md`.
+
+Colony is a cache-aware multi-agent framework for reasoning over extremely long context (billion-token scale) without RAG. Instead of retrieving fragments, Colony keeps the entire context "live" through paged distributed KV caching across a GPU cluster, allowing agents to perform <u>*deep, iterative reasoning over the full input*</u>.
 
 ## Core Design Principles
 
@@ -12,9 +15,12 @@ Colony is a cache-aware multi-agent framework for reasoning over extremely long 
 
 4. **All state on the blackboard.** No out-of-band state in instance variables. State changes become observable events via blackboard notifications, enabling the memory-as-observer pattern.
 
-5. **Cache-awareness is emergent.** Cache efficiency is not a property of individual primitives but an emergent property of the LLM planner composing primitives with awareness of the current cache state.
+5. **Cache-awareness is emergent.** Cache efficiency is not a property of individual agents but a collective property of the multi-agent system as a whole.
 
 ## System Architecture
+
+!!! bug "Add More Details and Shown Design Options"
+    This digram does not convey how flexible the architecture is. For example, the memory system is not constrained to the specific hierarchy shown here -- users can design arbitrary memory hierarchies with custom scopes and maintenance policies. The VCM is not constrained to specific page sources. The agent system supports both VCM-bound agents and unbound (**floating**) agents that operate on blackboard state without direct page bindings.
 
 ```mermaid
 graph TB
@@ -61,15 +67,20 @@ graph TB
 
 ## Subsystems
 
+
+### [Distributed Architecture](distributed.md)
+
+Colony is natively distributed. This section covers Colony's serving framework, request routing, multi-tenancy, autoscaling, and the heterogeneous LLM cluster.
+
 ### [Virtual Context Memory](virtual-context-memory.md)
 
-The VCM manages context pages like an OS manages virtual memory -- with page tables, page faults, and cache-aware scheduling. It operates at the cluster level (across GPU nodes), unlike vLLM which is node-level. Extended VCM combines immutable read-only input pages with read-write blackboard output.
+The VCM manages context pages like an OS manages virtual memory with page tables, page faults, and cache-aware scheduling. It operates at the cluster level (across GPU nodes), unlike vLLM which is node-level. Extended VCM combines immutable read-only input pages with read-write blackboard output.
 
 ### [Agent System](agent-system.md)
 
 Agents are autonomous computational entities with lifecycle states, capabilities, and action policies. The framework supports VCM-bound agents (loaded/unloaded with pages), unbound agents, service agents, and supervisor agents. `AgentCapability` provides the extension point -- each capability is an AOP aspect, and the `ActionPolicy` acts as the aspect weaver.
 
-### [Memory System](memory-system.md)
+### [Agent Memory System](agent-memory-system.md)
 
 A unified memory architecture where all state lives in blackboards. Memory is organized hierarchically -- sensory, working, short-term, and long-term (episodic, semantic, procedural) -- with each level implemented as a `MemoryCapability` managing a blackboard scope. Agents reason *about* their memory, not just *with* it.
 
@@ -85,9 +96,15 @@ The decision-making core. The LLM selects actions through a two-phase process (c
 
 Aspect-oriented programming for cross-cutting concerns. The `@hookable` decorator marks interception points; `Before`, `After`, and `Around` hooks attach via `Pointcut` expressions. Used for token tracking, rate limiting, checkpointing, and memory capture without polluting core logic.
 
-### [Game Engine](game-engine.md)
+### [Game Patterns](game-engine.md)
 
-A framework for structured multi-agent deliberation. Four game types -- hypothesis, bidding/contract, negotiation, consensus -- with defined roles and an Agent Communication Language. Games serve as correctness mechanisms: hypothesis games combat hallucination, contract nets combat laziness, objective guards combat goal drift.
+A framework for structured multi-agent deliberation. Four game types -- hypothesis, bidding/contract, negotiation, consensus -- with defined roles and an Agent Communication Language. Games serve as error correction mechanisms: hypothesis games combat hallucination, contract nets combat laziness, objective guards combat goal drift.
+
+
+### [Training](training.md)
+
+Coming soon.
+
 
 ## Key Classes
 

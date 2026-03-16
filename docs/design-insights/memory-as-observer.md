@@ -1,26 +1,18 @@
-# Memory as Observer
+# Memory as Observer and Observable
 
-Colony's memory system is not a passive store that agents write to and read from. It is a **bidirectional observer** -- memories observe agent behavior, and agents observe their memories. This pattern is the substrate on which emergent intelligence is built.
+Colony's memory system is not a passive store that agents write to and read from. It is an `AgentCapability` -- part of the **observable** and **controllable** agent's environment -- that provides actions to read, write, query, consolidate, and forget. It is a **feedback mechanism** or **observer-observable** -- memories observe agent behavior via **hooks**, and agents observe their memories via retrieval. This pattern is the substrate on which emergent intelligence is built. An agent's reasoning loop can span long periods involving multiple interactions, and self-reflection requires the agent to reason over its own thoughts and actions -- which are automatically stored in memory via hooks.
 
-## The Conventional View Is Wrong
 
-Most agent frameworks depict memory as separate from the agent's environment:
+!!! info "Memory in The Cognitive Architecture"
+    In Colony, memory is an active participant in cognition, not a filing cabinet. A `MemoryCapability` has full freedom to decide what hooks (**observation points**) to subscribe to (including other memory capabilities, leading naturally to memory hierarchies), what data to extract, how to consolidate it, and when to trigger events that the `ActionPolicy` can respond to. This design allows memory to be a first-class citizen in the agent's cognitive architecture, not an afterthought.
 
-```
-Agent Brain ←→ Memory (passive store)
-     ↓
-Environment (active, provides observations)
-```
 
-This separation is artificial and limiting. In Colony, memory is part of the agent's environment. An agent's reasoning loop can span long periods involving multiple interactions, and self-reflection requires the agent to reason over its own thoughts and actions -- which are stored in memory. Memory must be an active participant in cognition, not a filing cabinet.
-
-## Bidirectional Observer Pattern
 
 Colony implements memory as a bidirectional observer through two mechanisms:
 
 ### Direction 1: Memories Observe Agents
 
-Memory formation uses hook-based producers (`MemoryProducerConfig`). A producer attaches an AFTER hook to a `@hookable` method and extracts storable data when that method executes:
+Memory formation uses hook-based producers (`MemoryProducerConfig`). A producer attaches an `AFTER` hook to a `@hookable` method and extracts storable data when that method executes:
 
 ```python
 MemoryProducerConfig(
@@ -36,31 +28,82 @@ The agent does not explicitly write to memory after each action. The memory syst
 - Memory can observe **any hookable method** across all capabilities, not just actions
 - New memory types can be added by registering new hooks, without modifying existing code
 
+
+
+**Memories observe agents.** When an agent executes an action, completes a step, or communicates with another agent, memory capabilities receive hook notifications and decide what to record. A `WorkingMemoryCapability` might capture raw observations. An `EpisodicMemoryCapability` might record higher-level episode boundaries.
+
+
+
 ### Direction 2: Agents Observe Memories
 
-The `ActionPolicy` can consciously decide to inspect, search, or manipulate memories:
+The `ActionPolicy` can *consciously* decide to inspect, search, or manipulate memories:
 
 - `MemoryCapability` exports `recall`, `store`, `forget`, and `deduplicate` as `@action_executors`
 - The LLM planner can query available tags via `list_tags`
-- The LLM planner can inspect the `MemoryMap` -- the complete layout of all memory scopes, their configurations, entry counts, and dataflow edges
+- The LLM planner can inspect the `MemoryMap` -- the complete layout of the entire memory hierarchy, including scopes, their configurations, entry counts, and dataflow edges
 - Memory retrieval is a **conscious cognitive process** -- the LLM decides when to search memory and what to search for
 
+```python
+# MemoryCapability exports these as @action_executors
+# so the LLM planner can consciously invoke them:
+@action_executor()
+async def recall(self, query: MemoryQuery) -> list[MemoryEntry]: ...
+
+@action_executor()
+async def store(self, data: Any, tags: set[str], metadata: dict) -> str: ...
+
+@action_executor()
+async def forget(self, key: str) -> None: ...
+
+@action_executor(exclude_from_planning=True)
+async def list_tags(self) -> set[str]: ...
+```
+
 ```mermaid
-graph LR
+graph TB
+
     subgraph "Direction 1: Memories Observe Agents"
         AE["@action_executor<br/>(hookable method)"] -->|"AFTER hook"| MP[MemoryProducer]
-        MP -->|"extract + store"| WM[Working Memory<br/>Blackboard Scope]
     end
 
+    MP -->|"extract + store"| WM[Working Memory<br/>Blackboard Scope]
+
     subgraph "Direction 2: Agents Observe Memories"
-        AP[ActionPolicy] -->|"recall(query)"| MC[MemoryCapability]
-        MC -->|"query"| WM
+        AP[ActionPolicy] -->|"gather_context(query)"| ACE[AgentContextEngine]
+        ACE -->|"query"| WM
         WM -->|"results"| AP
     end
 
     style AE fill:#d5f5d5
     style AP fill:#d5e8f5
 ```
+
+**Agents observe memories.** When a memory is written, updated, or consolidated, the ActionPolicy can be notified via events. A new semantic memory about a discovered relationship might cause the ActionPolicy to revise its current plan.
+
+```python
+# Memory observes agent behavior
+class EpisodicMemoryCapability(AgentCapability):
+    @register_hook(Pointcut.pattern("ActionDispatcher.dispatch"), HookType.AFTER)
+    async def on_action_complete(self, action: str, result: ActionResult):
+        if self._is_episode_boundary(result):
+            await self._store_episode(result)
+
+# Agent observes memory changes
+class AnalysisCapability(AgentCapability):
+    @event_handler(pattern="{scope_id}:*")
+    async def on_memory_update(
+        self,
+        event: BlackboardEvent,
+        repl: PolicyREPL,
+    ) -> EventProcessingResult | None:
+        if self._is_relevant_to_current_task(event.value): # TODO: Fix this example
+            self._flag_for_replanning()
+```
+
+!!! tip "No Hidden State"
+    Colony implements the principle that **all agent state lives in blackboards**. No hidden instance variables, no out-of-band state. Every state change is an observable event, which means every state change can trigger responsive behavior from any capability that cares about it.
+
+
 
 ## Memory Levels as Blackboard Scopes
 
@@ -116,6 +159,21 @@ The memory hierarchy is often depicted as a linear pipeline (sensory → working
 
 The edges in this graph are `MemorySubscription` objects -- each defines a source scope, an optional transformer, and filter criteria. Adding a new edge creates a new dataflow path without modifying existing code.
 
+```python
+# Dataflow edge: STM consolidates from working memory
+MemorySubscription(
+    source_scope_id=MemoryScope.agent_working(agent_id),
+    transformer=SummarizingTransformer(agent=agent, prompt="..."),
+    filter=TagFilter(any_of={"action", "plan"}),
+)
+
+# Dataflow edge: team memory aggregates from multiple agents
+MemorySubscription(
+    source_scope_id=MemoryScope.agent_stm(other_agent_id),
+    transformer=TeamAggregationTransformer(),
+)
+```
+
 ## Cross-Agent Memory Sharing
 
 The observer pattern extends across agent boundaries through shared blackboard scopes:
@@ -140,3 +198,8 @@ The bidirectional observer pattern produces several properties that passive memo
 
 !!! note "No out-of-band state"
     The unified storage principle -- all state in blackboards -- is not just a software engineering preference. It is what makes memory observable, shareable, and introspectable. If some state lived in instance variables or thread-local storage, it would be invisible to the memory system, invisible to other agents, and lost on suspension/resumption.
+
+
+
+
+

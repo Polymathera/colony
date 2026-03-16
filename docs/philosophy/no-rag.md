@@ -208,7 +208,26 @@ LLMs learn vast amounts of knowledge during training, but this knowledge is *imp
 </svg>
 </div>
 
-## Deep Research as a Game
+
+
+## The Unifying Idea: Deep Research as a Game
+
+Colony reconceptualizes deep research as a **game** with a large number of possible moves available to agents at every step. One class of moves is combinations of currently known facts that offer the smallest leap to new insights. Because the narrowest leap across the **discovery front** is often unpredictable, the entire context must remain live -- not filtered through retrieval -- because breakthroughs emerge from unpredictable connections between distant pieces of information.
+
+A dynamic group of agents iteratively walks a page graph, accumulating state, communicating findings, and coordinating their traversal to maximize KV cache reuse. The page graph itself is built and refined as agents explore, creating a self-improving map of how context relates to itself.
+
+```mermaid
+graph TD
+    A((Deep Research Task)) --> B[Build Initial Page Graph]
+    B --> PG((Page Graph))
+    PG --> MAS[Agent Swarm Traverses Graph] --> |New Connections| PG
+    MAS --> CAS[Cache-Aware Scheduling] --> MAS
+    MAS --> G[Games: Hypothesis, Negotiation, Coalition, Consensus Game] --> MAS
+    MAS --> M[Memory Architecture] --> MAS
+    MAS --> CAP[Capabilities: Page Attention, Reflection, Refinement, Validation, Grounding] --> MAS
+    MAS --> F((Insights Synthesized))
+```
+
 
 Colony views deep research as a **game** where the moves available to agents are combinations of facts that offer the smallest leap to new insights. This framing has concrete architectural consequences:
 
@@ -234,6 +253,8 @@ LLMs with external memory (Colony's architecture) can always retrieve forgotten 
     This is not a limitation that better training will fix. It is a structural property of recurrent architectures. The hidden state has finite capacity, and any compression scheme must discard information. Deep reasoning over extremely long context requires that *nothing* be permanently discarded until the task is complete.
 
 ## Virtual Memory for LLMs
+
+!!! bug "Merge this section with `architecture/virtual-context-memory.md`"
 
 If you cannot retrieve-and-forget, you need a system that can manage context at the scale of billions of tokens. Colony's answer is to treat KV cache management like an operating system treats virtual memory.
 
@@ -362,8 +383,23 @@ This is not a metaphor. Colony implements actual page fault semantics, working s
     Since LLMs are causal models, KV caches stay valid (and, hence, useful) only if a cached sequence is a prefix of the current input. Colony's `infer_with_suffix()` API allows agents to specify a suffix to append to the cached page content, enabling flexible reuse of cached tokens across different reasoning steps. Moreover, the page contents themselves are prefixed with a system message that provides context about the page's origin and relevance, and that also explains the reasoning process over sharded/paged context.
 
 
+A single LLM has a finite context window. Even with million-token windows, many tasks involve context that exceeds what one model instance can hold. And for tasks requiring **dense reasoning**, the *quality* of reasoning degrades well before the context window is technically exhausted.
+
+Colony's answer: **distributed reasoning** over extremely long context. Multiple agents, each with their own context window, collectively reason over a corpus that no single agent could process. A cache-aware scheduler ensures that agents are routed to nodes where their required pages are already loaded, and a page attention graph guides which pages to load next.
+
+This produces reasoning over unbounded-length context: relationships with arbitrary degree in the knowledge hypergraph, discovered by agents that coordinate their exploration.
+
+
+!!! tip "Agent-Page (Soft) Affinity"
+    If Colony is deployed with self-hosted LLMs, to optimize context loading and reduce latency, an agent can be bound to specific pages, in which case the agent is constrained to run on the Ray node caching those pages in its LLM instance KV cache.
+
+
 
 ## The Payoff: Amortized Efficiency
+
+!!! bug "Merge this section with `philosophy/cache-awareness.md`"
+
+!!! bug "Merge this section with `design-insights/page-graphs.md`"
 
 The initial cost of reasoning over all pages is high: $O(N^2)$ for routing queries among $N$ pages. But as the page attention graph stabilizes over successive reasoning rounds, the amortized cost per round drops to $O(N \log N)$. Deep reasoning tasks inherently require many rounds, so the graph has time to stabilize and the amortized cost dominates. This is especially true for research tasks, where:
 - The context corpus (git repos, docs, KBs) changes slowly (e.g., cumulative knowledge).

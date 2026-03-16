@@ -13,7 +13,24 @@ An **Agent** is the fundamental unit of work. Each agent has:
 
 Agents don't hardcode their behavior. The LLM planner is given context and decides "what's next?" at every step.
 
-## AgentCapabilities
+```python
+from polymathera.colony.agents.base import Agent, AgentCapability, ActionPolicy
+
+class Agent:
+    @hookable
+    async def run_step(self) -> None:
+        """One iteration of the agent's reasoning loop."""
+        result = await self.action_policy.execute_iteration(self._build_state())
+        await self._apply_iteration_result(result)
+
+    def add_capability(self, capability: AgentCapability, *,
+                       include_actions: list[str] | None = None,
+                       exclude_actions: list[str] | None = None) -> None: ...
+
+    def get_capability(self, name: str) -> AgentCapability | None: ...
+```
+
+## `AgentCapabilities`
 
 Capabilities are pluggable modules attached to agents. They:
 
@@ -23,7 +40,20 @@ Capabilities are pluggable modules attached to agents. They:
 
 Examples: `MemoryCapability`, `ReflectionCapability`, `HypothesisGameProtocol`, `CriticCapability`.
 
-## ActionPolicy
+```python
+class MyCapability(AgentCapability):
+    @action_executor()
+    async def analyze(self, query: str, max_depth: int = 5) -> dict:
+        """Auto-discovered by ActionPolicy — the LLM planner can invoke this."""
+        ...
+
+    @hookable
+    async def process(self, data: dict) -> Result:
+        """Other capabilities can intercept this via hooks."""
+        ...
+```
+
+## `ActionPolicy`
 
 The ActionPolicy controls the agent's decision loop. Colony's main implementation is `CacheAwareActionPolicy`, which:
 
@@ -34,6 +64,15 @@ The ActionPolicy controls the agent's decision loop. Colony's main implementatio
 5. Feeds results back and loops
 
 This follows a **Model-Predictive Control** pattern: execute part of the plan, re-evaluate, adapt.
+
+```python
+class ActionPolicy(ABC):
+    async def execute_iteration(
+        self, state: ActionPolicyExecutionState
+    ) -> ActionPolicyIterationResult:
+        """Execute one iteration of the policy loop."""
+        ...
+```
 
 ## Virtual Context Memory (VCM)
 
@@ -54,6 +93,17 @@ The **Blackboard** is a shared, observable, transactional key-value store (Redis
 
 All agent state lives in blackboards. No out-of-band state in instance variables.
 
+```python
+board = EnhancedBlackboard(app_name="my-app", scope=BlackboardScope.SHARED, scope_id="team-1")
+await board.initialize()
+
+await board.write("results", my_data, created_by="agent-123", tags={"analysis"})
+value = await board.read("results")
+
+# Subscribe to changes
+board.subscribe(on_change, filter=KeyPatternFilter("*:results"))
+```
+
 ## Memory System
 
 Colony's memory system is a **hierarchy of MemoryCapabilities**, each managing a different abstraction level:
@@ -65,17 +115,26 @@ Colony's memory system is a **hierarchy of MemoryCapabilities**, each managing a
 
 Each capability handles ingestion, storage, retrieval, and maintenance for its scope.
 
+```python
+# Query memory using semantic search, logical filtering, or both
+result = await memory.recall(MemoryQuery(
+    query="What authentication approach was used?",
+    tag_filter=TagFilter(all_of={"action", "success"}),
+    max_results=10,
+))
+```
+
 ## Games
 
-**Game-theoretic protocols** are used for multi-agent coordination and correctness:
+**Game-theoretic protocols** are used for multi-agent coordination and error correction:
 
 - **Hypothesis games**: one agent proposes, others refute or refine
 - **Contract Net**: agents bid to take subtasks based on reputation
 - **Negotiation**: agents with conflicting constraints exchange offers
 - **Consensus**: agents vote with evidence; meta-agent aggregates
 
-These aren't just coordination tools — they're correctness mechanisms that combat LLM failure modes.
+These aren't just coordination tools — they're error correction mechanisms that combat LLM failure modes.
 
 ## Sessions and Runs
 
-A **Session** groups related work. Each call to `agent.run()` creates an **AgentRun** tracked within the session, with configuration, I/O history, resource usage, and intermediate events.
+A **Session** groups related work. Each call to `agent.run()` creates an **`AgentRun`** tracked within the session, with configuration, I/O history, resource usage, and intermediate events.

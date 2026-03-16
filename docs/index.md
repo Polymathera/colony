@@ -8,6 +8,10 @@ Colony is a framework for building *tightly-coupled, self-evolving, self-improvi
     Colony's goal is to be the most efficient *country of geniuses in a datacenter* — the ideal substrate for **civilization-building AI**.
 
 
+!!! tip "Use Cases."
+    Colony is designed to extract or synthesize novel insights from a <u>*large established body of knowledge*</u>, where the greatest cost factor is associated with the input context size rather than the expected output length. For example, incrementally editing a large code monorepo, systemic vulnerability detection in a billion-line codebase, <u>*reverse-engineering advanced proprietary designs from public knowledge*</u>, or discovering novel connections or plausible conjectures across thousands of scientific papers.
+
+
 !!! tip "Pre-Alpha Early Access"
 
     Colony is still in pre-alpha early access. The API is not stable and the framework is under active development. We welcome feedback and contributions, but be aware that breaking changes may occur.

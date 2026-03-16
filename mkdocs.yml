@@ -49,6 +49,9 @@ markdown_extensions:
       generic: true
   - attr_list
   - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - toc:
       permalink: true
 
@@ -58,6 +61,7 @@ nav:
     - Installation: getting-started/installation.md
     - Quick Start: getting-started/quickstart.md
     - Key Concepts: getting-started/concepts.md
+    - Example Gallery: getting-started/example-gallery.md
   - Philosophy:
     - Overview: philosophy/index.md
     - "The NoRAG Paradigm": philosophy/no-rag.md
@@ -66,22 +70,23 @@ nav:
     - "The Consciousness-Intuition Interface": philosophy/consciousness-intuition.md
   - Architecture:
     - Overview: architecture/index.md
+    - Distributed Architecture: architecture/distributed.md
     - Virtual Context Memory: architecture/virtual-context-memory.md
     - Agent System: architecture/agent-system.md
-    - Memory System: architecture/memory-system.md
+    - Agent Memory System: architecture/agent-memory-system.md
     - Action Policies: architecture/action-policies.md
     - Planning: architecture/planning.md
     - Blackboard Pattern: architecture/blackboard.md
     - Hook System: architecture/hook-system.md
-    - Game Engine: architecture/game-engine.md
-    - Distributed Architecture: architecture/distributed.md
+    - Game Patterns: architecture/game-engine.md
+    - Training: architecture/training.md
   - Design Insights:
     - Overview: design-insights/index.md
-    - Capabilities as AOP Aspects: design-insights/capabilities-as-aspects.md
-    - Game-Theoretic Correctness: design-insights/game-theoretic-correctness.md
-    - Abstraction Patterns: design-insights/abstraction-patterns.md
-    - Memory as Observer: design-insights/memory-as-observer.md
     - Page Graphs: design-insights/page-graphs.md
+    - Capabilities as AOP Aspects: design-insights/capabilities-as-aspects.md
+    - Games as Error Correction Mechanisms: design-insights/game-theoretic-correctness.md
+    - Abstraction Patterns: design-insights/abstraction-patterns.md
+    - Memory as Observer and Observable: design-insights/memory-as-observer.md
     - Qualitative Analysis: design-insights/qualitative-analysis.md
   - Guides:
     - colony-env: guides/colony-env.md

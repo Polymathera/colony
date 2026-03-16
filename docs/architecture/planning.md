@@ -1,21 +1,25 @@
 # Planning Architecture
 
-Colony's planning system follows a single principle: **the LLM is the planner, not the framework**. There are no rigid plan graphs, state machines, or rule-based orchestration engines. The framework provides context and available actions; the LLM decides what to do; the framework executes and feeds back results.
+!!! bug "Merge this article with `action-policies.md`"
+    The planning system and action policies are deeply intertwined. Consider merging this article with `action-policies.md` to unify the discussion of how the LLM planner generates actions and how the framework executes them.
+
+
+Colony does not emphasize rigid plan graphs, state machines, or rule-based orchestration engines, although these approaches can be provided as `ActionPolicy` implementations. Instead, the framework provides context and available actions to a LLM planner, which decides what to do; the framework executes and feeds back results.
 
 ## Why LLM-Centric Planning?
 
-Traditional agent frameworks constrain planning through explicit structures: DAGs of tasks, state machines with fixed transitions, or Standard Operating Procedures that prescribe step sequences. These work for well-defined workflows but fail for Colony's target domain -- deep reasoning over extremely long context -- where:
+Traditional agent frameworks constrain planning through explicit structures: DAGs of tasks, state machines with fixed transitions, or Standard Operating Procedures that prescribe step sequences. These work for well-defined workflows but fail for Colony's target domain -- deep reasoning over extremely long context -- where <u>the task structure is not known in advance. The optimal plan or strategy changees mid-execution depending on</u>:
+- What the LLM discovers during execution
+- Cache state, page availability, and other agents' actions
 
-- The optimal plan depends on what the LLM discovers during execution
-- The task structure is not known in advance
-- Cache state, page availability, and other agents' actions change the optimal strategy mid-execution
-- The reasoning process may require arbitrary depth of sub-planning
-
-Colony's approach: a **plan** is the LLM's current thinking plus execution history -- not a fixed sequence of steps. The LLM can revise, extend, or abandon its plan at any point based on new information.
+Colony's approach: a **plan** is the LLM's current thinking plus execution history -- not a fixed sequence of steps. The LLM can revise, extend, or abandon its plan at any point based on new information. The reasoning process may require arbitrary depth of sub-planning
 
 ## Plan and Action Models
 
-### Action
+### `Actions`
+
+!!! bug "Composite actions no longer supported"
+    The original plan was to have composite actions that contain sub-plans. This added complexity without clear benefit. The current design is that all actions are atomic. Recursively nested planning is implemented indirectly via child agent spawning.
 
 An `Action` represents a single decision made by the LLM planner:
 
@@ -33,7 +37,11 @@ class Action(BaseModel):
 
 Actions can be **atomic** (executed directly by an `@action_executor`) or **composite** (containing a sub-plan that is generated JIT when the action is executed). This enables hierarchical planning without requiring the LLM to plan everything upfront.
 
-### ActionPlan
+### `ActionPlan`
+
+!!! bug "Execution And Planning Context"
+    Is `execution_context` actually populated and executed? Add details of using `AgentContextEngine.gather_context()` by the planner.
+
 
 An `ActionPlan` is a container for the LLM's current strategy:
 
@@ -49,9 +57,53 @@ class ActionPlan(BaseModel):
     execution_context: dict[str, Any] # Accumulated results and state
 ```
 
-The plan maintains a full `execution_context` -- all completed actions, their results, and accumulated findings. This context is passed to the LLM when replanning, so the planner can generate informed continuations.
+<s>The plan maintains a full `execution_context` -- all completed actions, their results, and accumulated findings. This context is passed to the LLM when replanning, so the planner can generate informed continuations.</s>
+
+### `ActionPlanner`
+
+The `ActionPlanner` (in `polymathera.colony.agents.patterns.planning.planner`) is the abstract base for plan generation:
+
+```python
+class ActionPlanner(ABC):
+    @abstractmethod
+    async def create_plan(self, planning_context: PlanningContext) -> ActionPlan: ...
+
+    @abstractmethod
+    async def revise_plan(
+        self,
+        current_plan: ActionPlan,
+        planning_context: PlanningContext,
+        revision_reason: str,
+    ) -> ActionPlan: ...
+```
+
+Implementations:
+
+- `SequentialPlanner`: Manually-specified linear sequence of actions
+- `CacheAwareActionPlanner`: LLM-driven planning via pluggable `PlanningStrategyPolicy`
+
+!!! bug "Explain and Consolidate Planner Parameters"
+    These constructor parameters are confusing with seemingly overlapping responsibilities. Perhaps rename them to clarify their roles, and add a diagram showing how they interact.
+
+```python
+class CacheAwareActionPlanner(ActionPlanner):
+    """One planner class, customized via pluggable policies."""
+
+    def __init__(
+        self,
+        agent: Agent,
+        planning_strategy: PlanningStrategyPolicy,
+        planning_params: PlanningParameters,
+        cache_policy: CacheAwarePlanningPolicy | None = None,
+        learning_policy: LearningPlanningPolicy | None = None,
+        coordination_policy: CoordinationPlanningPolicy | None = None,
+    ): ...
+```
 
 ## The Reasoning Loop
+
+!!! bug "Composite actions no longer supported"
+    Update this diagram to remove composite actions and show how hierarchical planning is implemented via child agent spawning instead.
 
 The core execution cycle is straightforward:
 
@@ -123,42 +175,10 @@ MPC is essential for cache-aware planning because:
 
 ## Hierarchical Planning
 
-Plans can be hierarchical through composite actions:
+!!! bug "Composite actions no longer supported"
+    Update this section to explain how hierarchical planning is implemented via child agent spawning instead of composite actions with sub-plans. Explain how sub-agents are described to the parent agent planner, how they are coordinated and how they feed results back to the parent agent.
 
-1. A parent agent creates a high-level plan with composite actions (e.g., "Analyze authentication subsystem")
-2. When executing a composite action, a sub-plan is generated JIT by the LLM
-3. The sub-plan may itself contain composite actions, creating arbitrary depth
-4. The policy maintains its position in the plan tree for context
 
-```mermaid
-graph TD
-    subgraph "Level 0: Strategic Plan"
-        A0[Analyze codebase structure]
-        A1["Analyze auth subsystem (composite)"]
-        A2[Synthesize findings]
-    end
-
-    subgraph "Level 1: Auth Sub-Plan (JIT)"
-        B0[Load auth module pages]
-        B1[Trace authentication flow]
-        B2["Analyze token handling (composite)"]
-        B3[Summarize auth findings]
-    end
-
-    subgraph "Level 2: Token Sub-Plan (JIT)"
-        C0[Inspect token generation]
-        C1[Check token validation]
-        C2[Assess token storage security]
-    end
-
-    A1 --> B0
-    B2 --> C0
-
-    style A1 fill:#e8d5f5,stroke:#7b2d8e
-    style B2 fill:#e8d5f5,stroke:#7b2d8e
-```
-
-This allows natural decomposition: the LLM plans at the right level of abstraction for its current context, and defers detailed planning until it has the context to plan well.
 
 ## Replanning
 
@@ -173,6 +193,32 @@ Replanning is triggered by several conditions:
 | **Periodic** | `REVISE` | Configurable re-evaluation interval |
 
 The replanning mechanism preserves the full execution history. When `revise_plan()` is called, the planner sees all completed actions and their results, and generates a continuation that builds on what has already been accomplished.
+
+Replanning decisions are made by the `ReplanningPolicy` (in `polymathera.colony.agents.patterns.planning.replanning`):
+
+```python
+class ReplanningPolicy(ABC):
+    """Decides WHEN to replan and WHAT revision strategy to use.
+
+    Separation of concerns:
+    - ReplanningPolicy decides WHEN to replan (this class)
+    - ActionPlanner.revise_plan() decides HOW to replan
+    - CacheAwareActionPolicy orchestrates the flow
+    """
+
+    @abstractmethod
+    async def evaluate_replanning_need(
+        self,
+        plan: ActionPlan,
+        last_result: ActionResult | None,
+        state: ActionPolicyExecutionState,
+    ) -> ReplanningDecision: ...
+```
+
+Built-in implementations compose via `CompositeReplanningPolicy`:
+
+- `PlanExhaustionReplanningPolicy`: Triggers when all actions are executed
+- `PeriodicReplanningPolicy`: Re-evaluates at configurable intervals
 
 ### Plan Exhaustion
 

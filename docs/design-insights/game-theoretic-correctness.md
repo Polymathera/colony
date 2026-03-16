@@ -1,6 +1,29 @@
-# Games as Correctness Mechanisms
+# Games as Error Correction Mechanisms
 
-The standard pitch for multi-agent systems is coordination: divide work, parallelize, aggregate. Colony uses multi-agent coordination for a different and more fundamental purpose: **correctness**. Game-theoretic protocols are not overhead -- they are the mechanism by which Colony combats specific, well-characterized LLM failure modes.
+
+!!! bug "This page needs a rewrite"
+
+    This page needs to be rewritten more concisely and clearly, with better examples and explanations.
+
+!!! bug "Merge this with `docs/architecture/game-engine.md`"
+    Or keep them separate, but minimize overlap and add cross-references.
+
+
+!!! bug "Reframe this: Games as Learning Mechanisms"
+    **Learning *is* a form of error correction**.
+    The game-theoretic protocols in Colony are not just error correction mechanisms -- they also create rich learning signals that drive system improvement over time. For example, the outcomes of hypothesis games provide feedback on which agents produce more reliable claims, which in turn informs future task allocation and strategy selection. The contract net protocol creates a competitive environment where agents learn to bid effectively based on their capabilities and past performance. The objective guard provides a clear signal when goal drift occurs, allowing agents to learn how to maintain focus on objectives. In this way, the game engine is not just correcting errors in the moment -- it is generating the data needed for continuous learning and adaptation.
+
+
+Colony is designed to execute long-running inference tasks over unbounded context. This is not a trivial engineering challenge -- it is a fundamental correctness challenge. LLMs are powerful but fallible reasoners. When you scale up to many agents and large context, the probability of failure modes (hallucination, laziness, goal drift) increases dramatically. Without mechanisms to detect and correct these failures, the system's outputs become unreliable.
+
+The standard pitch for multi-agent systems is coordination: divide work, parallelize, aggregate. Colony uses multi-agent coordination for a different and more fundamental purpose: **error correction**. Game-theoretic protocols are not overhead -- they are the mechanism by which Colony combats specific, well-characterized LLM failure modes.
+
+
+
+!!! info "Games as error correction mechanisms"
+    Hypothesis games catch hallucination. Contract nets prevent laziness. Objective guards detect goal drift. These are not social simulations -- they are formal mechanisms with game-theoretic foundations (VCG incentives, no-regret learning, social choice aggregation).
+
+
 
 ## The Core Insight
 
@@ -17,9 +40,21 @@ Colony's position is that each failure mode has a natural game-theoretic counter
 
 This is not metaphorical. Colony implements these as formal protocols with defined roles, legal moves, and payoff structures.
 
+!!! tip "Any Agent Can Play Any Role"
+    The roles in these protocols (Proposer, Skeptic, Grounder, Arbiter) are not hardcoded to specific agents. Any agent can play any role depending on the context. This flexibility allows the system to adaptively apply error correction where it is most needed. All an agent needs to to do is dynamically instantiate the relevant `GameProtocolCapability` (e.g., `HypothesisGameCapability`), start the game and it will create other agents to participate in the corresponding game. The agent's `ActionPolicy` will automatically pick up on the game protocol and weave in the necessary moves (e.g., proposing claims, challenging others, grounding evidence) without explicit coding of those interactions.
+
+
+!!! tip "Agents Play Games When They Need To"
+    An agent with `HypothesisGameCapability` will automatically engage in hypothesis games when making claims, without needing explicit code for when and how to challenge or ground.
+
+
+!!! tip "Agents with More Capabilities Are Better Players"
+    The aspect-oriented design of `AgentCapabilities` allows interesting game behavior to emerge naturally from the composition of `GameProtocolCapability` with other complementary capabilities. For example, an agent with `NegotiationGameProtocol` will automatically engage in negotiation games. If it also has a `GroundingCapability`, its action policy can use the grounding capability to collect evidence before making offers or counteroffers or accepting offers, without needing explicit code for when and how to propose or counteroffer.
+
+
 ## Mapping Failures to Games
 
-### Hallucination --> Hypothesis Games
+### Hallucination $\Rightarrow$ Hypothesis Games
 
 When a Colony agent produces a finding, it does not emit a bare string. It produces a `ScopeAwareResult` with confidence scores, supporting evidence, and declared missing context. No single agent's output is treated as ground truth.
 
@@ -43,19 +78,69 @@ sequenceDiagram
 
 The game structure forces the system to surface uncertainty rather than paper over it. An isolated agent might hallucinate with high confidence. Under adversarial scrutiny from a Skeptic, that confidence collapses -- exactly as intended.
 
-### Laziness --> Contract Net
+```python
+# Launch a hypothesis game with role-specific agents
+from polymathera.colony.agents.patterns.games.hypothesis.agents import run_hypothesis_game
 
-LLMs exhibit "laziness" -- producing shallow analysis, skipping edge cases, giving generic answers when specific ones are needed. Colony counters this with the Contract Net protocol: tasks are announced, agents bid based on their capabilities and current context, and the best-positioned agent wins.
+result_future = await run_hypothesis_game(
+    owner=supervisor_agent,
+    hypothesis=Hypothesis(claim="The auth module uses JWT tokens", evidence=[...]),
+    num_skeptics=2,
+    num_grounders=1,
+    use_llm_reasoning=True,
+)
+outcome = await result_future  # GameOutcome with success, consensus_level, lessons_learned
+```
 
-The key ingredient is **reputation**. Each agent's track record (quality scores from previous tasks, depth of analysis, follow-through on commitments) feeds into bid evaluation. An agent that consistently produces shallow work loses bids to agents with better reputations. Over time, this creates selective pressure for thoroughness.
+### Laziness $\Rightarrow$ Contract Net
 
-### Goal Drift --> Objective Guard Agents
+LLMs exhibit "laziness", producing shallow analysis, skipping edge cases, giving generic answers when specific ones are needed. Colony counters this with the Contract Net protocol: tasks are announced, agents bid based on their capabilities and current context, and the best-positioned agent wins.
 
-In extended multi-step reasoning, agents gradually drift from the original objective. Colony addresses this with **ObjectiveGuardAgent** -- an independent agent whose sole job is to compare each new draft or plan revision against the stated goals. If an agent's output diverges from the objective, the guard flags it before it propagates.
+Laziness is not just a failure mode; *it is a strategic choice by the agent to minimize effort*. The contract net protocol turns laziness into a competitive disadvantage, incentivizing agents to put in the work to win bids. This is a fundamental shift from treating laziness as an error to treating it as a rational strategy that can be outcompeted.
+
+
+The key ingredients are:
+- **Reputation**. Each agent's track record (quality scores from previous tasks, depth of analysis, follow-through on commitments) feeds into bid evaluation. An agent that consistently produces shallow work loses bids to agents with better reputations. Over time, this creates selective pressure for thoroughness.
+- **Feedback**. When an agent loses a bid or fails to meet expectations, it receives feedback on why it lost (e.g., "Your bid was too high because your past performance on similar tasks was poor"). This allows agents to learn and adjust their future bids, creating a dynamic market for task allocation.
+
+!!! bug ""
+    A bid is not just a promise to do work. It is a **contract**. Winning a bid creates an obligation. If the agent fails to deliver on its bid (e.g., by producing low-quality output or missing deadlines), its reputation takes a hit. This accountability mechanism is crucial for combating laziness.
+
+
+
+
+```python
+class TaskBid(BaseModel):
+    bidder_id: str
+    task_id: str
+    estimated_cost_tokens: int
+    estimated_duration_seconds: float
+    estimated_quality_gain: float          # 0.0 to 1.0
+    rationale: str
+    capabilities_match: list[str]
+    past_performance: dict[str, float]     # Reputation metrics
+
+class ContractAward(BaseModel):
+    task_id: str
+    winner_id: str
+    winning_bid: TaskBid
+    selection_reasoning: str
+```
+
+### Goal Drift $\Rightarrow$ Objective Guard Agents
+
+!!! bug "This guard is not a game"
+    `ObjectiveGuardAgent` is a meta-agent not a game participant.
+
+In extended multi-step reasoning, agents gradually drift from the original objective. Colony addresses this with `ObjectiveGuardAgent`: an independent agent whose sole job is to compare each new draft or plan revision against the stated goals. If an agent's output diverges from the objective, the guard flags it before it propagates.
 
 This is not a heuristic check. The guard agent has full access to the original task specification and applies LLM-based semantic comparison. It operates outside the main reasoning loop, so it is not subject to the same contextual pressure that causes drift in the first place.
 
-### Miscommunication --> Vocabulary Normalization
+
+### Miscommunication $\Rightarrow$ Vocabulary Normalization
+
+!!! bug "This section is incomplete and needs work"
+    Implementation is missing. This is a critical failure mode that needs a robust solution.
 
 When multiple agents analyze different parts of a codebase or document, they may develop inconsistent terminology. One agent calls something a "service layer," another calls the same pattern a "controller." A meta-agent monitors inter-agent communication, detects mismatched assumptions, and enforces shared vocabulary through normalization.
 

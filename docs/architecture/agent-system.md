@@ -4,7 +4,7 @@ The agent system defines how autonomous computational entities are created, mana
 
 ## Guiding Principle
 
-> Agent control flow and all decisions should be driven by a reasoning LLM given sufficient context, **not hardcoded logic**.
+> Agent control flow and all decisions should be driven by a reasoning LLM given sufficient context, **not hardcoded logic**. But the actions available to the LLM planner are as important as the context it reasons over. The framework provides a rich ecosystem of capabilities that expose different actions and cognitive processes to the LLM, enabling emergent behavior from the combinatorial explosion of possible action interleavings.
 
 The framework provides structure (lifecycle, capabilities, blackboard access), but the LLM decides what to do next. Meta-choices available to the LLM include delegating to another agent, meta-reasoning about its own strategy, initiating multi-agent deliberation, and building new tools.
 
@@ -63,7 +63,7 @@ Always-running agents that provide services to other agents (e.g., a `MemoryMana
 ### Supervisor Agents
 Independent of page state. They monitor and coordinate other agents, make delegation decisions, and handle escalation.
 
-## AgentCapability
+## `AgentCapability`
 
 `polymathera.colony.agents.base.AgentCapability` is the extension point for agent functionality. Each capability encapsulates a specific aspect or protocol:
 
@@ -77,14 +77,59 @@ class AgentCapability(ABC):
     3. Shared scope: multiple agents share a namespace
     4. Detached: standalone without agent context
     """
+
+    def __init__(
+        self,
+        agent: Agent | None = None,
+        scope_id: str | None = None,
+        *,
+        blackboard: EnhancedBlackboard | None = None,
+        capability_key: str | None = None,
+    ): ...
+```
+
+The four modes in practice:
+
+```python
+# 1. Local mode — capability runs within its owning agent
+memory = MemoryCapability(agent=self)  # scope_id defaults to agent.agent_id
+
+# 2. Remote mode — parent monitors a child agent's progress
+child_cap = ResultCapability(agent=parent, scope_id=child_agent_id)
+await child_cap.stream_events_to_queue(self.get_event_queue())
+result = await asyncio.wait_for(child_cap.get_result_future(), timeout=30.0)
+
+# 3. Shared scope — all game participants see each other's events
+game_cap = NegotiationGameProtocol(agent=self, scope_id=game_id)
+
+# 4. Detached mode — external system interacts with agents via blackboard
+external_cap = MyCapability(agent=None, scope_id=target_agent_id)
 ```
 
 Capabilities provide:
 
-- **Action executors**: Methods the `ActionPolicy` can invoke (conscious cognitive processes)
+- **Action executors**: Methods decorated with `@action_executor` that the `ActionPolicy` can invoke (conscious cognitive processes)
 - **Hookables**: Methods marked `@hookable` that other components can intercept
-- **Hooks**: Hooks the capability registers on other components
+- **Hooks**: Hooks the capability registers on other components (via `register_hook()`)
 - **Background processes**: Subconscious cognitive processes (consolidation, rehearsal)
+
+```python
+class PageGraphCapability(AgentCapability):
+    """Example capability with action executors and hooks."""
+
+    @action_executor()
+    async def traverse(
+        self, start_pages: list[str], strategy: str = "bfs", max_depth: int = 5
+    ) -> dict[str, Any]:
+        """Auto-discovered by ActionPolicy — the LLM planner can invoke this."""
+        graph = await self._get_page_graph()
+        ...
+
+    @action_executor(exclude_from_planning=True)
+    async def update_edge(self, source: str, target: str, weight: float) -> None:
+        """exclude_from_planning=True: only invoked programmatically, not by the LLM."""
+        ...
+```
 
 !!! tip "Capabilities as AOP Aspects"
     Each `AgentCapability` is an "aspect" in the aspect-oriented programming sense. The `ActionPolicy` plays the role of the "aspect weaver," deciding which capabilities to activate and in what order. Emergent behavior arises from the combinatorial explosion of possible capability interleavings -- the framework does not model all paths explicitly.
@@ -99,7 +144,16 @@ Capabilities use `scope_id` for flexible communication patterns:
 
 The `publish()` method writes records to the capability's scoped blackboard. If the scope is VCM-mapped, writes are automatically discoverable by other agents via the VCM.
 
-## ActionPolicy
+```python
+# publish() replaces manual blackboard key construction:
+#   key = f"{self.scope_id}:analysis:result:{result.result_id}"
+#   await bb.write(key=key, value=result.model_dump(), created_by=...)
+# With:
+await self.publish(result, tags={"analysis"})
+# Key is resolved automatically via BlackboardPublishable protocol on the record.
+```
+
+## `ActionPolicy`
 
 `polymathera.colony.agents.base.ActionPolicy` is the abstract base for decision-making. It receives execution state and produces iteration results:
 
@@ -113,7 +167,36 @@ class ActionPolicy(ABC):
 
 The policy manages which capabilities are active via `use_agent_capabilities()` and `disable_agent_capabilities()`. See [Action Policies](action-policies.md) for the full planning architecture.
 
-## ResourceExhausted Handling
+The agent's main execution loop calls `run_step()` repeatedly. Each step invokes the action policy, which gathers context from capabilities, asks the LLM what to do next, and dispatches the chosen action:
+
+```python
+class Agent:
+    @hookable
+    async def run_step(self) -> None:
+        """Execute one iteration of the agent's reasoning loop.
+
+        @hookable: capabilities can register BEFORE/AFTER/AROUND hooks
+        to prepare context, post-process results, or wrap execution.
+
+        Uses repeated run_step() instead of a single long-running run()
+        to facilitate suspension and state management across replicas.
+        """
+        if self.state not in (AgentState.RUNNING, AgentState.IDLE):
+            return
+        result = await self.action_policy.execute_iteration(self._build_state())
+        await self._apply_iteration_result(result)
+
+    def add_capability(self, capability: AgentCapability, *,
+                       include_actions: list[str] | None = None,
+                       exclude_actions: list[str] | None = None) -> None:
+        """Add a capability. Must still call action_policy.use_agent_capabilities()
+        to include it in planning."""
+
+    def get_capability(self, name: str) -> AgentCapability | None:
+        """Retrieve a capability by name."""
+```
+
+## `ResourceExhausted` Handling
 
 When a replica has insufficient resources for a new agent, the system follows an ordered strategy:
 
@@ -142,6 +225,10 @@ Actions are typed via `polymathera.colony.agents.models.ActionType`:
 Long-running actions should be idempotent, pausable, resumable, checkpointable, and cancellable. Complex actions are best implemented as separate agents managed by the `AgentSystemDeployment`.
 
 ## Blueprints
+
+!!! bug "This section is incomplete and needs expansion"
+    Add explanation of how blueprints work for serializable agent specifications, validation, and instantiation with dependency injection.
+
 
 Agent configuration uses the blueprint pattern for serializable, deployable specifications:
 

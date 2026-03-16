@@ -1,6 +1,12 @@
 # Qualitative Analysis
 
-Colony reframes classical algorithmic analyses as **LLM-driven qualitative reasoning**. The insight: human programmers already perform "fuzzy" versions of formal analyses mentally -- they trace likely execution paths, reason about probable behaviors, and identify patterns without computing exact dataflow equations or building complete call graphs. LLMs can do the same, at scale, across extremely long context.
+
+!!! bug "This page needs a rewrite"
+
+    This page needs to be rewritten more concisely and clearly, with better examples and explanations.
+
+
+Colony reframes classical algorithmic analyses as **LLM-driven qualitative reasoning**. The insight: human programmers already perform "fuzzy" or "imprecise" versions of formal analyses mentally -- they trace likely execution paths, reason about probable behaviors, and identify patterns without computing exact dataflow equations or building complete call graphs. LLMs can do the same, at scale, across extremely long context.
 
 This reframing is not specific to code analysis. The same patterns generalize to any domain where agents work with partial knowledge and discovered relationships.
 
@@ -29,6 +35,36 @@ Classical program analyses compute exact results over formal abstractions (contr
 - **Risk markers**: Where the path may fail or produce unexpected behavior
 
 A `ConstraintSketchBoard` accumulates qualitative predicates across narratives. When two narratives reference the same variable under conflicting constraints, a coordinator asks the LLM whether the paths actually conflict -- replacing formal constraint solving with targeted qualitative reasoning.
+
+Colony's program slicing sample shows this pattern in practice. The `ProgramSlicingCapability` produces `ScopeAwareResult[ProgramSlice]` artifacts that track dependencies qualitatively:
+
+```python
+class SliceCriterion(BaseModel):
+    """Slicing criterion specification."""
+    file_path: str                        # File containing the criterion
+    line_number: int                      # Line of interest
+    variable: str | None = None           # Variable of interest
+    slice_type: SliceType = SliceType.BACKWARD  # BACKWARD, FORWARD, CHOPPING, DYNAMIC
+
+class DependencyEdge(BaseModel):
+    """Edge in dependency graph."""
+    from_line: int
+    to_line: int
+    dep_type: str    # "data", "control", or "call"
+    variable: str | None = None
+    confidence: float
+
+class ProgramSlicingCapability(AgentCapability):
+    @action_executor()
+    async def compute_slice(self, criterion: SliceCriterion, ...) -> dict[str, Any]:
+        """Compute backward/forward slices using LLM reasoning."""
+        ...
+
+    @action_executor()
+    async def resolve_interprocedural(self, ...) -> dict[str, Any]:
+        """Handle cross-function slicing with cross-page queries."""
+        ...
+```
 
 ## Lattice Hints
 
@@ -91,6 +127,41 @@ The LLM validates sanitization adequacy -- not just whether a sanitizer was call
 
 Contract Cards are a generic schema -- they work for API contracts, compliance rules, SLO definitions, and any domain where usage must conform to documented expectations.
 
+Colony's contract inference sample implements this pattern with typed contract models:
+
+```python
+class ContractType(str, Enum):
+    PRECONDITION = "precondition"   # Required before call
+    POSTCONDITION = "postcondition" # Guaranteed after call
+    INVARIANT = "invariant"         # Always true
+    ASSERTION = "assertion"         # Must hold at point
+    ASSUMPTION = "assumption"       # Assumed to hold
+
+class FormalismLevel(str, Enum):
+    NATURAL = "natural"         # Natural language
+    SEMI_FORMAL = "semi_formal" # Structured but not formal
+    FORMAL = "formal"           # Formal logic (Z3, Dafny)
+    CODE = "code"               # Executable assertions
+
+class Contract(BaseModel):
+    contract_type: ContractType
+    description: str                  # Natural language description
+    formal_spec: str | None = None    # Formal specification if available
+    variables: list[str] = []         # Variables involved
+    confidence: float = 0.8
+
+class ContractInferenceCapability(AgentCapability):
+    @action_executor()
+    async def infer_contracts(self, ...) -> dict[str, Any]:
+        """Infer function contracts using LLM reasoning about intent and patterns."""
+        ...
+
+    @action_executor()
+    async def analyze_page(self, page_id: str, ...) -> dict[str, Any]:
+        """Analyze page-level contracts."""
+        ...
+```
+
 ## Policy Narratives
 
 **Classical**: Architectural conformance checking compares dependency graphs against allowed-dependency rules. Cost: requires explicitly maintained architecture models.
@@ -106,6 +177,30 @@ Contract Cards are a generic schema -- they work for API contracts, compliance r
     - "Does this UI module import persistence directly?" (LLM prompt)
     - Creates `PolicyBreach` entries referencing both code locations and policy definitions
     - Enables cross-team remediation
+
+Colony's compliance analysis sample implements this with a multi-level compliance model:
+
+```python
+class ComplianceViolation(BaseModel):
+    """Violation with severity and remediation."""
+    severity: str            # "critical", "high", "medium", "low"
+    description: str
+    remediation: str | None = None
+
+class ComplianceRequirement(BaseModel):
+    """Requirement to check against."""
+    requirement_id: str
+    description: str
+    category: str            # "security", "licensing", "architecture"
+
+class ComplianceAnalysisCapability(AgentCapability):
+    @action_executor()
+    async def analyze_compliance(
+        self, requirements: list[ComplianceRequirement], ...
+    ) -> dict[str, Any]:
+        """Analyze compliance against requirements using LLM reasoning."""
+        ...
+```
 
 ## Dynamic Analysis Reframings
 
@@ -152,6 +247,54 @@ Messages include scope metadata enabling incremental discovery. Tracks message d
 
 !!! tip "The unifying insight"
     All seven meta-patterns serve the same principle: **the right unit of distributed analysis is not the answer -- it is the partial, confidence-scored, context-aware finding that knows what it does not know.** Systems built on `ScopeAwareResult` can route effort precisely where uncertainty is highest, discover relationships that no single agent could see, and converge on high-confidence results through targeted refinement.
+
+All qualitative analysis results extend `ScopeAwareResult[T]`, which provides the partial-knowledge tracking that drives refinement, merging, and validation:
+
+```python
+class ScopeAwareResult(BaseModel, Generic[T]):
+    """Generic wrapper for analysis results with scope awareness."""
+    content: T                             # The actual analysis result
+    scope: AnalysisScope                   # Completeness, confidence, missing context
+    result_id: str
+    producer_agent_id: str | None = None
+    refinement_count: int = 0
+    validated: bool = False
+
+
+# Domain-specific result types extend ScopeAwareResult:
+class ContractInferenceResult(ScopeAwareResult[list[FunctionContract]]): ...
+class SlicingResult(ScopeAwareResult[ProgramSlice]): ...
+class IntentInferenceResult(ScopeAwareResult[IntentGraph]): ...
+class ComplianceResult(ScopeAwareResult[ComplianceReport]): ...
+class ChangeImpactResult(ScopeAwareResult[ChangeImpactReport]): ...
+```
+
+Cross-scope relationships discovered by qualitative analyses are captured in a `RelationshipGraph`:
+
+```python
+class Relationship(BaseModel):
+    """A typed relationship between entities (pages, symbols, patterns)."""
+    source_id: str
+    target_id: str
+    relationship_type: str   # "dependency", "alias", "dataflow", "similarity", "temporal"
+    confidence: float
+    evidence: list[str] = []
+    discovered_by: str | None = None
+
+class RelationshipGraphBuilder:
+    """Extracts relationships from ScopeAwareResult and builds knowledge graphs."""
+
+    async def extract_relationships(self, result: ScopeAwareResult) -> list[Relationship]:
+        """Extract relationships from analysis result scope."""
+        ...
+
+class RelationshipGraph:
+    """In-memory graph of typed relationships with indexes."""
+
+    def add_relationship(self, rel: Relationship) -> None: ...
+    def traverse_forward(self, entity_id: str, rel_type: str | None = None) -> list[str]: ...
+    def traverse_backward(self, entity_id: str, rel_type: str | None = None) -> list[str]: ...
+```
 
 ## Narrative-Centric Memory
 

@@ -1,10 +1,14 @@
 # Hook System
 
-Colony uses aspect-oriented programming (AOP) to handle cross-cutting concerns -- token tracking, rate limiting, memory capture, checkpointing, and retry logic -- without polluting core agent logic. The hook system is implemented in `polymathera.colony.agents.patterns.hooks`.
+!!! bug "Aspect-Oriented Programming for Agents"
+    Create a new article on aspect-oriented programming (AOP) principles in Colony (hook system and agent capabilities) to allow cross-cutting concerns like observability, memory capture, and rate limiting to be modularly implemented without polluting core agent logic.
+
+
+Colony uses aspect-oriented programming (AOP) to handle cross-cutting concerns, most importantly, **observability** -- token tracking, rate limiting, agent memory capture, checkpointing, and retry logic -- without polluting core agent logic. The hook system is implemented in `polymathera.colony.agents.patterns.hooks`.
 
 ## Core Concepts
 
-### @hookable Decorator
+### `@hookable` Decorator
 
 The `hookable` decorator (in `polymathera.colony.agents.patterns.hooks.decorator`) marks a method as an interception point. When a hookable method is called, it checks the owning agent's hook registry for matching hooks and executes them in the appropriate order.
 
@@ -28,7 +32,7 @@ Defined in `polymathera.colony.agents.patterns.hooks.types.HookType`:
 | `AFTER` | After the method. Receives the return value. | Logging, metric collection, memory capture |
 | `AROUND` | Wraps the method. Controls whether it executes. | Caching, retry logic, circuit breaking |
 
-### HookContext
+### `HookContext`
 
 Every hook handler receives a `HookContext` (in `polymathera.colony.agents.patterns.hooks.types`):
 
@@ -42,34 +46,41 @@ class HookContext:
     agent: Agent | None  # Owning agent (if available)
 ```
 
-## Pointcut Expressions
+### Hook Registration
 
-`Pointcut` (in `polymathera.colony.agents.patterns.hooks.pointcuts`) determines which method invocations a hook intercepts. Pointcuts match against both the join point string (e.g., `"MyCapability.analyze"`) and the actual instance.
+#### Declarative Registration
 
-### Pattern Matching
+`AgentCapabilities` can declare hooks using the `@register_hook` decorator. These are auto-discovered and registered with the capability's parent agent during initialization. A hook declaration includes a pointcut, type, and optional priority:
 
 ```python
-# Match a specific method
-Pointcut.pattern("ActionDispatcher.dispatch")
+from polymathera.colony.agents.patterns.hooks.decorator import register_hook
 
-# Match all methods on a class
-Pointcut.pattern("MyCapability.*")
-
-# Match a method across all classes
-Pointcut.pattern("*.analyze")
+class TokenTrackingCapability(AgentCapability):
+    @register_hook(
+        pointcut=Pointcut.pattern("*.infer"),
+        hook_type=HookType.AFTER,
+        priority=100,
+    )
+    async def track_tokens(self, ctx: HookContext, result: Any) -> Any:
+        usage = result.usage
+        await ctx.agent.update_resource_usage(tokens=usage.total_tokens)
+        return result
 ```
 
-### Combinators
+The `auto_register_hooks` function (called by `AgentCapability.initialize`) scans a capability for methods decorated with `@register_hook` and registers them with the agent's registry.
 
-Pointcuts compose with logical operators:
+Alternatively, an arbitrary **handler function** can be directly registered as a hook by calling an agent's `registry.register` method:
 
-| Operator | Meaning | Example |
-|----------|---------|---------|
-| `&` | AND | `Pointcut.pattern("*.dispatch") & Pointcut.class_filter(ActionDispatcher)` |
-| `\|` | OR | `Pointcut.pattern("*.analyze") \| Pointcut.pattern("*.synthesize")` |
-| `~` | NOT | `~Pointcut.pattern("*.internal_*")` |
+```python
+registry.register(
+    pointcut=Pointcut.pattern("ActionDispatcher.dispatch"),
+    hook_type=HookType.AFTER,
+    handler=my_tracking_handler,
+    priority=100,  # Higher = runs later
+)
+```
 
-## AgentHookRegistry
+#### `AgentHookRegistry`
 
 Each agent has its own `AgentHookRegistry` (in `polymathera.colony.agents.patterns.hooks.registry`). Hooks registered on one agent do not affect other agents.
 
@@ -83,47 +94,89 @@ class AgentHookRegistry:
     """
 ```
 
-### Hook Registration
 
-Hooks are registered with a pointcut, type, handler function, and optional priority:
-
-```python
-registry.register(
-    pointcut=Pointcut.pattern("ActionDispatcher.dispatch"),
-    hook_type=HookType.AFTER,
-    handler=my_tracking_handler,
-    priority=100,  # Higher = runs later
-)
-```
-
-### Auto-Registration
-
-The `auto_register_hooks` function scans a capability for declared hooks and registers them with the agent's registry. This is called during capability initialization.
-
-## RegisteredHook
+#### `RegisteredHook`
 
 A `RegisteredHook` (in `polymathera.colony.agents.patterns.hooks.types`) bundles the hook configuration:
 
 - `hook_id`: Unique identifier
 - `pointcut`: Which methods to intercept
-- `hook_type`: BEFORE, AFTER, or AROUND
+- `hook_type`: `BEFORE`, `AFTER`, or `AROUND`
 - `handler`: The async callable
 - `priority`: Execution order (lower runs first)
 - `error_mode`: How to handle exceptions (`ErrorMode`)
 
+
+
+## Pointcut Expressions
+
+`Pointcut` (in `polymathera.colony.agents.patterns.hooks.pointcuts`) determines which method invocations a hook intercepts. Pointcuts match against both the join point string (e.g., `"MyCapability.analyze"`) and the actual instance.
+
+#### Pattern Matching
+
+```python
+# Match a specific method
+Pointcut.pattern("ActionDispatcher.dispatch")
+
+# Match all methods on a class
+Pointcut.pattern("MyCapability.*")
+
+# Match a method across all classes
+Pointcut.pattern("*.analyze")
+```
+
+#### Combinators
+
+Pointcuts compose with logical operators:
+
+| Operator | Meaning | Example |
+|----------|---------|---------|
+| `&` | AND | `Pointcut.pattern("*.dispatch") & Pointcut.class_filter(ActionDispatcher)` |
+| `\|` | OR | `Pointcut.pattern("*.analyze") \| Pointcut.pattern("*.synthesize")` |
+| `~` | NOT | `~Pointcut.pattern("*.internal_*")` |
+
+Additional factory methods:
+
+```python
+Pointcut.cls(MyCapability)              # Match all methods on instances of a class
+Pointcut.instance(specific_cap)         # Match only this specific instance (weak ref)
+Pointcut.method("analyze")              # Exact method name matching
+Pointcut.decorated_with("_is_hookable") # Match methods with a decorator marker
+```
+
+
+## Hook Execution Chain
+
+When a `@hookable` method is called, hooks execute in this order:
+
+1. **`BEFORE`** hooks (highest priority first) -- can modify `ctx.args`/`ctx.kwargs`
+2. **`AROUND`** hooks build a wrapper chain (highest priority = outermost)
+3. The original method executes inside the AROUND wrapper
+4. **`AFTER`** hooks (highest priority first) -- can modify the return value
+
+```python
+# Handler type signatures:
+BeforeHookHandler = Callable[[HookContext], Awaitable[HookContext]]
+AfterHookHandler  = Callable[[HookContext, Any], Awaitable[Any]]
+AroundHookHandler = Callable[[HookContext, Callable[[], Awaitable[Any]]], Awaitable[Any]]
+```
+
 ## Error Handling
 
-`ErrorMode` controls hook failure behavior:
+`ErrorMode` (in `polymathera.colony.agents.patterns.hooks.types`) controls hook failure behavior:
 
-- **Propagate**: Exception from the hook propagates to the caller
-- **Suppress**: Exception is logged but swallowed; execution continues
-- **Fallback**: A fallback value is returned if the hook fails
+```python
+class ErrorMode(str, Enum):
+    FAIL_FAST = "fail_fast"  # First error aborts entire chain (default)
+    CONTINUE = "continue"    # Log error, continue to next hook
+    SUPPRESS = "suppress"    # Silently ignore errors
+```
 
 ## Use Cases
 
 ### Token Tracking
 
-An AFTER hook on inference methods tracks token consumption without modifying any inference code:
+An `AFTER` hook on inference methods tracks token consumption without modifying any inference code:
 
 ```python
 @after(Pointcut.pattern("*.submit_inference"))
@@ -135,7 +188,7 @@ async def track_tokens(ctx: HookContext, result: InferenceResponse):
 
 ### Rate Limiting
 
-A BEFORE hook throttles inference requests:
+A `BEFORE` hook throttles inference requests:
 
 ```python
 @before(Pointcut.pattern("*.submit_inference"))
@@ -146,11 +199,11 @@ async def rate_limit(ctx: HookContext):
 
 ### Memory Capture
 
-The memory system uses AFTER hooks via `MemoryProducerConfig` to observe agent behavior and automatically store memories. See [Memory System](memory-system.md) for details.
+The memory system uses `AFTER` hooks via `MemoryProducerConfig` to observe agent behavior and automatically store memories. See [Memory System](agent-memory-system.md) for details.
 
 ### Checkpointing
 
-An AFTER hook on plan execution saves state for recovery:
+An `AFTER` hook on plan execution saves state for recovery:
 
 ```python
 @after(Pointcut.pattern("CacheAwareActionPolicy.execute_iteration"))

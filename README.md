@@ -207,8 +207,8 @@ pytest src/ --timeout=120 -x -q
 ### Documentation
 
 ```bash
-poetry run mkdocs serve     # Local docs server at http://127.0.0.1:8000/
-poetry run mkdocs build     # Build static site
+poetry run mkdocs serve --livereload   # Local docs server at http://127.0.0.1:8000/
+poetry run mkdocs build                # Build static site
 ```
 
 ## Contributing
