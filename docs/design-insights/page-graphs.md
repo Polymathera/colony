@@ -131,6 +131,8 @@ Pages that should be loaded together are organized into `PageGroup` instances:
 ```python
 class PageGroup(BaseModel):
     group_id: str
+    colony_id: str  # A shared address space for multiple page sources
+    tenant_id: str
     page_ids: list[str]
     priority: int = 0
     metadata: dict[str, Any] = {}

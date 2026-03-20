@@ -519,7 +519,8 @@ class FileGrouper:
 
     async def update_graph_with_llm_insights(
         self,
-        group_id: str,
+        colony_id: str,
+        tenant_id: str,
         commit_hash: str,
         new_file_relationships: dict[tuple[str, str], dict[str, Any]],
     ) -> bool:
@@ -542,7 +543,7 @@ class FileGrouper:
             await self._ensure_caches_initialized()
 
             # Get current graph
-            graph = await self.file_graph_cache.get(key=f"{group_id}:{commit_hash}")
+            graph = await self.file_graph_cache.get(key=f"{tenant_id}:{colony_id}:{commit_hash}")
             if not graph:
                 return False
 
@@ -561,7 +562,7 @@ class FileGrouper:
 
             # Store updated graph with new version
             return await self.file_graph_cache.set(
-                key=f"{group_id}:{commit_hash}",
+                key=f"{tenant_id}:{colony_id}:{commit_hash}",
                 graph=graph,
                 version=f"llm_{int(time.time())}",
             )
@@ -572,7 +573,8 @@ class FileGrouper:
 
     async def group_files(
         self,
-        group_id: str,
+        colony_id: str,
+        tenant_id: str,
         repo: git.Repo,
         files: list[str],
     ) -> list[FileGroup]:
@@ -581,7 +583,8 @@ class FileGrouper:
         Caches and reuses relationship graphs.
 
         Args:
-            group_id: Unique identifier for the repository and its VMR context
+            colony_id: Unique identifier for the repository and its VMR context
+            tenant_id: Tenant ID
             repo: Git repository object
             files: List of file paths to group
 
@@ -597,32 +600,32 @@ class FileGrouper:
         """
         graph = None
         try:
-            logger.info(f"[{group_id}] group_files: starting for {len(files)} files")
+            logger.info(f"[{tenant_id}:{colony_id}] group_files: starting for {len(files)} files")
             await self._ensure_caches_initialized()
-            logger.info(f"[{group_id}] group_files: caches initialized")
+            logger.info(f"[{tenant_id}:{colony_id}] group_files: caches initialized")
 
             start_time = time.time()
             commit_hash = repo.head.commit.hexsha
 
             # Detect languages for all files (populates cache)
             file_languages = {file: self._detect_language(file) for file in files}
-            logger.info(f"[{group_id}] group_files: detected languages for {len(file_languages)} files")
+            logger.info(f"[{tenant_id}:{colony_id}] group_files: detected languages for {len(file_languages)} files")
 
             # Try to get cached graph
             graph = await self.file_graph_cache.get(
-                key=f"{group_id}:{commit_hash}", version=self._get_graph_version(files)
+                key=f"{tenant_id}:{colony_id}:{commit_hash}", version=self._get_graph_version(files)
             )
 
             # Track files with known cross-language bindings
             cross_lang_bindings = set()
 
             if graph is None:
-                logger.info(f"[{group_id}] group_files: no cached graph, building from scratch")
+                logger.info(f"[{tenant_id}:{colony_id}] group_files: no cached graph, building from scratch")
                 graph = await self._build_graph(
                     repo, files, cross_lang_bindings
                 )
                 logger.info(
-                    f"[{group_id}] group_files: graph built: "
+                    f"[{tenant_id}:{colony_id}] group_files: graph built: "
                     f"{graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
                 )
 
@@ -631,14 +634,14 @@ class FileGrouper:
 
                 # Cache the constructed graph
                 await self.file_graph_cache.set(
-                    key=f"{group_id}:{commit_hash}",
+                    key=f"{tenant_id}:{colony_id}:{commit_hash}",
                     graph=graph,
                     version=self._get_graph_version(files),
                 )
-                logger.info(f"[{group_id}] group_files: graph cached")
+                logger.info(f"[{tenant_id}:{colony_id}] group_files: graph cached")
             else:
                 logger.info(
-                    f"[{group_id}] group_files: loaded cached graph: "
+                    f"[{tenant_id}:{colony_id}] group_files: loaded cached graph: "
                     f"{graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
                 )
                 # Reconstruct cross-language bindings from graph
@@ -659,11 +662,11 @@ class FileGrouper:
                         cross_lang_bindings.add(target)
 
             # Find initial groups using language-aware community detection
-            logger.info(f"[{group_id}] group_files: clustering files into communities")
+            logger.info(f"[{tenant_id}:{colony_id}] group_files: clustering files into communities")
             initial_groups = await self._cluster_files_with_languages(
                 graph, cross_lang_bindings
             )
-            logger.info(f"[{group_id}] group_files: {len(initial_groups)} initial groups")
+            logger.info(f"[{tenant_id}:{colony_id}] group_files: {len(initial_groups)} initial groups")
 
             # Apply language-specific optimizations while preserving cross-language relationships
             optimized_groups = await self._optimize_groups_with_languages(
@@ -672,7 +675,7 @@ class FileGrouper:
 
             duration = time.time() - start_time
             self.metrics.grouping_duration.labels(strategy="grouping").observe(duration)
-            logger.info(f"[{group_id}] Grouped {len(files)} files into {len(optimized_groups)} groups in {duration:.2f}s")
+            logger.info(f"[{tenant_id}:{colony_id}] Grouped {len(files)} files into {len(optimized_groups)} groups in {duration:.2f}s")
             return optimized_groups
 
         except Exception as e:
@@ -681,7 +684,8 @@ class FileGrouper:
                 exc_info=True,
                 extra={
                     "repo": repo.working_dir,
-                    "group_id": group_id,
+                    "tenant_id": tenant_id,
+                    "colony_id": colony_id,
                     "file_count": len(files),
                     "has_cached_graph": graph is not None,
                 },

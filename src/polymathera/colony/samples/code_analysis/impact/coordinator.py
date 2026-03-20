@@ -370,7 +370,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         self.max_depth: int = 5  # Max depth for impact propagation
         self._current_changes: list[CodeChange] = []  # Changes being analyzed
         # Get configuration from agent metadata
-        self.group_id = self.agent.metadata.group_id
+        self.colony_id = self.agent.metadata.colony_id
         self.tenant_id = self.agent.metadata.tenant_id
         self.prefetch_depth = self.agent.metadata.parameters.get("prefetch_depth", 2)
         self.prefetch_test_pages = self.agent.metadata.parameters.get("prefetch_test_pages", True)
@@ -428,7 +428,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         # Initialize feedback predictor
         self.feedback_predictor = FeedbackLoopPredictor(
             agent=self.agent,
-            group_id=self.group_id,
+            colony_id=self.colony_id,
             tenant_id=self.tenant_id,
             prefetch_depth=self.prefetch_depth,
             prefetch_test_pages=self.prefetch_test_pages
@@ -1099,7 +1099,7 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
                 metadata=AgentMetadata(
                     page_id=page_id,
                     parent_agent_id=self.agent.agent_id,
-                    group_id=self.agent.metadata.group_id,
+                    colony_id=self.agent.metadata.colony_id,
                     tenant_id=self.agent.metadata.tenant_id,
                     session_id=self.agent.metadata.session_id,
                     run_id=self.agent.metadata.run_id,

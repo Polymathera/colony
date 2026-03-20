@@ -2576,6 +2576,7 @@ class AgentMetadata(BaseModel):
     """Metadata for agents."""
     role: str | None = None
     tenant_id: str = "default"  # Tenant/namespace for multi-tenant deployments
+    colony_id: str = "default-colony"
     team_id: str | None = None
     session_id: str = Field(
         default="default",
@@ -2592,7 +2593,6 @@ class AgentMetadata(BaseModel):
         )
     )
     parent_agent_id: str | None = None
-    group_id: str | None = None
 
     goals: list[str] = Field(default_factory=list)
 

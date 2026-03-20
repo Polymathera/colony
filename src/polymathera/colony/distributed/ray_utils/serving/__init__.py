@@ -81,6 +81,15 @@ from .models import (
 )
 
 
+# Tenant/colony isolation context
+from .context import (
+    get_colony_id,
+    get_tenant_id,
+    require_colony_id,
+    require_tenant_id,
+    isolation_context,
+)
+
 # Internal components (exposed for advanced usage and testing)
 from .autoscaler import DeploymentAutoscaler
 from .health import DeploymentHealthMonitor
@@ -120,6 +129,12 @@ __all__ = [
     "RequestRouter",
     "RoundRobinRouter",
     "LeastLoadedRouter",
+    # Tenant/colony isolation
+    "get_colony_id",
+    "get_tenant_id",
+    "require_colony_id",
+    "require_tenant_id",
+    "isolation_context",
     # Internal components
     "DeploymentProxyRayActor",
     "DeploymentHealthMonitor",

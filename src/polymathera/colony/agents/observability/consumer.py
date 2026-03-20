@@ -24,12 +24,12 @@ class SpanConsumer:
         kafka_bootstrap: str,
         db_pool: Any,  # asyncpg.Pool
         topic: str = "colony.spans",
-        group_id: str = "colony-pg-sink",
+        kafka_group_id: str = "colony-pg-sink",
     ):
         self._kafka_bootstrap = kafka_bootstrap
         self._db_pool = db_pool
         self._topic = topic
-        self._group_id = group_id
+        self._kafka_group_id = kafka_group_id
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -37,7 +37,7 @@ class SpanConsumer:
         """Start the consumer loop as a background task."""
         self._running = True
         self._task = asyncio.create_task(self._run())
-        logger.info("SpanConsumer started (group=%s, topic=%s)", self._group_id, self._topic)
+        logger.info("SpanConsumer started (group=%s, topic=%s)", self._kafka_group_id, self._topic)
 
     async def _run(self) -> None:
         """Main consume loop."""
@@ -46,7 +46,7 @@ class SpanConsumer:
         consumer = AIOKafkaConsumer(
             self._topic,
             bootstrap_servers=self._kafka_bootstrap,
-            group_id=self._group_id,
+            group_id=self._kafka_group_id,
             auto_offset_reset="earliest",
             enable_auto_commit=True,
             auto_commit_interval_ms=5000,

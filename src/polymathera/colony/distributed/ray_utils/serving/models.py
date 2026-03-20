@@ -113,7 +113,6 @@ class RoutingHints:
             router_kwargs={"strip_routing_params": ["target_client_id"]},
             metadata={
                 "context_page_ids": ["page-1", "page-2", "page-3"],
-                "tenant_id": "tenant-a",
                 "requirements": LLMClientRequirements(min_context_window=4096)
             },
         )
@@ -184,6 +183,16 @@ class DeploymentRequest(BaseModel):
 
     metadata: dict[str, Any] = Field(default_factory=dict)
     """Optional metadata for routing and monitoring."""
+
+    colony_id: str | None = None
+    """Colony ID for tenant isolation. Captured from contextvars by DeploymentHandle,
+    restored on replicas by __handle_request__. Present on every request regardless
+    of router configuration."""
+
+    tenant_id: str | None = None
+    """Tenant ID for tenant isolation. Captured from contextvars by DeploymentHandle,
+    restored on replicas by __handle_request__. Present on every request regardless
+    of router configuration."""
 
 
 class DeploymentResponseStatus(str, Enum):

@@ -29,6 +29,7 @@ from ....system import get_llm_cluster
 from ....utils import setup_logger
 from ...models import AttentionContext
 from ....cluster.models import InferenceRequest
+from ...base import Agent
 
 logger = setup_logger(__name__)
 
@@ -66,6 +67,8 @@ class PageKey(BaseModel):
     """
 
     page_id: str
+    colony_id: str
+    tenant_id: str
     key_type: str = "structural"  # "structural", "semantic", "hybrid"
     structural_features: dict[str, Any] = Field(default_factory=dict)  # Domain-specific
     semantic_embedding: list[float] | None = None  # For embedding-based matching
@@ -118,6 +121,12 @@ class AttentionScore(BaseModel):
     page_id: str = Field(
         description="Page identifier"
     )
+    colony_id: str = Field(
+        description="Colony identifier"
+    )
+    tenant_id: str = Field(
+        description="Tenant identifier"
+    )
 
     score: float = Field(
         ge=0.0,
@@ -153,6 +162,9 @@ class KeyGenerator(ABC):
     - HybridKeyGenerator: Combine structural and semantic features
     """
 
+    def __init__(self, agent: Agent):
+        self.agent = agent
+
     @abstractmethod
     async def generate_key(
         self, page_id: str, content: str, metadata: dict[str, Any] | None = None
@@ -178,6 +190,9 @@ class QueryGenerator(ABC):
     - ErrorQueryGenerator: Find potential error sources
     - SemanticQueryGenerator: Find semantically related pages
     """
+
+    def __init__(self, agent: Agent):
+        self.agent = agent
 
     @abstractmethod
     async def generate_queries(
@@ -209,6 +224,9 @@ class AttentionScoringMechanism(ABC):
     - LLMAttention: Use LLM to judge relevance
     - HybridAttention: Combine multiple signals
     """
+
+    def __init__(self, agent: Agent):
+        self.agent = agent
 
     @abstractmethod
     async def score_attention(
@@ -247,6 +265,7 @@ class BatchedLLMAttention(AttentionScoringMechanism):
 
     def __init__(
         self,
+        agent: Agent,
         relevance_threshold: float = 0.5,
         top_k: int = 10,
         batch_size: int = 20
@@ -254,10 +273,12 @@ class BatchedLLMAttention(AttentionScoringMechanism):
         """Initialize batched LLM attention.
 
         Args:
+            agent: Reference to the agent using this attention mechanism
             relevance_threshold: Minimum relevance score (0.0-1.0)
             top_k: Maximum results to return
             batch_size: Number of keys to score per LLM call
         """
+        super().__init__(agent)
         self.relevance_threshold = relevance_threshold
         self.top_k = top_k
         self.batch_size = batch_size
@@ -297,6 +318,8 @@ class BatchedLLMAttention(AttentionScoringMechanism):
             request = InferenceRequest(
                 request_id=f"attention-batch-{i}",
                 prompt=prompt,
+                colony_id=self.agent.colony_id,
+                tenant_id=self.agent.tenant_id,
                 context_page_ids=[],  # No pages needed
                 max_tokens=500 # TODO: Make fucking configurable
             )
@@ -330,6 +353,8 @@ class BatchedLLMAttention(AttentionScoringMechanism):
             summary = {
                 "index": idx,
                 "page_id": key.page_id,
+                "colony_id": key.colony_id,
+                "tenant_id": key.tenant_id,
                 "summary": key.summary or "No summary",
                 "key_type": key.key_type
             }
@@ -378,6 +403,8 @@ Output ONLY the JSON array, no extra text."""
                     key = keys[idx]
                     scores.append(AttentionScore(
                         page_id=key.page_id,
+                        colony_id=key.colony_id,
+                        tenant_id=key.tenant_id,
                         score=float(score_value),
                         explanation=reason,
                         matched_features={"llm_score": float(score_value)}
@@ -391,6 +418,8 @@ Output ONLY the JSON array, no extra text."""
             return [
                 AttentionScore(
                     page_id=key.page_id,
+                    colony_id=key.colony_id,
+                    tenant_id=key.tenant_id,
                     score=0.0,
                     explanation="Failed to parse LLM response",
                     matched_features={}
@@ -407,6 +436,7 @@ class EmbeddingBasedAttention(AttentionScoringMechanism):
 
     def __init__(
         self,
+        agent: Agent,
         similarity_threshold: float = 0.5,
         top_k: int = 10,
     ):
@@ -416,6 +446,7 @@ class EmbeddingBasedAttention(AttentionScoringMechanism):
             similarity_threshold: Minimum cosine similarity (0.0-1.0)
             top_k: Maximum number of results to return
         """
+        super().__init__(agent)
         self.similarity_threshold = similarity_threshold
         self.top_k = top_k
         self._llm_cluster = None
@@ -459,6 +490,8 @@ class EmbeddingBasedAttention(AttentionScoringMechanism):
                 scores.append(
                     AttentionScore(
                         page_id=key.page_id,
+                        colony_id=key.colony_id,
+                        tenant_id=key.tenant_id,
                         score=float(similarity),
                         explanation=f"Semantic similarity: {similarity:.3f}",
                         matched_features={"embedding_similarity": float(similarity)},
@@ -487,7 +520,8 @@ class StructuralKeyGenerator(KeyGenerator):
     Extracts classes, functions, imports, etc. from code via VCM.
     """
 
-    def __init__(self):
+    def __init__(self, agent: Agent):
+        super().__init__(agent)
         self._llm_cluster = None
 
     def _get_llm_cluster(self) -> serving.DeploymentHandle:
@@ -527,6 +561,8 @@ Output ONLY valid JSON, no extra text."""
         request = InferenceRequest(
             request_id=f"key-gen-structural-{page_id}",
             prompt=prompt,
+            colony_id=self.agent.colony_id,
+            tenant_id=self.agent.tenant_id,
             context_page_ids=[page_id],  # VCM loads page content
             max_tokens=1000, # TODO: Make fucking configurable
         )
@@ -543,6 +579,8 @@ Output ONLY valid JSON, no extra text."""
 
         return PageKey(
             page_id=page_id,
+            colony_id=self.agent.colony_id,
+            tenant_id=self.agent.tenant_id,
             key_type="structural",
             structural_features=features,
             metadata=metadata or {},
@@ -555,7 +593,8 @@ class SemanticKeyGenerator(KeyGenerator):
     Uses LLM to generate summary, then creates embedding via VCM.
     """
 
-    def __init__(self):
+    def __init__(self, agent: Agent):
+        super().__init__(agent)
         self._llm_cluster = None
 
     def _get_llm_cluster(self) -> serving.DeploymentHandle:
@@ -584,6 +623,8 @@ class SemanticKeyGenerator(KeyGenerator):
         summary_request = InferenceRequest(
             request_id=f"key-gen-semantic-summary-{page_id}",
             prompt=summary_prompt,
+            colony_id=self.agent.colony_id,
+            tenant_id=self.agent.tenant_id,
             context_page_ids=[page_id],  # VCM loads content
             max_tokens=100, # TODO: Make fucking configurable
         )
@@ -595,6 +636,8 @@ class SemanticKeyGenerator(KeyGenerator):
 
         return PageKey(
             page_id=page_id,
+            colony_id=self.agent.colony_id,
+            tenant_id=self.agent.tenant_id,
             key_type="semantic",
             semantic_embedding=embeddings[0],
             summary=summary,
@@ -608,9 +651,10 @@ class HybridKeyGenerator(KeyGenerator):
     Uses both structural features and embeddings for richer representation.
     """
 
-    def __init__(self):
-        self.structural_generator = StructuralKeyGenerator()
-        self.semantic_generator = SemanticKeyGenerator()
+    def __init__(self, agent: Agent):
+        super().__init__(agent)
+        self.structural_generator = StructuralKeyGenerator(agent)
+        self.semantic_generator = SemanticKeyGenerator(agent)
 
     async def generate_key(
         self, page_id: str, metadata: dict[str, Any] | None = None
@@ -631,6 +675,8 @@ class HybridKeyGenerator(KeyGenerator):
         # Combine into hybrid key
         return PageKey(
             page_id=page_id,
+            colony_id=self.agent.colony_id,
+            tenant_id=self.agent.tenant_id,
             key_type="hybrid",
             structural_features=structural_key.structural_features,
             semantic_embedding=semantic_key.semantic_embedding,
@@ -657,12 +703,14 @@ class LLMQueryGenerator(QueryGenerator):
     - Exploratory analysis (generate queries based on current insights)
     """
 
-    def __init__(self, max_queries: int = 5):
+    def __init__(self, agent: Agent, max_queries: int = 5):
         """Initialize LLM-based query generator.
 
         Args:
+            agent: The agent instance
             max_queries: Maximum number of queries to generate per call
         """
+        super().__init__(agent)
         self.max_queries = max_queries
         self._llm_cluster = None
 
@@ -731,6 +779,8 @@ Output ONLY valid JSON, no extra text."""
         request = InferenceRequest(
             request_id=f"query-gen-{context.page_id}",
             prompt=prompt,
+            colony_id=self.agent.colony_id,
+            tenant_id=self.agent.tenant_id,
             context_page_ids=[],  # No pages needed, just reasoning
             max_tokens=1000, # TODO: Make fucking configurable
         )
@@ -777,12 +827,14 @@ class DependencyQueryGenerator(QueryGenerator):
     - "Find definition of function Z"
     """
 
-    def __init__(self, max_queries: int = 10):
+    def __init__(self, agent: Agent, max_queries: int = 10):
         """Initialize dependency query generator.
 
         Args:
+            agent: The agent instance
             max_queries: Maximum number of queries to generate
         """
+        super().__init__(agent)
         self.max_queries = max_queries
 
     @override
@@ -869,12 +921,14 @@ class SemanticQueryGenerator(QueryGenerator):
     - "Documents discussing methodology"
     """
 
-    def __init__(self, max_queries: int = 5):
+    def __init__(self, agent: Agent, max_queries: int = 5):
         """Initialize semantic query generator.
 
         Args:
+            agent: The agent instance
             max_queries: Maximum number of queries to generate
         """
+        super().__init__(agent)
         self.max_queries = max_queries
         self._llm_cluster = None
 
@@ -944,12 +998,14 @@ class ErrorQueryGenerator(QueryGenerator):
     - "Functions that call validate()"
     """
 
-    def __init__(self, max_queries: int = 5):
+    def __init__(self, agent: Agent, max_queries: int = 5):
         """Initialize error query generator.
 
         Args:
+            agent: The agent instance
             max_queries: Maximum number of queries to generate
         """
+        super().__init__(agent)
         self.max_queries = max_queries
 
     @override

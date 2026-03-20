@@ -56,6 +56,10 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      # Slack chat service (optional)
+      - SLACK_ENABLED=false
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
     depends_on:
       redis:
         condition: service_started
@@ -114,6 +118,10 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      # Slack chat service (optional)
+      - SLACK_ENABLED=false
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
     depends_on:
       ray-head:
         condition: service_healthy

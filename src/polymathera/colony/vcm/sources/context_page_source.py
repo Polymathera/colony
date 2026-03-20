@@ -23,7 +23,8 @@ class PageCluster(BaseModel):
     """A cluster of related pages."""
     cluster_id: str
     page_ids: list[str]
-    group_id: str  # For identifying related pages (e.g., from same git repo)
+    colony_id: str  # For identifying related pages (e.g., from same git repo)
+    tenant_id: str  # For multi-tenant deployments
     relationship_score: float = Field(ge=0.0, le=1.0, description="Average relationship strength")
     cluster_type: str  # "file_group", "semantic", "hybrid", etc.
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -44,19 +45,19 @@ class ContextPageSource(ABC):
     def __init__(
         self,
         scope_id: str,
-        group_id: str,
+        colony_id: str,
         tenant_id: str,
         mmap_config: MmapConfig,
     ):
         """Initialize the context page source.
         Args:
             scope_id: Unique identifier for the scope of this source (e.g., file system ID, blackboard scope ID)
-            group_id: Identifier for grouping related context sources into one address space (e.g., VMR ID)
+            colony_id: Identifier for grouping related context sources into one address space (e.g., VMR ID)
             tenant_id: Identifier for multi-tenant deployments
             mmap_config: Configuration for memory-mapped storage (if needed)
         """
         self.scope_id = scope_id
-        self.group_id = group_id
+        self.colony_id = colony_id
         self.tenant_id = tenant_id
         self.mmap_config = mmap_config
 
@@ -209,7 +210,7 @@ class ContextPageSourceFactory:
     def create(
         source_type: str,
         scope_id: str,
-        group_id: str,
+        colony_id: str,
         tenant_id: str,
         mmap_config: MmapConfig,
         *args: Any,
@@ -220,7 +221,7 @@ class ContextPageSourceFactory:
         Args:
             source_type: Type of source to create ("file_grouper", etc.)
             scope_id: Unique identifier for the scope (e.g., file system ID, blackboard scope ID)
-            group_id: Identifier for grouping related context sources into one address space (e.g., VMR ID)
+            colony_id: Identifier for grouping related context sources into one address space (e.g., VMR ID)
             tenant_id: Identifier for multi-tenant deployments
             mmap_config: Configuration for memory-mapped storage (if needed)
             *args: Positional arguments for source constructor
@@ -233,7 +234,7 @@ class ContextPageSourceFactory:
         if source_type in ContextPageSourceFactory._registry:
             return ContextPageSourceFactory._registry[source_type](
                 scope_id=scope_id,
-                group_id=group_id,
+                colony_id=colony_id,
                 tenant_id=tenant_id,
                 mmap_config=mmap_config,
                 *args,

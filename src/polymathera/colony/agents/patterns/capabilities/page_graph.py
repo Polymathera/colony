@@ -90,8 +90,6 @@ class PageGraphCapability(AgentCapability):
             # We may need a more robust graph storage/update mechanism for large graphs.
             page_storage = await self.agent.get_page_storage()
             await page_storage.store_page_graph(
-                tenant_id=self.agent.tenant_id,
-                group_id=self.agent.group_id,
                 graph_data=self._page_graph
             )
 
@@ -339,8 +337,6 @@ class PageGraphCapability(AgentCapability):
         # TODO: This can introduce race conditions if multiple updates happen concurrently.
         page_storage = await self.agent.get_page_storage()
         await page_storage.update_page_graph(
-            tenant_id=self.agent.tenant_id,
-            group_id=self.agent.group_id,
             page_relationships={
                 (source, target): {
                     "weight": new_weight,
@@ -437,8 +433,6 @@ class PageGraphCapability(AgentCapability):
         page_storage = await self.agent.get_page_storage()
 
         async for cluster in page_storage.get_all_clusters(
-            tenant_id=self.agent.tenant_id,
-            group_id=self.agent.group_id,
             max_cluster_size=max_size or 100,
             min_cluster_size=min_size,
         ):
@@ -1019,8 +1013,6 @@ class PageGraphCapability(AgentCapability):
         # TODO: This can introduce race conditions if multiple updates happen concurrently.
         page_storage = await self.agent.get_page_storage()
         await page_storage.update_page_graph(
-            tenant_id=self.agent.tenant_id,
-            group_id=self.agent.group_id,
             page_relationships={
                 (source_page_id, target_page_id): {
                     "weight": new_weight,

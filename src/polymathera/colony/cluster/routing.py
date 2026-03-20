@@ -172,7 +172,6 @@ class RoutingHintExtractor:
             router_class=router_class,
             metadata={
                 "context_page_ids": list(inference_req.context_page_ids),
-                "tenant_id": inference_req.requirements.tenant_id if inference_req.requirements else None,
                 "requirements": inference_req.requirements,
                 "affinity_key": None # Generic affinity key for custom routing strategies.
             },
@@ -336,7 +335,7 @@ class ContextAwareRouter(RequestRouter):
         # Score replicas using the atomic snapshot
         replica_scores = []
         for replica in replicas:
-            score = await self._score_replica(replica, required_pages, client_states_snapshot)
+            score = await self._score_replica(replica, required_pages, request.colony_id, request.tenant_id, client_states_snapshot)
             replica_scores.append((replica, score))
             logger.debug(
                 f"Replica {replica.replica_id}: score={score:.2f}, "
@@ -357,6 +356,8 @@ class ContextAwareRouter(RequestRouter):
         self,
         replica: DeploymentReplicaInfo,
         required_pages: set[ContextPageId],
+        colony_id: str,
+        tenant_id: str,
         client_states_snapshot: dict,
     ) -> float:
         """Score a replica based on page locality and load.
@@ -369,6 +370,8 @@ class ContextAwareRouter(RequestRouter):
         Args:
             replica: Replica to score
             required_pages: Set of required page IDs
+            colony_id: Colony ID for the request
+            tenant_id: Tenant ID for the request
             client_states_snapshot: Atomic snapshot of all client states from StateManager
 
         Returns:
@@ -397,7 +400,7 @@ class ContextAwareRouter(RequestRouter):
             # Calculate page hits
             pages_loaded = sum(
                 1 for page_id in required_pages
-                if client_state.has_page(page_id)
+                if client_state.has_page(page_id, colony_id, tenant_id)
             )
             page_hit_ratio = pages_loaded / len(required_pages) if required_pages else 0.0
 
@@ -546,6 +549,8 @@ class PageAffinityRouter(ContextAwareRouter):
         self,
         replicas: list[DeploymentReplicaInfo],
         required_pages: set[ContextPageId],
+        colony_id: str,
+        tenant_id: str,
         client_states_snapshot: dict[str, LLMClientState],
     ) -> list[DeploymentReplicaInfo]:
         """Get replicas that have ALL required pages loaded.
@@ -558,7 +563,7 @@ class PageAffinityRouter(ContextAwareRouter):
             client_id = replica.metadata.get("client_id")
             if client_id and client_id in client_states_snapshot:
                 client_state = client_states_snapshot[client_id]
-                if all(client_state.has_page(page_id) for page_id in required_pages):
+                if all(client_state.has_page(page_id, colony_id, tenant_id) for page_id in required_pages):
                     candidates.append(replica)
         return candidates
 
@@ -613,6 +618,8 @@ class PageAffinityRouter(ContextAwareRouter):
         candidates = self._get_candidate_replicas(
             replicas,
             required_pages,
+            request.colony_id,
+            request.tenant_id,
             client_states_snapshot,
         )
 
@@ -629,16 +636,14 @@ class PageAffinityRouter(ContextAwareRouter):
                 f"issuing page fault for request {request.request_id}"
             )
 
-            # Get tenant_id from routing hints
-            tenant_id = request.routing_hints.metadata.get("tenant_id", "default")
-
             # Issue page fault
             try:
                 fault_id = await self._vcm_handle.issue_page_fault(
                     page_ids=list(required_pages),
+                    colony_id=request.colony_id,
+                    tenant_id=request.tenant_id,
                     requester_id=f"PageAffinityRouter-{request.request_id}",
                     priority=10,  # High priority for router requests
-                    tenant_id=tenant_id,
                 )
 
                 logger.info(f"Issued page fault {fault_id}, waiting for pages to load")
@@ -674,6 +679,8 @@ class PageAffinityRouter(ContextAwareRouter):
             candidates = self._get_candidate_replicas(
                 replicas,
                 required_pages,
+                request.colony_id,
+                request.tenant_id,
                 client_states_snapshot,
             )
 
@@ -730,7 +737,6 @@ class RequirementBasedRouter:
             remote_deployment_configs: List of remote deployment configurations
             enable_fallbacks: Whether to enable fallback routing if primary fails constraints
         """
-        from .config import LLMDeploymentConfig
         self.deployment_configs = deployment_configs or []
         self.remote_deployment_configs = remote_deployment_configs or []
         self.enable_fallbacks = enable_fallbacks

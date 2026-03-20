@@ -1462,9 +1462,7 @@ async def run_integration_test(
     if config.agent_system.enable_sessions:
         with console.status("[magenta]Creating session..."):
             sm_handle = get_session_manager(effective_app_name)
-            session = await sm_handle.create_session(
-                tenant_id=config.tenant_id,
-            )
+            session = await sm_handle.create_session()
             # Handle both Pydantic model and dict from DeploymentHandle
             if isinstance(session, dict):
                 config.session_id = session.get("session_id", config.session_id)
@@ -1512,10 +1510,10 @@ async def run_integration_test(
     with console.status("[cyan]Mapping codebase into VCM pages..."):
         mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
             scope_id=config.repo_id,
-            group_id=config.repo_id,  # Using repo_id as group_id for simplicity
-            tenant_id=config.tenant_id,
             source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
             config=mmap_config,
+            colony_id=config.repo_id,
+            tenant_id=config.tenant_id,
             origin_url=config.origin_url,
             branch=config.branch,
             commit=config.commit,
@@ -1568,7 +1566,7 @@ async def run_integration_test(
         metadata = AgentMetadata(
             role=f"{reg['label']} coordinator",
             tenant_id=config.tenant_id,
-            group_id=config.repo_id,
+            colony_id=config.repo_id,
             session_id=config.session_id,
             run_id=config.run_id,
             goals=[f"Run {reg['label']} on {config.repo_id}"],
@@ -2131,11 +2129,16 @@ def run(
         border_style="bright_blue",
     ))
 
+    # Set tenant/colony isolation context for the entire run.
+    # colony_id maps to the serving application name; tenant_id from config.
+    from polymathera.colony.distributed.ray_utils.serving.context import isolation_context
+
     try:
-        test_results = asyncio.run(run_integration_test(
-            config=test_config,
-            app_name=app_name,
-        ))
+        with isolation_context(colony_id=test_config.repo_id, tenant_id=test_config.tenant_id):
+            test_results = asyncio.run(run_integration_test(
+                config=test_config,
+                app_name=app_name,
+            ))
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user.[/yellow]")
         raise typer.Exit(130)

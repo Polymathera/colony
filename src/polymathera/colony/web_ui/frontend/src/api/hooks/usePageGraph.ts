@@ -1,21 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../client";
-import type { PageGraphGroup, PageGraphData } from "../types";
+import type { PageGraphScope, PageGraphData } from "../types";
 
-export function usePageGraphGroups() {
+export function usePageGraphScopes() {
   return useQuery({
     queryKey: ["page-graph", "groups"],
-    queryFn: () => apiFetch<PageGraphGroup[]>("/vcm/page-graph/groups"),
+    queryFn: () => apiFetch<PageGraphScope[]>("/vcm/page-graph/scopes"),
   });
 }
 
-export function usePageGraph(tenantId: string, groupId: string) {
+export function usePageGraph(tenantId: string, colonyId: string) {
   return useQuery({
-    queryKey: ["page-graph", tenantId, groupId],
+    queryKey: ["page-graph", tenantId, colonyId],
     queryFn: () =>
       apiFetch<PageGraphData>(
-        `/vcm/page-graph?tenant_id=${encodeURIComponent(tenantId)}&group_id=${encodeURIComponent(groupId)}`,
+        `/vcm/page-graph?tenant_id=${encodeURIComponent(tenantId)}&colony_id=${encodeURIComponent(colonyId)}`,
       ),
-    enabled: !!tenantId && !!groupId,
+    enabled: !!tenantId && !!colonyId,
   });
 }

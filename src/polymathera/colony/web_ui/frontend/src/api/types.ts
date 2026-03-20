@@ -105,9 +105,9 @@ export interface LogSource {
   repr_name: string;
 }
 
-export interface PageGraphGroup {
+export interface PageGraphScope {
   tenant_id: string;
-  group_id: string;
+  colony_id: string;
   scope_id: string;
 }
 
@@ -132,7 +132,7 @@ export interface PageGraphData {
   node_count: number;
   edge_count: number;
   tenant_id?: string;
-  group_id?: string;
+  colony_id?: string;
   error?: string;
 }
 

@@ -239,11 +239,12 @@ class VLLMDeployment(AgentManagerBase):
         self.state_manager = None  # StateManager for deployment state
 
         # Page management
-        self.loaded_pages: dict[ContextPageId, LoadedContextPage] = {}
+        # Keyed by (page_id, colony_id, tenant_id) for easier reconciliation with VCM state
+        self.loaded_pages: dict[tuple[ContextPageId, str, str], LoadedContextPage] = {}
         self.next_kv_slot = 0
 
         # Concurrency control for context composition
-        self._page_semaphores: dict[ContextPageId, asyncio.Semaphore] = {}
+        self._page_semaphores: dict[tuple[ContextPageId, str, str], asyncio.Semaphore] = {}
         self._max_concurrent_per_page = 20  # Configurable per-page concurrency limit
 
         # KV cache metrics
@@ -345,7 +346,7 @@ class VLLMDeployment(AgentManagerBase):
             model_name=self.model_name,
             kv_cache_capacity=self.kv_cache_capacity,
             kv_cache_used=0,
-            loaded_page_ids=set(),
+            loaded_page_ids={},
             last_heartbeat=time.time(),
         )
         async for state in self.state_manager.write_transaction():
@@ -416,7 +417,7 @@ class VLLMDeployment(AgentManagerBase):
 
                     # Check for missing pages (page faults)
                     for page_id in request.context_page_ids:
-                        if not client_state.has_page(page_id):
+                        if not client_state.has_page(page_id, request.colony_id, request.tenant_id):
                             page_faults.append(page_id)
                             logger.warning(f"Page fault: {page_id} not loaded in {self.client_id}")
 
@@ -465,8 +466,9 @@ class VLLMDeployment(AgentManagerBase):
                 # Prepend page tokens to prompt (vLLM will cache this prefix)
                 page_tokens = []
                 for page_id in request.context_page_ids:
-                    if page_id in self.loaded_pages:
-                        loaded_page = self.loaded_pages[page_id]
+                    page_key = (page_id, request.colony_id, request.tenant_id)
+                    if page_key in self.loaded_pages:
+                        loaded_page = self.loaded_pages[page_key]
                         page_tokens.extend(loaded_page.page.tokens)
                         loaded_page.access_count += 1
                         loaded_page.last_access_time = time.time()
@@ -546,8 +548,9 @@ class VLLMDeployment(AgentManagerBase):
         """
         try:
             # Check if page is already loaded
-            if page.page_id in self.loaded_pages:
-                loaded_page = self.loaded_pages[page.page_id]
+            page_key = (page.page_id, page.colony_id, page.tenant_id)
+            if page_key in self.loaded_pages:
+                loaded_page = self.loaded_pages[page_key]
                 if loaded_page.state == ContextPageState.LOADED:
                     logger.info(f"Page {page.page_id} already loaded in {self.client_id}")
                     loaded_page.access_count += 1
@@ -583,7 +586,7 @@ class VLLMDeployment(AgentManagerBase):
                 access_count=0,
             )
 
-            self.loaded_pages[page.page_id] = loaded_page
+            self.loaded_pages[page_key] = loaded_page
 
             # TODO: Integrate with vLLM's actual KV cache management
             # TODO: Do we need to pin the page in memory?
@@ -601,9 +604,14 @@ class VLLMDeployment(AgentManagerBase):
                     client_state = state.client_states.get(self.client_id)
                     if client_state:
                         client_state.kv_cache_used += page.size
-                        client_state.loaded_page_ids.add(page.page_id)
+                        client_state.loaded_page_ids[(page.page_id, page.colony_id, page.tenant_id)] = page.size
                         kv_cache_used = client_state.kv_cache_used
-                    state.register_page_load(page.page_id, self.client_id, page.tenant_id)
+                    state.register_page_load(
+                        page_id=page.page_id,
+                        client_id=self.client_id,
+                        colony_id=page.colony_id,
+                        tenant_id=page.tenant_id
+                    )
 
             logger.info(
                 f"Loaded page {page.page_id} into {self.client_id} "
@@ -644,21 +652,24 @@ class VLLMDeployment(AgentManagerBase):
             return False
 
     @serving.endpoint
-    async def evict_page(self, page_id: ContextPageId) -> bool:
+    async def evict_page(self, page_id: ContextPageId, colony_id: str, tenant_id: str) -> bool:
         """Evict a context page from the KV cache.
 
         Args:
             page_id: ID of the page to evict
+            colony_id: ID of the colony
+            tenant_id: ID of the tenant
 
         Returns:
             True if page was evicted successfully, False otherwise
         """
         try:
-            if page_id not in self.loaded_pages:
-                logger.warning(f"Page {page_id} not found in {self.client_id}")
+            page_key = (page_id, colony_id, tenant_id)
+            if page_key not in self.loaded_pages:
+                logger.warning(f"Page {page_key} not found in {self.client_id}")
                 return True  # Already evicted
 
-            loaded_page = self.loaded_pages[page_id]
+            loaded_page = self.loaded_pages[page_key]
             loaded_page.state = ContextPageState.EVICTING
 
             # NOTE: vLLM handles cache eviction automatically via its LRU policy
@@ -672,15 +683,15 @@ class VLLMDeployment(AgentManagerBase):
                     client_state = state.client_states.get(self.client_id)
                     if client_state:
                         client_state.kv_cache_used -= loaded_page.page.size
-                        client_state.loaded_page_ids.discard(page_id)
-                    state.register_page_eviction(page_id, self.client_id)
+                        client_state.loaded_page_ids.pop((page_id, colony_id, tenant_id), None)
+                    state.register_page_eviction(page_id, self.client_id, colony_id, tenant_id)
 
             loaded_page.state = ContextPageState.EVICTED
             page_size = loaded_page.page.size
             tenant_id = loaded_page.page.tenant_id
-            del self.loaded_pages[page_id]
+            del self.loaded_pages[page_key]
 
-            logger.info(f"Evicted page {page_id} from {self.client_id}")
+            logger.info(f"Evicted page {page_key} from {self.client_id}")
 
             # Emit PageEvictedEvent for VCM reconciliation
             deployment_name = serving.get_my_deployment_name()
@@ -752,7 +763,7 @@ class VLLMDeployment(AgentManagerBase):
                 break
 
             # Evict this page
-            await self.evict_page(loaded_page.page.page_id)
+            await self.evict_page(loaded_page.page.page_id, loaded_page.page.colony_id, loaded_page.page.tenant_id)
             freed_size += loaded_page.page.size
             evicted_pages.append(loaded_page.page.page_id)
 
@@ -851,6 +862,8 @@ class VLLMDeployment(AgentManagerBase):
     async def migrate_page(
         self,
         page_id: ContextPageId,
+        colony_id: str,
+        tenant_id: str,
         target_deployment_name: str,
         target_client_id: LLMClientId,
     ) -> bool:
@@ -867,6 +880,9 @@ class VLLMDeployment(AgentManagerBase):
 
         Args:
             page_id: ID of page to migrate
+            colony_id: Colony ID for address space grouping
+            tenant_id: Tenant ID for multi-tenancy isolation
+            target_deployment_name: Name of target deployment to migrate to
             target_client_id: ID of target LLM client
 
         Returns:
@@ -878,14 +894,15 @@ class VLLMDeployment(AgentManagerBase):
         """
         try:
             # Check if page is loaded here
-            if page_id not in self.loaded_pages:
-                raise ValueError(f"Page {page_id} not loaded in {self.client_id}")
+            page_key = (page_id, colony_id, tenant_id)
+            if page_key not in self.loaded_pages:
+                raise ValueError(f"Page {page_key} not loaded in {self.client_id}")
 
-            loaded_page = self.loaded_pages[page_id]
+            loaded_page = self.loaded_pages[page_key]
             page = loaded_page.page
 
             logger.info(
-                f"Migrating page {page_id} from {self.client_id} to {target_client_id}"
+                f"Migrating page {page_key} from {self.client_id} to {target_client_id}"
             )
 
             # Get LLMCluster handle
@@ -905,10 +922,10 @@ class VLLMDeployment(AgentManagerBase):
                 raise RuntimeError(f"Page migration failed: {e}") from e
 
             # Evict from this deployment
-            await self.evict_page(page_id)
+            await self.evict_page(page_id, colony_id, tenant_id)
 
             logger.info(
-                f"Successfully migrated page {page_id} from {self.client_id} to {target_client_id}"
+                f"Successfully migrated page {page_key} from {self.client_id} to {target_client_id}"
             )
 
             return True
@@ -921,6 +938,8 @@ class VLLMDeployment(AgentManagerBase):
     async def append_context_to_page(
         self,
         page_id: ContextPageId,
+        colony_id: str,
+        tenant_id: str,
         tokens: list[int],
     ) -> bool:
         """Append task-specific context to a loaded page's KV cache.
@@ -934,6 +953,8 @@ class VLLMDeployment(AgentManagerBase):
 
         Args:
             page_id: ID of the page to append to
+            colony_id: Colony ID for address space grouping
+            tenant_id: Tenant ID for multi-tenancy isolation
             tokens: Token IDs to append (task-specific context)
 
         Returns:
@@ -949,13 +970,13 @@ class VLLMDeployment(AgentManagerBase):
 
             # Append agent instructions
             task_tokens = tokenize("You are a code reviewer. Check for bugs...")
-            await vllm.append_context_to_page("file.py", task_tokens)
+            await vllm.append_context_to_page("file.py", "colony_id", "tenant_id", task_tokens)
 
             # Run inference
             response = await vllm.infer(request)
 
             # Remove appended context for next agent
-            await vllm.remove_appended_context("file.py")
+            await vllm.remove_appended_context("file.py", "colony_id", "tenant_id")
             ```
 
         TODO (VCM Integration):
@@ -983,16 +1004,17 @@ class VLLMDeployment(AgentManagerBase):
         """
         try:
             # Check if page is loaded
-            if page_id not in self.loaded_pages:
-                logger.error(f"Cannot append to page {page_id}: page not loaded")
+            page_key = (page_id, colony_id, tenant_id)
+            if page_key not in self.loaded_pages:
+                logger.error(f"Cannot append to page {page_key}: page not loaded")
                 return False
 
-            loaded_page = self.loaded_pages[page_id]
+            loaded_page = self.loaded_pages[page_key]
 
             # Check capacity
             if not loaded_page.can_append(len(tokens)):
                 logger.error(
-                    f"Cannot append {len(tokens)} tokens to page {page_id}: "
+                    f"Cannot append {len(tokens)} tokens to page {page_key}: "
                     f"would exceed capacity (current: {loaded_page.appended_size}, "
                     f"max: {loaded_page.max_append_capacity})"
                 )
@@ -1004,20 +1026,22 @@ class VLLMDeployment(AgentManagerBase):
             loaded_page.appended_size += len(tokens)
 
             logger.info(
-                f"Appended {len(tokens)} tokens to page {page_id} "
+                f"Appended {len(tokens)} tokens to page {page_key} "
                 f"(total appended: {loaded_page.appended_size}/{loaded_page.max_append_capacity})"
             )
 
             return True
 
         except Exception as e:
-            logger.error(f"Failed to append context to page {page_id}: {e}", exc_info=True)
+            logger.error(f"Failed to append context to page {page_key}: {e}", exc_info=True)
             return False
 
     @serving.endpoint
     async def remove_appended_context(
         self,
         page_id: ContextPageId,
+        colony_id: str,
+        tenant_id: str,
     ) -> bool:
         """Remove appended context from a loaded page, resetting to base page.
 
@@ -1026,6 +1050,8 @@ class VLLMDeployment(AgentManagerBase):
 
         Args:
             page_id: ID of the page to reset
+            colony_id: Colony ID for address space grouping
+            tenant_id: Tenant ID for multi-tenancy isolation
 
         Returns:
             True if successful, False otherwise
@@ -1055,15 +1081,16 @@ class VLLMDeployment(AgentManagerBase):
         """
         try:
             # Check if page is loaded
-            if page_id not in self.loaded_pages:
-                logger.warning(f"Cannot remove appended context: page {page_id} not loaded")
+            page_key = (page_id, colony_id, tenant_id)
+            if page_key not in self.loaded_pages:
+                logger.warning(f"Cannot remove appended context: page {page_key} not loaded")
                 return True  # Not an error if already removed
 
-            loaded_page = self.loaded_pages[page_id]
+            loaded_page = self.loaded_pages[page_key]
 
             # Check if there's appended context
             if not loaded_page.has_appended_context():
-                logger.debug(f"Page {page_id} has no appended context to remove")
+                logger.debug(f"Page {page_key} has no appended context to remove")
                 return True
 
             # TODO (VCM Integration): Implement actual vLLM KV cache truncation
@@ -1073,19 +1100,21 @@ class VLLMDeployment(AgentManagerBase):
             loaded_page.appended_size = 0
 
             logger.info(
-                f"Removed {removed_size} appended tokens from page {page_id}, "
+                f"Removed {removed_size} appended tokens from page {page_key}, "
                 f"reset to base page ({len(loaded_page.page.tokens)} tokens)"
             )
 
             return True
 
         except Exception as e:
-            logger.error(f"Failed to remove appended context from page {page_id}: {e}", exc_info=True)
+            logger.error(f"Failed to remove appended context from page {page_key}: {e}", exc_info=True)
             return False
 
     def _get_or_create_page_semaphore(
         self,
         page_id: ContextPageId,
+        colony_id: str,
+        tenant_id: str,
         max_concurrent: int,
     ) -> asyncio.Semaphore:
         """Get or create a semaphore for per-page concurrency control.
@@ -1097,9 +1126,10 @@ class VLLMDeployment(AgentManagerBase):
         Returns:
             Semaphore for this page
         """
-        if page_id not in self._page_semaphores:
-            self._page_semaphores[page_id] = asyncio.Semaphore(max_concurrent)
-        return self._page_semaphores[page_id]
+        sem_key = (page_id, colony_id, tenant_id)
+        if sem_key not in self._page_semaphores:
+            self._page_semaphores[sem_key] = asyncio.Semaphore(max_concurrent)
+        return self._page_semaphores[sem_key]
 
     def _check_kv_cache_capacity(self, base_size: int, suffix_size: int) -> bool:
         """Check if we have sufficient KV cache capacity for a request.
@@ -1136,8 +1166,8 @@ class VLLMDeployment(AgentManagerBase):
     async def infer_with_context_composition(
         self,
         base_page_id: ContextPageId,
+        request: InferenceRequest,
         suffix_tokens: list[int] | None = None,
-        request: InferenceRequest | None = None,
         max_concurrent_per_page: int | None = None,
     ) -> InferenceResponse:
         """Inference with dynamic context composition and concurrency control.
@@ -1158,13 +1188,13 @@ class VLLMDeployment(AgentManagerBase):
         - Each request gets its own suffix KV blocks (allocated on demand)
         - No application-level locks needed - vLLM handles everything
 
-        Memory Overhead: O(num_concurrent × suffix_size)
-        NOT O(num_concurrent × (base_size + suffix_size))
+        Memory Overhead: O(num_concurrent x suffix_size)
+        NOT O(num_concurrent x (base_size + suffix_size))
 
         Args:
             base_page_id: ID of the loaded base page
+            request: InferenceRequest
             suffix_tokens: Optional task-specific tokens to append (e.g., agent instructions)
-            request: Optional InferenceRequest (if None, creates default)
             max_concurrent_per_page: Override default per-page concurrency limit
 
         Returns:
@@ -1192,8 +1222,8 @@ class VLLMDeployment(AgentManagerBase):
             results = await asyncio.gather(*[run_agent(i) for i in range(10)])
 
             # vLLM automatically:
-            # - Shares file.py KV blocks across all 10 requests (1× base memory)
-            # - Allocates separate suffix blocks per agent (10× suffix memory)
+            # - Shares file.py KV blocks across all 10 requests (1x base memory)
+            # - Allocates separate suffix blocks per agent (10x suffix memory)
             ```
 
         Design Notes:
@@ -1208,21 +1238,22 @@ class VLLMDeployment(AgentManagerBase):
 
         try:
             # Validate base page is loaded
-            if base_page_id not in self.loaded_pages:
-                raise ValueError(f"Base page {base_page_id} not loaded in {self.client_id}")
+            page_key = (base_page_id, request.colony_id, request.tenant_id)
+            if page_key not in self.loaded_pages:
+                raise ValueError(f"Base page {page_key} not loaded in {self.client_id}")
 
-            loaded_page = self.loaded_pages[base_page_id]
+            loaded_page = self.loaded_pages[page_key]
             base_tokens = loaded_page.page.tokens
             suffix_size = len(suffix_tokens) if suffix_tokens else 0
 
             # Layer 1: Per-page concurrency limit (prevent monopolization)
             max_concurrent = max_concurrent_per_page or self._max_concurrent_per_page
-            semaphore = self._get_or_create_page_semaphore(base_page_id, max_concurrent)
+            semaphore = self._get_or_create_page_semaphore(base_page_id, request.colony_id, request.tenant_id, max_concurrent)
 
             # Try to acquire semaphore - will block if at limit
             async with semaphore:
                 # Update metrics: track concurrent requests
-                self.kv_metrics.update_concurrency(base_page_id, delta=+1)
+                self.kv_metrics.update_concurrency(base_page_id, request.colony_id, request.tenant_id, delta=+1)
 
                 # Record queue time
                 queue_time_ms = (time.time() - queue_start_time) * 1000
@@ -1237,7 +1268,7 @@ class VLLMDeployment(AgentManagerBase):
                 # Layer 2: Memory-based admission control
                 if not self._check_kv_cache_capacity(len(base_tokens), suffix_size):
                     self.kv_metrics.requests_rejected += 1
-                    self.kv_metrics.update_concurrency(base_page_id, delta=-1)
+                    self.kv_metrics.update_concurrency(base_page_id, request.colony_id, request.tenant_id, delta=-1)
 
                     raise ValueError(
                         f"Insufficient KV cache capacity for request: "
@@ -1258,16 +1289,8 @@ class VLLMDeployment(AgentManagerBase):
                 # TODO: How much overhead does this unnecessary decoding add?
                 full_prompt = self.tokenizer.decode(full_tokens)
 
-                # Create or use provided inference request
-                if request is None:
-                    import uuid
-                    request = InferenceRequest(
-                        request_id=f"compose-{base_page_id}-{uuid.uuid4().hex[:8]}",
-                        prompt=full_prompt,
-                    )
-                else:
-                    # Override prompt with composed prompt
-                    request = request.model_copy(update={"prompt": full_prompt})
+                # Override prompt with composed prompt
+                request = request.model_copy(update={"prompt": full_prompt})
 
                 # Build sampling params
                 sampling_params = SamplingParams(
@@ -1303,9 +1326,11 @@ class VLLMDeployment(AgentManagerBase):
                 # Update metrics
                 # Note: We can't easily detect cache hits from vLLM's API
                 # In production, we'd integrate with vLLM's metrics endpoint
-                cache_hit = base_page_id in self.loaded_pages  # Heuristic: assume hit if page loaded
+                cache_hit = page_key in self.loaded_pages  # Heuristic: assume hit if page loaded
                 self.kv_metrics.record_request(
                     page_id=base_page_id,
+                    colony_id=request.colony_id,
+                    tenant_id=request.tenant_id,
                     suffix_size=suffix_size,
                     cache_hit=cache_hit,
                 )
@@ -1320,7 +1345,7 @@ class VLLMDeployment(AgentManagerBase):
                 loaded_page.last_access_time = time.time()
 
                 # Decrement concurrency counter
-                self.kv_metrics.update_concurrency(base_page_id, delta=-1)
+                self.kv_metrics.update_concurrency(base_page_id, request.colony_id, request.tenant_id, delta=-1)
 
                 response = InferenceResponse(
                     request_id=request.request_id,
@@ -1330,6 +1355,8 @@ class VLLMDeployment(AgentManagerBase):
                     latency_ms=latency_ms,
                     metadata={
                         "base_page_id": base_page_id,
+                        "colony_id": request.colony_id,
+                        "tenant_id": request.tenant_id,
                         "suffix_size": suffix_size,
                         "queue_time_ms": queue_time_ms,
                         "cache_hit": cache_hit,
@@ -1339,7 +1366,7 @@ class VLLMDeployment(AgentManagerBase):
                 logger.info(
                     f"Context composition inference completed: "
                     f"request_id={request.request_id}, "
-                    f"base={base_page_id}, suffix={suffix_size} tokens, "
+                    f"base={base_page_id}, colony={request.colony_id}, tenant={request.tenant_id}, suffix={suffix_size} tokens, "
                     f"generated={tokens_generated} tokens, "
                     f"latency={latency_ms:.2f}ms, queue={queue_time_ms:.2f}ms"
                 )
@@ -1355,11 +1382,11 @@ class VLLMDeployment(AgentManagerBase):
             # Unexpected error
             logger.error(
                 f"Inference with context composition failed: "
-                f"base={base_page_id}, suffix_size={suffix_size}, error={e}",
+                f"base={base_page_id}, colony={request.colony_id}, tenant={request.tenant_id}, suffix_size={suffix_size}, error={e}",
                 exc_info=True
             )
             # Ensure concurrency counter is decremented
-            self.kv_metrics.update_concurrency(base_page_id, delta=-1)
+            self.kv_metrics.update_concurrency(base_page_id, request.colony_id, request.tenant_id, delta=-1)
             raise
 
     @serving.endpoint

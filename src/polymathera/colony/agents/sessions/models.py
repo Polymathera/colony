@@ -34,6 +34,7 @@ from typing import Any, TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from ...distributed.state_management import SharedState
+from ...distributed.ray_utils import serving
 
 if TYPE_CHECKING:
     from .context import SessionContextManager
@@ -72,8 +73,14 @@ class SessionMetadata(BaseModel):
         parent_session_id: Parent session if this was forked
         custom: Custom metadata for application use
     """
-
-    tenant_id: str = Field(..., description="Owning tenant")
+    colon_id: str | None = Field(
+        default_factory=lambda: serving.require_colony_id(),
+        description="Colony ID for address space isolation within the same tenant"
+        )
+    tenant_id: str | None = Field(
+        default_factory=lambda: serving.require_tenant_id(),
+        description="Owning tenant"
+    )
     name: str | None = Field(None, description="Human-readable name")
     description: str | None = Field(None, description="Session description")
     created_by: str = Field(..., description="User/system that created the session")
@@ -331,6 +338,7 @@ class Session(BaseModel):
 
     Attributes:
         session_id: Unique identifier
+        colony_id: Colony ID for address space isolation within the same tenant
         tenant_id: Owning tenant
         branch_id: Associated VCM branch for copy-on-write
         state: Current lifecycle state
@@ -346,6 +354,7 @@ class Session(BaseModel):
         default_factory=lambda: f"session_{uuid.uuid4().hex[:12]}",
         description="Unique session identifier"
     )
+    colony_id: str = Field(..., description="Colony ID for address space isolation within the same tenant")
     tenant_id: str = Field(..., description="Owning tenant")
     branch_id: str = Field(..., description="Associated VCM branch for copy-on-write")
     state: SessionState = Field(

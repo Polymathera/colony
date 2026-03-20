@@ -706,7 +706,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         # Initialize feedback predictor for cache-aware prefetching
         self.feedback_predictor = FeedbackLoopPredictor(
             agent=self.agent,
-            group_id=self.agent.group_id,
+            colony_id=self.agent.colony_id,
             tenant_id=self.agent.tenant_id,
             prefetch_depth=self.agent.metadata.parameters.get("prefetch_depth", 2),
             prefetch_test_pages=self.agent.metadata.parameters.get("prefetch_test_pages", True)

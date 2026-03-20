@@ -260,7 +260,7 @@ class EmbeddingDeployment:
             model_name=self.model_name,
             kv_cache_capacity=0,  # Embeddings don't use KV cache
             kv_cache_used=0,
-            loaded_pages={},
+            loaded_page_ids={},
             last_heartbeat=time.time(),
         )
 

@@ -28,6 +28,7 @@ class PageEvent(BaseModel):
     page_id: str = Field(..., description="Virtual page identifier")
     deployment_name: str = Field(..., description="Deployment name")
     client_id: str = Field(..., description="LLM client/replica ID")
+    colony_id: str = Field(..., description="Colony ID acting as address space ID.")
     tenant_id: str = Field(..., description="Tenant ID for multi-tenancy")
     timestamp: float = Field(..., description="Event timestamp (Unix time)")
 

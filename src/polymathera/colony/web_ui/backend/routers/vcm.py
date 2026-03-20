@@ -32,7 +32,7 @@ async def get_vcm_stats(
         stats = await colony.get_vcm().get_stats()
         pt = stats.get("page_table", {})
         storage = stats.get("storage", {})
-        return VCMStats(
+        return VCMStats( # TODO: Add more stats
             total_pages=storage.get("total_pages", 0) or pt.get("total_pages_loaded", 0),
             loaded_pages=pt.get("total_pages_loaded", 0),
             page_groups=pt.get("num_groups", 0),
@@ -54,6 +54,7 @@ async def list_pages(
         return []
 
     try:
+        # TODO: This will fail because tenant_id and colony_id are not set in the isolation context.
         summaries = await colony.get_vcm().list_stored_pages(
             limit=limit,
             offset=offset,
@@ -82,6 +83,7 @@ async def get_working_set(
         return {"pages": []}
 
     try:
+        # TODO: This will fail because tenant_id and colony_id are not set in the isolation context.
         loaded = await colony.get_vcm().get_all_loaded_pages()
         return {"pages": loaded}
     except Exception as e:
@@ -98,15 +100,18 @@ async def list_loaded_pages(
         return []
 
     try:
+        # TODO: This will fail because tenant_id and colony_id are not set in the isolation context.
         return await colony.get_vcm().list_loaded_page_entries()
     except Exception as e:
         logger.warning("Failed to list loaded pages: %s", e)
         return []
 
 
-@router.get("/vcm/pages/{page_id}")
+@router.get("/vcm/pages/{page_id}/{colony_id}/{tenant_id}")
 async def get_page_detail(
     page_id: str,
+    colony_id: str,
+    tenant_id: str,
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """Get detailed info for a specific virtual page."""
@@ -114,7 +119,8 @@ async def get_page_detail(
         return {"error": "not connected"}
 
     try:
-        page = await colony.get_vcm().get_virtual_page(page_id=page_id)
+        # TODO: This will fail because tenant_id and colony_id are not set in the isolation context.
+        page = await colony.get_vcm().get_virtual_page(page_id=page_id, colony_id=colony_id, tenant_id=tenant_id)
         if page is None:
             return {"error": "page not found", "page_id": page_id}
         if hasattr(page, "model_dump"):
@@ -124,9 +130,11 @@ async def get_page_detail(
         return {"error": str(e), "page_id": page_id}
 
 
-@router.get("/vcm/pages/{page_id}/locations")
+@router.get("/vcm/pages/{page_id}/{colony_id}/{tenant_id}/locations")
 async def get_page_locations(
     page_id: str,
+    colony_id: str,
+    tenant_id: str,
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """Get physical locations where a page is loaded."""
@@ -134,13 +142,16 @@ async def get_page_locations(
         return {"error": "not connected"}
 
     try:
-        locations = await colony.get_vcm().get_page_locations(virtual_page_id=page_id)
+        # TODO: This will fail because tenant_id and colony_id are not set in the isolation context.
+        locations = await colony.get_vcm().get_page_locations(page_id=page_id, colony_id=colony_id, tenant_id=tenant_id)
         return {
             "page_id": page_id,
+            "colony_id": colony_id,
+            "tenant_id": tenant_id,
             "locations": [
                 loc.model_dump() if hasattr(loc, "model_dump") else str(loc)
                 for loc in locations
             ],
         }
     except Exception as e:
-        return {"error": str(e), "page_id": page_id}
+        return {"error": str(e), "page_id": page_id, "colony_id": colony_id, "tenant_id": tenant_id}

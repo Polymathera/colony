@@ -554,7 +554,8 @@ def deployment(
                 """Handle an incoming request.
 
                 This method is called by the proxy actor to execute a request
-                on this replica.
+                on this replica. It restores the isolation context (colony_id,
+                tenant_id) from the request before calling the endpoint method.
 
                 Args:
                     request: The request to handle.
@@ -562,41 +563,44 @@ def deployment(
                 Returns:
                     Response with result or error.
                 """
-                try:
-                    # Validate method exists and is an endpoint
-                    if request.method_name not in self._endpoints:
-                        raise ValueError(
-                            f"Method '{request.method_name}' is not a registered endpoint. "
-                            f"Available endpoints: {list(self._endpoints.keys())}"
+                from .context import isolation_context
+
+                with isolation_context(request.colony_id, request.tenant_id):
+                    try:
+                        # Validate method exists and is an endpoint
+                        if request.method_name not in self._endpoints:
+                            raise ValueError(
+                                f"Method '{request.method_name}' is not a registered endpoint. "
+                                f"Available endpoints: {list(self._endpoints.keys())}"
+                            )
+
+                        # Get the endpoint method
+                        method = self._endpoints[request.method_name]
+
+                        # Call the method with provided arguments
+                        result = method(*request.args, **request.kwargs)
+
+                        # Await if coroutine
+                        if inspect.iscoroutine(result):
+                            result = await result
+
+                        # Return successful response
+                        return DeploymentResponse.with_success(
+                            request_id=request.request_id,
+                            result=result,
                         )
 
-                    # Get the endpoint method
-                    method = self._endpoints[request.method_name]
-
-                    # Call the method with provided arguments
-                    result = method(*request.args, **request.kwargs)
-
-                    # Await if coroutine
-                    if inspect.iscoroutine(result):
-                        result = await result
-
-                    # Return successful response
-                    return DeploymentResponse.with_success(
-                        request_id=request.request_id,
-                        result=result,
-                    )
-
-                except Exception as e:
-                    logger.error(
-                        f"Error handling request {request.request_id} "
-                        f"to method {request.method_name}: {e}",
-                        exc_info=True,
-                    )
-                    # Return error response with traceback
-                    return DeploymentResponse.with_error(
-                        request_id=request.request_id,
-                        error=e,
-                    )
+                    except Exception as e:
+                        logger.error(
+                            f"Error handling request {request.request_id} "
+                            f"to method {request.method_name}: {e}",
+                            exc_info=True,
+                        )
+                        # Return error response with traceback
+                        return DeploymentResponse.with_error(
+                            request_id=request.request_id,
+                            error=e,
+                        )
 
             async def __ping__(self) -> str:
                 """Health check endpoint.

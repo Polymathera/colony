@@ -2,14 +2,14 @@ import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { Canvas, useThree, ThreeEvent } from "@react-three/fiber";
 import { OrbitControls, Html } from "@react-three/drei";
 import * as THREE from "three";
-import { usePageGraphGroups, usePageGraph } from "@/api/hooks/usePageGraph";
+import { usePageGraphScopes, usePageGraph } from "@/api/hooks/usePageGraph";
 import { useVCMPages, useLoadedPageEntries } from "@/api/hooks/useVCM";
 import { MetricCard } from "../shared/MetricCard";
 import { Badge } from "../shared/Badge";
 import type {
   PageGraphNode,
   PageGraphEdge,
-  PageGraphGroup,
+  PageGraphScope,
   PageSummary,
 } from "@/api/types";
 
@@ -252,9 +252,9 @@ function GroupSelector({
   selected,
   onSelect,
 }: {
-  groups: PageGraphGroup[];
-  selected: PageGraphGroup | null;
-  onSelect: (g: PageGraphGroup | null) => void;
+  groups: PageGraphScope[];
+  selected: PageGraphScope | null;
+  onSelect: (g: PageGraphScope | null) => void;
 }) {
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -265,7 +265,7 @@ function GroupSelector({
       }
       const [tenantId, groupId] = val.split(":::");
       const found = groups.find(
-        (g) => g.tenant_id === tenantId && g.group_id === groupId,
+        (g) => g.tenant_id === tenantId && g.colony_id === groupId,
       );
       onSelect(found ?? null);
     },
@@ -276,17 +276,17 @@ function GroupSelector({
     <select
       className="rounded border border-border bg-background px-2 py-1.5 text-xs font-mono"
       value={
-        selected ? `${selected.tenant_id}:::${selected.group_id}` : ""
+        selected ? `${selected.tenant_id}:::${selected.colony_id}` : ""
       }
       onChange={handleChange}
     >
       <option value="">Select a page graph...</option>
       {groups.map((g) => (
         <option
-          key={`${g.tenant_id}:::${g.group_id}`}
-          value={`${g.tenant_id}:::${g.group_id}`}
+          key={`${g.tenant_id}:::${g.colony_id}`}
+          value={`${g.tenant_id}:::${g.colony_id}`}
         >
-          {g.scope_id} ({g.group_id.slice(0, 16)})
+          {g.scope_id} ({g.colony_id.slice(0, 16)})
         </option>
       ))}
     </select>
@@ -408,8 +408,8 @@ function Legend() {
 /* ── Main Component ─────────────────────────────────────────── */
 
 export function PageGraphTab() {
-  const { data: groups } = usePageGraphGroups();
-  const [selectedGroup, setSelectedGroup] = useState<PageGraphGroup | null>(
+  const { data: groups } = usePageGraphScopes();
+  const [selectedGroup, setSelectedGroup] = useState<PageGraphScope | null>(
     null,
   );
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
@@ -426,7 +426,7 @@ export function PageGraphTab() {
 
   const graphData = usePageGraph(
     selectedGroup?.tenant_id ?? "",
-    selectedGroup?.group_id ?? "",
+    selectedGroup?.colony_id ?? "",
   );
 
   const pages = useVCMPages();

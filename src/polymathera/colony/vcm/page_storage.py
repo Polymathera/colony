@@ -29,6 +29,7 @@ import networkx as nx
 
 from .models import VirtualContextPageMetadata, VirtualContextPage, ContextPageId
 from .sources import PageCluster
+from ..distributed.ray_utils.serving import require_colony_id, require_tenant_id
 
 if TYPE_CHECKING:
     from ..distributed.storage import Storage
@@ -84,20 +85,37 @@ class PageMetadataStore(ABC):
     @abstractmethod
     async def list_pages(
         self,
-        tenant_id: str | None = None,
         source_pattern: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[ContextPageId]:
         """List page IDs with optional filtering.
         Args:
-            tenant_id: Optional tenant ID to filter pages
             source_pattern: Optional source pattern to filter pages
             limit: Maximum number of pages to return
             offset: Number of pages to skip for pagination
 
         Returns:
             List of ContextPageId objects matching the filters
+        """
+        pass
+
+    @abstractmethod
+    async def list_page_summaries(
+        self,
+        source_pattern: str | None = None,
+        limit: int = 20000,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List page summaries (id, source, size) without loading blobs.
+
+        Args:
+            source_pattern: Filter by source pattern (SQL LIKE pattern)
+            limit: Maximum number of results
+            offset: Number of results to skip
+
+        Returns:
+            List of dicts with page_id, source, size, group_id, colony_id, tenant_id
         """
         pass
 
@@ -160,6 +178,7 @@ class RelationalPageMetadataStore(PageMetadataStore):
                 if existing_page:
                     # Update existing page
                     existing_page.tenant_id = page.tenant_id
+                    existing_page.colony_id = page.colony_id
                     existing_page.source = source
                     existing_page.updated_at = datetime.now(timezone.utc)
                     existing_page.size = page.size
@@ -179,6 +198,7 @@ class RelationalPageMetadataStore(PageMetadataStore):
                     page_metadata = VirtualContextPageMetadata(
                         page_id=page.page_id,
                         tenant_id=page.tenant_id,
+                        colony_id=page.colony_id,
                         source=source,
                         created_at=datetime.fromtimestamp(page.created_at, tz=timezone.utc),
                         size=page.size,
@@ -198,10 +218,14 @@ class RelationalPageMetadataStore(PageMetadataStore):
     @override
     async def get_page_metadata(self, page_id: str) -> VirtualContextPageMetadata | None:
         """Retrieve page metadata by page ID."""
+        tenant_id = require_tenant_id()
+        colony_id = require_colony_id()
         session_maker = self.relational_storage._get_current_loop_session_maker()
         async with session_maker() as session:
             stmt = sqlm.select(VirtualContextPageMetadata).where(
-                VirtualContextPageMetadata.page_id == page_id
+                VirtualContextPageMetadata.page_id == page_id,
+                VirtualContextPageMetadata.tenant_id == tenant_id,
+                VirtualContextPageMetadata.colony_id == colony_id,
             )
             result = await session.execute(stmt)
             page_metadata: VirtualContextPageMetadata | None = result.scalar_one_or_none()
@@ -213,8 +237,12 @@ class RelationalPageMetadataStore(PageMetadataStore):
         session_maker = self.relational_storage._get_current_loop_session_maker()
         async with session_maker() as session:
             async with session.begin():
+                tenant_id = require_tenant_id()
+                colony_id = require_colony_id()
                 stmt = sqlm.select(VirtualContextPageMetadata).where(
-                    VirtualContextPageMetadata.page_id == page_id
+                    VirtualContextPageMetadata.page_id == page_id,
+                    VirtualContextPageMetadata.tenant_id == tenant_id,
+                    VirtualContextPageMetadata.colony_id == colony_id,
                 )
                 result = await session.execute(stmt)
                 page_metadata: VirtualContextPageMetadata | None = result.scalar_one_or_none()
@@ -229,7 +257,6 @@ class RelationalPageMetadataStore(PageMetadataStore):
     @override
     async def list_pages(
         self,
-        tenant_id: str | None = None,
         source_pattern: str | None = None,
         limit: int = 100,
         offset: int = 0,
@@ -237,7 +264,6 @@ class RelationalPageMetadataStore(PageMetadataStore):
         """Query page IDs by filters.
 
         Args:
-            tenant_id: Filter by tenant ID
             source_pattern: Filter by source pattern (SQL LIKE pattern)
             limit: Maximum number of results
             offset: Number of results to skip
@@ -248,8 +274,11 @@ class RelationalPageMetadataStore(PageMetadataStore):
         Raises:
             Exception: If query fails
         """
+        tenant_id = require_tenant_id()
+        colony_id = require_colony_id()
+
         logger.debug(
-            f"Listing pages (tenant={tenant_id}, source_pattern={source_pattern}, "
+            f"Listing pages (tenant={tenant_id}, colony={colony_id}, source_pattern={source_pattern}, "
             f"limit={limit}, offset={offset})"
         )
 
@@ -261,6 +290,9 @@ class RelationalPageMetadataStore(PageMetadataStore):
 
                 if tenant_id:
                     stmt = stmt.where(VirtualContextPageMetadata.tenant_id == tenant_id)
+
+                if colony_id:
+                    stmt = stmt.where(VirtualContextPageMetadata.colony_id == colony_id)
 
                 if source_pattern:
                     stmt = stmt.where(VirtualContextPageMetadata.source.like(source_pattern))
@@ -278,9 +310,9 @@ class RelationalPageMetadataStore(PageMetadataStore):
             logger.error(f"Failed to list pages: {e}", exc_info=True)
             raise
 
+    @override
     async def list_page_summaries(
         self,
-        tenant_id: str | None = None,
         source_pattern: str | None = None,
         limit: int = 20000,
         offset: int = 0,
@@ -288,7 +320,6 @@ class RelationalPageMetadataStore(PageMetadataStore):
         """List page summaries (id, source, size) without loading blobs.
 
         Args:
-            tenant_id: Filter by tenant ID
             source_pattern: Filter by source pattern (SQL LIKE pattern)
             limit: Maximum number of results
             offset: Number of results to skip
@@ -297,6 +328,9 @@ class RelationalPageMetadataStore(PageMetadataStore):
             List of dicts with page_id, source, size, group_id, tenant_id
         """
         try:
+            tenant_id = require_tenant_id()
+            colony_id = require_colony_id()
+
             session_maker = self.relational_storage._get_current_loop_session_maker()
             async with session_maker() as session:
                 stmt = sqlm.select(
@@ -305,11 +339,14 @@ class RelationalPageMetadataStore(PageMetadataStore):
                     VirtualContextPageMetadata.size,
                     VirtualContextPageMetadata.group_id,
                     VirtualContextPageMetadata.tenant_id,
+                    VirtualContextPageMetadata.colony_id,
                     VirtualContextPageMetadata.metadata_json,
                 )
 
                 if tenant_id:
                     stmt = stmt.where(VirtualContextPageMetadata.tenant_id == tenant_id)
+                if colony_id:
+                    stmt = stmt.where(VirtualContextPageMetadata.colony_id == colony_id)
                 if source_pattern:
                     stmt = stmt.where(VirtualContextPageMetadata.source.like(source_pattern))
 
@@ -333,6 +370,7 @@ class RelationalPageMetadataStore(PageMetadataStore):
                         "size": row.size or 0,
                         "group_id": row.group_id or "",
                         "tenant_id": row.tenant_id or "",
+                        "colony_id": row.colony_id or "",
                         "files": files,
                     })
                 return summaries
@@ -348,7 +386,7 @@ class RelationalPageMetadataStore(PageMetadataStore):
     ) -> list[ContextPageId]:
         """Query pages by metadata filters.
 
-        Uses indexed columns (``source``, ``group_id``, ``tenant_id``,
+        Uses indexed columns (``source``, ``group_id``, ``tenant_id``, ``colony_id``,
         ``created_by``) when available for efficient queries. Falls back to
         JSON metadata search for non-indexed fields.
 
@@ -360,6 +398,7 @@ class RelationalPageMetadataStore(PageMetadataStore):
         - ``scope_id``: Maps to ``source = f"{XYZContextPageSource.get_source_metadata(scope_id)}"``.
         - ``group_id``: Direct indexed column match.
         - ``tenant_id``: Direct indexed column match.
+        - ``colony_id``: Direct indexed column match.
         - ``created_by``: Direct indexed column match.
 
         Args:
@@ -396,6 +435,11 @@ class RelationalPageMetadataStore(PageMetadataStore):
                 if "tenant_id" in filters:
                     stmt = stmt.where(
                         VirtualContextPageMetadata.tenant_id == filters["tenant_id"]
+                    )
+
+                if "colony_id" in filters:
+                    stmt = stmt.where(
+                        VirtualContextPageMetadata.colony_id == filters["colony_id"]
                     )
 
                 if "created_by" in filters:
@@ -439,6 +483,7 @@ class RelationalPageMetadataStore(PageMetadataStore):
                     func.count(VirtualContextPageMetadata.page_id).label("total_pages"),
                     func.sum(VirtualContextPageMetadata.size).label("total_tokens"),
                     func.count(func.distinct(VirtualContextPageMetadata.tenant_id)).label("unique_tenants"),
+                    func.count(func.distinct(VirtualContextPageMetadata.colony_id)).label("unique_colonies"),
                     func.count(func.distinct(VirtualContextPageMetadata.source)).label("unique_sources"),
                 )
                 result = await session.execute(stmt)
@@ -458,6 +503,7 @@ class RelationalPageMetadataStore(PageMetadataStore):
                     "total_pages": row.total_pages or 0,
                     "total_tokens": row.total_tokens or 0,
                     "unique_tenants": row.unique_tenants or 0,
+                    "unique_colonies": row.unique_colonies or 0,
                     "unique_sources": row.unique_sources or 0,
                     "by_backend": {
                         backend_row.storage_backend: {
@@ -756,7 +802,7 @@ class PageStorage:
             tokens_data = msgpack.packb(page.tokens, use_bin_type=True)
 
             # 2. Store tokens to blob storage
-            blob_key = self._get_blob_key(page.page_id, page.tenant_id)
+            blob_key = self._get_blob_key(page.page_id, page.colony_id, page.tenant_id)
 
             storage_location = await self.blob_storage.store_blob(blob_key, tokens_data)
 
@@ -795,6 +841,7 @@ class PageStorage:
         Raises:
             Exception: If retrieval operation fails
         """
+        # TODO: This assumes page_id is globally unique across tenants and colonies. We may want to enforce this or change the API to include tenant_id and colony_id for disambiguation.
         logger.debug(f"Retrieving page {page_id}")
 
         try:
@@ -816,7 +863,7 @@ class PageStorage:
             # 3b. Try to retrieve text blob (may not exist for older pages)
             text = None
             try:
-                blob_key = self._get_blob_key(page_id, page_metadata.tenant_id)
+                blob_key = self._get_blob_key(page_id, page_metadata.colony_id, page_metadata.tenant_id)
                 text_blob_key = f"{blob_key}.text"
                 text_data = await self.blob_storage.retrieve_blob(text_blob_key)
                 if text_data:
@@ -832,6 +879,7 @@ class PageStorage:
             page = VirtualContextPage(
                 page_id=page_metadata.page_id,
                 tenant_id=page_metadata.tenant_id,
+                colony_id=page_metadata.colony_id,
                 tokens=tokens,
                 text=text,
                 size=page_metadata.size,
@@ -886,7 +934,7 @@ class PageStorage:
 
             # 3b. Delete text blob if it exists
             try:
-                blob_key = self._get_blob_key(page_id, page_metadata.tenant_id)
+                blob_key = self._get_blob_key(page_id, page_metadata.colony_id, page_metadata.tenant_id)
                 text_blob_key = f"{blob_key}.text"
                 await self.blob_storage.delete_blob(text_blob_key)
             except Exception:
@@ -901,7 +949,6 @@ class PageStorage:
 
     async def list_pages(
         self,
-        tenant_id: str | None = None,
         source_pattern: str | None = None,
         limit: int = 100,
         offset: int = 0,
@@ -909,7 +956,6 @@ class PageStorage:
         """Query page IDs by filters.
 
         Args:
-            tenant_id: Filter by tenant ID
             source_pattern: Filter by source pattern (SQL LIKE pattern)
             limit: Maximum number of results
             offset: Number of results to skip
@@ -921,7 +967,6 @@ class PageStorage:
             Exception: If query fails
         """
         return await self.page_metadata_store.list_pages(
-            tenant_id=tenant_id,
             source_pattern=source_pattern,
             limit=limit,
             offset=offset
@@ -929,7 +974,6 @@ class PageStorage:
 
     async def list_page_summaries(
         self,
-        tenant_id: str | None = None,
         source_pattern: str | None = None,
         limit: int = 20000,
         offset: int = 0,
@@ -939,7 +983,6 @@ class PageStorage:
         Delegates to the metadata store for efficient column-only queries.
         """
         return await self.page_metadata_store.list_page_summaries(
-            tenant_id=tenant_id,
             source_pattern=source_pattern,
             limit=limit,
             offset=offset,
@@ -952,7 +995,7 @@ class PageStorage:
     ) -> list[VirtualContextPage]:
         """Query pages by metadata filters.
 
-        Uses indexed columns (``source``, ``group_id``, ``tenant_id``,
+        Uses indexed columns (``source``, ``group_id``, ``tenant_id``, ``colony_id``,
         ``created_by``) when available for efficient queries. Falls back to
         JSON metadata search for non-indexed fields.
 
@@ -964,6 +1007,7 @@ class PageStorage:
         - ``scope_id``: Maps to ``source = f"{XYZContextPageSource.get_source_metadata(scope_id)}"``.
         - ``group_id``: Direct indexed column match.
         - ``tenant_id``: Direct indexed column match.
+        - ``colony_id``: Direct indexed column match.
         - ``created_by``: Direct indexed column match.
 
         Args:
@@ -999,11 +1043,12 @@ class PageStorage:
         """
         return await self.page_metadata_store.get_storage_stats()
 
-    def _get_blob_key(self, page_id: str, tenant_id: str) -> str:
+    def _get_blob_key(self, page_id: str, colony_id: str, tenant_id: str) -> str:
         """Generate blob storage key for a page.
 
         Args:
             page_id: Page identifier
+            colony_id: Colony identifier
             tenant_id: Tenant identifier
 
         Returns:
@@ -1012,15 +1057,13 @@ class PageStorage:
         # Sanitize page_id for filesystem use (replace : / with -)
         safe_page_id = page_id.replace(":", "-").replace("/", "-")
 
-        # Structure: {storage_path}/{tenant_id}/{safe_page_id}.bin
-        return f"{self.storage_path}/{tenant_id}/{safe_page_id}.bin"
+        # Structure: {storage_path}/{tenant_id}/{colony_id}/{safe_page_id}.bin
+        return f"{self.storage_path}/{tenant_id}/{colony_id}/{safe_page_id}.bin"
 
     # === Page Graph Persistence ===
 
     async def store_page_graph_level_data(
         self,
-        tenant_id: str,
-        group_id: str,
         data_key: str,
         graph_data: Any,
     ) -> None:
@@ -1036,21 +1079,21 @@ class PageStorage:
         Raises:
             `Exception`: If storage operation fails
         """
-        logger.debug(f"Storing page graph data {data_key} for group {group_id}")
+        tenant_id = require_tenant_id()
+        colony_id = require_colony_id()
+        logger.debug(f"Storing page graph data {data_key} for colony {colony_id}, tenant {tenant_id}")
 
         try:
             # Generate storage key for graph
-            graph_key = f"{self.storage_path}/graphs/{tenant_id}/{group_id}.{data_key}"
+            graph_key = f"{self.storage_path}/graphs/{tenant_id}/{colony_id}.{data_key}"
             await self.blob_storage.store_blob(graph_key, pickle.dumps(graph_data))
 
         except Exception as e:
-            logger.error(f"Failed to store page graph data {data_key} for group {group_id}: {e}", exc_info=True)
+            logger.error(f"Failed to store page graph data {data_key} for colony {colony_id}, tenant {tenant_id}: {e}", exc_info=True)
             raise
 
     async def store_page_graph(
         self,
-        tenant_id: str,
-        group_id: str,
         graph_data: nx.DiGraph) -> None:
         """Store a page relationship graph to persistent storage.
 
@@ -1058,31 +1101,22 @@ class PageStorage:
         relationship graphs between pages.
 
         Args:
-            tenant_id: Tenant identifier
-            group_id: Group identifier
             graph_data: Page graph (`networkx.DiGraph`)
 
         Raises:
             `Exception`: If storage operation fails
         """
-        logger.debug(f"Storing page graph for group {group_id}")
-
         try:
             return await self.store_page_graph_level_data(
-                tenant_id=tenant_id,
-                group_id=group_id,
                 data_key="graph",
                 graph_data=graph_data
             )
-
         except Exception as e:
-            logger.error(f"Failed to store page graph for group {group_id}: {e}", exc_info=True)
+            logger.error(f"Failed to store page graph: {e}", exc_info=True)
             raise
 
     async def retrieve_page_graph_level_data(
         self,
-        tenant_id: str,
-        group_id: str,
         data_key: str,
         cached: bool = True
     ) -> Any | None:
@@ -1092,16 +1126,18 @@ class PageStorage:
         updated each time the graph changes. Moreover, some graph-level data
         is computed once by one entity (e.g., sharding strategy) and used by all agents."""
         try:
+            tenant_id = require_tenant_id()
+            colony_id = require_colony_id()
             # Check local cache first
-            effective_data_key = f"{tenant_id}:{group_id}:{data_key}"
+            effective_data_key = f"{tenant_id}:{colony_id}:{data_key}"
             if cached and effective_data_key in self._page_graph_data:
                 return self._page_graph_data[effective_data_key]
 
             # Generate storage key for graph
-            graph_key = f"{self.storage_path}/graphs/{tenant_id}/{group_id}.{data_key}"
+            graph_key = f"{self.storage_path}/graphs/{tenant_id}/{colony_id}.{data_key}"
             graph_data = await self.blob_storage.retrieve_blob(graph_key)
             if not graph_data:
-                logger.debug(f"Page graph data {data_key} for group {group_id} not found in EFS")
+                logger.debug(f"Page graph data {data_key} for colony {colony_id}, tenant {tenant_id} not found in EFS")
                 return None
 
             data_obj = pickle.loads(graph_data)
@@ -1109,10 +1145,10 @@ class PageStorage:
             return data_obj
 
         except Exception as e:
-            logger.error(f"Failed to retrieve page graph data {data_key} for group {tenant_id}:{group_id}: {e}", exc_info=True)
+            logger.error(f"Failed to retrieve page graph data {data_key} for colony {colony_id}, tenant {tenant_id}: {e}", exc_info=True)
             raise
 
-    async def retrieve_page_graph(self, tenant_id: str, group_id: str) -> nx.DiGraph | None:
+    async def retrieve_page_graph(self) -> nx.DiGraph | None:
         """Retrieve a page relationship graph from persistent storage.
         This allows ContextPageSource implementations to load/store
         auxiliary data with their relationship graphs (e.g., file-to-page mappings).
@@ -1123,24 +1159,13 @@ class PageStorage:
         Raises:
             `Exception`: If retrieval operation fails
         """
-        logger.debug(f"Retrieving page graph for group {group_id}")
         return await self.retrieve_page_graph_level_data(
-            tenant_id=tenant_id,
-            group_id=group_id,
             data_key="graph",
             cached=False
         )
 
-    async def delete_page_graph(
-        self,
-        group_id: str,
-        tenant_id: str = "default"
-    ) -> bool:
+    async def delete_page_graph(self) -> bool:
         """Delete a page relationship graph from storage.
-
-        Args:
-            group_id: Group identifier (e.g., repo ID)
-            tenant_id: Tenant identifier
 
         Returns:
             True if graph was deleted, False if not found
@@ -1148,24 +1173,27 @@ class PageStorage:
         Raises:
             Exception: If deletion operation fails
         """
-        logger.debug(f"Deleting page graph for group {group_id}")
+        tenant_id = require_tenant_id()
+        colony_id = require_colony_id()
+
+        logger.debug(f"Deleting page graph for colony {colony_id}")
 
         try:
             # Generate storage key for graph
-            graph_key = f"{self.storage_path}/graphs/{tenant_id}/{group_id}.graph"
+            graph_key = f"{self.storage_path}/graphs/{tenant_id}/{colony_id}.graph"
 
             deleted = await self.blob_storage.delete_blob(graph_key)
             if deleted:
-                logger.info(f"Deleted page graph for group {group_id} from storage")
+                logger.info(f"Deleted page graph for colony {colony_id} from storage")
             else:
-                logger.debug(f"Page graph for group {group_id} not found for deletion")
+                logger.debug(f"Page graph for colony {colony_id} not found for deletion")
             return deleted
 
         except Exception as e:
-            logger.error(f"Failed to delete page graph for group {group_id}: {e}", exc_info=True)
+            logger.error(f"Failed to delete page graph for colony {colony_id}: {e}", exc_info=True)
             raise
 
-    async def load_page_graph(self, tenant_id: str, group_id: str, cached: bool = True) -> nx.DiGraph:
+    async def load_page_graph(self, cached: bool = True) -> nx.DiGraph:
         """Load page graph dynamically from PageStorage.
 
         This allows the agent and its components to load
@@ -1173,36 +1201,36 @@ class PageStorage:
         passing the entire graph in metadata.
 
         Args:
-            tenant_id: Tenant identifier
-            group_id: Group identifier (e.g., VMR ID)
             cached: If True, return the locally cached graph if available. If False, always load from storage.
         Returns:
             The page graph as a networkx DiGraph. If loading from storage fails, returns an empty graph.
         """
-        graph_key = f"{tenant_id}:{group_id}:graph"
+        tenant_id = require_tenant_id()
+        colony_id = require_colony_id()
+        graph_key = f"{tenant_id}:{colony_id}:graph"
         if cached and graph_key in self._page_graphs and len(self._page_graphs[graph_key].nodes) > 0:
             return self._page_graphs[graph_key]
 
         try:
-            if not group_id or not tenant_id:
-                raise RuntimeError("Missing group_id or tenant_id, creating empty page graph")
+            if not colony_id or not tenant_id:
+                raise RuntimeError("Missing colony_id or tenant_id, creating empty page graph")
 
             await self.initialize()
 
-            graph = await self.retrieve_page_graph(tenant_id=tenant_id, group_id=group_id)
+            graph = await self.retrieve_page_graph()
 
             if graph:
                 self._page_graphs[graph_key] = graph
                 logger.info(
-                    f"Loaded page graph for {group_id}: "
+                    f"Loaded page graph for {colony_id}: "
                     f"{len(graph.nodes)} nodes, {len(graph.edges)} edges, "
                     f"{graph.number_of_edges()} relationships"
                 )
             else:
                 # Build new graph (requires FileGrouper - deferred to first usage)
-                logger.info(f"No existing page graph for {group_id}, "
+                logger.info(f"No existing page graph for {colony_id}, "
                             "will build on first use, creating empty graph")
-                logger.warning(f"No existing page graph found in storage for {group_id}, creating empty graph")
+                logger.warning(f"No existing page graph found in storage for {colony_id}, creating empty graph")
                 self._page_graphs[graph_key] = nx.DiGraph()
 
             return self._page_graphs[graph_key]
@@ -1214,19 +1242,20 @@ class PageStorage:
 
     async def get_page_cluster(
         self,
-        tenant_id: str,
-        group_id: str,
         cluster_size: int = 10,
         cluster_type: str | None = None
     ) -> PageCluster:
         """Get a cluster of related pages."""
+        tenant_id = require_tenant_id()
+        colony_id = require_colony_id()
+
         # TODO: Get page graph dynamically from PageStorage, rather than relying on in-memory graph.
         # This allows the agent to pick up the latest graph state.
         # Simple implementation: use community detection or just take connected component
-        graph_key = f"{tenant_id}:{group_id}:graph"
+        graph_key = f"{tenant_id}:{colony_id}:graph"
         if not self._page_graphs.get(graph_key) or len(self._page_graphs[graph_key].nodes) == 0:
             raise RuntimeError(
-                f"PageStorage[{group_id}]: page graph not initialized or empty"
+                f"PageStorage[{colony_id}]: page graph not initialized or empty"
             )
 
         graph = self._page_graphs[graph_key]
@@ -1239,7 +1268,7 @@ class PageStorage:
             if len(component) <= cluster_size:
                 page_ids = list(component)
                 return PageCluster(
-                    cluster_id=f"{group_id}-cluster-{i}",
+                    cluster_id=f"{colony_id}-cluster-{i}",
                     page_ids=page_ids,
                     relationship_score=0.8,  # TODO: Compute from graph
                     cluster_type=cluster_type or "connected_component",
@@ -1258,7 +1287,7 @@ class PageStorage:
         ### ):
         ###     if len(page_ids) <= cluster_size:
         ###         return PageCluster(
-        ###             cluster_id=f"bb:{tenant_id}:{group_id}:{group_key}",
+        ###             cluster_id=f"bb:{tenant_id}:{colony_id}:{group_key}",
         ###             page_ids=page_ids,
         ###             relationship_score=0.8,
         ###             cluster_type=cluster_type or "locality_group",
@@ -1268,7 +1297,7 @@ class PageStorage:
         # Fallback: take first N pages
         all_pages = list(graph.nodes)[:cluster_size]
         return PageCluster(
-            cluster_id=f"bb:{tenant_id}:{group_id}:cluster-fallback",
+            cluster_id=f"bb:{tenant_id}:{colony_id}:cluster-fallback",
             page_ids=all_pages,
             relationship_score=0.5,
             cluster_type="fallback",
@@ -1277,15 +1306,15 @@ class PageStorage:
 
     async def get_all_clusters(
         self,
-        tenant_id: str,
-        group_id: str,
         max_cluster_size: int = 10,
         min_cluster_size: int = 2
     ) -> AsyncIterator[PageCluster]:
         """Iterate over all page clusters."""
+        tenant_id = require_tenant_id()
+        colony_id = require_colony_id()
         # TODO: Get page graph dynamically from PageStorage, rather than relying on in-memory graph.
         # This allows the agent to pick up the latest graph state.
-        graph_key = f"{tenant_id}:{group_id}:graph"
+        graph_key = f"{tenant_id}:{colony_id}:graph"
         if not self._page_graphs.get(graph_key) or len(self._page_graphs[graph_key].nodes) == 0:
             return
 
@@ -1298,7 +1327,7 @@ class PageStorage:
             if min_cluster_size <= len(component) <= max_cluster_size:
                 page_ids = list(component)
                 yield PageCluster(
-                    cluster_id=f"{tenant_id}:{group_id}-cluster-{i}",
+                    cluster_id=f"{tenant_id}:{colony_id}-cluster-{i}",
                     page_ids=page_ids,
                     relationship_score=0.8,
                     cluster_type="connected_component",
@@ -1312,7 +1341,7 @@ class PageStorage:
         ### for group_key, page_ids in groups.items():
         ###     if min_cluster_size <= len(page_ids) <= max_cluster_size:
         ###         yield PageCluster(
-        ###             cluster_id=f"bb:{tenant_id}:{group_id}:{group_key}",
+        ###             cluster_id=f"bb:{tenant_id}:{colony_id}:{group_key}",
         ###             page_ids=page_ids,
         ###             relationship_score=0.8,
         ###             cluster_type="locality_group",
@@ -1321,8 +1350,6 @@ class PageStorage:
 
     async def update_page_graph(
         self,
-        tenant_id: str,
-        group_id: str,
         page_relationships: dict[tuple[str, str], dict[str, Any]],
     ) -> None:
         """Update page graph with new relationships and persist to storage."""
@@ -1330,7 +1357,9 @@ class PageStorage:
         # This may be susceptible to race conditions if multiple agents are updating the graph concurrently.
         # We should consider implementing a more robust graph update mechanism that can handle concurrent updates,
         # such as using graph databases or implementing locking mechanisms.
-        graph_key = f"{tenant_id}:{group_id}:graph"
+        tenant_id = require_tenant_id()
+        colony_id = require_colony_id()
+        graph_key = f"{tenant_id}:{colony_id}:graph"
         if not self._page_graphs.get(graph_key) or len(self._page_graphs[graph_key].nodes) == 0:
             return
 
@@ -1345,22 +1374,20 @@ class PageStorage:
 
         # Persist to storage
         await self.store_page_graph(
-            tenant_id=tenant_id,
-            group_id=group_id,
             graph_data=graph
         )
-        logger.info(f"Persisted page graph for {tenant_id}:{group_id}")
+        logger.info(f"Persisted page graph for {tenant_id}:{colony_id}")
 
     async def get_page_neighbors(
         self,
         page_id: str,
-        tenant_id: str,
-        group_id: str,
         max_neighbors: int = 5,
         relationship_types: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Get nearest neighbor pages."""
-        graph_key = f"{tenant_id}:{group_id}:graph"
+        tenant_id = require_tenant_id()
+        colony_id = require_colony_id()
+        graph_key = f"{tenant_id}:{colony_id}:graph"
         if not self._page_graphs.get(graph_key) or len(self._page_graphs[graph_key].nodes) == 0:
             return []
 

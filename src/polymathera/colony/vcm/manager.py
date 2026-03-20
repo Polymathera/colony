@@ -59,6 +59,8 @@ from .sources import ContextPageSource, ContextPageSourceFactory
 from .page_storage import PageStorage, PageStorageConfig
 from .page_table import VirtualPageTable
 from .allocation import AllocationStrategy, DEFAULT_ALLOCATION_STRATEGY
+from .events import PageLoadedEvent, PageEvictedEvent, PageLoadFailedEvent
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,7 +76,7 @@ class MappedScope:
     source: ContextPageSource
     config: MmapConfig
     scope_id: str
-    group_id: str
+    colony_id: str
     tenant_id: str
 
 
@@ -142,7 +144,7 @@ class VirtualContextManager:
         self._reconciliation_interval_s = reconciliation_interval_s
 
         # Application ↔ VCM integration (scope mappings)
-        self._local_mapped_scopes: dict[str, MappedScope] = {}
+        self._local_mapped_scopes: dict[tuple[str, str, str], MappedScope] = {}
 
     @serving.initialize_deployment
     async def initialize(self):
@@ -239,6 +241,8 @@ class VirtualContextManager:
     async def create_virtual_page(
         self,
         tokens: list[int],
+        colony_id: str,
+        tenant_id: str,
         page_id: ContextPageId | None = None,
         metadata: dict[str, Any] | None = None,
         group_id: str | None = None,
@@ -248,6 +252,8 @@ class VirtualContextManager:
 
         Args:
             tokens: Token sequence for this page
+            colony_id: Identifier for grouping related context sources (e.g., VMR ID)
+            tenant_id: Tenant ID for multi-tenancy
             page_id: Optional ID (generated if None)
             metadata: Optional metadata
             group_id: Optional group ID for spatial locality
@@ -266,6 +272,8 @@ class VirtualContextManager:
             size=len(tokens),
             metadata=metadata or {},
             group_id=group_id,
+            colony_id=colony_id,
+            tenant_id=tenant_id,
         )
 
         # Persist to durable storage (EFS or S3)
@@ -279,8 +287,7 @@ class VirtualContextManager:
 
     # === Physical Page Allocation (from LLMCluster) ===
 
-    @serving.endpoint
-    async def allocate_pages(self, request: PageAllocationRequest) -> PageAllocationResponse:
+    async def _allocate_pages(self, request: PageAllocationRequest) -> PageAllocationResponse:
         """Allocate pages into physical memory.
 
         This method:
@@ -345,14 +352,16 @@ class VirtualContextManager:
             for decision in decisions:
                 try:
                     # Evict pages if needed
-                    for evict_page_id in decision.evict_pages:
+                    for evict_page_id, colony_id, tenant_id in decision.evict_pages:
                         success = await self._evict_page_from_client(
-                            virtual_page_id=evict_page_id,
+                            page_id=evict_page_id,
+                            colony_id=colony_id,
+                            tenant_id=tenant_id,
                             deployment_name=decision.target_deployment,
                             client_id=decision.target_client_id,
                         )
                         if success:
-                            evicted_pages.append(evict_page_id)
+                            evicted_pages.append((evict_page_id, colony_id, tenant_id))
                         else:
                             logger.warning(
                                 f"Failed to evict page {evict_page_id} from "
@@ -361,39 +370,40 @@ class VirtualContextManager:
 
                     # Load the page
                     success = await self._load_page_on_client(
-                        virtual_page_id=decision.virtual_page_id,
+                        page_id=decision.page_id,
                         deployment_name=decision.target_deployment,
                         client_id=decision.target_client_id,
-                        page_size=page_sizes.get(decision.virtual_page_id, 0),
+                        page_size=page_sizes.get(decision.page_id, 0),
+                        colony_id=request.colony_id,
                         tenant_id=request.tenant_id,
                     )
 
                     if success:
                         # Create location record
                         location = PageLocation(
-                            page_id=decision.virtual_page_id,
+                            page_id=decision.page_id,
                             deployment_name=decision.target_deployment,
                             client_id=decision.target_client_id,
                             load_time=time.time(),
                             last_access_time=time.time(),
                             access_count=0,
-                            size=page_sizes.get(decision.virtual_page_id, 0),
+                            size=page_sizes.get(decision.page_id, 0),
                             tenant_id=request.tenant_id,
                         )
-                        allocated_locations[decision.virtual_page_id] = [location]
+                        allocated_locations[decision.page_id] = [location]
                     else:
-                        failed_pages.append(decision.virtual_page_id)
+                        failed_pages.append(decision.page_id)
                         logger.warning(
-                            f"Failed to load page {decision.virtual_page_id} on "
+                            f"Failed to load page {decision.page_id} on "
                             f"{decision.target_deployment}/{decision.target_client_id}"
                         )
 
                 except Exception as e:
                     logger.error(
-                        f"Error allocating page {decision.virtual_page_id}: {e}",
+                        f"Error allocating page {decision.page_id}: {e}",
                         exc_info=True,
                     )
-                    failed_pages.append(decision.virtual_page_id)
+                    failed_pages.append(decision.page_id)
 
             allocation_time_ms = (time.time() - start_time) * 1000
 
@@ -420,9 +430,10 @@ class VirtualContextManager:
     async def request_page_load(
         self,
         page_id: ContextPageId,
+        colony_id: str | None,
+        tenant_id: str | None,
+        agent_id: str,
         priority: int = 0,
-        agent_id: str | None = None,
-        tenant_id: str = "default",
         lock_duration_s: float | None = None,
         lock_reason: str = "",
     ) -> str | None:
@@ -437,24 +448,31 @@ class VirtualContextManager:
 
         Args:
             page_id: Page identifier
-            priority: Load priority (higher = more urgent)
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
             agent_id: Requesting agent ID (optional)
-            tenant_id: Tenant ID (optional)
+            priority: Load priority (higher = more urgent)
             lock_duration_s: If set, lock page after loading for this duration (seconds)
             lock_reason: Reason for locking (if lock_duration_s is set)
 
         Returns:
             None if page already loaded, fault_id (Unique identifier for tracking this fault) if added to fault queue
         """
+
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         # Check if already loaded
-        if await self.page_table.is_page_loaded(page_id):
+        if await self.page_table.is_page_loaded(page_id, colony_id, tenant_id):
             # Update access time
-            await self.page_table.update_page_access(page_id)
+            await self.page_table.update_page_access(page_id, colony_id, tenant_id)
 
             # Lock if requested
             if lock_duration_s is not None and lock_duration_s > 0:
                 await self.page_table.lock_page(
                     page_id=page_id,
+                    colony_id=colony_id,
+                    tenant_id=tenant_id,
                     locked_by=agent_id or "unknown",
                     lock_duration_s=lock_duration_s,
                     reason=lock_reason,
@@ -465,9 +483,10 @@ class VirtualContextManager:
         # Add to page fault queue (with lock request if specified)
         fault_id = await self.issue_page_fault(
             page_ids=[page_id],
+            colony_id=colony_id,
+            tenant_id=tenant_id,
             requester_id=agent_id or "unknown",
             priority=priority,
-            tenant_id=tenant_id,
             lock_duration_s=lock_duration_s,
             lock_reason=lock_reason,
         )
@@ -475,23 +494,29 @@ class VirtualContextManager:
         return fault_id
 
     @serving.endpoint
-    async def request_group_load(
+    async def request_page_group_load(
         self,
         group_id: str,
-        priority: int | None = None,
-        agent_id: str | None = None,
-        tenant_id: str = "default",
+        colony_id: str | None,
+        tenant_id: str | None,
+        agent_id: str,
+        priority: int = 0,
     ) -> None:
         """Request all pages in a group to be loaded.
 
         Args:
             group_id: Group identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
+            agent_id: Requesting agent ID
             priority: Optional priority override (uses group priority if None)
-            agent_id: Requesting agent ID (optional)
-            tenant_id: Tenant ID (optional)
         """
+
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         # Get group
-        group = await self.page_table.get_page_group(group_id)
+        group = await self.page_table.get_page_group(group_id, colony_id, tenant_id)
         if not group:
             raise ValueError(f"Group {group_id} not found")
 
@@ -501,7 +526,13 @@ class VirtualContextManager:
         # Request each page
         # TODO: The page loader should support group loading directly for efficiency
         for page_id in group.page_ids:
-            await self.request_page_load(page_id, load_priority, agent_id, tenant_id=tenant_id)
+            await self.request_page_load(
+                page_id=page_id,
+                colony_id=colony_id,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                priority=load_priority,
+            )
 
         logger.info(
             f"Requested load for group {group_id} ({len(group.page_ids)} pages, "
@@ -514,9 +545,10 @@ class VirtualContextManager:
     async def issue_page_fault(
         self,
         page_ids: list[str],
+        colony_id: str | None,
+        tenant_id: str | None,
         requester_id: str,
         priority: int = 10,
-        tenant_id: str = "default",
         lock_duration_s: float | None = None,
         lock_reason: str = "",
     ) -> str:
@@ -527,21 +559,28 @@ class VirtualContextManager:
 
         Args:
             page_ids: List of page IDs that need to be loaded
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
             requester_id: ID of the requester (router, agent, etc.)
             priority: Fault priority (higher = more urgent, default=10 for router requests)
-            tenant_id: Tenant that owns these pages
             lock_duration_s: If set, lock pages after loading for this duration (seconds)
             lock_reason: Reason for locking (if lock_duration_s is set)
 
         Returns:
             fault_id: Unique identifier for tracking this fault
         """
+
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         # Create page fault with batched pages
         fault = PageFault(
             page_ids=page_ids,
             requesting_agent_id=requester_id,
             priority=priority,
+            group_id=None,  # TODO: Should this be set here?
             tenant_id=tenant_id,
+            colony_id=colony_id,
             lock_duration_s=lock_duration_s,
             lock_reason=lock_reason,
         )
@@ -599,51 +638,87 @@ class VirtualContextManager:
     # === Page Retrieval ===
 
     @serving.endpoint
-    def get_page_locations(self, virtual_page_id: str) -> list[PageLocation]:
+    async def get_page_locations(
+        self,
+        page_id: str,
+        colony_id: str | None,
+        tenant_id: str | None,
+    ) -> list[PageLocation]:
         """Get all locations where a virtual page is loaded.
 
         Args:
-            virtual_page_id: Virtual page identifier
+            page_id: Virtual page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
         Returns:
             List of PageLocation records
         """
-        return self.page_table.get_page_locations(virtual_page_id)
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+        return await self.page_table.get_page_locations(page_id, colony_id, tenant_id)
 
     @serving.endpoint
-    async def get_virtual_page(self, page_id: ContextPageId) -> VirtualContextPage | None:
+    async def get_virtual_page(
+        self,
+        page_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> VirtualContextPage | None:
         """Get a virtual page by ID from persistent storage.
 
         Args:
             page_id: Page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
 
         Returns:
             VirtualContextPage if exists, None otherwise
         """
-        return await self.page_storage.retrieve_page(page_id)
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+        return await self.page_storage.retrieve_page(page_id, colony_id=colony_id, tenant_id=tenant_id)
 
     @serving.endpoint
-    async def is_page_loaded(self, page_id: str) -> bool:
+    async def is_page_loaded(
+        self,
+        page_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> bool:
         """Check if page is loaded in any replica.
 
         Args:
             page_id: Page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
 
         Returns:
             True if loaded
         """
-        return await self.page_table.is_page_loaded(page_id)
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+        return await self.page_table.is_page_loaded(page_id, colony_id, tenant_id)
 
     @serving.endpoint
-    async def get_page_location(self, page_id: str) -> PageLocation | None:
+    async def get_page_location(
+        self,
+        page_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> PageLocation | None:
         """Get which replica has this page loaded.
 
         Args:
             page_id: Page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
 
         Returns:
             PageLocation if loaded, None otherwise
         """
-        return await self.page_table.get_page_location(page_id)
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+        return await self.page_table.get_page_location(page_id, colony_id, tenant_id)
 
     @serving.endpoint
     async def get_all_loaded_pages(self) -> list[str]:
@@ -657,7 +732,6 @@ class VirtualContextManager:
     @serving.endpoint
     async def list_stored_pages(
         self,
-        tenant_id: str | None = None,
         source_pattern: str | None = None,
         limit: int = 20000,
         offset: int = 0,
@@ -668,7 +742,6 @@ class VirtualContextManager:
         without loading page blobs. Suitable for dashboard page tables.
 
         Args:
-            tenant_id: Filter by tenant ID
             source_pattern: Filter by source pattern (SQL LIKE)
             limit: Maximum number of results
             offset: Number of results to skip
@@ -677,7 +750,6 @@ class VirtualContextManager:
             List of page summary dicts
         """
         return await self.page_storage.list_page_summaries(
-            tenant_id=tenant_id,
             source_pattern=source_pattern,
             limit=limit,
             offset=offset,
@@ -687,12 +759,13 @@ class VirtualContextManager:
     async def list_loaded_page_entries(self) -> list[dict[str, Any]]:
         """Return summary of all pages currently loaded in KV cache with access stats.
 
-        Returns per-page: page_id, size, tenant_id, total_access_count,
+        Returns per-page: page_id, size, tenant_id, colony_id, total_access_count,
         and physical location details (deployment, replica, access count, timestamps).
         """
+        # TODO: Should we return only pages associated with the current colony_id?
         async for state in self.page_table.state_manager.read_transaction():
             result = []
-            for page_id, entry in state.entries.items():
+            for page_key, entry in state.entries.items():
                 locations = []
                 for loc in entry.physical_locations:
                     locations.append({
@@ -703,9 +776,10 @@ class VirtualContextManager:
                         "load_time": loc.load_time,
                     })
                 result.append({
-                    "page_id": page_id,
+                    "page_id": entry.page_id,
                     "size": entry.size,
                     "tenant_id": entry.tenant_id,
+                    "colony_id": entry.colony_id,
                     "total_access_count": entry.total_access_count,
                     "locations": locations,
                 })
@@ -714,6 +788,8 @@ class VirtualContextManager:
     async def _page_is_on_target(
         self,
         page_id: str,
+        colony_id: str,
+        tenant_id: str,
         target_deployment_name: str,
         target_client_id: str,
     ) -> bool:
@@ -726,18 +802,18 @@ class VirtualContextManager:
         Returns:
             True if page is on target replica
         """
-        locations = await self.page_table.get_page_locations(page_id)
+        locations = await self.page_table.get_page_locations(page_id, colony_id, tenant_id)
         for loc in locations:
             if (loc.deployment_name == target_deployment_name and
                 loc.client_id == target_client_id):
                 return True
         return False
 
-    @serving.endpoint
-    async def replicate_page(
+    async def _replicate_page(
         self,
         page_id: str,
         group_id: str,
+        colony_id: str,
         tenant_id: str,
         target_deployment_name: str,
         target_client_id: str,
@@ -758,6 +834,7 @@ class VirtualContextManager:
         Args:
             page_id: Virtual page identifier
             group_id: Group ID for identifying related pages (e.g., from same git repo)
+            colony_id: Colony ID for grouping related page sources (e.g., VMR ID)
             tenant_id: Tenant ID for multi-tenancy
             target_deployment_name: Target VLLM deployment name
             target_client_id: Target VLLM replica ID
@@ -773,6 +850,8 @@ class VirtualContextManager:
         # Check if page already loaded on target
         if await self._page_is_on_target(
             page_id,
+            colony_id,
+            tenant_id,
             target_deployment_name,
             target_client_id,
         ):
@@ -797,6 +876,7 @@ class VirtualContextManager:
         allocation_request = PageAllocationRequest(
             virtual_page_ids=[page_id],
             group_id=group_id,
+            colony_id=colony_id,
             tenant_id=tenant_id,
             priority=priority,
             preferred_deployment=target_deployment_name,
@@ -804,7 +884,7 @@ class VirtualContextManager:
         )
 
         try:
-            response: PageAllocationResponse = await self.allocate_pages(allocation_request)
+            response: PageAllocationResponse = await self._allocate_pages(allocation_request)
 
             # Check if page was loaded successfully
             if page_id in response.failed_pages:
@@ -817,6 +897,8 @@ class VirtualContextManager:
             # Verify page is now on target
             if await self._page_is_on_target(
                 page_id,
+                colony_id,
+                tenant_id,
                 target_deployment_name,
                 target_client_id,
             ):
@@ -842,6 +924,8 @@ class VirtualContextManager:
     async def create_page_group(
         self,
         page_ids: list[str],
+        colony_id: str | None,
+        tenant_id: str | None,
         group_id: str | None = None,
         priority: int = 0,
         metadata: dict[str, Any] | None = None,
@@ -850,6 +934,8 @@ class VirtualContextManager:
 
         Args:
             page_ids: List of page IDs in this group
+            colony_id: Colony ID for grouping related page sources (e.g., VMR ID)
+            tenant_id: Tenant ID for multi-tenancy isolation
             group_id: Optional group ID (generated if None)
             priority: Load priority for entire group
             metadata: Optional metadata
@@ -857,14 +943,19 @@ class VirtualContextManager:
         Returns:
             Created PageGroup
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         if group_id is None:
             import uuid
 
-            group_id = f"group-{uuid.uuid4().hex[:8]}"
+            group_id = f"vcm-page-group-{uuid.uuid4().hex[:8]}"
 
         group = PageGroup(
             group_id=group_id,
             page_ids=page_ids,
+            colony_id=colony_id,
+            tenant_id=tenant_id,
             priority=priority,
             metadata=metadata or {},
         )
@@ -905,10 +996,11 @@ class VirtualContextManager:
 
     async def _load_page_on_client(
         self,
-        virtual_page_id: ContextPageId,
+        page_id: ContextPageId,
         deployment_name: str,
         client_id: str,
         page_size: int,
+        colony_id: str,
         tenant_id: str,
     ) -> bool:
         """Load a page on a specific client.
@@ -917,10 +1009,11 @@ class VirtualContextManager:
         and updates the page table.
 
         Args:
-            virtual_page_id: Virtual page ID
+            page_id: Virtual page ID
             deployment_name: Target deployment
             client_id: Target client
             page_size: Page size in tokens
+            colony_id: Colony ID
             tenant_id: Tenant ID
 
         Returns:
@@ -928,9 +1021,9 @@ class VirtualContextManager:
         """
         try:
             # Get actual page from cache (we ARE the VCM)
-            page = await self.get_virtual_page(virtual_page_id)
+            page = await self.get_virtual_page(page_id, colony_id=colony_id, tenant_id=tenant_id)
             if not page:
-                raise ValueError(f"Page {virtual_page_id} not found in VCM cache")
+                raise ValueError(f"Page {page_id}:{colony_id}:{tenant_id} not found in VCM cache")
 
             # Load page on specific client via LLMCluster
             # This ensures the page is loaded on the correct replica as decided by allocation strategy
@@ -945,37 +1038,44 @@ class VirtualContextManager:
             # Update VCM page table (Layer 2)
             # Note: Layer 1 (VLLMDeploymentState) is updated by VLLMDeployment.load_page()
             # In Phase 2, this Layer 2 update will be moved to event handler
-            await self.page_table.register_loaded_page(
-                page_id=virtual_page_id,
+            faults_to_signal_completion = await self.page_table.register_loaded_page(
+                page_id=page_id,
+                colony_id=colony_id,
+                tenant_id=tenant_id,
                 replica_id=client_id,
                 deployment_name=deployment_name,
-                tenant_id=tenant_id,
                 size=page_size,
             )
+            # Check if this resolves any pending page faults
+            await self._resolve_page_faults_for_page(faults_to_signal_completion)
 
             logger.debug(
-                f"Loaded page {virtual_page_id} on {deployment_name}/{client_id} "
+                f"Loaded page {page_id} on {deployment_name}/{client_id} "
                 f"(VCM page table updated, deployment state updated by VLLMDeployment)"
             )
             return True
 
         except Exception as e:
             logger.error(
-                f"Error loading page {virtual_page_id} on {deployment_name}/{client_id}: {e}",
+                f"Error loading page {page_id} on {deployment_name}/{client_id}: {e}",
                 exc_info=True,
             )
             return False
 
     async def _evict_page_from_client(
         self,
-        virtual_page_id: ContextPageId,
+        page_id: ContextPageId,
+        colony_id: str,
+        tenant_id: str,
         deployment_name: str,
         client_id: str,
     ) -> bool:
         """Evict a page from a specific client.
 
         Args:
-            virtual_page_id: Virtual page ID
+            page_id: Virtual page ID
+            colony_id: Colony ID
+            tenant_id: Tenant ID
             deployment_name: Deployment name
             client_id: Client ID
 
@@ -985,11 +1085,11 @@ class VirtualContextManager:
         try:
             # Get VLLMDeployment handle and call evict_page
             deployment_handle = serving.get_deployment(self.app_name, deployment_name)
-            success = await deployment_handle.evict_page(virtual_page_id)
+            success = await deployment_handle.evict_page(page_id, colony_id, tenant_id)
 
             if not success:
                 logger.warning(
-                    f"Failed to evict page {virtual_page_id} from {deployment_name}/{client_id}"
+                    f"Failed to evict page {page_id}:{colony_id}:{tenant_id} from {deployment_name}/{client_id}"
                 )
                 return False
 
@@ -998,20 +1098,22 @@ class VirtualContextManager:
             # In Phase 2, this Layer 2 update will be moved to event handler
             async for state in self.page_table.state_manager.write_transaction():
                 state.register_page_eviction(
-                    virtual_page_id=virtual_page_id,
+                    page_id=page_id,
+                    colony_id=colony_id,
+                    tenant_id=tenant_id,
                     deployment_name=deployment_name,
                     client_id=client_id,
                 )
 
             logger.debug(
-                f"Evicted page {virtual_page_id} from {deployment_name}/{client_id} "
+                f"Evicted page {page_id}:{colony_id}:{tenant_id} from {deployment_name}/{client_id} "
                 f"(VCM page table updated, deployment state updated by VLLMDeployment)"
             )
             return True
 
         except Exception as e:
             logger.error(
-                f"Error evicting page {virtual_page_id} from {deployment_name}/{client_id}: {e}",
+                f"Error evicting page {page_id}:{colony_id}:{tenant_id} from {deployment_name}/{client_id}: {e}",
                 exc_info=True,
             )
             return False
@@ -1024,7 +1126,7 @@ class VirtualContextManager:
 
         This background task:
         1. Pops faults from the priority queue
-        2. Uses allocate_pages to load missing pages
+        2. Uses _allocate_pages to load missing pages
         3. Signals asyncio.Event to notify waiters
         4. Supports batching and optimization
 
@@ -1051,7 +1153,7 @@ class VirtualContextManager:
                     # Check which pages are already loaded
                     pages_to_load = []
                     for page_id in fault.page_ids:
-                        if not await self.page_table.is_page_loaded(page_id):
+                        if not await self.page_table.is_page_loaded(page_id, fault.colony_id, fault.tenant_id):
                             pages_to_load.append(page_id)
 
                     if not pages_to_load:
@@ -1068,13 +1170,14 @@ class VirtualContextManager:
                     allocation_request = PageAllocationRequest(
                         virtual_page_ids=pages_to_load,
                         group_id=fault.group_id,
+                        colony_id=fault.colony_id,
                         tenant_id=fault.tenant_id,
                         priority=fault.priority,
                         # Could add affinity_pages here for spatial locality optimization
                     )
 
                     # Allocate pages
-                    response: PageAllocationResponse = await self.allocate_pages(allocation_request)
+                    response: PageAllocationResponse = await self._allocate_pages(allocation_request)
 
                     # Check if all pages were allocated successfully
                     success = len(response.failed_pages) == 0
@@ -1085,6 +1188,8 @@ class VirtualContextManager:
                             try:
                                 await self.page_table.lock_page(
                                     page_id=page_id,
+                                    colony_id=fault.colony_id,
+                                    tenant_id=fault.tenant_id,
                                     locked_by=fault.requesting_agent_id or "unknown",
                                     lock_duration_s=fault.lock_duration_s,
                                     reason=fault.lock_reason,
@@ -1165,6 +1270,8 @@ class VirtualContextManager:
     async def lock_page(
         self,
         page_id: str,
+        colony_id: str | None,
+        tenant_id: str | None,
         locked_by: str,
         lock_duration_s: float,
         reason: str = "",
@@ -1174,6 +1281,8 @@ class VirtualContextManager:
 
         Args:
             page_id: ID of the page to lock
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
             locked_by: Identifier of who is locking the page (agent_id, session_id, run_id, etc.)
             lock_duration_s: Lock duration in seconds
             reason: Human-readable reason for the lock
@@ -1185,8 +1294,13 @@ class VirtualContextManager:
         Raises:
             ValueError: If lock_duration_s is negative or zero
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         return await self.page_table.lock_page(
             page_id=page_id,
+            colony_id=colony_id,
+            tenant_id=tenant_id,
             locked_by=locked_by,
             lock_duration_s=lock_duration_s,
             reason=reason,
@@ -1194,27 +1308,36 @@ class VirtualContextManager:
         )
 
     @serving.endpoint
-    async def unlock_page(self, page_id: str) -> bool:
+    async def unlock_page(self, page_id: str, colony_id: str | None, tenant_id: str | None) -> bool:
         """Unlock a page, allowing it to be evicted.
 
         Args:
             page_id: Page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
 
         Returns:
             True if page was unlocked, False if page wasn't locked
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         return await self.page_table.unlock_page(page_id)
 
     @serving.endpoint
     async def extend_page_lock(
         self,
         page_id: str,
+        colony_id: str | None,
+        tenant_id: str | None,
         additional_duration_s: float,
     ) -> bool:
         """Extend the lock duration for a locked page.
 
         Args:
             page_id: Page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
             additional_duration_s: Additional seconds to add to lock duration
 
         Returns:
@@ -1223,24 +1346,39 @@ class VirtualContextManager:
         Raises:
             ValueError: If additional_duration_s is negative
         """
-        return await self.page_table.extend_page_lock(page_id, additional_duration_s)
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
+        return await self.page_table.extend_page_lock(page_id, colony_id, tenant_id, additional_duration_s)
 
     @serving.endpoint
-    async def get_page_lock_info(self, page_id: str) -> dict[str, Any] | None:
+    async def get_page_lock_info(
+        self,
+        page_id: str,
+        colony_id: str | None,
+        tenant_id: str | None,
+    ) -> dict[str, Any] | None:
         """Get lock information for a page.
 
         Args:
             page_id: Page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
 
         Returns:
             Lock info dict if page is locked, None otherwise
         """
-        lock = await self.page_table.get_page_lock(page_id)
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
+        lock = await self.page_table.get_page_lock(page_id, colony_id, tenant_id)
         if not lock:
             return None
 
         return {
             "page_id": lock.page_id,
+            "colony_id": lock.colony_id,
+            "tenant_id": lock.tenant_id,
             "locked_by": lock.locked_by,
             "lock_expires_at": lock.lock_expires_at,
             "remaining_time_s": lock.remaining_time_s(),
@@ -1270,31 +1408,31 @@ class VirtualContextManager:
     # === Page Graph Visualization ===
 
     @serving.endpoint
-    async def get_page_graph_groups(self) -> list[dict[str, Any]]:
-        """List (tenant_id, group_id, scope_id) tuples that have page graphs.
+    async def get_all_mapped_scopes(self) -> list[dict[str, Any]]:
+        """List (tenant_id, colony_id, scope_id) tuples that have page graphs.
 
         Reads mapped_scopes from shared state to discover which groups
         might have page graphs stored in PageStorage.
         """
-        groups: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
+        mapping_tuples: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
         async for state in self.page_table.state_manager.read_transaction():
-            for scope_id, mapping in state.mapped_scopes.items():
-                key = (mapping.tenant_id, mapping.group_id)
+            for _scope_key, mapping in state.mapped_scopes.items():
+                key = (mapping.tenant_id, mapping.colony_id, mapping.scope_id)
                 if key not in seen:
                     seen.add(key)
-                    groups.append({
+                    mapping_tuples.append({
                         "tenant_id": mapping.tenant_id,
-                        "group_id": mapping.group_id,
-                        "scope_id": scope_id,
+                        "colony_id": mapping.colony_id,
+                        "scope_id": mapping.scope_id,
                     })
-        return groups
+        return mapping_tuples
 
     @serving.endpoint
     async def get_page_graph_data(
         self,
-        tenant_id: str,
-        group_id: str,
+        colony_id: str | None,
+        tenant_id: str | None,
         max_nodes: int = 5000,
     ) -> dict[str, Any]:
         """Get page graph as JSON-serializable node/edge lists for 3D visualization.
@@ -1302,11 +1440,12 @@ class VirtualContextManager:
         Loads the nx.DiGraph from PageStorage, optionally prunes to max_nodes
         (keeping highest-degree nodes), computes 3D positions via spring_layout.
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         import networkx as nx
 
-        graph = await self.page_storage.load_page_graph(
-            tenant_id=tenant_id, group_id=group_id, cached=False,
-        )
+        graph = await self.page_storage.load_page_graph(cached=False)
 
         if graph is None or len(graph.nodes) == 0:
             return {"nodes": [], "edges": [], "node_count": 0, "edge_count": 0}
@@ -1350,7 +1489,7 @@ class VirtualContextManager:
             "node_count": len(nodes),
             "edge_count": len(edges),
             "tenant_id": tenant_id,
-            "group_id": group_id,
+            "colony_id": colony_id,
         }
 
     # === Branch Management API (Copy-on-Write Support) ===
@@ -1358,7 +1497,8 @@ class VirtualContextManager:
     @serving.endpoint
     async def create_branch(
         self,
-        tenant_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
         parent_branch_id: BranchId | None = None,
         name: str | None = None,
     ) -> VCMBranch:
@@ -1370,14 +1510,20 @@ class VirtualContextManager:
         3. Child branch inherits parent's pages (no copying yet)
         4. First modification triggers copy-on-write
 
+        NOTE: Colony ID and Tenant ID must be provided in the serving context.
+
         Args:
-            tenant_id: Owning tenant
+            colony_id: Optional colony identifier (for grouping related page sources)
+            tenant_id: Optional tenant identifier (uses context if None)
             parent_branch_id: Parent branch to fork from (None for root)
             name: Human-readable name
 
         Returns:
             Created VCMBranch
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         import uuid
 
         branch_id = f"branch_{uuid.uuid4().hex[:12]}"
@@ -1387,14 +1533,15 @@ class VirtualContextManager:
         base_snapshot: set[str] = set()
 
         if parent_branch_id:
-            parent = await self.page_table.get_branch(parent_branch_id)
+            parent = await self.page_table.get_branch(parent_branch_id, colony_id, tenant_id)
             if not parent:
                 raise ValueError(f"Parent branch {parent_branch_id} not found")
             # Inherit parent's effective pages (including its inherited pages)
-            base_snapshot = await self.page_table.get_branch_effective_pages(parent_branch_id)
+            base_snapshot = await self.page_table.get_branch_effective_pages(parent_branch_id, colony_id, tenant_id)
 
         branch = VCMBranch(
             branch_id=branch_id,
+            colony_id=colony_id,
             tenant_id=tenant_id,
             parent_branch_id=parent_branch_id,
             name=name or f"branch_{branch_id[:8]}",
@@ -1413,7 +1560,12 @@ class VirtualContextManager:
         return branch
 
     @serving.endpoint
-    async def get_branch(self, branch_id: BranchId) -> VCMBranch | None:
+    async def get_branch(
+        self,
+        branch_id: BranchId,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> VCMBranch | None:
         """Get a branch by ID.
 
         Args:
@@ -1422,18 +1574,23 @@ class VirtualContextManager:
         Returns:
             VCMBranch if found, None otherwise
         """
-        return await self.page_table.get_branch(branch_id)
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
+        return await self.page_table.get_branch(branch_id, colony_id, tenant_id)
 
     @serving.endpoint
-    async def list_branches(self, tenant_id: str) -> list[VCMBranch]:
+    async def list_branches(self, tenant_id: str | None = None) -> list[VCMBranch]:
         """List all branches for a tenant.
 
         Args:
-            tenant_id: Tenant identifier
+            tenant_id: Tenant identifier. If None, uses tenant_id from serving context.
 
         Returns:
             List of VCMBranch objects for this tenant
         """
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         return await self.page_table.list_branches(tenant_id)
 
     @serving.endpoint
@@ -1441,6 +1598,8 @@ class VirtualContextManager:
         self,
         page_id: str,
         branch_id: BranchId,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> VirtualContextPage | None:
         """Get a page as seen from a specific branch.
 
@@ -1451,12 +1610,17 @@ class VirtualContextManager:
         Args:
             page_id: Base page ID
             branch_id: Branch to read from
+            colony_id: Optional colony ID for isolation within same tenant
+            tenant_id: Optional tenant ID for multi-tenancy
 
         Returns:
             VirtualContextPage (overlay or original)
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         # Resolve effective page ID through overlay chain
-        effective_page_id = await self.page_table.get_effective_page_id(page_id, branch_id)
+        effective_page_id = await self.page_table.get_effective_page_id(page_id, branch_id, colony_id, tenant_id)
 
         # Retrieve from storage
         return await self.page_storage.retrieve_page(effective_page_id)
@@ -1468,6 +1632,8 @@ class VirtualContextManager:
         branch_id: BranchId,
         new_tokens: list[int],
         modifier_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
         metadata_updates: dict[str, Any] | None = None,
     ) -> VirtualContextPage:
         """Modify a page on a branch with copy-on-write.
@@ -1484,13 +1650,18 @@ class VirtualContextManager:
             branch_id: Branch to modify on
             new_tokens: New token content
             modifier_id: ID of who is modifying (agent_id, session_id)
+            colony_id: Optional colony ID for isolation within same tenant
+            tenant_id: Optional tenant ID for multi-tenancy
             metadata_updates: Additional metadata to merge
 
         Returns:
             The overlay page (new or updated)
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         # Get branch
-        branch = await self.page_table.get_branch(branch_id)
+        branch = await self.page_table.get_branch(branch_id, colony_id, tenant_id)
         if not branch:
             raise ValueError(f"Branch {branch_id} not found")
 
@@ -1506,9 +1677,10 @@ class VirtualContextManager:
             # Create updated overlay with new tokens
             updated_overlay = VirtualContextPage(
                 page_id=overlay.page_id,
+                colony_id=overlay.colony_id,
+                tenant_id=overlay.tenant_id,
                 tokens=new_tokens,
                 size=len(new_tokens),
-                tenant_id=overlay.tenant_id,
                 branch_id=branch_id,
                 parent_page_id=overlay.parent_page_id,
                 is_overlay=True,
@@ -1528,7 +1700,7 @@ class VirtualContextManager:
         else:
             # Create new overlay (copy-on-write)
             # First, get the effective page (could be parent's overlay or original)
-            effective_page_id = await self.page_table.get_effective_page_id(page_id, branch_id)
+            effective_page_id = await self.page_table.get_effective_page_id(page_id, branch_id, colony_id, tenant_id)
 
             base_page = await self.page_storage.retrieve_page(effective_page_id)
             if not base_page:
@@ -1540,9 +1712,10 @@ class VirtualContextManager:
 
             overlay = VirtualContextPage(
                 page_id=overlay_id,
+                colony_id=branch.colony_id,
+                tenant_id=branch.tenant_id,
                 tokens=new_tokens,
                 size=len(new_tokens),
-                tenant_id=branch.tenant_id,
                 branch_id=branch_id,
                 parent_page_id=effective_page_id,
                 is_overlay=True,
@@ -1560,7 +1733,7 @@ class VirtualContextManager:
             await self.page_storage.store_page(overlay)
 
             # Register overlay in branch
-            await self.page_table.register_overlay(branch_id, page_id, overlay_id)
+            await self.page_table.register_overlay(branch_id, page_id, overlay_id, colony_id, tenant_id)
 
             logger.info(f"Created CoW overlay {overlay_id} for page {page_id} on branch {branch_id}")
             return overlay
@@ -1571,6 +1744,8 @@ class VirtualContextManager:
         branch_id: BranchId,
         tokens: list[int],
         creator_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         page_id: str | None = None,
     ) -> VirtualContextPage:
@@ -1583,6 +1758,8 @@ class VirtualContextManager:
             branch_id: Branch to create page on
             tokens: Token content
             creator_id: ID of who is creating the page
+            colony_id: Optional colony ID for isolation within same tenant
+            tenant_id: Optional tenant ID for multi-tenancy
             metadata: Optional metadata
             page_id: Optional page ID (generated if None)
 
@@ -1591,8 +1768,11 @@ class VirtualContextManager:
         """
         import uuid
 
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         # Get branch
-        branch = await self.page_table.get_branch(branch_id)
+        branch = await self.page_table.get_branch(branch_id, colony_id, tenant_id)
         if not branch:
             raise ValueError(f"Branch {branch_id} not found")
 
@@ -1604,6 +1784,7 @@ class VirtualContextManager:
             page_id=page_id,
             tokens=tokens,
             size=len(tokens),
+            colony_id=branch.colony_id,
             tenant_id=branch.tenant_id,
             branch_id=branch_id,
             parent_page_id=None,  # Not an overlay
@@ -1619,7 +1800,7 @@ class VirtualContextManager:
         await self.page_storage.store_page(page)
 
         # Register as new page on branch
-        await self.page_table.register_new_page_on_branch(branch_id, page_id)
+        await self.page_table.register_new_page_on_branch(branch_id, page_id, colony_id, tenant_id)
 
         logger.info(f"Created new page {page_id} on branch {branch_id}")
         return page
@@ -1629,6 +1810,8 @@ class VirtualContextManager:
         self,
         source_branch_id: BranchId,
         target_branch_id: BranchId,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
         strategy: str = "last_write_wins",
     ) -> dict[str, Any]:
         """Merge source branch into target branch.
@@ -1641,13 +1824,19 @@ class VirtualContextManager:
         Args:
             source_branch_id: Branch to merge from
             target_branch_id: Branch to merge into
+            colony_id: Optional colony ID for isolation within same tenant
+            tenant_id: Optional tenant ID for multi-tenancy
             strategy: Merge strategy
 
         Returns:
             Merge result with conflicts and applied changes
         """
-        source = await self.page_table.get_branch(source_branch_id)
-        target = await self.page_table.get_branch(target_branch_id)
+
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
+        source = await self.page_table.get_branch(source_branch_id, colony_id, tenant_id)
+        target = await self.page_table.get_branch(target_branch_id, colony_id, tenant_id)
 
         if not source or not target:
             return {"success": False, "error": "Source or target branch not found"}
@@ -1724,10 +1913,10 @@ class VirtualContextManager:
         self,
         *,
         scope_id: str,
-        group_id: str,
-        tenant_id: str,
         source_type: str = "blackboard",
         config: MmapConfig | None = None,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
         **kwargs,
     ) -> MmapResult:
         """Map an application scope (blackboard entries, memories, files, knowledge graphs, etc.) into VCM pages.
@@ -1742,10 +1931,10 @@ class VirtualContextManager:
 
         Args:
             scope_id: The scope to map (e.g., "tenant:acme:discoveries"). Unique identifier for the data source.
-            group_id: Identifier for grouping related context sources into one address space (e.g., VMR ID)
-            tenant_id: Tenant ID for multi-tenancy
             source_type: Type of the source (e.g., "blackboard", "memory", "file", "kg"). This controls the ContextPageSource to be created.
             config: Mapping configuration (controls flushing, locality, etc.)
+            colony_id: Identifier for grouping related context sources (e.g., VMR ID)
+            tenant_id: Tenant ID for multi-tenancy
             **kwargs: Additional parameters for future extensibility (e.g., filters, initial load options)
 
         Returns:
@@ -1753,13 +1942,18 @@ class VirtualContextManager:
         """
         config = config or MmapConfig()
 
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
+        key = (scope_id, colony_id, tenant_id)
+
         # Check if already mapped
         async for state in self.page_table.state_manager.read_transaction():
-            if scope_id in state.mapped_scopes:
+            if key in state.mapped_scopes:
                 return MmapResult(
                     status="already_mapped",
                     scope_id=scope_id,
-                    group_id=group_id,
+                    colony_id=colony_id,
                     tenant_id=tenant_id,
                     message=f"Scope {scope_id} is already mapped",
                 )
@@ -1767,7 +1961,7 @@ class VirtualContextManager:
         # Record mapping in shared state (visible to all replicas)
         mapping_config = MappedScopeConfig(
             scope_id=scope_id,
-            group_id=group_id,
+            colony_id=colony_id,
             tenant_id=tenant_id,
             config=config,
             source_type=source_type,
@@ -1776,33 +1970,33 @@ class VirtualContextManager:
         )
 
         async for state in self.page_table.state_manager.write_transaction():
-            state.mapped_scopes[scope_id] = mapping_config
+            state.mapped_scopes[key] = mapping_config
 
         # Materialize locally on this replica
         try:
             await self._materialize_scope_mapping(
                 scope_id=scope_id,
-                group_id=group_id,
+                colony_id=colony_id,
                 tenant_id=tenant_id,
                 source_type=source_type,
                 config=config,
                 **kwargs
             )
         except Exception as e:
-            logger.error(f"Failed to materialize scope mapping for {scope_id} (tenant={tenant_id}, group={group_id}): {e}", exc_info=True)
+            logger.error(f"Failed to materialize scope mapping for {scope_id} (tenant={tenant_id}, colony={colony_id}): {e}", exc_info=True)
             return MmapResult(
                 status="error",
                 scope_id=scope_id,
-                group_id=group_id,
+                colony_id=colony_id,
                 tenant_id=tenant_id,
                 message=f"Mapping recorded but materialization failed: {e}",
             )
 
-        logger.info(f"Mapped scope {scope_id} into VCM (tenant={tenant_id}, group={group_id})")
+        logger.info(f"Mapped scope {scope_id} into VCM (tenant={tenant_id}, colony={colony_id})")
         return MmapResult(
             status="mapped",
             scope_id=scope_id,
-            group_id=group_id,
+            colony_id=colony_id,
             tenant_id=tenant_id,
             message=f"Scope {scope_id} mapped successfully",
         )
@@ -1812,8 +2006,8 @@ class VirtualContextManager:
         self,
         *,
         scope_id: str,
-        group_id: str,
-        tenant_id: str
+        colony_id: str | None = None,
+        tenant_id: str | None = None
     ) -> MmapResult:
         """Unmap an application scope from VCM.
 
@@ -1822,41 +2016,46 @@ class VirtualContextManager:
 
         Args:
             scope_id: The scope to unmap
-            group_id: Identifier for grouping related context sources (e.g., VMR ID)
+            colony_id: Identifier for grouping related context sources (e.g., VMR ID)
             tenant_id: Tenant ID for multi-tenancy
 
         Returns:
             MmapResult with status and message
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
+        key = (scope_id, colony_id, tenant_id)
+
         # Check if mapped
         is_mapped = False
         async for state in self.page_table.state_manager.read_transaction():
-            is_mapped = scope_id in state.mapped_scopes
+            is_mapped = key in state.mapped_scopes
 
         if not is_mapped:
             return MmapResult(
                 status="not_mapped",
                 scope_id=scope_id,
-                group_id=group_id,
+                colony_id=colony_id,
                 tenant_id=tenant_id,
                 message=f"Scope {scope_id} is not mapped",
             )
 
         # Shut down local page source if materialized
-        if scope_id in self._local_mapped_scopes:
-            mapped = self._local_mapped_scopes.pop(scope_id)
+        if key in self._local_mapped_scopes:
+            mapped = self._local_mapped_scopes.pop(key)
             await mapped.source.shutdown()
-            logger.info(f"Shut down local page source for scope {scope_id} (tenant={tenant_id}, group={group_id})")
+            logger.info(f"Shut down local page source for scope {scope_id} (tenant={tenant_id}, colony={colony_id})")
 
         # Remove from shared state
         async for state in self.page_table.state_manager.write_transaction():
-            state.mapped_scopes.pop(scope_id, None)
+            state.mapped_scopes.pop(key, None)
 
-        logger.info(f"Unmapped scope {scope_id} from VCM (tenant={tenant_id}, group={group_id})")
+        logger.info(f"Unmapped scope {scope_id} from VCM (tenant={tenant_id}, colony={colony_id})")
         return MmapResult(
             status="unmapped",
             scope_id=scope_id,
-            group_id=group_id,
+            colony_id=colony_id,
             tenant_id=tenant_id,
             message=f"Scope {scope_id} unmapped successfully",
         )
@@ -1865,6 +2064,8 @@ class VirtualContextManager:
     async def get_pages_for_scope(
         self,
         scope_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
         include_metadata: bool = False,
     ) -> list[dict]:
         """List all VCM pages created from an application scope.
@@ -1874,13 +2075,22 @@ class VirtualContextManager:
 
         Args:
             scope_id: The scope to query
+            colony_id: Identifier for grouping related context sources (e.g., VMR ID)
+            tenant_id: Tenant ID for multi-tenancy
             include_metadata: Whether to include full page metadata
 
         Returns:
             List of page info dicts
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         pages = await self.page_storage.query_pages_by_metadata(
-            filters={"scope_id": scope_id},
+            filters={
+                "scope_id": scope_id,
+                "colony_id": colony_id,
+                "tenant_id": tenant_id,
+            },
         )
         result = []
         for page in pages:
@@ -1895,7 +2105,12 @@ class VirtualContextManager:
         return result
 
     @serving.endpoint
-    async def is_application_scope_mapped(self, scope_id: str) -> bool:
+    async def is_application_scope_mapped(
+        self,
+        scope_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None
+    ) -> bool:
         """Check if an application scope is currently mapped into VCM.
 
         Args:
@@ -1904,12 +2119,21 @@ class VirtualContextManager:
         Returns:
             True if mapped, False otherwise
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+        key = (scope_id, colony_id, tenant_id)
+
         async for state in self.page_table.state_manager.read_transaction():
-            return scope_id in state.mapped_scopes
+            return key in state.mapped_scopes
         return False
 
     @serving.endpoint
-    async def get_application_scope_mapping_status(self, scope_id: str) -> dict | None:
+    async def get_application_scope_mapping_status(
+        self,
+        scope_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None
+    ) -> dict | None:
         """Get detailed status of an application scope mapping.
 
         Args:
@@ -1918,8 +2142,13 @@ class VirtualContextManager:
         Returns:
             Dict with mapping details, or None if not mapped
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
+        key = (scope_id, colony_id, tenant_id)
+
         async for state in self.page_table.state_manager.read_transaction():
-            mapping = state.mapped_scopes.get(scope_id)
+            mapping = state.mapped_scopes.get(key)
             if mapping is None:
                 return None
             result = {
@@ -1927,18 +2156,23 @@ class VirtualContextManager:
                 "config": mapping.config.model_dump(),
                 "tenant_id": mapping.tenant_id,
                 "created_at": mapping.created_at,
-                "materialized_locally": scope_id in self._local_mapped_scopes,
+                "materialized_locally": key in self._local_mapped_scopes,
             }
             # Add page count if materialized
-            if scope_id in self._local_mapped_scopes:
-                source = self._local_mapped_scopes[scope_id].source
+            if key in self._local_mapped_scopes:
+                source = self._local_mapped_scopes[key].source
                 result["page_count"] = len(await source.get_all_mapped_pages())
                 result["tracked_records"] = len(await source.get_all_mapped_records())
             return result
         return None
 
     @serving.endpoint
-    async def get_application_records_in_page(self, page_id: str) -> list[str]:
+    async def get_application_records_in_page(
+        self,
+        page_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None
+    ) -> list[str]:
         """Get the application record keys that were ingested into a VCM page.
 
         This is a provenance/debugging endpoint for understanding what
@@ -1950,6 +2184,9 @@ class VirtualContextManager:
         Returns:
             List of application record keys in the page
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         # Search across all local mapped scopes for the record_to_page mapping
         for _scope_id, mapped in self._local_mapped_scopes.items():
             records = await mapped.source.get_record_ids_for_page(page_id)
@@ -2019,8 +2256,6 @@ class VirtualContextManager:
             return True  # Continue subscription despite error
 
         try:
-            from .events import PageLoadedEvent, PageEvictedEvent, PageLoadFailedEvent
-
             # Extract event data from update
             event_data = update.data.get("event_data")
             if not event_data:
@@ -2040,7 +2275,7 @@ class VirtualContextManager:
                 event = PageLoadFailedEvent(**event_data)
                 await self._on_page_load_failed(event)
             else:
-                logger.warning(f"Unknown event type: {event_type}")
+                raise ValueError(f"Unknown event type: {event_type}")
 
             return True  # Continue subscription
 
@@ -2048,7 +2283,7 @@ class VirtualContextManager:
             logger.error(f"Error handling page event: {e}", exc_info=True)
             return True  # Continue subscription despite error
 
-    async def _on_page_loaded(self, event: Any):
+    async def _on_page_loaded(self, event: PageLoadedEvent):
         """Handle PageLoadedEvent - reconcile Layer 2 (VirtualPageTableState).
 
         This is triggered by VLLMDeployment after it updates Layer 1.
@@ -2060,23 +2295,23 @@ class VirtualContextManager:
 
         try:
             # Update VCM page table (Layer 2)
-            await self.page_table.register_loaded_page(
+            faults_to_signal_completion = await self.page_table.register_loaded_page(
                 page_id=event.page_id,
+                colony_id=event.colony_id,
+                tenant_id=event.tenant_id,
                 replica_id=event.client_id,
                 deployment_name=event.deployment_name,
-                tenant_id=event.tenant_id,
                 size=event.size,
             )
+            # Check if this resolves any pending page faults
+            await self._resolve_page_faults_for_page(faults_to_signal_completion)
 
             logger.debug(f"Updated VCM page table for page {event.page_id}")
-
-            # Check if this resolves any pending page faults
-            await self._resolve_page_faults_for_page(event.page_id)
 
         except Exception as e:
             logger.error(f"Error handling PageLoadedEvent: {e}", exc_info=True)
 
-    async def _on_page_evicted(self, event: Any):
+    async def _on_page_evicted(self, event: PageEvictedEvent):
         """Handle PageEvictedEvent - reconcile Layer 2."""
         logger.info(
             f"VCM received PageEvictedEvent: page={event.page_id}, "
@@ -2087,7 +2322,9 @@ class VirtualContextManager:
             # Update VCM page table (Layer 2)
             async for state in self.page_table.state_manager.write_transaction():
                 state.register_page_eviction(
-                    virtual_page_id=event.page_id,
+                    page_id=event.page_id,
+                    colony_id=event.colony_id,
+                    tenant_id=event.tenant_id,
                     deployment_name=event.deployment_name,
                     client_id=event.client_id,
                 )
@@ -2097,7 +2334,7 @@ class VirtualContextManager:
         except Exception as e:
             logger.error(f"Error handling PageEvictedEvent: {e}", exc_info=True)
 
-    async def _on_page_load_failed(self, event: Any):
+    async def _on_page_load_failed(self, event: PageLoadFailedEvent):
         """Handle PageLoadFailedEvent - update fault tracking."""
         logger.warning(
             f"VCM received PageLoadFailedEvent: page={event.page_id}, "
@@ -2110,20 +2347,16 @@ class VirtualContextManager:
             f"{event.deployment_name}/{event.client_id}: {event.error}"
         )
 
-    async def _resolve_page_faults_for_page(self, page_id: str):
+    async def _resolve_page_faults_for_page(self, faults_to_signal_completion: list[str]):
         """Resolve any pending page faults for a specific page.
 
         Called when a page is successfully loaded.
         """
         # Signal any pending events for this page
-        # Note: We'd need to track which fault_id corresponds to which page_id
-        # For now, this simplified implementation signals all pending faults
-        events_to_signal = list(self._page_fault_events.keys())
-
-        for fault_id in events_to_signal:
-            if fault_id in self._page_fault_events:
+        for fault_id, event in self._page_fault_events.items():
+            if fault_id in faults_to_signal_completion:
                 self._page_fault_events[fault_id].set()
-                logger.debug(f"Resolved page fault {fault_id} due to page {page_id} loaded")
+                logger.debug(f"Resolved page fault {fault_id} due to page {event.page_id} loaded")
 
     # === Application ↔ VCM Scope Mapping Internals ===
 
@@ -2131,7 +2364,7 @@ class VirtualContextManager:
         self,
         *,
         scope_id: str,
-        group_id: str,
+        colony_id: str,
         tenant_id: str,
         source_type: str,
         config: MmapConfig,
@@ -2141,21 +2374,21 @@ class VirtualContextManager:
 
         Args:
             scope_id: The scope being mapped
-            group_id: Identifier for grouping related context sources (e.g., VMR ID)
+            colony_id: Identifier for grouping related context sources (e.g., VMR ID)
             tenant_id: Tenant ID for multi-tenancy
             source_type: Type of the source (e.g., "blackboard", "memory", "file", "kg")
             config: Mapping configuration
             **kwargs: Additional parameters for context page source creation
         """
-        scope_key = f"{tenant_id}:{group_id}:{scope_id}"
+        scope_key = f"{tenant_id}:{colony_id}:{scope_id}"
         if scope_key in self._local_mapped_scopes:
-            logger.debug(f"Scope {tenant_id}:{group_id}:{scope_id} already materialized locally, skipping")
+            logger.debug(f"Scope {tenant_id}:{colony_id}:{scope_id} already materialized locally, skipping")
             return
 
         # Create page source
         source = ContextPageSourceFactory.create(
             scope_id=scope_id,
-            group_id=group_id,
+            colony_id=colony_id,
             tenant_id=tenant_id,
             source_type=source_type,
             mmap_config=config,
@@ -2169,15 +2402,15 @@ class VirtualContextManager:
             source=source,
             config=config,
             scope_id=scope_id,
-            group_id=group_id,
+            colony_id=colony_id,
             tenant_id=tenant_id,
         )
 
         # Pin pages if configured
         if config.pinned:
-            await self._pin_scope_pages(scope_id)
+            await self._pin_scope_pages(scope_id, colony_id, tenant_id)
 
-        logger.info(f"Materialized scope mapping: scope={scope_id} (tenant={tenant_id}, group={group_id})")
+        logger.info(f"Materialized scope mapping: scope={scope_id} (tenant={tenant_id}, colony={colony_id})")
 
     async def _reconcile_scope_mappings(self) -> None:
         """Synchronize local scope mappings with shared state.
@@ -2191,47 +2424,47 @@ class VirtualContextManager:
           a previous replica crashed mid-processing.
         """
         # Read shared state
-        shared_scopes: dict[str, MappedScopeConfig] = {}
+        shared_scopes: dict[tuple[str, str, str], MappedScopeConfig] = {}
         async for state in self.page_table.state_manager.read_transaction():
             shared_scopes = dict(state.mapped_scopes)
 
         # Materialize new mappings
-        for scope_id, mapping in shared_scopes.items():
-            if scope_id not in self._local_mapped_scopes:
+        for key, mapping in shared_scopes.items():
+            if key not in self._local_mapped_scopes:
                 try:
                     await self._materialize_scope_mapping(
-                        scope_id=scope_id,
+                        scope_id=mapping.scope_id,
                         tenant_id=mapping.tenant_id,
-                        group_id=mapping.group_id,
+                        colony_id=mapping.colony_id,
                         source_type=mapping.source_type,
                         config=mapping.config,
                         **mapping.kwargs,
                     )
-                    logger.info(f"Reconciliation: materialized scope mapping {scope_id}")
+                    logger.info(f"Reconciliation: materialized scope mapping {mapping.scope_id}")
                 except Exception as e:
                     logger.warning(
-                        f"Reconciliation: failed to materialize scope {scope_id}: {e}"
+                        f"Reconciliation: failed to materialize scope {mapping.scope_id}: {e}"
                     )
 
         # Clean up stale local mappings
         stale = [
-            sid for sid in self._local_mapped_scopes
-            if sid not in shared_scopes
+            key for key in self._local_mapped_scopes
+            if key not in shared_scopes
         ]
-        for scope_id in stale:
-            mapped = self._local_mapped_scopes.pop(scope_id)
+        for scope_key in stale:
+            mapped = self._local_mapped_scopes.pop(scope_key)
             try:
                 await mapped.source.shutdown()
             except Exception as e:
-                logger.warning(f"Error shutting down stale scope mapping {scope_id}: {e}")
-            logger.info(f"Reconciliation: cleaned up stale scope mapping {scope_id}")
+                logger.warning(f"Error shutting down stale scope mapping {scope_key}: {e}")
+            logger.info(f"Reconciliation: cleaned up stale scope mapping {scope_key}")
 
         # XAUTOCLAIM orphaned events from crashed replicas
         if self.redis_client:
-            for scope_id, mapped in self._local_mapped_scopes.items():
+            for _scope_key, mapped in self._local_mapped_scopes.items():
                 await mapped.source.claim_orphaned_events()
 
-    async def _pin_scope_pages(self, scope_id: str) -> None:
+    async def _pin_scope_pages(self, scope_id: str, colony_id: str, tenant_id: str) -> None:
         """Lock all pages from a scope to prevent eviction.
 
         Used when MmapConfig.pinned=True. Locks each page using the
@@ -2248,6 +2481,8 @@ class VirtualContextManager:
             try:
                 await self.page_table.lock_page(
                     page_id=page.page_id,
+                    colony_id=colony_id,
+                    tenant_id=tenant_id,
                     locked_by=f"mmap:pinned:{scope_id}",
                     lock_duration_s=86400 * 365,  # ~1 year - TODO: Make configurable?
                     reason=f"Pinned scope: {scope_id}",
@@ -2303,28 +2538,34 @@ class VirtualContextManager:
                     missing_in_layer1 = layer2_pages - layer1_pages
 
                     # Reconcile: Layer 1 is source of truth for physical state
-                    for page_id in missing_in_layer2:
+                    for page_id, colony_id, tenant_id in missing_in_layer2:
                         logger.warning(
                             f"Reconciling: Adding page {page_id} to Layer 2 "
                             f"(present in Layer 1: {deployment_name}/{client_id})"
                         )
-                        await self.page_table.register_loaded_page(
+                        faults_to_signal_completion = await self.page_table.register_loaded_page(
                             page_id=page_id,
+                            colony_id=colony_id,
+                            tenant_id=tenant_id,
                             replica_id=client_id,
                             deployment_name=deployment_name,
-                            tenant_id="unknown",  # TODO: Best effort? Load page metadata?
-                            size=0,  # TODO: Unknown, will be corrected on next load?
+                            size=client_state.loaded_page_ids.get((page_id, colony_id, tenant_id), 0),
                         )
+                        # Check if this resolves any pending page faults
+                        await self._resolve_page_faults_for_page(faults_to_signal_completion)
+
                         reconciled_count += 1
 
-                    for page_id in missing_in_layer1:
+                    for page_id, colony_id, tenant_id in missing_in_layer1:
                         logger.warning(
                             f"Reconciling: Removing page {page_id} from Layer 2 "
                             f"(absent in Layer 1: {deployment_name}/{client_id})"
                         )
                         async for state in self.page_table.state_manager.write_transaction():
                             state.register_page_eviction(
-                                virtual_page_id=page_id,
+                                page_id=page_id,
+                                colony_id=colony_id,
+                                tenant_id=tenant_id,
                                 deployment_name=deployment_name,
                                 client_id=client_id,
                             )
@@ -2387,12 +2628,12 @@ class VirtualContextManager:
                 logger.warning(f"Error cancelling subscriber for {deployment_name}: {e}")
 
         # Flush and shut down all scope mappings
-        for scope_id, mapped in list(self._local_mapped_scopes.items()):
+        for scope_key, mapped in list(self._local_mapped_scopes.items()):
             try:
                 await mapped.source.shutdown()
-                logger.info(f"Shut down scope mapping: {scope_id}")
+                logger.info(f"Shut down scope mapping: {scope_key}")
             except Exception as e:
-                logger.warning(f"Error shutting down scope mapping {scope_id}: {e}")
+                logger.warning(f"Error shutting down scope mapping {scope_key}: {e}")
         self._local_mapped_scopes.clear()
 
         logger.info("VirtualContextManager cleanup complete")

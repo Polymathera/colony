@@ -309,7 +309,7 @@ This enables the router to make informed decisions without querying every replic
 class PhysicalContextManager:
     """Manages physical context pages across LLM cluster."""
 
-    async def allocate_page(self, virtual_page_id: str) -> PhysicalContextPage:
+    async def allocate_page(self, page_id: str) -> PhysicalContextPage:
         """Allocate physical page for virtual page."""
 
     async def migrate_page(self, page_id: str, from_client: str, to_client: str):

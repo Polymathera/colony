@@ -98,7 +98,8 @@ class VirtualContextPage(BaseModel):
     metadata: dict[str, Any] = {}       # Arbitrary metadata (source file, keywords, etc.)
 
     scope_id: str                       # Scope identifier (e.g., repo ID, blackboard scope)
-    group_id: str                       # Page group for spatial locality
+    group_id: str | None                # Page group for spatial locality (pages in the same group should be loaded together)
+    colony_id: str | None = None        # Optional address space for advanced use cases (e.g., separate code vs. docs spaces)
 
     # Storage
     storage_uri: str | None = None      # Where raw data is stored (S3, DB, etc.)
@@ -124,7 +125,7 @@ Pages are produced by `ContextPageSource` implementations (in `polymathera.colon
 class ContextPageSource(ABC):
     """Maps application-level records to VCM pages."""
 
-    def __init__(self, scope_id: str, group_id: str, tenant_id: str, mmap_config: MmapConfig): ...
+    def __init__(self, scope_id: str, colony_id: str, tenant_id: str, mmap_config: MmapConfig): ...
 
     @abstractmethod
     async def initialize(self) -> None: ...
@@ -154,7 +155,7 @@ class MyContextPageSource(ContextPageSource):
 # Later, create via factory
 source = ContextPageSourceFactory.create(
     source_type="my_source",
-    scope_id="my-scope", group_id="my-group",
+    scope_id="my-scope", colony_id="my-colony",
     tenant_id="default", mmap_config=mmap_config,
 )
 ```

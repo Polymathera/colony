@@ -10,23 +10,24 @@ Example:
     from polymathera.colony.vcm.sources import BuilInContextPageSourceType
     from polymathera.colony.system import get_vcm
 
-    # Create context page source
-    vcm_handle = get_vcm()
-    mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
-        scope_id="repo-123",
-        group_id="vmr-456",
-        tenant_id="tenant-1",
-        source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
-        config=MmapConfig(),
-        repo_path="/path/to/repo",
-    )
+    from polymathera.colony.distributed.ray_utils.serving.context import isolation_context
+
+    with isolation_context(colony_id="my-colony", tenant_id="my-tenant"):
+        # Create context page source
+        vcm_handle = get_vcm()
+        mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
+            scope_id="repo-123",
+            source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
+            config=MmapConfig(),
+            repo_path="/path/to/repo",
+        )
 
     # Spawn coordinator agent
     from polymathera.colony.system import spawn_agents
     coordinator_bp = CodeAnalysisCoordinator.bind(
         metadata=AgentMetadata(
             tenant_id="tenant-1",
-            group_id="vmr-456",
+            colony_id="vmr-456",
             parameters={"repo_id": "repo-123"},
         ),
     )

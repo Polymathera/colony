@@ -595,7 +595,7 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
             tokens=tokens,
             text=content_text,
             size=len(tokens),
-            group_id=self.source.group_id, # f"bb:{self.source.scope_id}:{locality_key}",
+            colony_id=self.source.colony_id, # f"bb:{self.source.scope_id}:{locality_key}",
             tenant_id=self.source.tenant_id,
             metadata={
                 "source": BlackboardContextPageSource.get_source_metadata(self.source.scope_id),
@@ -677,7 +677,7 @@ class BlackboardContextPageSource(ContextPageSource):
         self,
         *,
         scope_id: str,
-        group_id: str,
+        colony_id: str,
         tenant_id: str,
         mmap_config: MmapConfig,
     ):
@@ -687,11 +687,11 @@ class BlackboardContextPageSource(ContextPageSource):
 
         Args:
             scope_id: The scope being paged (e.g., "tenant:acme:discoveries")
-            group_id: Identifier for grouping related context sources (e.g., VMR ID)
+            colony_id: Identifier for grouping related context sources (e.g., VMR ID)
             tenant_id: The tenant ID for the scope
             mmap_config: Configuration for the memory-mapped page source
         """
-        super().__init__(scope_id=scope_id, group_id=group_id, tenant_id=tenant_id, mmap_config=mmap_config)
+        super().__init__(scope_id=scope_id, colony_id=colony_id, tenant_id=tenant_id, mmap_config=mmap_config)
         #    ingestion_policy: How records are organized into pages.
         #        Default: GroupAndFlushIngestionPolicy (tag-based locality,
         #        threshold-based flushing, JSON serialization).

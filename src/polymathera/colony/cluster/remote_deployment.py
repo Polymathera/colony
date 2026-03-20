@@ -96,7 +96,8 @@ class RemoteLLMDeployment:
         self.config = config
 
         # Page tracking (Layer 3 — same as VLLMDeployment)
-        self.loaded_pages: dict[ContextPageId, CachedPageEntry] = {}
+        # Keyed by (page_id, colony_id, tenant_id) for easier reconciliation with VCM state
+        self.loaded_pages: dict[tuple[ContextPageId, str, str], CachedPageEntry] = {}
 
         # Simulated capacity (mirrors GPU KV cache capacity)
         self.max_cached_tokens: int = config.max_cached_tokens
@@ -181,7 +182,7 @@ class RemoteLLMDeployment:
             model_name=self.config.model_name,
             kv_cache_capacity=self.max_cached_tokens,
             kv_cache_used=0,
-            loaded_page_ids=set(),
+            loaded_page_ids={},
             last_heartbeat=time.time(),
         )
         async for state in self.state_manager.write_transaction():
@@ -198,7 +199,7 @@ class RemoteLLMDeployment:
                 namespace=self.event_namespace,
             )
 
-            topics = {"vcm_page_events": {}}
+            topics = {"vcm_page_events": {}}  # TODO: Make this configurable
             await self.redis_om.initialize_topics(topics)
             logger.info(f"Initialized Redis event publishing for {self.event_namespace}")
         except Exception as e:
@@ -234,8 +235,9 @@ class RemoteLLMDeployment:
         """
         try:
             # Check if page is already loaded
-            if page.page_id in self.loaded_pages:
-                entry = self.loaded_pages[page.page_id]
+            key = (page.page_id, page.colony_id, page.tenant_id)
+            if key in self.loaded_pages:
+                entry = self.loaded_pages[key]
                 entry.last_access = time.time()
                 entry.ttl_expiry = time.time() + self.ttl_seconds
                 entry.access_count += 1
@@ -269,7 +271,8 @@ class RemoteLLMDeployment:
 
             # Track locally (Layer 3)
             now = time.time()
-            self.loaded_pages[page.page_id] = CachedPageEntry(
+            key = (page.page_id, page.colony_id, page.tenant_id)
+            self.loaded_pages[key] = CachedPageEntry(
                 page=page,
                 text=page_text,
                 cached_tokens=page.size,
@@ -285,10 +288,13 @@ class RemoteLLMDeployment:
                     client_state = state.client_states.get(self.client_id)
                     if client_state:
                         client_state.kv_cache_used += page.size
-                        client_state.loaded_page_ids.add(page.page_id)
+                        client_state.loaded_page_ids[(page.page_id, page.colony_id, page.tenant_id)] = page.size
                         kv_cache_used = client_state.kv_cache_used
                     state.register_page_load(
-                        page.page_id, self.client_id, page.tenant_id
+                        page_id=page.page_id,
+                        client_id=self.client_id,
+                        colony_id=page.colony_id,
+                        tenant_id=page.tenant_id,
                     )
 
             logger.info(
@@ -334,7 +340,7 @@ class RemoteLLMDeployment:
             return False
 
     @serving.endpoint
-    async def evict_page(self, page_id: ContextPageId) -> bool:
+    async def evict_page(self, page_id: ContextPageId, colony_id: str, tenant_id: str) -> bool:
         """Evict a page from tracking. The remote cache expires via TTL.
 
         Same pattern as VLLMDeployment: vLLM handles cache eviction via LRU,
@@ -343,12 +349,15 @@ class RemoteLLMDeployment:
 
         Args:
             page_id: ID of the page to evict
+            colony_id: Colony ID of the page to evict
+            tenant_id: Tenant ID of the page to evict
 
         Returns:
             True if page was evicted
         """
         try:
-            entry = self.loaded_pages.pop(page_id, None)
+            page_key = (page_id, colony_id, tenant_id)
+            entry = self.loaded_pages.pop(page_key, None)
             if not entry:
                 return True  # Already evicted
 
@@ -361,19 +370,20 @@ class RemoteLLMDeployment:
                     client_state = state.client_states.get(self.client_id)
                     if client_state:
                         client_state.kv_cache_used -= entry.cached_tokens
-                        client_state.loaded_page_ids.discard(page_id)
-                    state.register_page_eviction(page_id, self.client_id)
+                        client_state.loaded_page_ids.pop(page_key, None)
+                    state.register_page_eviction(page_id, self.client_id, colony_id, tenant_id)
 
-            logger.info(f"Evicted page {page_id} from {self.client_id}")
+            logger.info(f"Evicted page {page_key} from {self.client_id}")
 
             # Emit PageEvictedEvent for VCM reconciliation
             deployment_name = serving.get_my_deployment_name()
             await self._emit_page_event(
                 PageEvictedEvent(
                     page_id=page_id,
+                    colony_id=colony_id,
+                    tenant_id=tenant_id,
                     deployment_name=deployment_name,
                     client_id=self.client_id,
-                    tenant_id=tenant_id,
                     timestamp=time.time(),
                     size=entry.cached_tokens,
                     reason="manual",
@@ -383,15 +393,15 @@ class RemoteLLMDeployment:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to evict page {page_id}: {e}", exc_info=True)
+            logger.error(f"Failed to evict page {page_key}: {e}", exc_info=True)
             return False
 
     @serving.endpoint
     async def infer_with_context_composition(
         self,
         base_page_id: ContextPageId,
+        request: InferenceRequest,
         suffix_tokens: list[int] | None = None,
-        request: InferenceRequest | None = None,
         max_concurrent_per_page: int | None = None,
     ) -> InferenceResponse:
         """Inference using cached page prefix + task-specific suffix.
@@ -405,7 +415,7 @@ class RemoteLLMDeployment:
         Args:
             base_page_id: ID of the loaded base page
             suffix_tokens: Optional task-specific tokens to append
-            request: Optional InferenceRequest
+            request: InferenceRequest
             max_concurrent_per_page: Unused (kept for API compatibility)
 
         Returns:
@@ -414,10 +424,11 @@ class RemoteLLMDeployment:
         start_time = time.time()
 
         # Validate base page is loaded
-        entry = self.loaded_pages.get(base_page_id)
+        page_key = (base_page_id, request.colony_id, request.tenant_id)
+        entry = self.loaded_pages.get(page_key)
         if not entry:
             raise ValueError(
-                f"Page {base_page_id} not loaded in {self.client_id}"
+                f"Page {page_key} not loaded in {self.client_id}"
             )
 
         # Refresh tracking
@@ -441,13 +452,6 @@ class RemoteLLMDeployment:
             full_suffix = suffix_text
         else:
             full_suffix = prompt_text or "Continue."
-
-        # Create default request if not provided
-        if request is None:
-            request = InferenceRequest(
-                request_id=f"compose-{base_page_id}-{uuid.uuid4().hex[:8]}",
-                prompt=full_suffix,
-            )
 
         # Build messages with cache control markers
         messages = self._build_cached_messages(
@@ -477,6 +481,8 @@ class RemoteLLMDeployment:
         suffix_size = len(suffix_tokens) if suffix_tokens else 0
         self.kv_metrics.record_request(
             page_id=base_page_id,
+            colony_id=request.colony_id,
+            tenant_id=request.tenant_id,
             suffix_size=suffix_size,
             cache_hit=cache_hit,
         )
@@ -551,7 +557,7 @@ class RemoteLLMDeployment:
                     client_state.total_requests += 1
 
                     for page_id in request.context_page_ids:
-                        if not client_state.has_page(page_id):
+                        if not client_state.has_page(page_id, request.colony_id, request.tenant_id):
                             page_faults.append(page_id)
                             logger.warning(
                                 f"Page fault: {page_id} not loaded in {self.client_id}"
@@ -560,7 +566,8 @@ class RemoteLLMDeployment:
             # Build prompt from loaded page texts + request prompt
             page_context_parts = []
             for page_id in request.context_page_ids:
-                entry = self.loaded_pages.get(page_id)
+                page_key = (page_id, request.colony_id, request.tenant_id)
+                entry = self.loaded_pages.get(page_key)
                 if entry:
                     page_context_parts.append(entry.text)
                     entry.last_access = time.time()
@@ -642,6 +649,8 @@ class RemoteLLMDeployment:
     async def migrate_page(
         self,
         page_id: ContextPageId,
+        colony_id: str,
+        tenant_id: str,
         target_deployment_name: str,
         target_client_id: LLMClientId,
     ) -> bool:
@@ -652,6 +661,8 @@ class RemoteLLMDeployment:
 
         Args:
             page_id: ID of page to migrate
+            colony_id: Colony ID for address space grouping
+            tenant_id: Tenant ID for multi-tenancy isolation
             target_deployment_name: Name of the target deployment
             target_client_id: ID of target LLM client
 
@@ -659,14 +670,15 @@ class RemoteLLMDeployment:
             True if migration succeeded
         """
         try:
-            if page_id not in self.loaded_pages:
-                raise ValueError(f"Page {page_id} not loaded in {self.client_id}")
+            page_key = (page_id, colony_id, tenant_id)
+            if page_key not in self.loaded_pages:
+                raise ValueError(f"Page {page_key} not loaded in {self.client_id}")
 
-            entry = self.loaded_pages[page_id]
+            entry = self.loaded_pages[page_key]
             page = entry.page
 
             logger.info(
-                f"Migrating page {page_id} from {self.client_id} to {target_client_id}"
+                f"Migrating page {page_key} from {self.client_id} to {target_client_id}"
             )
 
             from ..system import get_llm_cluster
@@ -684,10 +696,10 @@ class RemoteLLMDeployment:
                 logger.error(f"Failed to load page in target deployment: {e}")
                 raise RuntimeError(f"Page migration failed: {e}") from e
 
-            await self.evict_page(page_id)
+            await self.evict_page(page_id, colony_id, tenant_id)
 
             logger.info(
-                f"Successfully migrated page {page_id} from "
+                f"Successfully migrated page {page_key} from "
                 f"{self.client_id} to {target_client_id}"
             )
             return True
@@ -700,6 +712,8 @@ class RemoteLLMDeployment:
     async def append_context_to_page(
         self,
         page_id: ContextPageId,
+        colony_id: str,
+        tenant_id: str,
         tokens: list[int],
     ) -> bool:
         """Append task-specific context to a loaded page.
@@ -709,21 +723,24 @@ class RemoteLLMDeployment:
 
         Args:
             page_id: ID of the page to append to
+            colony_id: Colony ID for address space grouping
+            tenant_id: Tenant ID for multi-tenancy isolation
             tokens: Token IDs to append
 
         Returns:
             True if successful
         """
         try:
-            if page_id not in self.loaded_pages:
-                logger.error(f"Cannot append to page {page_id}: page not loaded")
+            page_key = (page_id, colony_id, tenant_id)
+            if page_key not in self.loaded_pages:
+                logger.error(f"Cannot append to page {page_key}: page not loaded")
                 return False
 
-            entry = self.loaded_pages[page_id]
+            entry = self.loaded_pages[page_key]
 
             if not entry.can_append(len(tokens)):
                 logger.error(
-                    f"Cannot append {len(tokens)} tokens to page {page_id}: "
+                    f"Cannot append {len(tokens)} tokens to page {page_key}: "
                     f"would exceed capacity (current: {entry.appended_size}, "
                     f"max: {entry.max_append_capacity})"
                 )
@@ -733,14 +750,14 @@ class RemoteLLMDeployment:
             entry.appended_size += len(tokens)
 
             logger.info(
-                f"Appended {len(tokens)} tokens to page {page_id} "
+                f"Appended {len(tokens)} tokens to page {page_key} "
                 f"(total appended: {entry.appended_size}/{entry.max_append_capacity})"
             )
             return True
 
         except Exception as e:
             logger.error(
-                f"Failed to append context to page {page_id}: {e}", exc_info=True
+                f"Failed to append context to page {page_key}: {e}", exc_info=True
             )
             return False
 
@@ -748,26 +765,31 @@ class RemoteLLMDeployment:
     async def remove_appended_context(
         self,
         page_id: ContextPageId,
+        colony_id: str,
+        tenant_id: str,
     ) -> bool:
         """Remove appended context from a loaded page, resetting to base page.
 
         Args:
             page_id: ID of the page to reset
+            colony_id: Colony ID for address space grouping
+            tenant_id: Tenant ID for multi-tenancy isolation
 
         Returns:
             True if successful
         """
         try:
-            if page_id not in self.loaded_pages:
+            page_key = (page_id, colony_id, tenant_id)
+            if page_key not in self.loaded_pages:
                 logger.warning(
-                    f"Cannot remove appended context: page {page_id} not loaded"
+                    f"Cannot remove appended context: page {page_key} not loaded"
                 )
                 return True
 
-            entry = self.loaded_pages[page_id]
+            entry = self.loaded_pages[page_key]
 
             if not entry.has_appended_context():
-                logger.debug(f"Page {page_id} has no appended context to remove")
+                logger.debug(f"Page {page_key} has no appended context to remove")
                 return True
 
             removed_size = entry.appended_size
@@ -775,14 +797,14 @@ class RemoteLLMDeployment:
             entry.appended_size = 0
 
             logger.info(
-                f"Removed {removed_size} appended tokens from page {page_id}, "
+                f"Removed {removed_size} appended tokens from page {page_key}, "
                 f"reset to base page ({entry.cached_tokens} tokens)"
             )
             return True
 
         except Exception as e:
             logger.error(
-                f"Failed to remove appended context from page {page_id}: {e}",
+                f"Failed to remove appended context from page {page_key}: {e}",
                 exc_info=True,
             )
             return False
@@ -819,7 +841,7 @@ class RemoteLLMDeployment:
         now = time.time()
         refreshed = 0
 
-        for page_id, entry in list(self.loaded_pages.items()):
+        for page_key, entry in list(self.loaded_pages.items()):
             idle_s = now - entry.last_access
             # Refresh if 80% of TTL has elapsed
             if idle_s > self.ttl_seconds * 0.8:
@@ -834,7 +856,7 @@ class RemoteLLMDeployment:
                     entry.ttl_expiry = time.time() + self.ttl_seconds
                     refreshed += 1
                 except Exception as e:
-                    logger.warning(f"Keepalive failed for page {page_id}: {e}")
+                    logger.warning(f"Keepalive failed for page {page_key}: {e}")
 
         if refreshed > 0:
             logger.info(f"Refreshed TTL for {refreshed} idle pages")
@@ -864,7 +886,7 @@ class RemoteLLMDeployment:
         for entry in pages_by_lru:
             if available + freed_size >= required_size:
                 break
-            await self.evict_page(entry.page.page_id)
+            await self.evict_page(entry.page.page_id, entry.page.colony_id, entry.page.tenant_id)
             freed_size += entry.cached_tokens
             evicted_pages.append(entry.page.page_id)
 
@@ -887,7 +909,7 @@ class RemoteLLMDeployment:
 
         try:
             success = await self.redis_om.update_state_topic(
-                topic="vcm_page_events",
+                topic="vcm_page_events",  # TODO: Make this configurable
                 updates={
                     "event_type": event.event_type,
                     "event_data": event.model_dump(),

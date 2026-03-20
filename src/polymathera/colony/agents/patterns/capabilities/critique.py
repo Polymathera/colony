@@ -110,6 +110,8 @@ class CritiquePolicy(ABC):
     - SelfCritic: Agent critiques own work
     - PeerCritic: Another agent provides critique
     """
+    def __init__(self, agent: Agent):
+        self.agent = agent
 
     @abstractmethod
     async def critique_output(
@@ -151,12 +153,14 @@ class LLMCritiquePolicy(CritiquePolicy):
     Simple, fast policy: use LLM to evaluate output against context.
     """
 
-    def __init__(self, llm_cluster_handle: Any, max_tokens=1000):
+    def __init__(self, agent: Agent, llm_cluster_handle: Any, max_tokens=1000):
         """Initialize with LLM cluster handle.
 
         Args:
+            agent: The agent instance
             llm_cluster_handle: Handle to LLMCluster deployment
         """
+        super().__init__(agent)
         self.llm_cluster = llm_cluster_handle
         self.max_tokens = max_tokens
 
@@ -214,6 +218,8 @@ As a peer reviewer, evaluate:
         request = InferenceRequest(
             request_id=f"critique-{context.producer_id}",
             prompt=prompt,
+            colony_id=self.agent.colony_id,
+            tenant_id=self.agent.tenant_id,
             context_page_ids=[],
             max_tokens=self.max_tokens,
         )
@@ -243,6 +249,7 @@ class MetricBasedCritiquePolicy(CritiquePolicy):
 
     def __init__(
         self,
+        agent: Agent,
         min_coverage: float = 0.7,
         min_evidence_count: int = 2,
         max_claim_ratio: float = 2.0,
@@ -254,6 +261,7 @@ class MetricBasedCritiquePolicy(CritiquePolicy):
             min_evidence_count: Minimum evidence items required
             max_claim_ratio: Maximum claims per evidence item
         """
+        super().__init__(agent)
         self.min_coverage = min_coverage
         self.min_evidence_count = min_evidence_count
         self.max_claim_ratio = max_claim_ratio

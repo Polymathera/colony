@@ -150,8 +150,8 @@ class LLMClientState(BaseModel):
     kv_cache_used: int = 0
     """Number of tokens currently in KV cache"""
 
-    loaded_page_ids: set[ContextPageId] = Field(default_factory=set)
-    """Set of page IDs loaded in this client's KV cache"""
+    loaded_page_ids: dict[tuple[str, str, str], int] = Field(default_factory=dict)
+    """Dictionary of (page_id, colony_id, tenant_id) tuples to token counts loaded in this client's KV cache"""
 
     pending_requests: int = 0
     """Number of pending inference requests"""
@@ -175,9 +175,9 @@ class LLMClientState(BaseModel):
         """Get available KV cache capacity in tokens."""
         return self.kv_cache_capacity - self.kv_cache_used
 
-    def has_page(self, page_id: ContextPageId) -> bool:
+    def has_page(self, page_id: ContextPageId, colony_id: str, tenant_id: str) -> bool:
         """Check if a page is loaded in this client."""
-        return page_id in self.loaded_page_ids
+        return (page_id, colony_id, tenant_id) in self.loaded_page_ids
 
 
 class InferenceRequest(BaseModel):
@@ -186,6 +186,8 @@ class InferenceRequest(BaseModel):
     Attributes:
         request_id: Unique identifier for this request
         prompt: The prompt text
+        colony_id: Colony ID for address space grouping
+        tenant_id: Tenant ID for multi-tenancy isolation
         context_page_ids: IDs of context pages required for this request
         requirements: Optional requirements for deployment selection
         max_tokens: Maximum number of tokens to generate
@@ -197,6 +199,8 @@ class InferenceRequest(BaseModel):
 
     request_id: str
     prompt: str
+    colony_id: str = Field(..., description="Colony ID used to group multiple page source in the same address space.")
+    tenant_id: str = Field(..., description="Tenant ID for multi-tenancy isolation.")
     context_page_ids: list[ContextPageId] = Field(default_factory=list)
     requirements: LLMClientRequirements | None = Field(
         default=None,
@@ -210,16 +214,6 @@ class InferenceRequest(BaseModel):
         description="JSON schema for structured output generation (vLLM guided decoding)"
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
-
-    def get_tenant_id(self) -> str:
-        """Get tenant ID from requirements or return default.
-
-        Returns:
-            Tenant ID for this request
-        """
-        if self.requirements:
-            return self.requirements.tenant_id
-        return "default"
 
 
 class InferenceResponse(BaseModel):
@@ -306,8 +300,8 @@ class VLLMDeploymentState(SharedState):
     total_errors: int = 0
     total_page_faults: int = 0
 
-    # Tenant tracking
-    tenant_pages: dict[str, set[ContextPageId]] = Field(default_factory=dict)
+    # Tenant tracking: tenant_id -> tuple(page_id, colony_id)
+    tenant_pages: dict[str, set[tuple[ContextPageId, str]]] = Field(default_factory=dict)
 
     @staticmethod
     def get_state_key(app_name: str, deployment_name: str) -> str:
@@ -318,7 +312,8 @@ class VLLMDeploymentState(SharedState):
         self,
         page_id: ContextPageId,
         client_id: LLMClientId,
-        tenant_id: str = "default",
+        colony_id: str,
+        tenant_id: str,
     ) -> None:
         """Register that a page has been loaded on a client."""
         if page_id not in self.page_index:
@@ -332,12 +327,14 @@ class VLLMDeploymentState(SharedState):
 
         if tenant_id not in self.tenant_pages:
             self.tenant_pages[tenant_id] = set()
-        self.tenant_pages[tenant_id].add(page_id)
+        self.tenant_pages[tenant_id].add((page_id, colony_id))
 
     def register_page_eviction(
         self,
         page_id: ContextPageId,
         client_id: LLMClientId,
+        colony_id: str,
+        tenant_id: str,
     ) -> None:
         """Register that a page has been evicted from a client."""
         if page_id in self.page_index:
@@ -424,19 +421,21 @@ class KVCacheMetrics(BaseModel):
     kv_cache_utilization: float = 0.0
 
     # Concurrency metrics
-    concurrent_requests_per_page: dict[ContextPageId, int] = Field(default_factory=dict)
+    concurrent_requests_per_page: dict[tuple[ContextPageId, str, str], int] = Field(default_factory=dict)
     avg_suffix_size_tokens: float = 0.0
     requests_queued: int = 0
     requests_rejected: int = 0
     avg_queue_time_ms: float = 0.0
 
     # Per-page statistics
-    page_request_counts: dict[ContextPageId, int] = Field(default_factory=dict)
-    page_suffix_sizes: dict[ContextPageId, list[int]] = Field(default_factory=dict)
+    page_request_counts: dict[tuple[ContextPageId, str, str], int] = Field(default_factory=dict)
+    page_suffix_sizes: dict[tuple[ContextPageId, str, str], list[int]] = Field(default_factory=dict)
 
     def record_request(
         self,
         page_id: ContextPageId | None,
+        colony_id: str,
+        tenant_id: str,
         suffix_size: int,
         cache_hit: bool,
     ) -> None:
@@ -444,6 +443,8 @@ class KVCacheMetrics(BaseModel):
 
         Args:
             page_id: Base page ID used (None if no composition)
+            colony_id: Colony ID
+            tenant_id: Tenant ID
             suffix_size: Size of appended suffix in tokens
             cache_hit: Whether prefix cache was hit
         """
@@ -458,31 +459,35 @@ class KVCacheMetrics(BaseModel):
             self.cache_hit_rate = self.cache_hit_count / self.total_requests
 
         if page_id:
-            self.page_request_counts[page_id] = self.page_request_counts.get(page_id, 0) + 1
+            key = (page_id, colony_id, tenant_id)
+            self.page_request_counts[key] = self.page_request_counts.get(key, 0) + 1
 
-            if page_id not in self.page_suffix_sizes:
-                self.page_suffix_sizes[page_id] = []
-            self.page_suffix_sizes[page_id].append(suffix_size)
+            if key not in self.page_suffix_sizes:
+                self.page_suffix_sizes[key] = []
+            self.page_suffix_sizes[key].append(suffix_size)
 
         # Update average suffix size
         all_sizes = [s for sizes in self.page_suffix_sizes.values() for s in sizes]
         if all_sizes:
             self.avg_suffix_size_tokens = sum(all_sizes) / len(all_sizes)
 
-    def update_concurrency(self, page_id: ContextPageId, delta: int) -> None:
+    def update_concurrency(self, page_id: ContextPageId, colony_id: str, tenant_id: str, delta: int) -> None:
         """Update concurrent request count for a page.
 
         Args:
             page_id: Page ID
+            colony_id: Colony ID
+            tenant_id: Tenant ID
             delta: Change in concurrent requests (+1 for new, -1 for completed)
         """
-        current = self.concurrent_requests_per_page.get(page_id, 0)
+        key = (page_id, colony_id, tenant_id)
+        current = self.concurrent_requests_per_page.get(key, 0)
         new_count = max(0, current + delta)
 
         if new_count == 0:
-            self.concurrent_requests_per_page.pop(page_id, None)
+            self.concurrent_requests_per_page.pop(key, None)
         else:
-            self.concurrent_requests_per_page[page_id] = new_count
+            self.concurrent_requests_per_page[key] = new_count
 
     def update_kv_cache_usage(self, used_tokens: int, capacity_tokens: int) -> None:
         """Update KV cache utilization metrics.

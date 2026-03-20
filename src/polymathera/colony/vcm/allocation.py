@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from overrides import override
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,29 +20,41 @@ if TYPE_CHECKING:
     )
     from .page_table import VirtualPageTable
 
+from ..distributed.ray_utils.serving import require_colony_id, require_tenant_id
+
 logger = logging.getLogger(__name__)
+
+
+def _check_page_allocation_request(request: PageAllocationRequest):
+    tenant_id = require_tenant_id()
+    colony_id = require_colony_id()
+
+    if request.colony_id != colony_id or request.tenant_id != tenant_id:
+        raise ValueError(
+            f"Request colony_id {request.colony_id} / tenant_id {request.tenant_id} does not match current colony_id {colony_id} / tenant_id {tenant_id}"
+        )
 
 
 class AllocationDecision:
     """Decision about where to allocate a page.
 
     Attributes:
-        virtual_page_id: The page to allocate
+        page_id: The page to allocate
         target_deployment: Deployment to load page into
         target_client_id: Client (replica) to load page into
-        evict_pages: Pages to evict to make room (if needed)
+        evict_pages: Pages to evict to make room (if needed), each represented as a tuple (page_id, colony_id, tenant_id)
         reason: Human-readable reason for this decision
     """
 
     def __init__(
         self,
-        virtual_page_id: ContextPageId,
+        page_id: ContextPageId,
         target_deployment: str,
         target_client_id: str,
-        evict_pages: list[ContextPageId] | None = None,
+        evict_pages: list[tuple[str, str, str]] | None = None,
         reason: str = "",
     ):
-        self.virtual_page_id = virtual_page_id
+        self.page_id = page_id
         self.target_deployment = target_deployment
         self.target_client_id = target_client_id
         self.evict_pages = evict_pages or []
@@ -90,6 +103,7 @@ class BalancedAllocationStrategy(AllocationStrategy):
     This is a good general-purpose strategy for most workloads.
     """
 
+    @override
     async def make_allocation_decisions(
         self,
         request: PageAllocationRequest,
@@ -108,6 +122,8 @@ class BalancedAllocationStrategy(AllocationStrategy):
         Returns:
             List of allocation decisions
         """
+        _check_page_allocation_request(request)
+
         decisions = []
 
         # Filter clients by tenant isolation if needed
@@ -134,9 +150,9 @@ class BalancedAllocationStrategy(AllocationStrategy):
             page_size = page_sizes.get(page_id, 0)
 
             # Check if page is already loaded
-            if await page_table.is_page_loaded(page_id):
+            if await page_table.is_page_loaded(page_id, request.colony_id, request.tenant_id):
                 # Page already loaded, check if we need more replicas
-                current_replication = await page_table.get_replication_factor(page_id)
+                current_replication = await page_table.get_replication_factor(page_id, request.colony_id, request.tenant_id)
                 if current_replication >= request.max_replication:
                     logger.debug(
                         f"Page {page_id} already loaded with sufficient replication "
@@ -160,7 +176,7 @@ class BalancedAllocationStrategy(AllocationStrategy):
             client_state = available_clients[best_client_id]
 
             # Check if we need to evict pages
-            evict_pages = []
+            evict_pages: list[tuple[str, str, str]] = []
             available_capacity = client_state.get_available_cache_capacity()
 
             if available_capacity < page_size:
@@ -174,7 +190,7 @@ class BalancedAllocationStrategy(AllocationStrategy):
 
             # Create allocation decision
             decision = AllocationDecision(
-                virtual_page_id=page_id,
+                page_id=page_id,
                 target_deployment=client_state.deployment_name,
                 target_client_id=best_client_id,
                 evict_pages=evict_pages,
@@ -287,7 +303,7 @@ class BalancedAllocationStrategy(AllocationStrategy):
         required_capacity: int,
         page_table: VirtualPageTable,
         client_state: LLMClientState,
-    ) -> list[ContextPageId]:
+    ) -> list[tuple[str, str, str]]:
         """Select pages to evict using LRU policy.
 
         Args:
@@ -306,10 +322,12 @@ class BalancedAllocationStrategy(AllocationStrategy):
         )
 
         # Get locations for these pages on this client
-        page_locations = []
-        for page_id in client_pages:
+        page_locations: list[tuple[str, PageLocation]] = []
+        for page_id, colony_id, tenant_id in client_pages:
             locations = await page_table.get_page_locations(
                 page_id,
+                colony_id=colony_id,
+                tenant_id=tenant_id,
                 deployment_name=client_state.deployment_name,
             )
             # Find the location on this specific client
@@ -322,10 +340,11 @@ class BalancedAllocationStrategy(AllocationStrategy):
         page_locations.sort(key=lambda x: x[1].last_access_time)
 
         # Get locked pages to exclude them from eviction
-        locked_pages = await page_table.get_locked_pages()
+        locked_page_keys = await page_table.get_locked_pages()
+        locked_pages = [key[0] for key in locked_page_keys]
 
         # Select pages to evict (skip locked pages)
-        evict_pages = []
+        evict_pages: list[tuple[str, str, str]] = []
         freed_capacity = 0
 
         for page_id, location in page_locations:
@@ -337,7 +356,7 @@ class BalancedAllocationStrategy(AllocationStrategy):
                 logger.debug(f"Skipping locked page {page_id} during eviction")
                 continue
 
-            evict_pages.append(page_id)
+            evict_pages.append((page_id, location.colony_id, location.tenant_id))
             freed_capacity += location.size
 
         # Warn if we couldn't free enough capacity due to locked pages
@@ -361,6 +380,7 @@ class LocalityAwareAllocationStrategy(AllocationStrategy):
     This is useful for workloads with strong locality patterns (e.g., code analysis).
     """
 
+    @override
     async def make_allocation_decisions(
         self,
         request: PageAllocationRequest,
@@ -382,6 +402,8 @@ class LocalityAwareAllocationStrategy(AllocationStrategy):
         Returns:
             List of allocation decisions
         """
+        _check_page_allocation_request(request)
+
         # Use balanced strategy as base
         # In the future, we can add:
         # - Page group analysis (from metadata)

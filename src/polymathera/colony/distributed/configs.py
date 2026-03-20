@@ -263,15 +263,20 @@ class StorageConfig(ConfigComponent):
 
 @register_polymathera_config()
 class UserChatServiceConfig(ConfigComponent):
+    enable_slack: bool = Field(
+        default=False,
+        description="Enable Slack integration. Disable for local mode.",
+        json_schema_extra={"env": "SLACK_ENABLED"},
+    )
     slack_bot_token: str = Field(
         default="",
         description="Slack bot token. Set via SLACK_BOT_TOKEN env var.",
-        json_schema_extra={"env": "SLACK_BOT_TOKEN"},
+        json_schema_extra={"env": "SLACK_BOT_TOKEN", "optional": lambda config: not config.enable_slack},
     )
     slack_app_token: str = Field(
         default="",
         description="Slack app token. Set via SLACK_APP_TOKEN env var.",
-        json_schema_extra={"env": "SLACK_APP_TOKEN"},
+        json_schema_extra={"env": "SLACK_APP_TOKEN", "optional": lambda config: not config.enable_slack},
     )
 
     CONFIG_PATH: ClassVar[str] = "chat.user_chat_service"

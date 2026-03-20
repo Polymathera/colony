@@ -37,6 +37,7 @@ from .models import (
     AgentRunEvent,
     AgentRun,
 )
+from ...vcm.models import VCMBranch
 
 logger = logging.getLogger(__name__)
 
@@ -67,32 +68,31 @@ class SessionManagerDeployment:
         ```python
         from polymathera.colony.agents.sessions import SessionManagerDeployment
 
-        # Get session manager handle
-        session_manager = serving.get_deployment(app_name, names.session_manager)
+        with isolation_context(colony_id="my-colony", tenant_id="my-tenant"):
+            # Get session manager handle
+            session_manager = serving.get_deployment(app_name, names.session_manager)
 
-        # Set tenant quota
-        await session_manager.set_tenant_quota(
-            tenant_id="my-tenant",
-            quota=TenantQuota(max_concurrent_sessions=20),
-        )
-
-        # Create a session
-        session = await session_manager.create_session(
-            tenant_id="my-tenant",
-            metadata=SessionMetadata(
+            # Set tenant quota
+            await session_manager.set_tenant_quota(
                 tenant_id="my-tenant",
-                created_by="user-123",
-            ),
-        )
+                quota=TenantQuota(max_concurrent_sessions=20),
+            )
 
-        # Use session in context
-        from polymathera.colony.agents.sessions import session_context
-        async with session_context(session):
-            # All operations use session's branch
-            ...
+            # Create a session
+            session = await session_manager.create_session(
+                metadata=SessionMetadata(
+                    created_by="user-123",
+                ),
+            )
 
-        # Close session when done
-        await session_manager.close_session(session.session_id)
+            # Use session in context
+            from polymathera.colony.agents.sessions import session_context
+            async with session_context(session):
+                # All operations use session's branch
+                ...
+
+            # Close session when done
+            await session_manager.close_session(session.session_id)
         ```
     """
 
@@ -141,7 +141,8 @@ class SessionManagerDeployment:
     @serving.endpoint
     async def create_session(
         self,
-        tenant_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
         metadata: SessionMetadata | None = None,
         ttl_seconds: float | None = None,
         fork_from_session_id: str | None = None,
@@ -150,8 +151,11 @@ class SessionManagerDeployment:
 
         Creates a new VCM branch for this session's copy-on-write view.
 
+        NOTE: Colony ID and Tenant ID must be provided in the serving context.
+
         Args:
-            tenant_id: Owning tenant
+            colony_id: Colony identifier (uses context if None)
+            tenant_id: Tenant identifier (uses context if None)
             metadata: Session metadata (uses defaults if None)
             ttl_seconds: Session TTL (uses default if None)
             fork_from_session_id: Fork from existing session's branch
@@ -162,6 +166,9 @@ class SessionManagerDeployment:
         Raises:
             ValueError: If tenant quota exceeded or parent session not found
         """
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+
         # Check quota
         await self._check_session_quota(tenant_id)
 
@@ -180,7 +187,8 @@ class SessionManagerDeployment:
                 raise ValueError(f"Parent session {fork_from_session_id} not found")
 
         # Create branch via VCM
-        branch = await self.vcm_handle.create_branch(
+        branch: VCMBranch | None = await self.vcm_handle.create_branch(
+            colony_id=colony_id,
             tenant_id=tenant_id,
             parent_branch_id=parent_branch_id,
             name=f"session_{session_id}",
@@ -189,6 +197,7 @@ class SessionManagerDeployment:
         # Create session
         session = Session(
             session_id=session_id,
+            colony_id=colony_id,
             tenant_id=tenant_id,
             branch_id=branch.branch_id,
             state=SessionState.ACTIVE,
@@ -435,6 +444,8 @@ class SessionManagerDeployment:
         result = await self.vcm_handle.merge_branches(
             source_branch_id=source.branch_id,
             target_branch_id=target.branch_id,
+            colony_id=source.colony_id,
+            tenant_id=source.tenant_id,
             strategy=strategy,
         )
 

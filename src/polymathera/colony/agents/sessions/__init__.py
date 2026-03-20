@@ -23,29 +23,28 @@ Example:
         get_current_session,
     )
 
-    # Get session manager handle
-    session_manager = serving.get_deployment(app_name, names.session_manager)
+    with isolation_context(colony_id="my-colony", tenant_id="my-tenant"):
+        # Get session manager handle
+        session_manager = serving.get_deployment(app_name, names.session_manager)
 
-    # Create a session
-    session = await session_manager.create_session(
-        tenant_id="my-tenant",
-        metadata=SessionMetadata(
-            tenant_id="my-tenant",
-            created_by="user-123",
-        ),
-    )
+        # Create a session
+        session = await session_manager.create_session(
+            metadata=SessionMetadata(
+                created_by="user-123",
+            ),
+        )
 
-    # Use session in context (preferred: use session.context() method)
-    async with session.context():
-        # All operations use session's branch
-        current = get_current_session()
-        assert current.session_id == session.session_id
+        # Use session in context (preferred: use session.context() method)
+        async with session.context():
+            # All operations use session's branch
+            current = get_current_session()
+            assert current.session_id == session.session_id
 
-        # Agent work here uses session's VCM branch
-        ...
+            # Agent work here uses session's VCM branch
+            ...
 
-    # Close session when done
-    await session_manager.close_session(session.session_id)
+        # Close session when done
+        await session_manager.close_session(session.session_id)
     ```
 
 See IMPLEMENTATION_PLAN.md for detailed design.

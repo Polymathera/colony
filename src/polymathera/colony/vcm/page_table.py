@@ -69,33 +69,39 @@ class VirtualPageTable:
             state_key=VirtualPageTableState.get_state_key(self.app_name),
         )
 
-    async def is_page_loaded(self, page_id: str) -> bool:
+    async def is_page_loaded(self, page_id: str, colony_id: str, tenant_id: str) -> bool:
         """Check if page is loaded anywhere in the cluster.
 
         Args:
             page_id: Page identifier
+            colony_id: Colony ID
+            tenant_id: Tenant ID
 
         Returns:
             True if page is loaded on at least one replica
         """
         async for state in self.state_manager.read_transaction():
-            return state.is_page_loaded(page_id)
+            return state.is_page_loaded(page_id, colony_id, tenant_id)
 
-    async def get_replication_factor(self, virtual_page_id: str) -> int:
+    async def get_replication_factor(self, page_id: str, colony_id: str, tenant_id: str) -> int:
         """Get the replication factor (number of physical copies) of a page.
 
         Args:
-            virtual_page_id: ID of the virtual page
+            page_id: ID of the virtual page
+            colony_id: Colony ID for isolation
+            tenant_id: Tenant ID for isolation
 
         Returns:
             Number of physical locations (0 if page not loaded)
         """
         async for state in self.state_manager.read_transaction():
-            return state.get_replication_factor(virtual_page_id)
+            return state.get_replication_factor(page_id, colony_id, tenant_id)
 
     async def is_page_loaded_on_client(
         self,
         page_id: str,
+        colony_id: str | None,
+        tenant_id: str | None,
         deployment_name: str,
         client_id: str,
     ) -> bool:
@@ -103,6 +109,8 @@ class VirtualPageTable:
 
         Args:
             page_id: Page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional filter by tenant
             deployment_name: Deployment name
             client_id: Client (replica) ID
 
@@ -110,42 +118,51 @@ class VirtualPageTable:
             True if page is loaded on this specific client
         """
         async for state in self.state_manager.read_transaction():
-            entry = state.get_page_entry(page_id)
+            entry = state.get_page_entry(page_id, colony_id, tenant_id)
             if not entry:
                 return False
             return entry.get_location(deployment_name, client_id) is not None
 
-    async def get_page_location(self, page_id: str) -> PageLocation | None:
+    async def get_page_location(
+        self,
+        page_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> PageLocation | None:
         """Get first location where page is loaded (for backward compatibility).
 
         Args:
             page_id: Page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional filter by tenant
 
         Returns:
             PageLocation if loaded, None otherwise
         """
         async for state in self.state_manager.read_transaction():
-            locations = state.get_page_locations(page_id)
+            locations = state.get_page_locations(page_id, colony_id, tenant_id)
             return locations[0] if locations else None
 
     async def get_page_locations(
         self,
         page_id: str,
-        deployment_name: str | None = None,
+        colony_id: str | None = None,
         tenant_id: str | None = None,
+        deployment_name: str | None = None,
     ) -> list[PageLocation]:
         """Get all locations where a page is loaded, with optional filters.
 
         Args:
             page_id: Page identifier
-            deployment_name: Optional filter by deployment
+            colony_id: Optional colony ID
             tenant_id: Optional filter by tenant
+            deployment_name: Optional filter by deployment
 
         Returns:
             List of PageLocation objects matching filters
         """
         async for state in self.state_manager.read_transaction():
-            locations = state.get_page_locations(page_id)
+            locations = state.get_page_locations(page_id, colony_id, tenant_id)
 
             # Apply filters
             if deployment_name:
@@ -158,19 +175,23 @@ class VirtualPageTable:
     async def find_replicas_with_page(
         self,
         page_id: str,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
         deployment_name: str | None = None,
     ) -> list[tuple[str, str]]:
         """Find all replicas that have a specific page loaded.
 
         Args:
             page_id: Page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
             deployment_name: Optional filter by deployment
 
         Returns:
             List of (deployment_name, client_id) tuples
         """
         async for state in self.state_manager.read_transaction():
-            clients = state.find_clients_with_page(page_id)
+            clients = state.find_clients_with_page(page_id, colony_id, tenant_id)
 
             # Apply deployment filter
             if deployment_name:
@@ -182,7 +203,7 @@ class VirtualPageTable:
         self,
         deployment_name: str,
         client_id: str,
-    ) -> set[str]:
+    ) -> set[tuple[str, str, str]]:
         """Get all pages loaded on a specific client (deployment-aware).
 
         Args:
@@ -190,7 +211,7 @@ class VirtualPageTable:
             client_id: Client (replica) ID
 
         Returns:
-            Set of page IDs loaded on this client
+            Set of (page_id, colony_id, tenant_id) tuples loaded on this client
         """
         async for state in self.state_manager.read_transaction():
             return state.get_pages_on_client(deployment_name, client_id)
@@ -222,11 +243,12 @@ class VirtualPageTable:
     async def register_loaded_page(
         self,
         page_id: str,
+        colony_id: str | None,
+        tenant_id: str | None,
         replica_id: str,
         deployment_name: str,
-        tenant_id: str = "default",
         size: int = 0,
-    ) -> None:
+    ) -> list[str]:
         """Register that a page has been loaded on a LLM replica.
 
         Updates both forward (page_id -> location) and reverse
@@ -234,15 +256,22 @@ class VirtualPageTable:
 
         Args:
             page_id: Page identifier
+            colony_id: Colony ID (optional, will be inferred if not provided)
+            tenant_id: Tenant ID (optional, will be inferred if not provided)
             replica_id: Replica identifier (client_id)
             deployment_name: Deployment name (required - no default)
-            tenant_id: Tenant that owns this page
             size: Page size in tokens
+
+        Returns:
+            List of fault IDs that were resolved by this page load (if any)
         """
         import time
 
         if deployment_name is None:
             raise ValueError("deployment_name must be provided to register_loaded_page")
+
+        colony_id = serving.require_colony_id() if colony_id is None else colony_id
+        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
 
         async for state in self.state_manager.write_transaction():
             location = PageLocation(
@@ -253,32 +282,39 @@ class VirtualPageTable:
                 last_access_time=time.time(),
                 access_count=0,
                 size=size,
+                colony_id=colony_id,
                 tenant_id=tenant_id,
             )
-            state.register_page_load(
-                virtual_page_id=page_id,
-                location=location,
+            faults_to_signal_completion = state.register_page_load(
+                page_id=page_id,
+                colony_id=colony_id,
                 tenant_id=tenant_id,
+                location=location,
                 size=size,
             )
             logger.info(f"Registered page {page_id} on {deployment_name}/{replica_id}")
+            return faults_to_signal_completion
 
-    async def unregister_page(self, page_id: str) -> None:
+    async def unregister_page(self, page_id: str, colony_id: str, tenant_id: str) -> None:
         """Unregister a page from all locations (when evicted).
 
         Removes from both forward and reverse indices atomically.
 
         Args:
             page_id: Page identifier
+            colony_id: Colony ID
+            tenant_id: Tenant ID
         """
         async for state in self.state_manager.write_transaction():
             # Use backward compatibility wrapper that removes from all locations
-            state.remove_page_location(page_id)
-            logger.info(f"Unregistered page {page_id} from all locations")
+            state.remove_page_location(page_id, colony_id, tenant_id)
+            logger.info(f"Unregistered page {page_id}:{colony_id}:{tenant_id} from all locations")
 
     async def lock_page(
         self,
         page_id: str,
+        colony_id: str,
+        tenant_id: str,
         locked_by: str,
         lock_duration_s: float,
         reason: str = "",
@@ -288,6 +324,8 @@ class VirtualPageTable:
 
         Args:
             page_id: ID of the page to lock
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
             locked_by: Identifier of who is locking the page (agent_id, session_id, run_id, etc.)
             lock_duration_s: Lock duration in seconds
             reason: Human-readable reason for the lock
@@ -300,25 +338,78 @@ class VirtualPageTable:
             ValueError: If lock_duration_s is negative or zero
         """
         async for state in self.state_manager.write_transaction():
+            colony_id = serving.require_colony_id() if colony_id is None else colony_id
+            tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
             return state.lock_page(
                 page_id=page_id,
+                colony_id=colony_id,
+                tenant_id=tenant_id,
                 locked_by=locked_by,
                 lock_duration_s=lock_duration_s,
                 reason=reason,
                 current_time=current_time,
             )
 
-    async def unlock_page(self, page_id: str) -> bool:
+    async def unlock_page(self, page_id: str, colony_id: str, tenant_id: str) -> bool:
         """Unlock a page, allowing it to be evicted.
 
         Args:
             page_id: ID of the page to unlock
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
 
         Returns:
             True if page was locked and is now unlocked, False if page wasn't locked
         """
         async for state in self.state_manager.write_transaction():
-            return state.unlock_page(page_id)
+            return state.unlock_page(page_id, colony_id, tenant_id)
+
+    async def extend_page_lock(
+        self,
+        page_id: str,
+        colony_id: str | None,
+        tenant_id: str | None,
+        additional_duration_s: float,
+    ) -> bool:
+        """Extend the lock duration for a locked page.
+
+        Args:
+            page_id: Page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
+            additional_duration_s: Additional seconds to add to lock duration
+
+        Returns:
+            True if lock was extended, False if page wasn't locked
+
+        Raises:
+            ValueError: If additional_duration_s is negative
+        """
+        async for state in self.state_manager.write_transaction():
+            return state.extend_page_lock(page_id, colony_id, tenant_id, additional_duration_s)
+
+    async def get_page_lock(self, page_id: str, colony_id: str, tenant_id: str) -> PageLock | None:
+        """Get the lock information for a page.
+
+        Args:
+            page_id: ID of the page
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
+
+        Returns:
+            PageLock if page is locked, None otherwise
+        """
+        async for state in self.state_manager.read_transaction():
+            return state.get_page_lock(page_id, colony_id, tenant_id)
+
+    async def get_locked_pages(self) -> list[tuple[str, str, str]]:
+        """Get a list of currently locked pages.
+
+        Returns:
+            List of page keys (page_id, colony_id, tenant_id) that are currently locked
+        """
+        async for state in self.state_manager.read_transaction():
+            return state.get_locked_pages()
 
     async def cleanup_expired_locks(self, current_time: float | None = None) -> int:
         """Remove expired locks from the state.
@@ -335,6 +426,8 @@ class VirtualPageTable:
     async def update_page_access(
         self,
         page_id: str,
+        colony_id: str | None,
+        tenant_id: str | None,
         deployment_name: str | None = None,
         client_id: str | None = None,
     ) -> None:
@@ -342,6 +435,8 @@ class VirtualPageTable:
 
         Args:
             page_id: Page identifier
+            colony_id: Optional colony ID
+            tenant_id: Optional tenant ID
             deployment_name: Optional specific deployment to update
             client_id: Optional specific client to update
         """
@@ -350,14 +445,15 @@ class VirtualPageTable:
         async for state in self.state_manager.write_transaction():
             if deployment_name and client_id:
                 # Update specific location
-                state.register_page_access(page_id, deployment_name, client_id, time.time())
+                state.register_page_access(page_id, colony_id, tenant_id, deployment_name, client_id, time.time())
             else:
                 # Update all locations for this page
-                entry = state.get_page_entry(page_id)
+                entry = state.get_page_entry(page_id, colony_id, tenant_id)
                 if entry:
                     for loc in entry.physical_locations:
+                        assert colony_id == loc.colony_id and tenant_id == loc.tenant_id
                         state.register_page_access(
-                            page_id, loc.deployment_name, loc.client_id, time.time()
+                            page_id, colony_id, tenant_id, loc.deployment_name, loc.client_id, time.time()
                         )
                 logger.debug(f"Updated access for page {page_id}")
 
@@ -409,27 +505,31 @@ class VirtualPageTable:
             group: Virtual page group to register
         """
         async for state in self.state_manager.write_transaction():
-            state.page_groups[group.group_id] = group
+            state.page_groups[(group.group_id, group.colony_id, group.tenant_id)] = group
             # TODO: Ensure that pages in group are linked to the group
             logger.info(f"Registered virtual page group {group.group_id} with {len(group.page_ids)} pages")
 
-    async def get_page_group(self, group_id: str) -> PageGroup | None:
+    async def get_page_group(self, group_id: str, colony_id: str, tenant_id: str) -> PageGroup | None:
         """Get a virtual page group by ID.
 
         Args:
             group_id: Group identifier
+            colony_id: Colony identifier
+            tenant_id: Tenant identifier
 
         Returns:
             PageGroup if exists, None otherwise
         """
         async for state in self.state_manager.read_transaction():
-            return state.page_groups.get(group_id)
+            return state.page_groups.get((group_id, colony_id, tenant_id))
 
-    async def get_page_groups_for_page(self, page_id: str) -> list[PageGroup]:
+    async def get_page_groups_for_page(self, page_id: str, colony_id: str, tenant_id: str) -> list[PageGroup]:
         """Get all groups that contain a specific page.
 
         Args:
             page_id: Page identifier
+            colony_id: Colony identifier
+            tenant_id: Tenant identifier
 
         Returns:
             List of PageGroups containing this page
@@ -437,7 +537,7 @@ class VirtualPageTable:
         async for state in self.state_manager.read_transaction():
             groups = []
             for group in state.page_groups.values():
-                if page_id in group.page_ids:
+                if page_id in group.page_ids and group.colony_id == colony_id and group.tenant_id == tenant_id:
                     groups.append(group)
             return groups
 
@@ -483,17 +583,19 @@ class VirtualPageTable:
 
     # === Branch Management ===
 
-    async def get_branch(self, branch_id: str) -> VCMBranch | None:
+    async def get_branch(self, branch_id: str, colony_id: str, tenant_id: str) -> VCMBranch | None:
         """Get a branch by ID.
 
         Args:
             branch_id: Branch identifier
+            colony_id: Colony identifier
+            tenant_id: Tenant identifier
 
         Returns:
             VCMBranch if found, None otherwise
         """
         async for state in self.state_manager.read_transaction():
-            return state.get_branch(branch_id)
+            return state.get_branch(branch_id, colony_id, tenant_id)
 
     async def list_branches(self, tenant_id: str) -> list[VCMBranch]:
         """List all branches for a tenant.
@@ -523,6 +625,8 @@ class VirtualPageTable:
         self,
         base_page_id: str,
         branch_id: str,
+        colony_id: str,
+        tenant_id: str,
     ) -> str:
         """Resolve a page ID to its effective ID on a branch.
 
@@ -532,26 +636,30 @@ class VirtualPageTable:
         Args:
             base_page_id: Original page ID to look up
             branch_id: Branch to resolve from
+            colony_id: Colony identifier
+            tenant_id: Tenant identifier
 
         Returns:
             Effective page ID (overlay or original)
         """
         async for state in self.state_manager.read_transaction():
-            return state.get_effective_page_id(base_page_id, branch_id)
+            return state.get_effective_page_id(base_page_id, branch_id, colony_id, tenant_id)
 
-    async def get_branch_effective_pages(self, branch_id: str) -> set[str]:
+    async def get_branch_effective_pages(self, branch_id: str, colony_id: str, tenant_id: str) -> set[str]:
         """Get all pages effectively visible from a branch.
 
         Includes inherited pages, overlays, and new pages.
 
         Args:
             branch_id: Branch identifier
+            colony_id: Colony identifier
+            tenant_id: Tenant identifier
 
         Returns:
             Set of effective page IDs visible from this branch
         """
         async for state in self.state_manager.read_transaction():
-            return state.get_branch_effective_pages(branch_id)
+            return state.get_branch_effective_pages(branch_id, colony_id, tenant_id)
 
     async def register_branch(self, branch: VCMBranch) -> None:
         """Register a new branch.
@@ -568,6 +676,8 @@ class VirtualPageTable:
         branch_id: str,
         original_page_id: str,
         overlay_page_id: str,
+        colony_id: str,
+        tenant_id: str,
     ) -> None:
         """Register a CoW overlay for a page on a branch.
 
@@ -575,9 +685,11 @@ class VirtualPageTable:
             branch_id: Branch to register overlay on
             original_page_id: Original page being overlaid
             overlay_page_id: New overlay page ID
+            colony_id: Colony identifier
+            tenant_id: Tenant identifier
         """
         async for state in self.state_manager.write_transaction():
-            state.register_overlay(branch_id, original_page_id, overlay_page_id)
+            state.register_overlay(branch_id, original_page_id, overlay_page_id, colony_id, tenant_id)
             logger.info(
                 f"Registered overlay {overlay_page_id} for page {original_page_id} "
                 f"on branch {branch_id}"
@@ -587,13 +699,17 @@ class VirtualPageTable:
         self,
         branch_id: str,
         page_id: str,
+        colony_id: str,
+        tenant_id: str,
     ) -> None:
         """Register a new page created on a branch (not an overlay).
 
         Args:
             branch_id: Branch the page was created on
             page_id: New page ID
+            colony_id: Colony identifier
+            tenant_id: Tenant identifier
         """
         async for state in self.state_manager.write_transaction():
-            state.register_new_page_on_branch(branch_id, page_id)
+            state.register_new_page_on_branch(branch_id, page_id, colony_id, tenant_id)
             logger.info(f"Registered new page {page_id} on branch {branch_id}")

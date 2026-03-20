@@ -302,17 +302,23 @@ class GitRepoShardCache:
 class GitRepoShardingMetricsMonitor(BaseMetricsMonitor):
     """Centralized monitoring for GitRepoShardingStrategy."""
 
-    def __init__(self, enable_http_server: bool = True):
+    def __init__(self,
+        tenant_id: str,
+        colony_id: str,
+        enable_http_server: bool = True,
+    ):
         # Initialize base class with HTTP server
         super().__init__(
             enable_http_server=enable_http_server,
             service_name="git-repo-sharding-metrics",
         )
+        self.tenant_id = tenant_id
+        self.colony_id = colony_id
 
         self.logger.info(f"Initializing GitRepoShardingMetricsMonitor instance {id(self)}...")
 
         # Use consistent label names across all metrics
-        common_labels = ["repo_id"]
+        common_labels = ["tenant_id", "colony_id"]
 
         self.shard_size = self.create_histogram(
             "repo_shard_size_bytes",
@@ -320,27 +326,27 @@ class GitRepoShardingMetricsMonitor(BaseMetricsMonitor):
             buckets=[1024, 4096, 16384, 32768, 65536],
             #buckets=[1024, 10 * 1024, 100 * 1024, 1024 * 1024, 10 * 1024 * 1024],
             labelnames=common_labels
-        )
+        ).labels(tenant_id=self.tenant_id,colony_id=self.colony_id)
         self.processing_time = self.create_histogram(
             "repo_sharding_duration_seconds",
             "Time taken to shard repository",
             labelnames=common_labels
-        )
+        ).labels(tenant_id=self.tenant_id,colony_id=self.colony_id)
         self.shard_count = self.create_counter(
             "repo_shard_count",
             "Total number of shards created",
             labelnames=common_labels
-        )
+        ).labels(tenant_id=self.tenant_id,colony_id=self.colony_id)
         self.binary_files = self.create_counter(
             "repo_binary_files",
             "Number of binary files encountered",
             labelnames=common_labels
-        )
+        ).labels(tenant_id=self.tenant_id,colony_id=self.colony_id)
         self.processing_errors = self.create_counter(
             "repo_sharding_errors",
             "Number of errors during sharding",
             labelnames=common_labels
-        )
+        ).labels(tenant_id=self.tenant_id,colony_id=self.colony_id)
 
 
 
@@ -445,9 +451,13 @@ class GitRepoShardingStrategy:
 
     def __init__(
         self,
+        tenant_id: str,
+        colony_id: str,
         prompt_strategy: ShardedInferencePromptStrategy,
         config: ShardingConfig | None = None,
     ):
+        self.tenant_id = tenant_id
+        self.colony_id = colony_id
         self.prompt_strategy = prompt_strategy
         self.config: ShardingConfig | None = config
         self._token_manager = None
@@ -459,7 +469,10 @@ class GitRepoShardingStrategy:
         self.shard_semaphore = None
 
         # Metrics
-        self.metrics = GitRepoShardingMetricsMonitor()
+        self.metrics = GitRepoShardingMetricsMonitor(
+            tenant_id=self.tenant_id,
+            colony_id=self.colony_id
+        )
 
         # Initialize shard cache with proper configuration
         self.shard_cache = None
@@ -470,7 +483,7 @@ class GitRepoShardingStrategy:
 
         # Track processed commits
         self.processed_commits: dict[str, set[str]] = {}
-        self.commit_history: dict[str, list[str]] = {}
+        self.commit_history: list[str] = {}
 
         # Setup circuit breakers
         self._setup_circuit_breakers()
@@ -500,6 +513,8 @@ class GitRepoShardingStrategy:
     async def get_token_manager(self) -> TokenManager:
         if self._token_manager is None:
             self._token_manager = TokenManager(
+                tenant_id=self.tenant_id,
+                colony_id=self.colony_id,
                 file_content_cache=self._file_content_cache,
                 config=self.config.tokenization_config,
             )
@@ -553,9 +568,7 @@ class GitRepoShardingStrategy:
         ]
 
     @standard_retry(logger)
-    async def create_shards_with_graph(
-        self, group_id: str, repo: git.Repo
-    ) -> ShardingResult:
+    async def create_shards_with_graph(self, repo: git.Repo) -> ShardingResult:
         """
         Create shards from a git repository and extract the page relationship graph.
 
@@ -563,7 +576,6 @@ class GitRepoShardingStrategy:
         graph, converting it to a page-level graph for cache-aware scheduling by agents.
 
         Args:
-            group_id: Unique identifier for the repository and its VMR context
             repo: GitPython repository object
 
         Returns:
@@ -578,7 +590,7 @@ class GitRepoShardingStrategy:
 
         try:
             # Create shards (this will use FileGrouperWithGraph internally)
-            shards, file_grouper = await self._create_shards_internal(group_id, repo)
+            shards, file_grouper = await self._create_shards_internal(repo)
 
             # Extract file relationship graph from FileGrouperWithGraph
             # file_grouper is None when shards were loaded from cache
@@ -613,12 +625,8 @@ class GitRepoShardingStrategy:
             if file_grouper:
                 await file_grouper.cleanup()
 
-
-
     @standard_retry(logger)
-    async def create_shards(
-        self, group_id: str, repo: git.Repo
-    ) -> list[RepositoryShard]:
+    async def create_shards(self, repo: git.Repo) -> list[RepositoryShard]:
         """
         Create shards from a git repository with retries on failure.
         Uses FileGrouper to cluster related files together before sharding.
@@ -630,7 +638,6 @@ class GitRepoShardingStrategy:
         This will save a lot of time and energy with autoregressive LLMs.
 
         Args:
-            group_id: Unique identifier for the repository and its VMR context
             repo: GitPython repository object
 
         Returns:
@@ -639,17 +646,17 @@ class GitRepoShardingStrategy:
         Raises:
             ShardingError: If sharding fails after retries
         """
-        shards, _ = await self._create_shards_internal(group_id, repo)
+        shards, _ = await self._create_shards_internal(repo)
         return shards
 
-    async def _create_shards_internal(
-        self, group_id: str, repo: git.Repo
-    ) -> tuple[list[RepositoryShard], FileGrouperWithGraph]:
+    def _get_cache_key(self, commit_hash: str):
+        return f"{self.tenant_id}:{self.colony_id}:{commit_hash}"
+
+    async def _create_shards_internal(self, repo: git.Repo) -> tuple[list[RepositoryShard], FileGrouperWithGraph]:
         """
         Internal method that creates shards and returns the file_grouper for graph extraction.
 
         Args:
-            group_id: Unique identifier for the repository and its VMR context
             repo: GitPython repository object
 
         Returns:
@@ -665,7 +672,7 @@ class GitRepoShardingStrategy:
 
             # Validate Git repository health
             if not validate_git_repository(repo):
-                logger.error(f"Git repository validation failed for {group_id}")
+                logger.error(f"Git repository validation failed for {self.tenant_id}:{self.colony_id}")
                 raise ShardingError(f"Git repository is not in a healthy state: {repo.working_dir}")
 
             # TODO: Cache Invalidation: Ensure that the cache is invalidated or
@@ -676,7 +683,7 @@ class GitRepoShardingStrategy:
             commit_hash = repo.head.commit.hexsha
 
             # Check if shards are already cached
-            cache_key = f"{group_id}:{commit_hash}"
+            cache_key = self._get_cache_key(commit_hash)
             logger.info(f"________ create_shards: 0 {cache_key}")
             cached_shards = await self._storage_breaker(self.shard_cache.get_shards)(cache_key)
             if cached_shards:
@@ -712,7 +719,12 @@ class GitRepoShardingStrategy:
             logger.info("________ create_shards: 3 file grouper initialized")
             # Group related files together
             # TODO: Ensure this is cached
-            file_groups = await file_grouper.group_files(group_id, repo, files)
+            file_groups = await file_grouper.group_files(
+                colony_id=self.colony_id,
+                tenant_id=self.tenant_id,
+                repo=repo,
+                files=files
+            )
             logger.info(f"________ create_shards: 4 {len(file_groups)} file groups")
             # Process groups concurrently with bounded concurrency.
             # Pass file paths directly from the group — no need to
@@ -723,7 +735,6 @@ class GitRepoShardingStrategy:
                     tasks.append(
                         tg.create_task(
                             self._process_file_group(
-                                group_id=group_id,
                                 file_paths=group.files,
                                 commit_hash=commit_hash,
                                 repo_path=repo_path,
@@ -739,15 +750,15 @@ class GitRepoShardingStrategy:
             logger.info(f"________ create_shards: 7 Cached {len(shards)} shards for {cache_key}")
             # Update metrics
             duration = time.time() - start_time
-            self.metrics.processing_time.labels(repo_id=group_id).observe(duration)
-            self.metrics.shard_count.labels(repo_id=group_id).inc(len(shards))
+            self.metrics.processing_time.observe(duration)
+            self.metrics.shard_count.inc(len(shards))
             return shards, file_grouper
 
         except* asyncio.CancelledError:
             logger.warning("Sharding operation cancelled")
             raise
         except* Exception as e:
-            self.metrics.processing_errors.labels(repo_id=group_id).inc()
+            self.metrics.processing_errors.inc()
             logger.error(f"Failed to create shards: {e!s}")
             raise ShardingError(f"Failed to create shards: {e!s}") from e
 
@@ -881,7 +892,6 @@ class GitRepoShardingStrategy:
 
     async def _create_shard_from_segments(
         self,
-        group_id: str,
         segments: list[ShardFileSegment],
         content: str,
         commit_hash: str,
@@ -892,7 +902,7 @@ class GitRepoShardingStrategy:
             try:
                 metadata = ShardMetadata(
                     shard_id=await self._create_shard_id(
-                        group_id, segments, commit_hash
+                        segments, commit_hash
                     ),
                     file_segments=segments,
                     content_size_bytes=len(content),
@@ -902,7 +912,7 @@ class GitRepoShardingStrategy:
                 )
 
                 # Update metrics
-                self.metrics.shard_size.labels(repo_id=group_id).observe(metadata.content_size_bytes)
+                self.metrics.shard_size.observe(metadata.content_size_bytes)
 
                 return RepositoryShard(
                     metadata=metadata,
@@ -916,11 +926,11 @@ class GitRepoShardingStrategy:
 
             except Exception as e:
                 logger.error(f"Error creating shard: {e!s}")
-                self.metrics.processing_errors.labels(repo_id=group_id).inc()
+                self.metrics.processing_errors.inc()
                 raise
 
     async def _create_shard_id(
-        self, group_id: str, segments: list[ShardFileSegment], commit_hash: str
+        self, segments: list[ShardFileSegment], commit_hash: str
     ) -> str:
         """Create deterministic shard ID from content and metadata."""
         # Create canonical representation of segments
@@ -936,7 +946,8 @@ class GitRepoShardingStrategy:
 
         # Combine all identifying information
         id_components = [
-            f"group={group_id}",
+            f"tenant_id={self.tenant_id}",
+            f"colony_id={self.colony_id}",
             f"commit={commit_hash}",
             f"segments={segment_str}",
         ]
@@ -947,7 +958,6 @@ class GitRepoShardingStrategy:
 
     async def _process_file_group(
         self,
-        group_id: str,
         file_paths: list[str],
         commit_hash: str,
         repo_path: Path,
@@ -968,7 +978,7 @@ class GitRepoShardingStrategy:
 
                 logger.debug(
                     f"_process_file_group: files={len(file_paths)} "
-                    f"group_id={group_id} repo_path={repo_path}"
+                    f"tenant_id={self.tenant_id} colony_id={self.colony_id} repo_path={repo_path}"
                 )
 
                 for file_path in file_paths:
@@ -991,7 +1001,7 @@ class GitRepoShardingStrategy:
                         is_binary = self._is_binary_file(file_path, content, mime_type)
 
                         if is_binary:
-                            self.metrics.binary_files.labels(repo_id=group_id).inc()
+                            self.metrics.binary_files.inc()
                             if self.config.skip_binary:
                                 continue
                             if (
@@ -1012,7 +1022,7 @@ class GitRepoShardingStrategy:
                             # Get token count
                             token_manager = await self.get_token_manager()
                             token_count = await token_manager.get_file_token_count(
-                                file_path, group_id, commit_hash
+                                file_path, commit_hash
                             )
 
                             if token_count > self.config.max_tokens_per_file:
@@ -1060,7 +1070,7 @@ class GitRepoShardingStrategy:
                     for segment in segment_group:
                         # Estimate segment tokens by scaling file tokens by line ratio
                         file_tokens = await token_manager.get_file_token_count(
-                            segment.file_path, group_id, commit_hash
+                            segment.file_path, commit_hash
                         )
                         num_file_lines = file_line_counts.get(segment.file_path, 1)
                         segment_lines = max(1, segment.end_line - segment.start_line)
@@ -1073,7 +1083,6 @@ class GitRepoShardingStrategy:
                             # Create shard from current segments
                             if current_segments:
                                 shard = await self._create_shard_from_segments(
-                                    group_id=group_id,
                                     segments=current_segments,
                                     content="\n".join(group_content),
                                     commit_hash=commit_hash,
@@ -1096,7 +1105,6 @@ class GitRepoShardingStrategy:
                 # Handle remaining segments
                 if current_segments:
                     shard = await self._create_shard_from_segments(
-                        group_id=group_id,
                         segments=current_segments,
                         content="\n".join(group_content),
                         commit_hash=commit_hash,
@@ -1110,17 +1118,16 @@ class GitRepoShardingStrategy:
 
         except Exception as e:
             logger.error(f"Error processing file group: {e!s}", exc_info=True)
-            self.metrics.processing_errors.labels(repo_id=group_id).inc()
+            self.metrics.processing_errors.inc()
             raise
 
     async def create_shards_incremental(
-        self, group_id: str, repo: git.Repo, base_commit: str | None = None
+        self, repo: git.Repo, base_commit: str | None = None
     ) -> AsyncIterator[RepositoryShard]:
         """
         Create shards incrementally by processing only changed files.
 
         Args:
-            group_id: Repository group identifier
             repo: GitPython repository object
             base_commit: Previous commit hash to compare against
         """
@@ -1163,7 +1170,7 @@ class GitRepoShardingStrategy:
 
                 # Reuse cached shards for unchanged files
                 cached_shards = await self._get_cached_shards(
-                    group_id, base_commit, changed_files
+                    base_commit, changed_files
                 )
 
                 # Yield cached shards first
@@ -1173,27 +1180,27 @@ class GitRepoShardingStrategy:
                 # Process changed files incrementally
                 async for shard in self.incremental_manager.process_repo(repo):
                     # Update cache
-                    await self._cache_shard(group_id, current_commit.hexsha, shard)
+                    await self._cache_shard(current_commit.hexsha, shard)
                     yield shard
 
             else:
                 # No base commit - process entire repo
                 async for shard in self.incremental_manager.process_repo(repo):
-                    await self._cache_shard(group_id, current_commit.hexsha, shard)
+                    await self._cache_shard(current_commit.hexsha, shard)
                     yield shard
 
             # Update commit history
-            self._update_commit_history(group_id, current_commit.hexsha)
+            self._update_commit_history(current_commit.hexsha)
 
         except Exception as e:
             logger.error(f"Incremental sharding failed: {e}", exc_info=True)
             raise ShardingError(f"Incremental sharding failed: {e!s}") from e
 
     async def _get_cached_shards(
-        self, group_id: str, commit_hash: str, changed_files: set[str]
+        self, commit_hash: str, changed_files: set[str]
     ) -> list[RepositoryShard]:
         """Get cached shards that don't contain changed files"""
-        cache_key = f"{group_id}:{commit_hash}"
+        cache_key = self._get_cache_key(commit_hash)
         cached_shards = await self.shard_cache.get_shards(cache_key)
         if not cached_shards:
             return []
@@ -1208,19 +1215,19 @@ class GitRepoShardingStrategy:
         ]
 
     async def _cache_shard(
-        self, group_id: str, commit_hash: str, shard: RepositoryShard
+        self, commit_hash: str, shard: RepositoryShard
     ):
         """Cache a shard with proper metadata"""
-        cache_key = f"{group_id}:{commit_hash}"
+        cache_key = self._get_cache_key(commit_hash)
         existing = await self.shard_cache.get_shards(cache_key) or []
         existing.append(shard)
         await self.shard_cache.set_shards(cache_key, existing)
 
-    def _update_commit_history(self, group_id: str, commit_hash: str):
+    def _update_commit_history(self, commit_hash: str):
         """Track commit history for better incremental processing"""
-        if group_id not in self.commit_history:
-            self.commit_history[group_id] = []
-        self.commit_history[group_id].append(commit_hash)
+        if not self.commit_history:
+            self.commit_history = []
+        self.commit_history.append(commit_hash)
 
         # Keep only recent history
-        self.commit_history[group_id] = self.commit_history[group_id][-100:]
+        self.commit_history = self.commit_history[-100:]  # TODO: Make it configurable

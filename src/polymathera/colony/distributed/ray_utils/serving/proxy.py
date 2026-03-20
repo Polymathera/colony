@@ -256,6 +256,8 @@ class DeploymentProxyRayActor:
         """Handle an incoming request by routing it to a replica.
 
         This method implements request queueing when max_concurrency is exceeded.
+        It also restores the isolation context (colony_id, tenant_id) from the
+        request for any proxy-local operations (logging, metrics).
 
         Args:
             request: The request to handle.
@@ -263,60 +265,63 @@ class DeploymentProxyRayActor:
         Returns:
             Response from the replica.
         """
+        from .context import isolation_context
+
         method_name = request.method_name
 
-        try:
-            # Get healthy replicas
-            async with self._replica_lock:
-                healthy_replicas = [r for r in self.replicas if r.is_healthy]
+        with isolation_context(request.colony_id, request.tenant_id):
+            try:
+                # Get healthy replicas
+                async with self._replica_lock:
+                    healthy_replicas = [r for r in self.replicas if r.is_healthy]
 
-            if not healthy_replicas:
-                error_msg = f"No healthy replicas available for {self.deployment_name}"
-                logger.error(error_msg)
+                if not healthy_replicas:
+                    error_msg = f"No healthy replicas available for {self.deployment_name}"
+                    logger.error(error_msg)
+                    request_total.labels(
+                        deployment_name=self.deployment_name,
+                        method=method_name,
+                        status="no_replicas",
+                    ).inc()
+                    return DeploymentResponse.with_error(
+                        request_id=request.request_id,
+                        error=Exception(error_msg),
+                    )
+
+                # Select router based on routing hints
+                router = self._get_router(request)
+
+                # Route request to a replica
+                replica = await router.route_request(request, healthy_replicas)
+
+                # Add request to replica's queue
+                # The queue processor will handle it
+                replica.queue_length += 1
+                await self._replica_queues[replica.replica_id].put(request)
+
+                # Wait for the request to complete
+                completion_event = asyncio.Event()
+                self._request_completion_events[request.request_id] = completion_event
+                await completion_event.wait()
+
+                # Get the response (stored in request metadata by processor)
+                response = request.metadata.get("__response__")
+                if response is None:
+                    raise RuntimeError(f"No response found for request {request.request_id}")
+
+                return response
+
+            except Exception as e:
+                logger.error(
+                    f"Error handling request to {self.deployment_name}.{method_name}: {e}",
+                    exc_info=True,
+                )
                 request_total.labels(
                     deployment_name=self.deployment_name,
                     method=method_name,
-                    status="no_replicas",
+                    status="error",
                 ).inc()
-                return DeploymentResponse.with_error(
-                    request_id=request.request_id,
-                    error=Exception(error_msg),
-                )
-
-            # Select router based on routing hints
-            router = self._get_router(request)
-
-            # Route request to a replica
-            replica = await router.route_request(request, healthy_replicas)
-
-            # Add request to replica's queue
-            # The queue processor will handle it
-            replica.queue_length += 1
-            await self._replica_queues[replica.replica_id].put(request)
-
-            # Wait for the request to complete
-            completion_event = asyncio.Event()
-            self._request_completion_events[request.request_id] = completion_event
-            await completion_event.wait()
-
-            # Get the response (stored in request metadata by processor)
-            response = request.metadata.get("__response__")
-            if response is None:
-                raise RuntimeError(f"No response found for request {request.request_id}")
-
-            return response
-
-        except Exception as e:
-            logger.error(
-                f"Error handling request to {self.deployment_name}.{method_name}: {e}",
-                exc_info=True,
-            )
-            request_total.labels(
-                deployment_name=self.deployment_name,
-                method=method_name,
-                status="error",
-            ).inc()
-            return DeploymentResponse.with_error(request_id=request.request_id, error=e)
+                return DeploymentResponse.with_error(request_id=request.request_id, error=e)
 
     async def _process_replica_queue(self, replica: DeploymentReplicaInfo) -> None:
         """Process requests from a replica's queue.

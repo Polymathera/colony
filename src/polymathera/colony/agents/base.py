@@ -20,6 +20,7 @@ import asyncio
 import logging
 import time
 import uuid
+import functools
 from typing import Any, Callable, AsyncIterator, TYPE_CHECKING
 from abc import ABC, abstractmethod
 from pydantic import BaseModel, Field, PrivateAttr
@@ -1158,7 +1159,7 @@ class AgentHandle:
                 # Create ephemeral run for return value
                 run = AgentRun(
                     session_id=session_id or "",
-                    tenant_id="",
+                    tenant_id="",  # TODO: Why is this empty?
                     agent_id=self.child_agent_id,
                     status=RunStatus.COMPLETED,
                     input_data=input_data,
@@ -1200,7 +1201,7 @@ class AgentHandle:
             # Create ephemeral run for return value
             run = AgentRun(
                 session_id=session_id or "",
-                tenant_id="",
+                tenant_id="",  # TODO: Why is this empty?
                 agent_id=self.child_agent_id,
                 status=final_status,
                 input_data=input_data,
@@ -1608,6 +1609,21 @@ class CapabilityResultFuture:
                 self._future.set_exception(e)
 
 
+
+def check_isolation(method):
+    """Decorator to check if the isolation context (tenant_id, colony_id) has changed and raise an exception if it has."""
+    @functools.wraps(method)
+    async def wrapper(self, *args, **kwargs):
+        tenant_id = serving.require_tenant_id()
+        colony_id = serving.require_colony_id()
+        if tenant_id != self.tenant_id or colony_id != self.colony_id:
+            raise RuntimeError(
+                f"Isolation context mismatch: agent tenant_id={self.tenant_id}, colony_id={self.colony_id} but current context is tenant_id={tenant_id}, colony_id={colony_id}"
+            )
+        return await method(self, *args, **kwargs)
+    return wrapper
+
+
 class Agent(BaseModel):
     """Base agent class representing an autonomous computational entity.
 
@@ -1634,8 +1650,7 @@ class Agent(BaseModel):
     state: AgentState = Field(default=AgentState.INITIALIZED)
 
     tenant_id: str = Field(default="system", description="Tenant/namespace for multi-tenant deployments")
-    # TODO: Replace group_id with vmr_id or colony_id once we have virtual monorepo support in place.
-    group_id: str = Field(default="default", description="Group ID for grouping related context sources (e.g., all repos in a virtual monorepo, and all VCM-mapped blackboard scopes)")
+    colony_id: str = Field(default="default", description="Colony ID for grouping related context sources (e.g., all repos in a virtual monorepo, and all VCM-mapped blackboard scopes)")
 
     # Optional page binding
     bound_pages: list[str] = Field(default_factory=list)
@@ -2174,6 +2189,7 @@ class Agent(BaseModel):
         """Get page storage handle from context page source."""
         return self.page_storage
 
+    @check_isolation
     async def load_page_graph(self, cached: bool = True) -> nx.DiGraph:
         """Load page graph dynamically from PageStorage.
 
@@ -2183,7 +2199,7 @@ class Agent(BaseModel):
         """
         if not self.page_storage:
             return nx.DiGraph()
-        return await self.page_storage.load_page_graph(self.tenant_id, self.group_id, cached)
+        return await self.page_storage.load_page_graph(cached)
 
     async def _restore_from_suspension(self) -> None:
         """Restore base agent state from suspension.
@@ -2450,6 +2466,7 @@ class Agent(BaseModel):
         logger.info(f"Agent {self.agent_id} requested suspension: {reason}")
 
     @hookable
+    @check_isolation
     async def run_step(self) -> None:
         """Execute one step of agent logic.
 
@@ -2569,7 +2586,8 @@ class Agent(BaseModel):
     # === Context Access (Delegated to manager) ===
 
     @hookable
-    async def request_page(self, page_id: str, priority: int = 0, tenant_id: str | None = None) -> None:
+    @check_isolation
+    async def request_page(self, page_id: str, priority: int = 0) -> None:
         """Request a virtual page to be loaded.
 
         Delegates to the agent manager that hosts this agent.
@@ -2588,10 +2606,11 @@ class Agent(BaseModel):
             raise RuntimeError(f"Agent {self.agent_id} not attached to manager")
 
         await self._manager.agent_request_page(
-            agent_id=self.agent_id,
             page_id=page_id,
+            agent_id=self.agent_id,
+            tenant_id=self.tenant_id,
+            colony_id=self.colony_id,
             priority=priority,
-            tenant_id=tenant_id or self.tenant_id
         )
 
     async def is_page_loaded(self, page_id: str) -> bool:
@@ -3353,6 +3372,8 @@ class AgentManagerBase:
                     logger.warning(f"Failed to initialize tracing for agent {agent_id}: {e}")
 
             # Store agent
+            if agent_id in self._agents:
+                raise ValueError(f"Agent ID collision: {agent_id} already exists")
             self._agents[agent_id] = agent
 
             # TRACK RESOURCE USAGE
@@ -3781,6 +3802,17 @@ class AgentManagerBase:
     async def _run_agent_loop(self, agent: Agent, max_iterations: int | None = None) -> None:
         """Run agent's execution loop (internal).
 
+        1. `start_agent` is a `@serving.endpoint`
+        2. When called, `__handle_request__` wraps it in with `isolation_context(...)`:
+        3. Inside that context, `start_agent` does `asyncio.create_task(self._run_agent_loop(...))`
+        4. `create_task` snapshots the current `contextvars` — so the agent loop task does inherit `colony_id`/`tenant_id`
+
+        So, the agent loop gets the right context automatically because Python's `asyncio.create_task` copies the active `contextvars.Context` at creation time.
+
+        The snapshot is a copy, not a reference — so even after `__handle_request__` exits and its `isolation_context` resets the `contextvars`, the agent loop's copy is unaffected. The agent loop retains the values for its entire lifetime.
+
+        No explicit setting needed in `_run_agent_loop`.
+
         Args:
             agent: Agent instance
             max_iterations: Optional maximum number of iterations for the agent's action policy
@@ -3976,13 +4008,13 @@ class AgentManagerBase:
 
         # Create instance
         try:
-            # Propagate tenant_id and group_id from metadata to Agent fields
+            # Propagate tenant_id and colony_id from metadata to Agent fields
             # so page graph lookups use the correct keys.
             extra_fields: dict[str, Any] = {}
             if isinstance(metadata, AgentMetadata):
                 extra_fields["tenant_id"] = metadata.tenant_id
-                if metadata.group_id:
-                    extra_fields["group_id"] = metadata.group_id
+                if metadata.colony_id:
+                    extra_fields["colony_id"] = metadata.colony_id
             agent = agent_class(
                 agent_id=agent_id,
                 agent_type=agent_class_id,
@@ -4096,6 +4128,8 @@ class AgentManagerBase:
         request = InferenceRequest(
             request_id=f"agent-{agent_id}-{uuid.uuid4().hex[:8]}",
             prompt=prompt or "",
+            colony_id=self._agents[agent_id].colony_id,
+            tenant_id=self._agents[agent_id].tenant_id,
             context_page_ids=context_page_ids or [],
             **kwargs
         )
@@ -4116,16 +4150,20 @@ class AgentManagerBase:
 
     async def agent_request_page(
         self,
-        agent_id: str,
+        *,
         page_id: str,
+        colony_id: str | None,
+        tenant_id: str | None,
+        agent_id: str,
         priority: int = 0,
-        tenant_id: str = "default",
     ) -> None:
         """Delegate page loading request to VCM.
 
         Args:
-            agent_id: Agent identifier
             page_id: Virtual page identifier
+            colony_id: Colony identifier
+            tenant_id: Tenant identifier
+            agent_id: Agent identifier
             priority: Load priority (0-100)
 
         Raises:
@@ -4139,9 +4177,10 @@ class AgentManagerBase:
         # Delegate to VCM
         await self._vcm_handle.request_page_load(
             page_id=page_id,
-            priority=priority,
+            colony_id=colony_id,
+            tenant_id=tenant_id,
             agent_id=agent_id,
-            tenant_id=tenant_id
+            priority=priority,
         )
 
     async def agent_is_page_loaded(
@@ -4165,7 +4204,11 @@ class AgentManagerBase:
             raise RuntimeError("VCM handle not initialized")
 
         # Delegate to VCM
-        is_loaded = await self._vcm_handle.is_page_loaded(page_id)
+        agent = self._agents.get(agent_id)
+        if not agent:
+            logger.warning(f"agent_is_page_loaded: Agent {agent_id} not found")
+            return False
+        is_loaded = await self._vcm_handle.is_page_loaded(page_id, agent.colony_id, agent.tenant_id)
 
         logger.debug(f"Agent {agent_id}: Page {page_id} loaded={is_loaded}")
 

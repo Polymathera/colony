@@ -30,11 +30,11 @@ export function useLoadedPageEntries() {
   });
 }
 
-export function usePageDetail(pageId: string) {
+export function usePageDetail(pageId: string, colonyId: string, tenantId: string) {
   return useQuery({
-    queryKey: ["vcm", "pages", pageId],
+    queryKey: ["vcm", "pages", pageId, colonyId, tenantId],
     queryFn: () =>
-      apiFetch<Record<string, unknown>>(`/vcm/pages/${pageId}`),
-    enabled: !!pageId,
+      apiFetch<Record<string, unknown>>(`/vcm/pages/${pageId}/${colonyId}/${tenantId}`),
+    enabled: !!pageId && !!colonyId && !!tenantId,
   });
 }

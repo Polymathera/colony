@@ -85,7 +85,7 @@ class FeedbackLoopPrefetchPolicy(PrefetchPolicy):
         if self._predictor is None:
             self._predictor = FeedbackLoopPredictor(
                 agent=self.agent,
-                group_id=None,
+                colony_id=None,
                 tenant_id=None,
                 prefetch_depth=self.prefetch_depth,
                 prefetch_test_pages=self.prefetch_test_pages,
@@ -127,7 +127,7 @@ class FeedbackLoopPredictor:
     def __init__(
         self,
         agent: Agent,
-        group_id: str | None,
+        colony_id: str | None,
         tenant_id: str | None,
         prefetch_depth: int = 2,
         prefetch_test_pages: bool = True
@@ -136,13 +136,13 @@ class FeedbackLoopPredictor:
 
         Args:
             agent: Agent instance
-            group_id: Group ID
+            colony_id: Colony ID
             tenant_id: Tenant ID
             prefetch_depth: Max hops to look for related pages
             prefetch_test_pages: Include test pages in predictions
         """
         self.agent = agent
-        self.group_id = group_id
+        self.colony_id = colony_id
         self.tenant_id = tenant_id
         self.prefetch_depth = prefetch_depth
         self.prefetch_test_pages = prefetch_test_pages

@@ -452,10 +452,10 @@ class MemoryCapability(AgentCapability):
                 # TODO: This only works if the memory storage backend is BlackboardStorageBackend. Generalize?
                 result = await vcm_handle.mmap_application_scope(
                     scope_id=self.scope_id,
-                    group_id=self._agent.group_id,
-                    tenant_id=self._agent.tenant_id,
                     source_type=BuilInContextPageSourceType.BLACKBOARD.value,
                     config=self.vcm_config or MmapConfig(),
+                    colony_id=self.agent.colony_id,
+                    tenant_id=self.agent.tenant_id,
                 )
                 logger.info(
                     f"MemoryCapability[{self.scope_id}]: VCM mapping status={result.status}"

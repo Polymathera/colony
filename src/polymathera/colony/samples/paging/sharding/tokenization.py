@@ -154,9 +154,14 @@ class TokenManager:
 
     def __init__(
         self,
+        tenant_id: str,
+        colony_id: str,
         file_content_cache: FileContentCache,
         config: TokenizationConfig | None = None,
     ):
+        self.tenant_id = tenant_id
+        self.colony_id = colony_id
+
         self.config: TokenizationConfig | None = config
         self.file_content_cache = file_content_cache
 
@@ -210,12 +215,11 @@ class TokenManager:
     async def get_file_token_count(
         self,
         file_path: str,
-        repo_id: str | None = None,
         commit_hash: str | None = None,
     ) -> int:
         """Get token count for a file with persistent caching and fallbacks"""
         return await self.get_file_tokens(
-            file_path, repo_id, commit_hash, return_tokens=False
+            file_path, commit_hash, return_tokens=False
         )
 
     @run_method_once
@@ -227,7 +231,6 @@ class TokenManager:
     async def get_file_tokens(
         self,
         file_path: str,
-        repo_id: str | None = None,
         commit_hash: str | None = None,
         return_tokens: bool = False,
     ) -> int | list[int]:
@@ -235,10 +238,10 @@ class TokenManager:
         ### if not hasattr(self, "_file_count"):
         ###     self._file_count = 0
         ### self._file_count += 1
-        ### logger.info(f"________ get_file_tokens({repo_id}:{commit_hash}:{file_path}) [{self._file_count}:{self.file_content_cache.cache.currsize}]")
+        ### logger.info(f"________ get_file_tokens({self.tenant_id}:{self.colony_id}:{commit_hash}:{file_path}) [{self._file_count}:{self.file_content_cache.cache.currsize}]")
         start_time = time.time()
         try:
-            cache_key = self._make_cache_key(repo_id, file_path, commit_hash)
+            cache_key = self._make_cache_key(file_path, commit_hash)
 
             if return_tokens:
                 # Try getting tokens from cache
@@ -324,7 +327,6 @@ class TokenManager:
     async def get_files_batch(
         self,
         files: list[str],
-        repo_id: str | None = None,
         commit_hash: str | None = None,
     ) -> dict[str, int]:
         """Process multiple files efficiently using DistributedSimpleCache batching"""
@@ -334,7 +336,7 @@ class TokenManager:
 
             # Generate cache keys for batch
             key_to_file = {
-                self._make_cache_key(repo_id, f, commit_hash): f for f in files
+                self._make_cache_key(f, commit_hash): f for f in files
             }
 
             # Get cached values in batch
@@ -348,7 +350,7 @@ class TokenManager:
             if missing_files:
                 new_results = {}
                 for f in missing_files:
-                    new_results[f] = await self.get_file_tokens(f, repo_id, commit_hash)
+                    new_results[f] = await self.get_file_tokens(f, commit_hash)
 
                 return {
                     **{
@@ -373,7 +375,7 @@ class TokenManager:
             )
 
     def _make_cache_key(
-        self, repo_id: str | None, file_path: str, commit_hash: str | None
+        self, file_path: str, commit_hash: str | None
     ) -> str:
         """Generate consistent cache key"""
-        return f"{repo_id or 'default'}:{file_path}:{commit_hash or 'latest'}"
+        return f"{self.tenant_id}:{self.colony_id}:{file_path}:{commit_hash or 'latest'}"

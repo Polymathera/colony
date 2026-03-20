@@ -14,15 +14,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/vcm/page-graph/groups")
-async def list_page_graph_groups(
+@router.get("/vcm/page-graph/scopes")
+async def list_all_mapped_memory_scopes(
     colony: ColonyConnection = Depends(get_colony),
 ) -> list[dict[str, Any]]:
-    """List available page graph groups (tenant_id, group_id, scope_id)."""
+    """List available mapped memory scopes (tenant_id, colony_id, scope_id)."""
     if not colony.is_connected:
         return []
     try:
-        return await colony.get_vcm().get_page_graph_groups()
+        return await colony.get_vcm().get_all_mapped_scopes()
     except Exception as e:
         logger.warning("Failed to list page graph groups: %s", e)
         return []
@@ -31,7 +31,7 @@ async def list_page_graph_groups(
 @router.get("/vcm/page-graph")
 async def get_page_graph(
     tenant_id: str = Query(...),
-    group_id: str = Query(...),
+    colony_id: str = Query(...),
     max_nodes: int = Query(default=5000, le=10000),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
@@ -41,7 +41,7 @@ async def get_page_graph(
     try:
         return await colony.get_vcm().get_page_graph_data(
             tenant_id=tenant_id,
-            group_id=group_id,
+            colony_id=colony_id,
             max_nodes=max_nodes,
         )
     except Exception as e:

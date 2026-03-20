@@ -77,7 +77,7 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
         # Key generator and registry to be used by action executors
         self.key_registry = GlobalPageKeyRegistry(self.agent)
         await self.key_registry.initialize()
-        self.key_generator = HybridKeyGenerator()
+        self.key_generator = HybridKeyGenerator(self)
 
         # Query generator to be used by action executors
         self.query_generator = DependencyQueryGenerator(max_queries=10)

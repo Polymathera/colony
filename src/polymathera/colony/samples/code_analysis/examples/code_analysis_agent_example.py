@@ -46,15 +46,19 @@ async def analyze_repository(
     logger.info("Creating ContextPageSource...")
     # Map the repository to VCM pages using the built-in file grouper source type
     from polymathera.colony.system import get_agent_system, get_vcm
-    vcm_handle = get_vcm()
-    mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
-        scope_id="repo-123",
-        group_id="vmr-456",
-        tenant_id="tenant-1",
-        source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
-        config=MmapConfig(),
-        repo_path=repo_path,
-    )
+    from polymathera.colony.distributed.ray_utils.serving.context import isolation_context
+
+    with isolation_context(colony_id="my-vmr", tenant_id="my-tenant"):
+
+        vcm_handle = get_vcm()
+        mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
+            scope_id="repo-123",
+            colony_id="my-vmr",
+            tenant_id="my-tenant",
+            source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
+            config=MmapConfig(),
+            repo_path=repo_path,
+        )
 
     # TODO: Build the page graph and persist it so the coordinator can load it (or let coordinator build it - needs repo access)
 

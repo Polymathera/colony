@@ -68,7 +68,7 @@ class GlobalPageKeyRegistry:
         Args:
             page_id: Page identifier
         """
-        return f"{_PAGE_KEY_PREFIX}{self.agent.tenant_id}:{page_id}"
+        return f"{_PAGE_KEY_PREFIX}{self.agent.tenant_id}:{self.agent.colony_id}:{page_id}"
 
     def _get_cluster_summary_key(self, cluster_id: str) -> str:
         """Get blackboard key for cluster summary.
@@ -78,7 +78,7 @@ class GlobalPageKeyRegistry:
         Returns:
             Blackboard key for this cluster summary
         """
-        return f"{_CLUSTER_SUMMARY_PREFIX}{self.agent.tenant_id}:{cluster_id}"
+        return f"{_CLUSTER_SUMMARY_PREFIX}{self.agent.tenant_id}:{self.agent.colony_id}:{cluster_id}"
 
     async def publish_page_key(
         self,
@@ -101,7 +101,7 @@ class GlobalPageKeyRegistry:
                 {
                     "key": key.model_dump(),
                     "cluster_id": cluster_id,
-                    "group_id": self.agent.group_id if self.agent else None,
+                    "colony_id": self.agent.colony_id if self.agent else None,
                     "tenant_id": self.agent.tenant_id if self.agent else None,
                     "timestamp": time.time(),
                     "agent_id": self.agent.agent_id,
@@ -295,9 +295,8 @@ class GlobalPageKeyRegistry:
             logger.error(f"Failed to get cluster summary for {cluster_id}: {e}", exc_info=True)
             return None
 
-
-    def _get_page_graph_group_id(self, page_id: str) -> str:
-        """Get VCM page graph group ID for page key."""
+    def _get_page_data_key(self, page_id: str) -> str:
+        """Get VCM page data key for page key in page storage."""
         return f"page_key_{page_id}"
 
     async def _get_page_key_from_page_graph(self, page_id: str) -> PageKey | None:
@@ -305,9 +304,7 @@ class GlobalPageKeyRegistry:
         # Retrieve from VCM page storage
         try:
             return await self.page_storage.retrieve_page_graph_level_data(
-                tenant_id=self.agent.tenant_id,
-                group_id=self.agent.group_id,
-                data_key=self._get_page_graph_group_id(page_id),
+                data_key=self._get_page_data_key(page_id),
             )
         except Exception as e:
             logger.warning(f"Failed to retrieve key from VCM for {page_id}: {e}")
@@ -318,9 +315,7 @@ class GlobalPageKeyRegistry:
         # Store in VCM page storage
         try:
             await self.page_storage.store_page_graph_level_data(  # TODO: Page keys are not really graph-level data, we should add a separate method for page-level data
-                tenant_id=self.agent.tenant_id,
-                group_id=self.agent.group_id,
-                data_key=self._get_page_graph_group_id(page_id),
+                data_key=self._get_page_data_key(page_id),
                 graph_data=page_key,
             )
             logger.debug(f"Cached key for {page_id} in VCM")

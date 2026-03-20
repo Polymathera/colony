@@ -10,7 +10,7 @@ from overrides import override
 import logging
 
 from ...base import Agent
-from .attention import PageQuery, AttentionScore, PageKey, AttentionScoringMechanism
+from .attention import PageQuery, AttentionScore, AttentionScoringMechanism
 from .key_registry import GlobalPageKeyRegistry
 from ...models import AttentionContext
 
