@@ -643,7 +643,7 @@ class VirtualContextManager:
 
     # === Page Retrieval ===
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_page_locations(
         self,
         page_id: str,
@@ -663,7 +663,7 @@ class VirtualContextManager:
         tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
         return await self.page_table.get_page_locations(page_id, colony_id, tenant_id)
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_virtual_page(
         self,
         page_id: str,
@@ -726,7 +726,7 @@ class VirtualContextManager:
         tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
         return await self.page_table.get_page_location(page_id, colony_id, tenant_id)
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_all_loaded_pages(self) -> list[str]:
         """Get all pages currently loaded across all replicas.
 
@@ -735,7 +735,7 @@ class VirtualContextManager:
         """
         return await self.page_table.get_all_loaded_pages()
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def list_stored_pages(
         self,
         source_pattern: str | None = None,
@@ -761,7 +761,7 @@ class VirtualContextManager:
             offset=offset,
         )
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def list_loaded_page_entries(self) -> list[dict[str, Any]]:
         """Return summary of all pages currently loaded in KV cache with access stats.
 
@@ -1394,7 +1394,7 @@ class VirtualContextManager:
 
     # === Monitoring and Statistics ===
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_stats(self) -> dict[str, Any]:
         """Get VCM statistics.
 
@@ -1413,7 +1413,7 @@ class VirtualContextManager:
 
     # === Page Graph Visualization ===
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_all_mapped_scopes(self) -> list[dict[str, Any]]:
         """List (tenant_id, colony_id, scope_id) tuples that have page graphs.
 
@@ -1434,7 +1434,7 @@ class VirtualContextManager:
                     })
         return mapping_tuples
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_page_graph_data(
         self,
         colony_id: str | None,

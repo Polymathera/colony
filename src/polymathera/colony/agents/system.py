@@ -177,7 +177,7 @@ class AgentSystemDeployment:
 
     # === Agent Discovery ===
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def list_all_agents(self) -> list[str]:
         """List all agent IDs in the system.
 
@@ -187,7 +187,7 @@ class AgentSystemDeployment:
         async for state in self.state_manager.read_transaction():
             return list(state.agents.keys())
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_agent_info(self, agent_id: str) -> AgentRegistrationInfo | None:
         """Get agent information.
 
@@ -1222,7 +1222,7 @@ class AgentSystemDeployment:
 
     # === Monitoring ===
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_system_stats(self) -> dict[str, Any]:
         """Get agent system statistics.
 
@@ -1251,7 +1251,7 @@ class AgentSystemDeployment:
 
     # === Infrastructure Status (for dashboard) ===
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_infrastructure_status(self) -> dict[str, Any]:
         """Get cluster infrastructure status: Redis health/info, app registry.
 
@@ -1338,7 +1338,7 @@ class AgentSystemDeployment:
 
     # === Blackboard Observer (for dashboard) ===
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_blackboard_scopes(self) -> list[dict[str, Any]]:
         """List all registered blackboard scopes with live statistics.
 
@@ -1389,7 +1389,7 @@ class AgentSystemDeployment:
 
         return scopes
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_blackboard_entries(
         self,
         scope: str,

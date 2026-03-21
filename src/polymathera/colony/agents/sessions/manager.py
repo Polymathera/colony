@@ -225,7 +225,7 @@ class SessionManagerDeployment:
 
         return session
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_session(self, session_id: str) -> Session | None:
         """Get session by ID.
 
@@ -238,7 +238,7 @@ class SessionManagerDeployment:
         async for state in self.state_manager.read_transaction():
             return state.sessions.get(session_id)
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def list_sessions(
         self,
         tenant_id: str | None = None,
@@ -507,7 +507,7 @@ class SessionManagerDeployment:
     # Statistics and Monitoring
     # =========================================================================
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_stats(self) -> dict[str, Any]:
         """Get session manager statistics.
 
@@ -966,7 +966,7 @@ class SessionManagerDeployment:
 
         return updated
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_run(self, run_id: str) -> AgentRun | None:
         """Get a run by ID.
 
@@ -979,7 +979,7 @@ class SessionManagerDeployment:
         async for state in self.state_manager.read_transaction():
             return state.runs.get(run_id)
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_session_runs(
         self,
         session_id: str,

@@ -29,7 +29,7 @@ import networkx as nx
 
 from .models import VirtualContextPageMetadata, VirtualContextPage, ContextPageId
 from .sources import PageCluster
-from ..distributed.ray_utils.serving import require_colony_id, require_tenant_id
+from ..distributed.ray_utils.serving import get_colony_id, get_tenant_id, require_colony_id, require_tenant_id
 
 if TYPE_CHECKING:
     from ..distributed.storage import Storage
@@ -274,8 +274,8 @@ class RelationalPageMetadataStore(PageMetadataStore):
         Raises:
             Exception: If query fails
         """
-        tenant_id = require_tenant_id()
-        colony_id = require_colony_id()
+        tenant_id = get_tenant_id()
+        colony_id = get_colony_id()
 
         logger.debug(
             f"Listing pages (tenant={tenant_id}, colony={colony_id}, source_pattern={source_pattern}, "
@@ -328,8 +328,8 @@ class RelationalPageMetadataStore(PageMetadataStore):
             List of dicts with page_id, source, size, group_id, tenant_id
         """
         try:
-            tenant_id = require_tenant_id()
-            colony_id = require_colony_id()
+            tenant_id = get_tenant_id()
+            colony_id = get_colony_id()
 
             session_maker = self.relational_storage._get_current_loop_session_maker()
             async with session_maker() as session:

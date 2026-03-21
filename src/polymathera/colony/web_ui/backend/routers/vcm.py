@@ -54,7 +54,7 @@ async def list_pages(
         return []
 
     try:
-        # TODO: This will fail because tenant_id and colony_id are not set in the isolation context.
+
         summaries = await colony.get_vcm().list_stored_pages(
             limit=limit,
             offset=offset,
@@ -83,7 +83,7 @@ async def get_working_set(
         return {"pages": []}
 
     try:
-        # TODO: This will fail because tenant_id and colony_id are not set in the isolation context.
+
         loaded = await colony.get_vcm().get_all_loaded_pages()
         return {"pages": loaded}
     except Exception as e:
@@ -100,7 +100,7 @@ async def list_loaded_pages(
         return []
 
     try:
-        # TODO: This will fail because tenant_id and colony_id are not set in the isolation context.
+
         return await colony.get_vcm().list_loaded_page_entries()
     except Exception as e:
         logger.warning("Failed to list loaded pages: %s", e)
@@ -119,7 +119,7 @@ async def get_page_detail(
         return {"error": "not connected"}
 
     try:
-        # TODO: This will fail because tenant_id and colony_id are not set in the isolation context.
+
         page = await colony.get_vcm().get_virtual_page(page_id=page_id, colony_id=colony_id, tenant_id=tenant_id)
         if page is None:
             return {"error": "page not found", "page_id": page_id}
@@ -142,7 +142,7 @@ async def get_page_locations(
         return {"error": "not connected"}
 
     try:
-        # TODO: This will fail because tenant_id and colony_id are not set in the isolation context.
+
         locations = await colony.get_vcm().get_page_locations(page_id=page_id, colony_id=colony_id, tenant_id=tenant_id)
         return {
             "page_id": page_id,

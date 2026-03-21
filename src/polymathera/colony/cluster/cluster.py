@@ -583,7 +583,7 @@ class LLMCluster:
             page_hit_rate=page_hit_rate,
         )
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_all_deployment_names(self) -> list[str]:
         """Get names of all deployments (vLLM + remote) in the cluster.
 
@@ -672,7 +672,7 @@ class LLMCluster:
             if response.page_faults:
                 state.total_page_faults += len(response.page_faults)
 
-    @serving.endpoint
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def select_deployment(
         self,
         requirements: Any | None = None,  # LLMClientRequirements - avoid circular import

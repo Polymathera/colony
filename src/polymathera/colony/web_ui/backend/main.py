@@ -11,14 +11,32 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from .config import DashboardConfig
 from .services.colony_connection import ColonyConnection
 
 logger = logging.getLogger(__name__)
+
+
+class ExecutionContextMiddleware(BaseHTTPMiddleware):
+    """Set a Ring.KERNEL execution context for every dashboard API request.
+
+    The dashboard is an admin/monitoring interface that operates across
+    tenants.  Individual routes that take colony_id/tenant_id as path
+    params can narrow to Ring.USER if needed.
+    """
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        from polymathera.colony.distributed.ray_utils.serving.context import (
+            Ring, execution_context,
+        )
+        with execution_context(ring=Ring.KERNEL, origin="dashboard"):
+            return await call_next(request)
 
 
 @asynccontextmanager
@@ -79,6 +97,9 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Execution context for all API requests (Ring.KERNEL — admin interface)
+    app.add_middleware(ExecutionContextMiddleware)
 
     # Register API routers
     from .routers import (
