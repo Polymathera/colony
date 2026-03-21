@@ -612,23 +612,21 @@ class VirtualPageTableState(SharedState):
     # Forward index: tenant_id:colony_id:page_id -> PageTableEntry (supports multiple physical locations)
     entries: dict[str, PageTableEntry] = Field(default_factory=dict)
 
-    # Reverse index: (deployment_name, client_id) -> set of (page_id, colony_id, tenant_id)
-    # NOTE: Pydantic serializes tuple keys as "('dep', 'client')" strings
-    client_pages: dict[str, set[tuple[str, str, str]]] = Field(default_factory=dict)
+    # Reverse index: client_key -> set of page_ref strings ("page_id:colony_id:tenant_id")
+    client_pages: dict[str, set[str]] = Field(default_factory=dict)
 
-    # Tenant index: tenant_id -> set of (page_id, colony_id)
-    tenant_pages: dict[str, set[tuple[str, str]]] = Field(default_factory=dict)
+    # Tenant index: tenant_id -> set of page_colony_ref strings ("page_id:colony_id")
+    tenant_pages: dict[str, set[str]] = Field(default_factory=dict)
 
-    # Page groups: (group_id, colony_id, tenant_id) -> PageGroup
-    page_groups: dict[tuple[str, str, str], PageGroup] = Field(default_factory=dict)
+    # Page groups: group_key ("group_id:colony_id:tenant_id") -> PageGroup
+    page_groups: dict[str, PageGroup] = Field(default_factory=dict)
 
     # Pending page faults (sorted by priority)
     pending_faults: list[PageFault] = Field(default_factory=list)
     processing_faults: dict[str, PageFault] = Field(default_factory=dict)  # fault_id -> PageFault currently being processed
 
-    # Page locks (prevent eviction during critical operations)
-    locked_pages: dict[tuple[str, str, str], PageLock] = Field(default_factory=dict)
-    """Maps (page_id, colony_id, tenant_id) to PageLock for pages that should not be evicted"""
+    # Page locks: lock_key ("page_id:colony_id:tenant_id") -> PageLock
+    locked_pages: dict[str, PageLock] = Field(default_factory=dict)
 
     # Statistics
     total_loads: int = 0
@@ -639,21 +637,57 @@ class VirtualPageTableState(SharedState):
     # Maps replica_id (client_id) to list of page_ids
     replica_pages: dict[str, list[str]] = Field(default_factory=dict)
 
-    # Scope-to-VCM mappings (scope_id -> MappedScopeConfig)
+    # Scope-to-VCM mappings: scope_key ("scope_id:colony_id:tenant_id") -> MappedScopeConfig
     # Each entry represents a blackboard/memory scope that is being paged into
     # VCM by a BlackboardContextPageSource. All VCM replicas materialize local
     # page sources from this shared mapping during reconciliation.
-    mapped_scopes: dict[tuple[str, str, str], MappedScopeConfig] = Field(default_factory=dict)
+    mapped_scopes: dict[str, MappedScopeConfig] = Field(default_factory=dict)
 
     # Branch tracking for copy-on-write semantics
-    branches: dict[tuple[str, str, str], VCMBranch] = Field(
+    branches: dict[str, VCMBranch] = Field(
         default_factory=dict,
-        description="Registered branches (branch_id -> VCMBranch)"
+        description="branch_key ('branch_id:colony_id:tenant_id') -> VCMBranch"
     )
-    branch_pages: dict[tuple[str, str, str], set[str]] = Field(
+    branch_pages: dict[str, set[str]] = Field(
         default_factory=dict,
-        description="Pages created on each branch (branch_id -> set of page_ids)"
+        description="branch_key -> set of page_ids created on that branch"
     )
+
+    # --- Composite key helpers ---
+    # All composite keys use ":" as separator. Components are identifiers
+    # that must not contain ":".
+
+    @staticmethod
+    def get_scope_key(scope_id: str, colony_id: str, tenant_id: str) -> str:
+        return f"{scope_id}:{colony_id}:{tenant_id}"
+
+    @staticmethod
+    def get_group_key(group_id: str, colony_id: str, tenant_id: str) -> str:
+        return f"{group_id}:{colony_id}:{tenant_id}"
+
+    @staticmethod
+    def get_lock_key(page_id: str, colony_id: str, tenant_id: str) -> str:
+        return f"{page_id}:{colony_id}:{tenant_id}"
+
+    @staticmethod
+    def get_branch_key(branch_id: str, colony_id: str, tenant_id: str) -> str:
+        return f"{branch_id}:{colony_id}:{tenant_id}"
+
+    @staticmethod
+    def get_page_colony_ref(page_id: str, colony_id: str) -> str:
+        """Composite ref for tenant_pages set values."""
+        return f"{page_id}:{colony_id}"
+
+    @staticmethod
+    def get_page_ref(page_id: str, colony_id: str, tenant_id: str) -> str:
+        """Composite ref for client_pages set values."""
+        return f"{page_id}:{colony_id}:{tenant_id}"
+
+    @staticmethod
+    def parse_page_ref(page_ref: str) -> dict[str, str]:
+        """Parse a composite page_ref into its components."""
+        page_id, colony_id, tenant_id = page_ref.split(":")
+        return {"page_id": page_id, "colony_id": colony_id, "tenant_id": tenant_id}
 
     @classmethod
     def get_state_key(cls, app_name: str) -> str:
@@ -723,12 +757,12 @@ class VirtualPageTableState(SharedState):
         client_key = self._client_key(location.deployment_name, location.client_id)
         if client_key not in self.client_pages:
             self.client_pages[client_key] = set()
-        self.client_pages[client_key].add((page_id, colony_id, tenant_id))
+        self.client_pages[client_key].add(self.get_page_ref(page_id, colony_id, tenant_id))
 
         # Update tenant index
         if tenant_id not in self.tenant_pages:
             self.tenant_pages[tenant_id] = set()
-        self.tenant_pages[tenant_id].add((page_id, colony_id))
+        self.tenant_pages[tenant_id].add(self.get_page_colony_ref(page_id, colony_id))
 
         # Update backward compatibility index
         if location.client_id not in self.replica_pages:
@@ -791,7 +825,7 @@ class VirtualPageTableState(SharedState):
         # Update reverse index
         client_key = self._client_key(deployment_name, client_id)
         if client_key in self.client_pages:
-            self.client_pages[client_key].discard((page_id, colony_id, tenant_id))
+            self.client_pages[client_key].discard(self.get_page_ref(page_id, colony_id, tenant_id))
             # Clean up empty entries
             if not self.client_pages[client_key]:
                 del self.client_pages[client_key]
@@ -807,7 +841,7 @@ class VirtualPageTableState(SharedState):
         if not entry.is_loaded():
             tenant_id = entry.tenant_id
             if tenant_id in self.tenant_pages:
-                self.tenant_pages[tenant_id].discard((page_id, colony_id))
+                self.tenant_pages[tenant_id].discard(self.get_page_colony_ref(page_id, colony_id))
                 if not self.tenant_pages[tenant_id]:
                     del self.tenant_pages[tenant_id]
 
@@ -885,7 +919,7 @@ class VirtualPageTableState(SharedState):
             return []
         return self.entries[key].physical_locations.copy()
 
-    def get_pages_on_client(self, deployment_name: str, client_id: str) -> set[tuple[str, str, str]]:
+    def get_pages_on_client(self, deployment_name: str, client_id: str) -> set[str]:
         """Get all virtual pages loaded on a specific client.
 
         Args:
@@ -893,19 +927,19 @@ class VirtualPageTableState(SharedState):
             client_id: Client ID
 
         Returns:
-            Set of (page_id, colony_id, tenant_id) tuples (empty if none)
+            Set of page_ref strings ("page_id:colony_id:tenant_id"), empty if none
         """
         client_key = self._client_key(deployment_name, client_id)
         return self.client_pages.get(client_key, set()).copy()
 
-    def get_pages_for_tenant(self, tenant_id: str) -> set[tuple[str, str]]:
+    def get_pages_for_tenant(self, tenant_id: str) -> set[str]:
         """Get all virtual pages belonging to a tenant.
 
         Args:
             tenant_id: Tenant ID
 
         Returns:
-            Set of (page_id, colony_id) tuples (empty if none)
+            Set of page_colony_ref strings ("page_id:colony_id"), empty if none
         """
         return self.tenant_pages.get(tenant_id, set()).copy()
 
@@ -1187,7 +1221,7 @@ class VirtualPageTableState(SharedState):
             reason=reason,
             created_at=now,
         )
-        page_key = (page_id, colony_id, tenant_id)
+        page_key = self.get_lock_key(page_id, colony_id, tenant_id)
         self.locked_pages[page_key] = lock
         logger.info(
             f"Locked page {page_key} for {lock_duration_s}s by {locked_by} "
@@ -1208,7 +1242,7 @@ class VirtualPageTableState(SharedState):
         """
         # TODO: Optionally check if locked_by matches?
 
-        page_key = (page_id, colony_id, tenant_id)
+        page_key = self.get_lock_key(page_id, colony_id, tenant_id)
         if page_key in self.locked_pages:
             del self.locked_pages[page_key]
             logger.info(f"Unlocked page {page_key}")
@@ -1241,7 +1275,7 @@ class VirtualPageTableState(SharedState):
         if additional_duration_s < 0:
             raise ValueError(f"Additional duration cannot be negative, got {additional_duration_s}")
 
-        page_key = (page_id, colony_id, tenant_id)
+        page_key = self.get_lock_key(page_id, colony_id, tenant_id)
         if page_key not in self.locked_pages:
             return False
 
@@ -1270,7 +1304,7 @@ class VirtualPageTableState(SharedState):
         Returns:
             True if page is locked and lock hasn't expired, False otherwise
         """
-        page_key = (page_id, colony_id, tenant_id)
+        page_key = self.get_lock_key(page_id, colony_id, tenant_id)
         if page_key not in self.locked_pages:
             return False
 
@@ -1288,7 +1322,7 @@ class VirtualPageTableState(SharedState):
         Returns:
             PageLock if page is locked, None otherwise
         """
-        page_key = (page_id, colony_id, tenant_id)
+        page_key = self.get_lock_key(page_id, colony_id, tenant_id)
         return self.locked_pages.get(page_key)
 
     def cleanup_expired_locks(self, current_time: float | None = None) -> int:
@@ -1315,7 +1349,7 @@ class VirtualPageTableState(SharedState):
 
         return len(expired_page_keys)
 
-    def get_locked_pages(self, include_expired: bool = False, current_time: float | None = None) -> list[tuple[str, str, str]]:
+    def get_locked_pages(self, include_expired: bool = False, current_time: float | None = None) -> list[str]:
         """Get list of currently locked page IDs.
 
         Args:
@@ -1335,6 +1369,49 @@ class VirtualPageTableState(SharedState):
             if not lock.is_expired(now)
         ]
 
+    # === Scope Mapping Methods ===
+
+    def has_mapped_scope(self, scope_id: str, colony_id: str, tenant_id: str) -> bool:
+        """Check if a scope is mapped."""
+        return self.get_scope_key(scope_id, colony_id, tenant_id) in self.mapped_scopes
+
+    def get_mapped_scope(self, scope_id: str, colony_id: str, tenant_id: str) -> MappedScopeConfig | None:
+        """Get a mapped scope configuration, or None if not mapped."""
+        return self.mapped_scopes.get(self.get_scope_key(scope_id, colony_id, tenant_id))
+
+    def set_mapped_scope(self, scope_id: str, colony_id: str, tenant_id: str, config: MappedScopeConfig) -> None:
+        """Register or update a scope mapping."""
+        self.mapped_scopes[self.get_scope_key(scope_id, colony_id, tenant_id)] = config
+
+    def remove_mapped_scope(self, scope_id: str, colony_id: str, tenant_id: str) -> MappedScopeConfig | None:
+        """Remove a scope mapping. Returns the removed config or None."""
+        return self.mapped_scopes.pop(self.get_scope_key(scope_id, colony_id, tenant_id), None)
+
+    def iter_mapped_scopes(self) -> list[MappedScopeConfig]:
+        """Get all mapped scope configurations."""
+        return list(self.mapped_scopes.values())
+
+    def get_all_mapped_scope_keys(self) -> dict[str, MappedScopeConfig]:
+        """Get a snapshot of all scope mappings (key -> config)."""
+        return dict(self.mapped_scopes)
+
+    # === Page Group Methods ===
+
+    def register_page_group(self, group: PageGroup) -> None:
+        """Register a virtual page group for spatial locality."""
+        self.page_groups[self.get_scope_key(group.group_id, group.colony_id, group.tenant_id)] = group
+
+    def get_page_group(self, group_id: str, colony_id: str, tenant_id: str) -> PageGroup | None:
+        """Get a page group by ID, or None if not found."""
+        return self.page_groups.get(self.get_scope_key(group_id, colony_id, tenant_id))
+
+    def get_page_groups_for_page(self, page_id: str, colony_id: str, tenant_id: str) -> list[PageGroup]:
+        """Get all groups that contain a specific page."""
+        return [
+            group for group in self.page_groups.values()
+            if page_id in group.page_ids and group.colony_id == colony_id and group.tenant_id == tenant_id
+        ]
+
     # === Branch Management Methods ===
 
     def register_branch(self, branch: VCMBranch) -> None:
@@ -1343,7 +1420,7 @@ class VirtualPageTableState(SharedState):
         Args:
             branch: VCMBranch to register
         """
-        key = (branch.branch_id, branch.colony_id, branch.tenant_id)
+        key = self.get_branch_key(branch.branch_id, branch.colony_id, branch.tenant_id)
         self.branches[key] = branch
         self.branch_pages[key] = set()
         logger.debug(f"Registered branch {branch.branch_id} for tenant {branch.tenant_id}")
@@ -1359,7 +1436,7 @@ class VirtualPageTableState(SharedState):
         Returns:
             VCMBranch if found, None otherwise
         """
-        return self.branches.get((branch_id, colony_id, tenant_id))
+        return self.branches.get(self.get_branch_key(branch_id, colony_id, tenant_id))
 
     def register_overlay(
         self,
@@ -1381,7 +1458,7 @@ class VirtualPageTableState(SharedState):
         Raises:
             ValueError: If branch doesn't exist
         """
-        key = (branch_id, colony_id, tenant_id)
+        key = self.get_branch_key(branch_id, colony_id, tenant_id)
         if key not in self.branches:
             raise ValueError(f"Branch {branch_id} not found")
 
@@ -1405,7 +1482,7 @@ class VirtualPageTableState(SharedState):
         Raises:
             ValueError: If branch doesn't exist
         """
-        key = (branch_id, colony_id, tenant_id)
+        key = self.get_branch_key(branch_id, colony_id, tenant_id)
         if key not in self.branches:
             raise ValueError(f"Branch {branch_id} not found")
 
@@ -1428,13 +1505,13 @@ class VirtualPageTableState(SharedState):
         Returns:
             Effective page ID (overlay or original)
         """
-        key = (branch_id, colony_id, tenant_id)
+        key = self.get_branch_key(branch_id, colony_id, tenant_id)
         branch = self.branches.get(key)
         while branch:
             if base_page_id in branch.overlays:
                 return branch.overlays[base_page_id]
             if branch.parent_branch_id:
-                parent_key = (branch.parent_branch_id, colony_id, tenant_id)
+                parent_key = self.get_branch_key(branch.parent_branch_id, colony_id, tenant_id)
                 branch = self.branches.get(parent_key)
             else:
                 break
@@ -1470,7 +1547,7 @@ class VirtualPageTableState(SharedState):
         Returns:
             Set of effective page IDs visible from this branch
         """
-        key = (branch_id, colony_id, tenant_id)
+        key = self.get_branch_key(branch_id, colony_id, tenant_id)
         branch = self.branches.get(key)
         if not branch:
             return set()

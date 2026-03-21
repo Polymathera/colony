@@ -1445,54 +1445,60 @@ class AgentSystemDeployment:
         2. AgentSystemDeployment tracks all suspension states via StateManager
         3. AgentSystemDeployment can query cluster-wide resource availability
         4. Resume routing happens via AgentSystemDeployment.resume_agent() anyway
+
+        Runs in Ring.KERNEL context — this is a cross-tenant infrastructure
+        task that scans all suspended agents across all tenants.
         """
+        from polymathera.colony.distributed.ray_utils.serving.context import Ring, execution_context
+
         while True:
             try:
                 await asyncio.sleep(10)  # Check every 10 seconds
 
-                # Query all suspended agents from StateManager
-                suspended_agents = await self._list_all_suspended_agents()
+                with execution_context(ring=Ring.KERNEL, origin="agent_resource_monitor"):
+                    # Query all suspended agents from StateManager
+                    suspended_agents = await self._list_all_suspended_agents()
 
-                if not suspended_agents:
-                    continue
-
-                # Sort by resumption priority (fairness)
-                sorted_agents = sorted(
-                    suspended_agents,
-                    key=lambda state: (
-                        state.resumption_priority,
-                        -state.suspension_count,  # Penalize frequently suspended
-                        state.suspended_at,  # FIFO among same priority
-                    ),
-                    reverse=True
-                )
-
-                # Try to resume agents one at a time
-                for suspension_state in sorted_agents:
-                    agent_id = suspension_state.agent_id
-                    try:
-                        # Attempt to resume the agent
-                        # This will call spawn_agents() with suspend_agents=True
-                        # which allows suspension of other agents to make room
-                        new_agent_id = await self.resume_agent(agent_id)
-                        logger.info(
-                            f"Resource monitor: Resumed agent {agent_id} as {new_agent_id} "
-                            f"(priority={suspension_state.resumption_priority}, "
-                            f"suspensions={suspension_state.suspension_count})"
-                        )
-                    except ResourceExhausted as e:
-                        # Not enough resources yet, try next agent
-                        logger.debug(
-                            f"Resource monitor: Cannot resume {agent_id} yet (ResourceExhausted): {e}"
-                        )
+                    if not suspended_agents:
                         continue
-                    except Exception as e:
-                        # Log error but continue monitoring
-                        logger.error(
-                            f"Resource monitor: Failed to resume {agent_id}: {e}",
-                            exc_info=True
-                        )
-                        continue
+
+                    # Sort by resumption priority (fairness)
+                    sorted_agents = sorted(
+                        suspended_agents,
+                        key=lambda state: (
+                            state.resumption_priority,
+                            -state.suspension_count,  # Penalize frequently suspended
+                            state.suspended_at,  # FIFO among same priority
+                        ),
+                        reverse=True
+                    )
+
+                    # Try to resume agents one at a time
+                    for suspension_state in sorted_agents:
+                        agent_id = suspension_state.agent_id
+                        try:
+                            # Attempt to resume the agent
+                            # This will call spawn_agents() with suspend_agents=True
+                            # which allows suspension of other agents to make room
+                            new_agent_id = await self.resume_agent(agent_id)
+                            logger.info(
+                                f"Resource monitor: Resumed agent {agent_id} as {new_agent_id} "
+                                f"(priority={suspension_state.resumption_priority}, "
+                                f"suspensions={suspension_state.suspension_count})"
+                            )
+                        except ResourceExhausted as e:
+                            # Not enough resources yet, try next agent
+                            logger.debug(
+                                f"Resource monitor: Cannot resume {agent_id} yet (ResourceExhausted): {e}"
+                            )
+                            continue
+                        except Exception as e:
+                            # Log error but continue monitoring
+                            logger.error(
+                                f"Resource monitor: Failed to resume {agent_id}: {e}",
+                                exc_info=True
+                            )
+                            continue
 
             except Exception as e:
                 # Don't crash the monitor loop on errors

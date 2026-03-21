@@ -54,6 +54,7 @@ from .models import (
     PageLock,
     VCMBranch,
     VirtualContextPage,
+    VirtualPageTableState,
 )
 from .sources import ContextPageSource, ContextPageSourceFactory
 from .page_storage import PageStorage, PageStorageConfig
@@ -144,7 +145,12 @@ class VirtualContextManager:
         self._reconciliation_interval_s = reconciliation_interval_s
 
         # Application ↔ VCM integration (scope mappings)
-        self._local_mapped_scopes: dict[tuple[str, str, str], MappedScope] = {}
+        self._local_mapped_scopes: dict[str, MappedScope] = {}
+
+    @staticmethod
+    def _local_scope_key(scope_id: str, colony_id: str, tenant_id: str) -> str:
+        """Key for the manager's own _local_mapped_scopes dict."""
+        return f"{scope_id}:{colony_id}:{tenant_id}"
 
     @serving.initialize_deployment
     async def initialize(self):
@@ -1415,12 +1421,12 @@ class VirtualContextManager:
         might have page graphs stored in PageStorage.
         """
         mapping_tuples: list[dict[str, Any]] = []
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[str] = set()
         async for state in self.page_table.state_manager.read_transaction():
-            for _scope_key, mapping in state.mapped_scopes.items():
-                key = (mapping.tenant_id, mapping.colony_id, mapping.scope_id)
-                if key not in seen:
-                    seen.add(key)
+            for mapping in state.iter_mapped_scopes():
+                dedup_key = f"{mapping.tenant_id}:{mapping.colony_id}:{mapping.scope_id}"
+                if dedup_key not in seen:
+                    seen.add(dedup_key)
                     mapping_tuples.append({
                         "tenant_id": mapping.tenant_id,
                         "colony_id": mapping.colony_id,
@@ -1945,11 +1951,9 @@ class VirtualContextManager:
         colony_id = serving.require_colony_id() if colony_id is None else colony_id
         tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
 
-        key = (scope_id, colony_id, tenant_id)
-
         # Check if already mapped
         async for state in self.page_table.state_manager.read_transaction():
-            if key in state.mapped_scopes:
+            if state.has_mapped_scope(scope_id, colony_id, tenant_id):
                 return MmapResult(
                     status="already_mapped",
                     scope_id=scope_id,
@@ -1970,7 +1974,7 @@ class VirtualContextManager:
         )
 
         async for state in self.page_table.state_manager.write_transaction():
-            state.mapped_scopes[key] = mapping_config
+            state.set_mapped_scope(scope_id, colony_id, tenant_id, mapping_config)
 
         # Materialize locally on this replica
         try:
@@ -2025,12 +2029,10 @@ class VirtualContextManager:
         colony_id = serving.require_colony_id() if colony_id is None else colony_id
         tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
 
-        key = (scope_id, colony_id, tenant_id)
-
         # Check if mapped
         is_mapped = False
         async for state in self.page_table.state_manager.read_transaction():
-            is_mapped = key in state.mapped_scopes
+            is_mapped = state.has_mapped_scope(scope_id, colony_id, tenant_id)
 
         if not is_mapped:
             return MmapResult(
@@ -2042,14 +2044,15 @@ class VirtualContextManager:
             )
 
         # Shut down local page source if materialized
-        if key in self._local_mapped_scopes:
-            mapped = self._local_mapped_scopes.pop(key)
+        local_key = self._local_scope_key(scope_id, colony_id, tenant_id)
+        if local_key in self._local_mapped_scopes:
+            mapped = self._local_mapped_scopes.pop(local_key)
             await mapped.source.shutdown()
             logger.info(f"Shut down local page source for scope {scope_id} (tenant={tenant_id}, colony={colony_id})")
 
         # Remove from shared state
         async for state in self.page_table.state_manager.write_transaction():
-            state.mapped_scopes.pop(key, None)
+            state.remove_mapped_scope(scope_id, colony_id, tenant_id)
 
         logger.info(f"Unmapped scope {scope_id} from VCM (tenant={tenant_id}, colony={colony_id})")
         return MmapResult(
@@ -2121,10 +2124,8 @@ class VirtualContextManager:
         """
         colony_id = serving.require_colony_id() if colony_id is None else colony_id
         tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
-        key = (scope_id, colony_id, tenant_id)
-
         async for state in self.page_table.state_manager.read_transaction():
-            return key in state.mapped_scopes
+            return state.has_mapped_scope(scope_id, colony_id, tenant_id)
         return False
 
     @serving.endpoint
@@ -2145,10 +2146,10 @@ class VirtualContextManager:
         colony_id = serving.require_colony_id() if colony_id is None else colony_id
         tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
 
-        key = (scope_id, colony_id, tenant_id)
+        local_key = self._local_scope_key(scope_id, colony_id, tenant_id)
 
         async for state in self.page_table.state_manager.read_transaction():
-            mapping = state.mapped_scopes.get(key)
+            mapping = state.get_mapped_scope(scope_id, colony_id, tenant_id)
             if mapping is None:
                 return None
             result = {
@@ -2156,11 +2157,11 @@ class VirtualContextManager:
                 "config": mapping.config.model_dump(),
                 "tenant_id": mapping.tenant_id,
                 "created_at": mapping.created_at,
-                "materialized_locally": key in self._local_mapped_scopes,
+                "materialized_locally": local_key in self._local_mapped_scopes,
             }
             # Add page count if materialized
-            if key in self._local_mapped_scopes:
-                source = self._local_mapped_scopes[key].source
+            if local_key in self._local_mapped_scopes:
+                source = self._local_mapped_scopes[local_key].source
                 result["page_count"] = len(await source.get_all_mapped_pages())
                 result["tracked_records"] = len(await source.get_all_mapped_records())
             return result
@@ -2380,9 +2381,9 @@ class VirtualContextManager:
             config: Mapping configuration
             **kwargs: Additional parameters for context page source creation
         """
-        scope_key = f"{tenant_id}:{colony_id}:{scope_id}"
+        scope_key = self._local_scope_key(scope_id, colony_id, tenant_id)
         if scope_key in self._local_mapped_scopes:
-            logger.debug(f"Scope {tenant_id}:{colony_id}:{scope_id} already materialized locally, skipping")
+            logger.debug(f"Scope {scope_key} already materialized locally, skipping")
             return
 
         # Create page source
@@ -2423,14 +2424,16 @@ class VirtualContextManager:
         - Claims orphaned events via XAUTOCLAIM for any mappings where
           a previous replica crashed mid-processing.
         """
-        # Read shared state
-        shared_scopes: dict[tuple[str, str, str], MappedScopeConfig] = {}
+        # Read shared state — build a dict keyed by our local key format
+        shared_by_local_key: dict[str, MappedScopeConfig] = {}
         async for state in self.page_table.state_manager.read_transaction():
-            shared_scopes = dict(state.mapped_scopes)
+            for mapping in state.iter_mapped_scopes():
+                lk = self._local_scope_key(mapping.scope_id, mapping.colony_id, mapping.tenant_id)
+                shared_by_local_key[lk] = mapping
 
         # Materialize new mappings
-        for key, mapping in shared_scopes.items():
-            if key not in self._local_mapped_scopes:
+        for local_key, mapping in shared_by_local_key.items():
+            if local_key not in self._local_mapped_scopes:
                 try:
                     await self._materialize_scope_mapping(
                         scope_id=mapping.scope_id,
@@ -2448,8 +2451,8 @@ class VirtualContextManager:
 
         # Clean up stale local mappings
         stale = [
-            key for key in self._local_mapped_scopes
-            if key not in shared_scopes
+            lk for lk in self._local_mapped_scopes
+            if lk not in shared_by_local_key
         ]
         for scope_key in stale:
             mapped = self._local_mapped_scopes.pop(scope_key)
@@ -2498,11 +2501,17 @@ class VirtualContextManager:
 
         This handles edge cases where events are lost or processing fails.
         Runs every 30 seconds (configurable).
+
+        Runs in Ring.KERNEL context — this is a cross-tenant infrastructure
+        task that queries all deployments, not scoped to a specific tenant.
         """
+        from polymathera.colony.distributed.ray_utils.serving.context import Ring, execution_context
+
         while True:
             try:
                 await asyncio.sleep(self._reconciliation_interval_s)
-                await self._reconcile_page_state()
+                with execution_context(ring=Ring.KERNEL, origin="vcm_reconciler"):
+                    await self._reconcile_page_state()
             except asyncio.CancelledError:
                 logger.info("Reconciliation loop cancelled")
                 break
@@ -2533,12 +2542,17 @@ class VirtualContextManager:
                         client_id=client_id,
                     )
 
-                    # Find discrepancies
-                    missing_in_layer2 = layer1_pages - layer2_pages
-                    missing_in_layer1 = layer2_pages - layer1_pages
+                    # Find discrepancies (both are sets of page_ref strings)
+                    layer1_refs = set(layer1_pages.keys())
+                    missing_in_layer2 = layer1_refs - layer2_pages
+                    missing_in_layer1 = layer2_pages - layer1_refs
 
                     # Reconcile: Layer 1 is source of truth for physical state
-                    for page_id, colony_id, tenant_id in missing_in_layer2:
+                    for page_ref in missing_in_layer2:
+                        page_components = VirtualPageTableState.parse_page_ref(page_ref)
+                        page_id = page_components["page_id"]
+                        colony_id = page_components["colony_id"]
+                        tenant_id = page_components["tenant_id"]
                         logger.warning(
                             f"Reconciling: Adding page {page_id} to Layer 2 "
                             f"(present in Layer 1: {deployment_name}/{client_id})"
@@ -2549,14 +2563,18 @@ class VirtualContextManager:
                             tenant_id=tenant_id,
                             replica_id=client_id,
                             deployment_name=deployment_name,
-                            size=client_state.loaded_page_ids.get((page_id, colony_id, tenant_id), 0),
+                            size=layer1_pages.get(page_ref, 0),
                         )
                         # Check if this resolves any pending page faults
                         await self._resolve_page_faults_for_page(faults_to_signal_completion)
 
                         reconciled_count += 1
 
-                    for page_id, colony_id, tenant_id in missing_in_layer1:
+                    for page_ref in missing_in_layer1:
+                        page_components = VirtualPageTableState.parse_page_ref(page_ref)
+                        page_id = page_components["page_id"]
+                        colony_id = page_components["colony_id"]
+                        tenant_id = page_components["tenant_id"]
                         logger.warning(
                             f"Reconciling: Removing page {page_id} from Layer 2 "
                             f"(absent in Layer 1: {deployment_name}/{client_id})"

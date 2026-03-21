@@ -604,7 +604,7 @@ class VLLMDeployment(AgentManagerBase):
                     client_state = state.client_states.get(self.client_id)
                     if client_state:
                         client_state.kv_cache_used += page.size
-                        client_state.loaded_page_ids[(page.page_id, page.colony_id, page.tenant_id)] = page.size
+                        client_state.add_page(page.page_id, page.colony_id, page.tenant_id, page.size)
                         kv_cache_used = client_state.kv_cache_used
                     state.register_page_load(
                         page_id=page.page_id,

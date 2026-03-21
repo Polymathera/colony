@@ -167,18 +167,10 @@ class DeploymentHandle:
             Raises:
                 Exception: If the deployment method raised an error.
             """
-            from .context import require_colony_id, require_tenant_id
+            from .context import require_execution_context
 
-            # Capture isolation context from contextvars
-            colony_id = require_colony_id()
-            tenant_id = require_tenant_id()
-            if colony_id is None or tenant_id is None:
-                raise RuntimeError(
-                    f"Cannot call {self.deployment_name}.{method_name} without "
-                    f"isolation context. Use 'with isolation_context(colony_id, tenant_id):' "
-                    f"at the entry point. "
-                    f"Got colony_id={colony_id!r}, tenant_id={tenant_id!r}"
-                )
+            # Capture execution context from contextvars
+            ctx = require_execution_context()
 
             # Get endpoint router class and kwargs
             router_class = self._get_endpoint_router_class(method_name)
@@ -197,15 +189,14 @@ class DeploymentHandle:
                 if router_kwargs and routing_hints is not None:
                     routing_hints.router_kwargs = router_kwargs
 
-            # Create request with routing hints and isolation context
+            # Create request with routing hints and execution context
             request = DeploymentRequest(
                 request_id=str(uuid.uuid4()),
                 method_name=method_name,
                 args=args,
                 kwargs=kwargs,
                 routing_hints=routing_hints,
-                colony_id=colony_id,
-                tenant_id=tenant_id,
+                execution_context=ctx,
             )
 
             # Send request to proxy actor

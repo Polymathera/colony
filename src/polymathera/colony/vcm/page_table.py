@@ -203,7 +203,7 @@ class VirtualPageTable:
         self,
         deployment_name: str,
         client_id: str,
-    ) -> set[tuple[str, str, str]]:
+    ) -> set[str]:
         """Get all pages loaded on a specific client (deployment-aware).
 
         Args:
@@ -211,7 +211,7 @@ class VirtualPageTable:
             client_id: Client (replica) ID
 
         Returns:
-            Set of (page_id, colony_id, tenant_id) tuples loaded on this client
+            Set of page_ref strings ("page_id:colony_id:tenant_id")
         """
         async for state in self.state_manager.read_transaction():
             return state.get_pages_on_client(deployment_name, client_id)
@@ -505,7 +505,7 @@ class VirtualPageTable:
             group: Virtual page group to register
         """
         async for state in self.state_manager.write_transaction():
-            state.page_groups[(group.group_id, group.colony_id, group.tenant_id)] = group
+            state.register_page_group(group)
             # TODO: Ensure that pages in group are linked to the group
             logger.info(f"Registered virtual page group {group.group_id} with {len(group.page_ids)} pages")
 
@@ -521,7 +521,7 @@ class VirtualPageTable:
             PageGroup if exists, None otherwise
         """
         async for state in self.state_manager.read_transaction():
-            return state.page_groups.get((group_id, colony_id, tenant_id))
+            return state.get_page_group(group_id, colony_id, tenant_id)
 
     async def get_page_groups_for_page(self, page_id: str, colony_id: str, tenant_id: str) -> list[PageGroup]:
         """Get all groups that contain a specific page.
@@ -535,11 +535,7 @@ class VirtualPageTable:
             List of PageGroups containing this page
         """
         async for state in self.state_manager.read_transaction():
-            groups = []
-            for group in state.page_groups.values():
-                if page_id in group.page_ids and group.colony_id == colony_id and group.tenant_id == tenant_id:
-                    groups.append(group)
-            return groups
+            return state.get_page_groups_for_page(page_id, colony_id, tenant_id)
 
     # === Statistics and Monitoring ===
 

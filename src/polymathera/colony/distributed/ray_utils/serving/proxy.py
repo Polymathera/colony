@@ -265,11 +265,16 @@ class DeploymentProxyRayActor:
         Returns:
             Response from the replica.
         """
-        from .context import isolation_context
+        from .context import Ring, ExecutionContext, restore_execution_context
 
         method_name = request.method_name
 
-        with isolation_context(request.colony_id, request.tenant_id):
+        # Restore execution context from request for proxy-local operations
+        ctx = request.execution_context
+        if not isinstance(ctx, ExecutionContext):
+            ctx = ExecutionContext(ring=Ring.KERNEL, origin="legacy_request")
+
+        with restore_execution_context(ctx):
             try:
                 # Get healthy replicas
                 async with self._replica_lock:
@@ -582,13 +587,18 @@ class DeploymentProxyRayActor:
         """Run a periodic health check method on a replica.
 
         This is a background task that loops forever, calling the health check
-        method at regular intervals.
+        method at regular intervals.  Calls go through ``__handle_request__``
+        with a Ring.KERNEL execution context so the replica has a proper
+        context for any downstream calls it makes.
 
         Args:
             replica: The replica to run the health check on.
             method_name: Name of the health check method to call.
             interval_s: Interval in seconds between health checks.
         """
+        import uuid as _uuid
+        from .context import Ring, ExecutionContext
+
         replica_id = replica.replica_id
         logger.info(
             f"Starting periodic health check '{method_name}' for replica {replica_id} "
@@ -600,12 +610,23 @@ class DeploymentProxyRayActor:
                 # Wait for the interval
                 await asyncio.sleep(interval_s)
 
-                # Call the health check method on the replica
                 logger.debug(
                     f"Calling periodic health check '{method_name}' on replica {replica_id}"
                 )
-                method = getattr(replica.actor_handle, method_name)
-                await method.remote()
+                # Do not call the health check method on the replica directly
+                # Instead, route through __handle_request__ so the replica gets proper
+                # ExecutionContext (Ring.KERNEL) for any downstream calls.
+                ### method = getattr(replica.actor_handle, method_name)
+                ### await method.remote()
+                request = DeploymentRequest(
+                    request_id=str(_uuid.uuid4()),
+                    method_name=method_name,
+                    execution_context=ExecutionContext(
+                        ring=Ring.KERNEL,
+                        origin=f"periodic_health_check:{method_name}",
+                    ),
+                )
+                await replica.actor_handle.__handle_request__.remote(request)
                 logger.debug(
                     f"Completed periodic health check '{method_name}' on replica {replica_id}"
                 )

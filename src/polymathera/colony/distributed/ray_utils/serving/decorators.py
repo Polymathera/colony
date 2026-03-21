@@ -18,6 +18,7 @@ _DEPLOYMENT_REGISTRY: dict[str, Type[Any]] = {}
 def endpoint(
     func: Callable | None = None,
     *,
+    ring: int | None = None,
     router_class: Type[RequestRouter] | None = None,
     router_kwargs: dict[str, Any] | None = None,
 ) -> Callable:
@@ -25,11 +26,14 @@ def endpoint(
 
     This decorator can be used with or without parameters:
 
-    - Without parameters: `@endpoint`
-    - With parameters: `@endpoint(router_class=RoundRobinRouter, router_kwargs={...})`
+    - Without parameters: ``@endpoint`` (defaults to ``Ring.USER``)
+    - With parameters: ``@endpoint(ring=Ring.KERNEL, router_class=RoundRobinRouter, router_kwargs={...})``
 
     Args:
         func: The method to mark as an endpoint (when used without parentheses).
+        ring: Privilege ring for this endpoint.  ``Ring.USER`` (default) requires
+            tenant context; ``Ring.KERNEL`` does not.  Accepts ``Ring`` enum or
+            raw ``int`` to avoid a circular import in simple usage.
         router_class: Router class for this endpoint (defaults to LeastLoadedRouter).
         The router_class must have a class method to extract routing hints from the method name, arguments and router class.
         router_kwargs: Keyword arguments to pass to router constructor. Allows per-endpoint
@@ -40,6 +44,8 @@ def endpoint(
 
     Examples:
         ```python
+        from polymathera.colony.distributed.ray_utils.serving.context import Ring
+
         @serving.deployment()
         class VLLMDeployment:
             # Simple endpoint with default routing
@@ -61,19 +67,27 @@ def endpoint(
             async def load_page(self, page: VirtualContextPage) -> bool:
                 # Routes to specific replica, strips target_client_id from kwargs
                 ...
+            # Default: Ring.USER — requires tenant context
+            @serving.endpoint
+            async def start_agent(self, blueprint) -> str: ...
+
+            # Ring.KERNEL — infrastructure endpoint, no tenant context needed
+            @serving.endpoint(ring=Ring.KERNEL)
+            async def get_all_deployment_names(self) -> list[str]: ...
         ```
     **TODO**: Maybe we can just pass `router_obj` instead of class and kwargs separately?
     """
     # TODO: Use functools.wraps to preserve method metadata?
     def decorator(f: Callable) -> Callable:
         f.__is_endpoint__ = True  # type: ignore
+        f.__endpoint_ring__ = ring  # type: ignore  # None = Ring.USER (resolved at discover time)
         f.__router_class__ = router_class  # type: ignore
         f.__router_kwargs__ = router_kwargs or {}  # type: ignore
         return f
 
     # Support both @endpoint and @endpoint(...)
     if func is None:
-        # Called with parameters: @endpoint(router_class=...)
+        # Called with parameters: @endpoint(router_class=..., ring=Ring.KERNEL, ...)
         return decorator
     else:
         # Called without parameters: @endpoint
@@ -513,6 +527,7 @@ def deployment(
 
                 super().__init__(*args, **kwargs)
                 self._endpoints = self._discover_endpoints()
+                self._endpoint_rings = self._discover_endpoint_rings()
                 logger.info(
                     f"Initialized deployment replica with endpoints: "
                     f"{list(self._endpoints.keys())}"
@@ -529,6 +544,25 @@ def deployment(
                     except AttributeError:
                         pass
                 return endpoints
+
+            def _discover_endpoint_rings(self) -> dict[str, int]:
+                """Discover ring level for each endpoint.
+
+                Returns:
+                    Dictionary mapping method_name -> ring (int).
+                    Defaults to Ring.USER (3) when not specified.
+                """
+                from .context import Ring
+                rings = {}
+                for attr_name in dir(self):
+                    try:
+                        attr = getattr(self, attr_name)
+                        if callable(attr) and getattr(attr, "__is_endpoint__", False):
+                            ring_val = getattr(attr, "__endpoint_ring__", None)
+                            rings[attr_name] = ring_val if ring_val is not None else Ring.USER
+                    except AttributeError:
+                        pass
+                return rings
 
             def _discover_replica_properties(self) -> dict[str, str]:
                 """Discover all replica property methods on this class.
@@ -554,8 +588,9 @@ def deployment(
                 """Handle an incoming request.
 
                 This method is called by the proxy actor to execute a request
-                on this replica. It restores the isolation context (colony_id,
-                tenant_id) from the request before calling the endpoint method.
+                on this replica. It restores the ``ExecutionContext`` from the
+                request, enforces ring-level access control, then calls the
+                endpoint method.
 
                 Args:
                     request: The request to handle.
@@ -563,15 +598,31 @@ def deployment(
                 Returns:
                     Response with result or error.
                 """
-                from .context import isolation_context
+                from .context import Ring, ExecutionContext, restore_execution_context
 
-                with isolation_context(request.colony_id, request.tenant_id):
+                # Restore execution context from request
+                ctx = request.execution_context
+                if not isinstance(ctx, ExecutionContext):
+                    ctx = ExecutionContext(ring=Ring.KERNEL, origin="legacy_request")
+
+                with restore_execution_context(ctx):
                     try:
                         # Validate method exists and is an endpoint
                         if request.method_name not in self._endpoints:
                             raise ValueError(
                                 f"Method '{request.method_name}' is not a registered endpoint. "
                                 f"Available endpoints: {list(self._endpoints.keys())}"
+                            )
+
+                        # Enforce ring-level access control
+                        endpoint_ring = self._endpoint_rings.get(request.method_name, Ring.USER)
+                        if endpoint_ring == Ring.USER:
+                            # USER endpoints require tenant context
+                            ctx.validate()
+                        if ctx.ring == Ring.KERNEL and endpoint_ring == Ring.USER:
+                            raise PermissionError(
+                                f"KERNEL context cannot call USER endpoint "
+                                f"'{request.method_name}'. Transition to USER context first."
                             )
 
                         # Get the endpoint method

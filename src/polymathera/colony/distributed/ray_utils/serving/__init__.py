@@ -81,13 +81,20 @@ from .models import (
 )
 
 
-# Tenant/colony isolation context
+# Execution context (identity, privilege, audit)
 from .context import (
+    Ring,
+    ExecutionContext,
+    execution_context,
+    restore_execution_context,
+    get_execution_context,
+    require_execution_context,
     get_colony_id,
     get_tenant_id,
+    get_session_id,
+    get_run_id,
     require_colony_id,
     require_tenant_id,
-    isolation_context,
 )
 
 # Internal components (exposed for advanced usage and testing)
@@ -129,12 +136,19 @@ __all__ = [
     "RequestRouter",
     "RoundRobinRouter",
     "LeastLoadedRouter",
-    # Tenant/colony isolation
+    # Execution context
+    "Ring",
+    "ExecutionContext",
+    "execution_context",
+    "restore_execution_context",
+    "get_execution_context",
+    "require_execution_context",
     "get_colony_id",
     "get_tenant_id",
+    "get_session_id",
+    "get_run_id",
     "require_colony_id",
     "require_tenant_id",
-    "isolation_context",
     # Internal components
     "DeploymentProxyRayActor",
     "DeploymentHealthMonitor",

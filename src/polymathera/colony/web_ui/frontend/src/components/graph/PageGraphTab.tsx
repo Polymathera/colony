@@ -263,9 +263,9 @@ function GroupSelector({
         onSelect(null);
         return;
       }
-      const [tenantId, groupId] = val.split(":::");
+      const [tenantId, colonyId] = val.split(":::");
       const found = groups.find(
-        (g) => g.tenant_id === tenantId && g.colony_id === groupId,
+        (g) => g.tenant_id === tenantId && g.colony_id === colonyId,
       );
       onSelect(found ?? null);
     },

@@ -79,6 +79,7 @@ nav:
   - Architecture:
     - Overview: architecture/index.md
     - Distributed Architecture: architecture/distributed.md
+    - Execution Context: architecture/execution-context.md
     - Virtual Context Memory: architecture/virtual-context-memory.md
     - Agent System: architecture/agent-system.md
     - Agent Memory System: architecture/agent-memory-system.md

@@ -2129,12 +2129,18 @@ def run(
         border_style="bright_blue",
     ))
 
-    # Set tenant/colony isolation context for the entire run.
-    # colony_id maps to the serving application name; tenant_id from config.
-    from polymathera.colony.distributed.ray_utils.serving.context import isolation_context
+    # Set execution context for the entire run.
+    from polymathera.colony.distributed.ray_utils.serving.context import Ring, execution_context
 
     try:
-        with isolation_context(colony_id=test_config.repo_id, tenant_id=test_config.tenant_id):
+        with execution_context(
+            ring=Ring.USER,
+            colony_id=test_config.repo_id,
+            tenant_id=test_config.tenant_id,
+            session_id=test_config.session_id,
+            run_id=test_config.run_id,
+            origin="cli",
+        ):
             test_results = asyncio.run(run_integration_test(
                 config=test_config,
                 app_name=app_name,

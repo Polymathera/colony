@@ -1611,14 +1611,14 @@ class CapabilityResultFuture:
 
 
 def check_isolation(method):
-    """Decorator to check if the isolation context (tenant_id, colony_id) has changed and raise an exception if it has."""
+    """Decorator to check that the execution context matches the agent's tenant/colony identity."""
     @functools.wraps(method)
     async def wrapper(self, *args, **kwargs):
-        tenant_id = serving.require_tenant_id()
-        colony_id = serving.require_colony_id()
-        if tenant_id != self.tenant_id or colony_id != self.colony_id:
+        ctx = serving.require_execution_context()
+        if ctx.tenant_id != self.tenant_id or ctx.colony_id != self.colony_id:
             raise RuntimeError(
-                f"Isolation context mismatch: agent tenant_id={self.tenant_id}, colony_id={self.colony_id} but current context is tenant_id={tenant_id}, colony_id={colony_id}"
+                f"Isolation context mismatch: agent={self.tenant_id}/{self.colony_id}, "
+                f"context={ctx.tenant_id}/{ctx.colony_id}"
             )
         return await method(self, *args, **kwargs)
     return wrapper

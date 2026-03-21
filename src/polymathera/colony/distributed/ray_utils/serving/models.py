@@ -12,6 +12,7 @@ from typing import Any, Literal
 import uuid
 
 from ...state_management import SharedState
+from .context import ExecutionContext
 
 
 logger = logging.getLogger(__name__)
@@ -184,15 +185,10 @@ class DeploymentRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     """Optional metadata for routing and monitoring."""
 
-    colony_id: str | None = None
-    """Colony ID for tenant isolation. Captured from contextvars by DeploymentHandle,
-    restored on replicas by __handle_request__. Present on every request regardless
-    of router configuration."""
-
-    tenant_id: str | None = None
-    """Tenant ID for tenant isolation. Captured from contextvars by DeploymentHandle,
-    restored on replicas by __handle_request__. Present on every request regardless
-    of router configuration."""
+    execution_context: ExecutionContext | None = None
+    """ExecutionContext carrying identity (colony_id, tenant_id, session_id, run_id),
+    privilege (Ring), and audit (origin). Captured from contextvars by DeploymentHandle,
+    restored on replicas by __handle_request__."""
 
 
 class DeploymentResponseStatus(str, Enum):

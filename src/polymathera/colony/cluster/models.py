@@ -14,7 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from ..distributed.state_management import SharedState
-from ..vcm.models import VirtualContextPage, ContextPageId
+from ..vcm.models import VirtualContextPage, ContextPageId, VirtualPageTableState
 
 LLMClientId = str
 """Unique identifier for an LLM client instance."""
@@ -150,8 +150,8 @@ class LLMClientState(BaseModel):
     kv_cache_used: int = 0
     """Number of tokens currently in KV cache"""
 
-    loaded_page_ids: dict[tuple[str, str, str], int] = Field(default_factory=dict)
-    """Dictionary of (page_id, colony_id, tenant_id) tuples to token counts loaded in this client's KV cache"""
+    loaded_page_ids: dict[str, int] = Field(default_factory=dict)
+    """Maps page_ref ("page_id:colony_id:tenant_id") to token count loaded in this client's KV cache"""
 
     pending_requests: int = 0
     """Number of pending inference requests"""
@@ -177,7 +177,12 @@ class LLMClientState(BaseModel):
 
     def has_page(self, page_id: ContextPageId, colony_id: str, tenant_id: str) -> bool:
         """Check if a page is loaded in this client."""
-        return (page_id, colony_id, tenant_id) in self.loaded_page_ids
+        return VirtualPageTableState.get_page_ref(page_id, colony_id, tenant_id) in self.loaded_page_ids
+
+    def add_page(self, page_id: str, colony_id: str, tenant_id: str, size: int) -> None:
+        self.loaded_page_ids[
+            VirtualPageTableState.get_page_ref(page_id, colony_id, tenant_id)] = size
+
 
 
 class InferenceRequest(BaseModel):
@@ -420,16 +425,16 @@ class KVCacheMetrics(BaseModel):
     kv_cache_used_tokens: int = 0
     kv_cache_utilization: float = 0.0
 
-    # Concurrency metrics
-    concurrent_requests_per_page: dict[tuple[ContextPageId, str, str], int] = Field(default_factory=dict)
+    # Concurrency metrics (keyed by page_ref "page_id:colony_id:tenant_id")
+    concurrent_requests_per_page: dict[str, int] = Field(default_factory=dict)
     avg_suffix_size_tokens: float = 0.0
     requests_queued: int = 0
     requests_rejected: int = 0
     avg_queue_time_ms: float = 0.0
 
-    # Per-page statistics
-    page_request_counts: dict[tuple[ContextPageId, str, str], int] = Field(default_factory=dict)
-    page_suffix_sizes: dict[tuple[ContextPageId, str, str], list[int]] = Field(default_factory=dict)
+    # Per-page statistics (keyed by page_ref "page_id:colony_id:tenant_id")
+    page_request_counts: dict[str, int] = Field(default_factory=dict)
+    page_suffix_sizes: dict[str, list[int]] = Field(default_factory=dict)
 
     def record_request(
         self,
@@ -459,7 +464,7 @@ class KVCacheMetrics(BaseModel):
             self.cache_hit_rate = self.cache_hit_count / self.total_requests
 
         if page_id:
-            key = (page_id, colony_id, tenant_id)
+            key = f"{page_id}:{colony_id}:{tenant_id}"
             self.page_request_counts[key] = self.page_request_counts.get(key, 0) + 1
 
             if key not in self.page_suffix_sizes:
