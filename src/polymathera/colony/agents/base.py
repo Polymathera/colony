@@ -1615,9 +1615,9 @@ def check_isolation(method):
     @functools.wraps(method)
     async def wrapper(self, *args, **kwargs):
         ctx = serving.require_execution_context()
-        if ctx.tenant_id != self.tenant_id or ctx.colony_id != self.colony_id:
+        if ctx.tenant_id != self.syscontext.tenant_id or ctx.colony_id != self.syscontext.colony_id:
             raise RuntimeError(
-                f"Isolation context mismatch: agent={self.tenant_id}/{self.colony_id}, "
+                f"Isolation context mismatch: agent={self.syscontext.tenant_id}/{self.syscontext.colony_id}, "
                 f"context={ctx.tenant_id}/{ctx.colony_id}"
             )
         return await method(self, *args, **kwargs)
@@ -1649,8 +1649,7 @@ class Agent(BaseModel):
     agent_type: str = Field(default="general", description="Type of agent: specialized, general, service, supervisor, service.memory_management")
     state: AgentState = Field(default=AgentState.INITIALIZED)
 
-    tenant_id: str = Field(default="system", description="Tenant/namespace for multi-tenant deployments")
-    colony_id: str = Field(default="default", description="Colony ID for grouping related context sources (e.g., all repos in a virtual monorepo, and all VCM-mapped blackboard scopes)")
+    syscontext: serving.ExecutionContext = Field(description="Execution context for tenant and colony isolation and user/kernel protection")
 
     # Optional page binding
     bound_pages: list[str] = Field(default_factory=list)
@@ -2608,8 +2607,6 @@ class Agent(BaseModel):
         await self._manager.agent_request_page(
             page_id=page_id,
             agent_id=self.agent_id,
-            tenant_id=self.tenant_id,
-            colony_id=self.colony_id,
             priority=priority,
         )
 
@@ -3803,13 +3800,13 @@ class AgentManagerBase:
         """Run agent's execution loop (internal).
 
         1. `start_agent` is a `@serving.endpoint`
-        2. When called, `__handle_request__` wraps it in with `isolation_context(...)`:
+        2. When called, `__handle_request__` wraps it in with `execution_context(...)`:
         3. Inside that context, `start_agent` does `asyncio.create_task(self._run_agent_loop(...))`
-        4. `create_task` snapshots the current `contextvars` — so the agent loop task does inherit `colony_id`/`tenant_id`
+        4. `create_task` snapshots the current `contextvars` — so the agent loop task does inherit `execution_context` values from the request that started the agent.
 
         So, the agent loop gets the right context automatically because Python's `asyncio.create_task` copies the active `contextvars.Context` at creation time.
 
-        The snapshot is a copy, not a reference — so even after `__handle_request__` exits and its `isolation_context` resets the `contextvars`, the agent loop's copy is unaffected. The agent loop retains the values for its entire lifetime.
+        The snapshot is a copy, not a reference — so even after `__handle_request__` exits and its `execution_context` resets the `contextvars`, the agent loop's copy is unaffected. The agent loop retains the values for its entire lifetime.
 
         No explicit setting needed in `_run_agent_loop`.
 
@@ -4008,13 +4005,13 @@ class AgentManagerBase:
 
         # Create instance
         try:
-            # Propagate tenant_id and colony_id from metadata to Agent fields
+            # Propagate syscontext from metadata to Agent fields
             # so page graph lookups use the correct keys.
             extra_fields: dict[str, Any] = {}
-            if isinstance(metadata, AgentMetadata):
-                extra_fields["tenant_id"] = metadata.tenant_id
-                if metadata.colony_id:
-                    extra_fields["colony_id"] = metadata.colony_id
+            ### if isinstance(metadata, AgentMetadata):
+            ###     extra_fields["tenant_id"] = metadata.syscontext.tenant_id
+            ###     if metadata.syscontext.colony_id:
+            ###         extra_fields["colony_id"] = metadata.syscontext.colony_id
             agent = agent_class(
                 agent_id=agent_id,
                 agent_type=agent_class_id,
@@ -4128,8 +4125,7 @@ class AgentManagerBase:
         request = InferenceRequest(
             request_id=f"agent-{agent_id}-{uuid.uuid4().hex[:8]}",
             prompt=prompt or "",
-            colony_id=self._agents[agent_id].colony_id,
-            tenant_id=self._agents[agent_id].tenant_id,
+            syscontext=self._agents[agent_id].syscontext,
             context_page_ids=context_page_ids or [],
             **kwargs
         )
@@ -4152,8 +4148,6 @@ class AgentManagerBase:
         self,
         *,
         page_id: str,
-        colony_id: str | None,
-        tenant_id: str | None,
         agent_id: str,
         priority: int = 0,
     ) -> None:
@@ -4161,8 +4155,6 @@ class AgentManagerBase:
 
         Args:
             page_id: Virtual page identifier
-            colony_id: Colony identifier
-            tenant_id: Tenant identifier
             agent_id: Agent identifier
             priority: Load priority (0-100)
 
@@ -4177,8 +4169,6 @@ class AgentManagerBase:
         # Delegate to VCM
         await self._vcm_handle.request_page_load(
             page_id=page_id,
-            colony_id=colony_id,
-            tenant_id=tenant_id,
             agent_id=agent_id,
             priority=priority,
         )
@@ -4208,7 +4198,7 @@ class AgentManagerBase:
         if not agent:
             logger.warning(f"agent_is_page_loaded: Agent {agent_id} not found")
             return False
-        is_loaded = await self._vcm_handle.is_page_loaded(page_id, agent.colony_id, agent.tenant_id)
+        is_loaded = await self._vcm_handle.is_page_loaded(page_id)
 
         logger.debug(f"Agent {agent_id}: Page {page_id} loaded={is_loaded}")
 

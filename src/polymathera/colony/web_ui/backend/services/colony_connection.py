@@ -12,8 +12,14 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-
+from contextlib import contextmanager
+from typing import Iterator
 import httpx
+
+from polymathera.colony.distributed.ray_utils.serving.context import (
+    Ring, execution_context, ExecutionContext
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -248,3 +254,50 @@ class ColonyConnection:
             return resp.text
         except Exception:
             return ""
+
+    async def execution_context(self, ring: str, origin: str):
+        """Context manager for executing code in a specific Ring (e.g. KERNEL) and origin."""
+        from polymathera.colony.distributed.ray_utils.serving.context import execution_context
+        return execution_context(ring=ring, origin=origin)
+
+    @contextmanager
+    def user_execution_context(
+        *,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        origin: str | None = None,
+    ) -> Iterator[ExecutionContext]:
+        with execution_context(
+            ring=Ring.USER,
+            colony_id=colony_id,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            origin=origin,
+        ) as ctx:
+            yield ctx
+
+    @contextmanager
+    def kernel_execution_context(
+        *,
+        colony_id: str | None = None,
+        tenant_id: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        origin: str | None = None,
+    ) -> Iterator[ExecutionContext]:
+        with execution_context(
+            ring=Ring.KERNEL,
+            colony_id=colony_id,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            origin=origin,
+        ) as ctx:
+            yield ctx

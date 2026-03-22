@@ -141,8 +141,6 @@ class ContextCompositionBenchmarks:
             request = InferenceRequest(
                 request_id=f"seq-agent-{i}",
                 prompt="",  # Will be overridden by composition
-                colony_id="benchmark-colony",
-                tenant_id="benchmark-tenant",
                 max_tokens=50,
             )
 
@@ -225,8 +223,6 @@ class ContextCompositionBenchmarks:
             request = InferenceRequest(
                 request_id=f"concurrent-agent-{agent_id}",
                 prompt="",
-                colony_id="benchmark-colony",
-                tenant_id="benchmark-tenant",
                 max_tokens=50,
             )
 
@@ -393,8 +389,6 @@ class ContextCompositionBenchmarks:
                 request = InferenceRequest(
                     request_id=f"mixed-{req_id}",
                     prompt="",
-                    colony_id="benchmark-colony",
-                    tenant_id="benchmark-tenant",
                     max_tokens=50,
                 )
 

@@ -68,7 +68,8 @@ class GlobalPageKeyRegistry:
         Args:
             page_id: Page identifier
         """
-        return f"{_PAGE_KEY_PREFIX}{self.agent.tenant_id}:{self.agent.colony_id}:{page_id}"
+        ctx = self.agent.syscontext
+        return f"{_PAGE_KEY_PREFIX}{ctx.tenant_id}:{ctx.colony_id}:{page_id}"
 
     def _get_cluster_summary_key(self, cluster_id: str) -> str:
         """Get blackboard key for cluster summary.
@@ -78,7 +79,8 @@ class GlobalPageKeyRegistry:
         Returns:
             Blackboard key for this cluster summary
         """
-        return f"{_CLUSTER_SUMMARY_PREFIX}{self.agent.tenant_id}:{self.agent.colony_id}:{cluster_id}"
+        ctx = self.agent.syscontext
+        return f"{_CLUSTER_SUMMARY_PREFIX}{ctx.tenant_id}:{ctx.colony_id}:{cluster_id}"
 
     async def publish_page_key(
         self,
@@ -101,8 +103,7 @@ class GlobalPageKeyRegistry:
                 {
                     "key": key.model_dump(),
                     "cluster_id": cluster_id,
-                    "colony_id": self.agent.colony_id if self.agent else None,
-                    "tenant_id": self.agent.tenant_id if self.agent else None,
+                    "syscontext": self.agent.syscontext.to_dict() if self.agent else None,
                     "timestamp": time.time(),
                     "agent_id": self.agent.agent_id,
                     "metadata": metadata or {}

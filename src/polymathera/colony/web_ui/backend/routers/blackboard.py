@@ -25,12 +25,15 @@ async def list_blackboard_scopes(
     if not colony.is_connected:
         return []
 
-    try:
-        handle = colony.get_agent_system()
-        return await handle.get_blackboard_scopes()
-    except Exception as e:
-        logger.warning("Failed to list blackboard scopes: %s", e)
-        return []
+    with colony.kernel_execution_context(
+        origin="dashboard",
+    ):
+        try:
+            handle = colony.get_agent_system()
+            return await handle.get_blackboard_scopes()
+        except Exception as e:
+            logger.warning("Failed to list blackboard scopes: %s", e)
+            return []
 
 
 @router.get("/blackboard/scopes/{scope}/{scope_id}/entries")
@@ -45,12 +48,15 @@ async def get_blackboard_entries(
     if not colony.is_connected:
         return []
 
-    try:
-        handle = colony.get_agent_system()
-        return await handle.get_blackboard_entries(
-            scope=scope, scope_id=scope_id, limit=limit,
-            backend_type=backend_type,
-        )
-    except Exception as e:
-        logger.warning("Failed to get blackboard entries: %s", e)
-        return []
+    with colony.kernel_execution_context(
+        origin="dashboard",
+    ):
+        try:
+            handle = colony.get_agent_system()
+            return await handle.get_blackboard_entries(
+                scope=scope, scope_id=scope_id, limit=limit,
+                backend_type=backend_type,
+            )
+        except Exception as e:
+            logger.warning("Failed to get blackboard entries: %s", e)
+            return []

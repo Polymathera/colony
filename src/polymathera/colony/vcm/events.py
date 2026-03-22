@@ -16,20 +16,23 @@ from __future__ import annotations
 from typing import Literal
 from pydantic import BaseModel, Field
 
+from ..distributed.ray_utils import serving
 
 class PageEvent(BaseModel):
     """Base class for all page lifecycle events.
 
     All events include basic identifying information about the page,
-    deployment, replica, and tenant.
+    deployment, replica, and execution context.
     """
 
     event_type: str = Field(..., description="Type of event")
     page_id: str = Field(..., description="Virtual page identifier")
     deployment_name: str = Field(..., description="Deployment name")
     client_id: str = Field(..., description="LLM client/replica ID")
-    colony_id: str = Field(..., description="Colony ID acting as address space ID.")
-    tenant_id: str = Field(..., description="Tenant ID for multi-tenancy")
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for correlating events"
+    )
     timestamp: float = Field(..., description="Event timestamp (Unix time)")
 
 

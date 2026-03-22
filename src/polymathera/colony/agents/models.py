@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from pydantic import BaseModel, Field, PrivateAttr
 
 from ..distributed.state_management import SharedState
+from ..distributed.ray_utils import serving
 from .self_concept import AgentSelfConcept
 
 
@@ -2575,8 +2576,10 @@ class AgentResourceRequirements(BaseModel):
 class AgentMetadata(BaseModel):
     """Metadata for agents."""
     role: str | None = None
-    tenant_id: str = "default"  # Tenant/namespace for multi-tenant deployments
-    colony_id: str = "default-colony"
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="System context for the agent (e.g., request info, user info)"
+    )
     team_id: str | None = None
     session_id: str = Field(
         default="default",

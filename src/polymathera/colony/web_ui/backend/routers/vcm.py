@@ -28,19 +28,20 @@ async def get_vcm_stats(
     if not colony.is_connected:
         return VCMStats()
 
-    try:
-        stats = await colony.get_vcm().get_stats()
-        pt = stats.get("page_table", {})
-        storage = stats.get("storage", {})
-        return VCMStats( # TODO: Add more stats
-            total_pages=storage.get("total_pages", 0) or pt.get("total_pages_loaded", 0),
-            loaded_pages=pt.get("total_pages_loaded", 0),
-            page_groups=pt.get("num_groups", 0),
-            pending_faults=pt.get("pending_faults", 0),
-        )
-    except Exception as e:
-        logger.warning("Failed to get VCM stats: %s", e)
-        return VCMStats()
+    with colony.kernel_execution_context(origin="dashboard"):
+        try:
+            stats = await colony.get_vcm().get_stats()
+            pt = stats.get("page_table", {})
+            storage = stats.get("storage", {})
+            return VCMStats( # TODO: Add more stats
+                total_pages=storage.get("total_pages", 0) or pt.get("total_pages_loaded", 0),
+                loaded_pages=pt.get("total_pages_loaded", 0),
+                page_groups=pt.get("num_groups", 0),
+                pending_faults=pt.get("pending_faults", 0),
+            )
+        except Exception as e:
+            logger.warning("Failed to get VCM stats: %s", e)
+            return VCMStats()
 
 
 @router.get("/vcm/pages", response_model=list[PageSummary])
@@ -53,25 +54,26 @@ async def list_pages(
     if not colony.is_connected:
         return []
 
-    try:
+    with colony.kernel_execution_context(origin="dashboard"):
+        try:
 
-        summaries = await colony.get_vcm().list_stored_pages(
-            limit=limit,
-            offset=offset,
-        )
-        return [
-            PageSummary(
-                page_id=s["page_id"],
-                source=s.get("source", ""),
-                tokens=s.get("size", 0),
-                loaded=True,
-                files=s.get("files", []),
+            summaries = await colony.get_vcm().list_stored_pages(
+                limit=limit,
+                offset=offset,
             )
-            for s in summaries
-        ]
-    except Exception as e:
-        logger.warning("Failed to list pages: %s", e)
-        return []
+            return [
+                PageSummary(
+                    page_id=s["page_id"],
+                    source=s.get("source", ""),
+                    tokens=s.get("size", 0),
+                    loaded=True,
+                    files=s.get("files", []),
+                )
+                for s in summaries
+            ]
+        except Exception as e:
+            logger.warning("Failed to list pages: %s", e)
+            return []
 
 
 @router.get("/vcm/working-set")
@@ -82,13 +84,14 @@ async def get_working_set(
     if not colony.is_connected:
         return {"pages": []}
 
-    try:
+    with colony.kernel_execution_context(origin="dashboard"):
+        try:
 
-        loaded = await colony.get_vcm().get_all_loaded_pages()
-        return {"pages": loaded}
-    except Exception as e:
-        logger.warning("Failed to get working set: %s", e)
-        return {"pages": [], "error": str(e)}
+            loaded = await colony.get_vcm().get_all_loaded_pages()
+            return {"pages": loaded}
+        except Exception as e:
+            logger.warning("Failed to get working set: %s", e)
+            return {"pages": [], "error": str(e)}
 
 
 @router.get("/vcm/loaded-pages")
@@ -99,12 +102,13 @@ async def list_loaded_pages(
     if not colony.is_connected:
         return []
 
-    try:
+    with colony.kernel_execution_context(origin="dashboard"):
+        try:
 
-        return await colony.get_vcm().list_loaded_page_entries()
-    except Exception as e:
-        logger.warning("Failed to list loaded pages: %s", e)
-        return []
+            return await colony.get_vcm().list_loaded_page_entries()
+        except Exception as e:
+            logger.warning("Failed to list loaded pages: %s", e)
+            return []
 
 
 @router.get("/vcm/pages/{page_id}/{colony_id}/{tenant_id}")
@@ -118,16 +122,20 @@ async def get_page_detail(
     if not colony.is_connected:
         return {"error": "not connected"}
 
-    try:
-
-        page = await colony.get_vcm().get_virtual_page(page_id=page_id, colony_id=colony_id, tenant_id=tenant_id)
-        if page is None:
-            return {"error": "page not found", "page_id": page_id}
-        if hasattr(page, "model_dump"):
-            return page.model_dump()
-        return {"page_id": page_id, "raw": str(page)}
-    except Exception as e:
-        return {"error": str(e), "page_id": page_id}
+    with colony.user_execution_context(
+        colony_id=colony_id,
+        tenant_id=tenant_id,
+        origin="dashboard",
+    ):
+        try:
+            page = await colony.get_vcm().get_virtual_page(page_id)
+            if page is None:
+                return {"error": "page not found", "page_id": page_id}
+            if hasattr(page, "model_dump"):
+                return page.model_dump()
+            return {"page_id": page_id, "raw": str(page)}
+        except Exception as e:
+            return {"error": str(e), "page_id": page_id}
 
 
 @router.get("/vcm/pages/{page_id}/{colony_id}/{tenant_id}/locations")
@@ -141,17 +149,21 @@ async def get_page_locations(
     if not colony.is_connected:
         return {"error": "not connected"}
 
-    try:
-
-        locations = await colony.get_vcm().get_page_locations(page_id=page_id, colony_id=colony_id, tenant_id=tenant_id)
-        return {
-            "page_id": page_id,
-            "colony_id": colony_id,
-            "tenant_id": tenant_id,
-            "locations": [
-                loc.model_dump() if hasattr(loc, "model_dump") else str(loc)
-                for loc in locations
-            ],
-        }
-    except Exception as e:
-        return {"error": str(e), "page_id": page_id, "colony_id": colony_id, "tenant_id": tenant_id}
+    with colony.user_execution_context(
+        colony_id=colony_id,
+        tenant_id=tenant_id,
+        origin="dashboard",
+    ):
+        try:
+            locations = await colony.get_vcm().get_page_locations(page_id)
+            return {
+                "page_id": page_id,
+                "colony_id": colony_id,
+                "tenant_id": tenant_id,
+                "locations": [
+                    loc.model_dump() if hasattr(loc, "model_dump") else str(loc)
+                    for loc in locations
+                ],
+            }
+        except Exception as e:
+            return {"error": str(e), "page_id": page_id, "colony_id": colony_id, "tenant_id": tenant_id}

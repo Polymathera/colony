@@ -98,8 +98,8 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Execution context for all API requests (Ring.KERNEL — admin interface)
-    app.add_middleware(ExecutionContextMiddleware)
+    ### # Execution context for all API requests (Ring.KERNEL — admin interface)
+    ### app.add_middleware(ExecutionContextMiddleware)
 
     # Register API routers
     from .routers import (

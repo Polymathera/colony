@@ -65,7 +65,7 @@ class SessionMetadata(BaseModel):
     Contains descriptive and administrative information about a session.
 
     Attributes:
-        tenant_id: Owning tenant
+        syscontext: Execution context for this session
         name: Human-readable name
         description: Session description
         created_by: ID of user/system that created the session
@@ -73,13 +73,9 @@ class SessionMetadata(BaseModel):
         parent_session_id: Parent session if this was forked
         custom: Custom metadata for application use
     """
-    colon_id: str | None = Field(
-        default_factory=lambda: serving.require_colony_id(),
-        description="Colony ID for address space isolation within the same tenant"
-        )
-    tenant_id: str | None = Field(
-        default_factory=lambda: serving.require_tenant_id(),
-        description="Owning tenant"
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for this session"
     )
     name: str | None = Field(None, description="Human-readable name")
     description: str | None = Field(None, description="Session description")
@@ -338,8 +334,7 @@ class Session(BaseModel):
 
     Attributes:
         session_id: Unique identifier
-        colony_id: Colony ID for address space isolation within the same tenant
-        tenant_id: Owning tenant
+        syscontext: Execution context for this session
         branch_id: Associated VCM branch for copy-on-write
         state: Current lifecycle state
         metadata: Session metadata
@@ -354,8 +349,10 @@ class Session(BaseModel):
         default_factory=lambda: f"session_{uuid.uuid4().hex[:12]}",
         description="Unique session identifier"
     )
-    colony_id: str = Field(..., description="Colony ID for address space isolation within the same tenant")
-    tenant_id: str = Field(..., description="Owning tenant")
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for this session"
+    )
     branch_id: str = Field(..., description="Associated VCM branch for copy-on-write")
     state: SessionState = Field(
         default=SessionState.CREATED,

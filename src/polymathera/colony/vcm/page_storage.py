@@ -29,7 +29,7 @@ import networkx as nx
 
 from .models import VirtualContextPageMetadata, VirtualContextPage, ContextPageId
 from .sources import PageCluster
-from ..distributed.ray_utils.serving import get_colony_id, get_tenant_id, require_colony_id, require_tenant_id
+from ..distributed.ray_utils import serving
 
 if TYPE_CHECKING:
     from ..distributed.storage import Storage
@@ -177,8 +177,8 @@ class RelationalPageMetadataStore(PageMetadataStore):
 
                 if existing_page:
                     # Update existing page
-                    existing_page.tenant_id = page.tenant_id
-                    existing_page.colony_id = page.colony_id
+                    existing_page.tenant_id = page.syscontext.tenant_id
+                    existing_page.colony_id = page.syscontext.colony_id
                     existing_page.source = source
                     existing_page.updated_at = datetime.now(timezone.utc)
                     existing_page.size = page.size
@@ -197,8 +197,8 @@ class RelationalPageMetadataStore(PageMetadataStore):
                     # Create new page metadata
                     page_metadata = VirtualContextPageMetadata(
                         page_id=page.page_id,
-                        tenant_id=page.tenant_id,
-                        colony_id=page.colony_id,
+                        tenant_id=page.syscontext.tenant_id,
+                        colony_id=page.syscontext.colony_id,
                         source=source,
                         created_at=datetime.fromtimestamp(page.created_at, tz=timezone.utc),
                         size=page.size,
@@ -218,8 +218,8 @@ class RelationalPageMetadataStore(PageMetadataStore):
     @override
     async def get_page_metadata(self, page_id: str) -> VirtualContextPageMetadata | None:
         """Retrieve page metadata by page ID."""
-        tenant_id = require_tenant_id()
-        colony_id = require_colony_id()
+        tenant_id = serving.require_tenant_id()
+        colony_id = serving.require_colony_id()
         session_maker = self.relational_storage._get_current_loop_session_maker()
         async with session_maker() as session:
             stmt = sqlm.select(VirtualContextPageMetadata).where(
@@ -237,8 +237,8 @@ class RelationalPageMetadataStore(PageMetadataStore):
         session_maker = self.relational_storage._get_current_loop_session_maker()
         async with session_maker() as session:
             async with session.begin():
-                tenant_id = require_tenant_id()
-                colony_id = require_colony_id()
+                tenant_id = serving.require_tenant_id()
+                colony_id = serving.require_colony_id()
                 stmt = sqlm.select(VirtualContextPageMetadata).where(
                     VirtualContextPageMetadata.page_id == page_id,
                     VirtualContextPageMetadata.tenant_id == tenant_id,
@@ -274,8 +274,8 @@ class RelationalPageMetadataStore(PageMetadataStore):
         Raises:
             Exception: If query fails
         """
-        tenant_id = get_tenant_id()
-        colony_id = get_colony_id()
+        tenant_id = serving.get_tenant_id()
+        colony_id = serving.get_colony_id()
 
         logger.debug(
             f"Listing pages (tenant={tenant_id}, colony={colony_id}, source_pattern={source_pattern}, "
@@ -328,8 +328,8 @@ class RelationalPageMetadataStore(PageMetadataStore):
             List of dicts with page_id, source, size, group_id, tenant_id
         """
         try:
-            tenant_id = get_tenant_id()
-            colony_id = get_colony_id()
+            tenant_id = serving.get_tenant_id()
+            colony_id = serving.get_colony_id()
 
             session_maker = self.relational_storage._get_current_loop_session_maker()
             async with session_maker() as session:
@@ -796,13 +796,14 @@ class PageStorage:
             Exception: If storage operation fails
         """
         logger.debug(f"Storing page {page.page_id} ({page.size} tokens)")
+        serving.ensure_context(page.page_id, page.syscontext)
 
         try:
             # 1. Serialize tokens to binary using msgpack (efficient)
             tokens_data = msgpack.packb(page.tokens, use_bin_type=True)
 
             # 2. Store tokens to blob storage
-            blob_key = self._get_blob_key(page.page_id, page.colony_id, page.tenant_id)
+            blob_key = self._get_blob_key(page.page_id, page.syscontext.colony_id, page.syscontext.tenant_id)
 
             storage_location = await self.blob_storage.store_blob(blob_key, tokens_data)
 
@@ -1079,8 +1080,8 @@ class PageStorage:
         Raises:
             `Exception`: If storage operation fails
         """
-        tenant_id = require_tenant_id()
-        colony_id = require_colony_id()
+        tenant_id = serving.require_tenant_id()
+        colony_id = serving.require_colony_id()
         logger.debug(f"Storing page graph data {data_key} for colony {colony_id}, tenant {tenant_id}")
 
         try:
@@ -1126,8 +1127,8 @@ class PageStorage:
         updated each time the graph changes. Moreover, some graph-level data
         is computed once by one entity (e.g., sharding strategy) and used by all agents."""
         try:
-            tenant_id = require_tenant_id()
-            colony_id = require_colony_id()
+            tenant_id = serving.require_tenant_id()
+            colony_id = serving.require_colony_id()
             # Check local cache first
             effective_data_key = f"{tenant_id}:{colony_id}:{data_key}"
             if cached and effective_data_key in self._page_graph_data:
@@ -1173,8 +1174,8 @@ class PageStorage:
         Raises:
             Exception: If deletion operation fails
         """
-        tenant_id = require_tenant_id()
-        colony_id = require_colony_id()
+        tenant_id = serving.require_tenant_id()
+        colony_id = serving.require_colony_id()
 
         logger.debug(f"Deleting page graph for colony {colony_id}")
 
@@ -1205,8 +1206,8 @@ class PageStorage:
         Returns:
             The page graph as a networkx DiGraph. If loading from storage fails, returns an empty graph.
         """
-        tenant_id = require_tenant_id()
-        colony_id = require_colony_id()
+        tenant_id = serving.require_tenant_id()
+        colony_id = serving.require_colony_id()
         graph_key = f"{tenant_id}:{colony_id}:graph"
         if cached and graph_key in self._page_graphs and len(self._page_graphs[graph_key].nodes) > 0:
             return self._page_graphs[graph_key]
@@ -1246,8 +1247,8 @@ class PageStorage:
         cluster_type: str | None = None
     ) -> PageCluster:
         """Get a cluster of related pages."""
-        tenant_id = require_tenant_id()
-        colony_id = require_colony_id()
+        tenant_id = serving.require_tenant_id()
+        colony_id = serving.require_colony_id()
 
         # TODO: Get page graph dynamically from PageStorage, rather than relying on in-memory graph.
         # This allows the agent to pick up the latest graph state.
@@ -1310,8 +1311,8 @@ class PageStorage:
         min_cluster_size: int = 2
     ) -> AsyncIterator[PageCluster]:
         """Iterate over all page clusters."""
-        tenant_id = require_tenant_id()
-        colony_id = require_colony_id()
+        tenant_id = serving.require_tenant_id()
+        colony_id = serving.require_colony_id()
         # TODO: Get page graph dynamically from PageStorage, rather than relying on in-memory graph.
         # This allows the agent to pick up the latest graph state.
         graph_key = f"{tenant_id}:{colony_id}:graph"
@@ -1357,8 +1358,8 @@ class PageStorage:
         # This may be susceptible to race conditions if multiple agents are updating the graph concurrently.
         # We should consider implementing a more robust graph update mechanism that can handle concurrent updates,
         # such as using graph databases or implementing locking mechanisms.
-        tenant_id = require_tenant_id()
-        colony_id = require_colony_id()
+        tenant_id = serving.require_tenant_id()
+        colony_id = serving.require_colony_id()
         graph_key = f"{tenant_id}:{colony_id}:graph"
         if not self._page_graphs.get(graph_key) or len(self._page_graphs[graph_key].nodes) == 0:
             return
@@ -1385,8 +1386,8 @@ class PageStorage:
         relationship_types: list[str] | None = None,
     ) -> list[tuple[str, float]]:
         """Get nearest neighbor pages."""
-        tenant_id = require_tenant_id()
-        colony_id = require_colony_id()
+        tenant_id = serving.require_tenant_id()
+        colony_id = serving.require_colony_id()
         graph_key = f"{tenant_id}:{colony_id}:graph"
         if not self._page_graphs.get(graph_key) or len(self._page_graphs[graph_key].nodes) == 0:
             return []

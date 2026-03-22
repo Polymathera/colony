@@ -19,6 +19,7 @@ from circuitbreaker import circuit
 from polymathera.colony.distributed.caching.simple import CacheConfig
 from polymathera.colony.distributed.config import ConfigComponent, register_polymathera_config
 from polymathera.colony.distributed import get_polymathera
+from polymathera.colony.distributed.ray_utils import serving
 from polymathera.colony.distributed.metrics.common import BaseMetricsMonitor
 from polymathera.colony.utils.git import validate_git_repository, configure_git_safety
 from polymathera.colony.utils.retry import standard_retry
@@ -251,8 +252,9 @@ class GitRepoShardCache:
 
     async def initialize(self):
         self.config = await CacheConfig.check_or_get_component(self.config)
+        syscontext = serving.require_execution_context()
         self.cache = await get_polymathera().create_distributed_simple_cache(
-            namespace="shards",  # TODO: Does this need to be VMR-specific?
+            namespace=f"{syscontext.tenant_id}:{syscontext.colony_id}:shards",
             config=self.config,
         )
 
@@ -303,8 +305,6 @@ class GitRepoShardingMetricsMonitor(BaseMetricsMonitor):
     """Centralized monitoring for GitRepoShardingStrategy."""
 
     def __init__(self,
-        tenant_id: str,
-        colony_id: str,
         enable_http_server: bool = True,
     ):
         # Initialize base class with HTTP server
@@ -312,13 +312,13 @@ class GitRepoShardingMetricsMonitor(BaseMetricsMonitor):
             enable_http_server=enable_http_server,
             service_name="git-repo-sharding-metrics",
         )
-        self.tenant_id = tenant_id
-        self.colony_id = colony_id
+
+        ctx = serving.require_execution_context()
 
         self.logger.info(f"Initializing GitRepoShardingMetricsMonitor instance {id(self)}...")
 
         # Use consistent label names across all metrics
-        common_labels = ["tenant_id", "colony_id"]
+        common_labels = list(ctx.to_dict().keys())
 
         self.shard_size = self.create_histogram(
             "repo_shard_size_bytes",
@@ -326,27 +326,27 @@ class GitRepoShardingMetricsMonitor(BaseMetricsMonitor):
             buckets=[1024, 4096, 16384, 32768, 65536],
             #buckets=[1024, 10 * 1024, 100 * 1024, 1024 * 1024, 10 * 1024 * 1024],
             labelnames=common_labels
-        ).labels(tenant_id=self.tenant_id,colony_id=self.colony_id)
+        ).labels(**ctx.to_dict())
         self.processing_time = self.create_histogram(
             "repo_sharding_duration_seconds",
             "Time taken to shard repository",
             labelnames=common_labels
-        ).labels(tenant_id=self.tenant_id,colony_id=self.colony_id)
+        ).labels(**ctx.to_dict())
         self.shard_count = self.create_counter(
             "repo_shard_count",
             "Total number of shards created",
             labelnames=common_labels
-        ).labels(tenant_id=self.tenant_id,colony_id=self.colony_id)
+        ).labels(**ctx.to_dict())
         self.binary_files = self.create_counter(
             "repo_binary_files",
             "Number of binary files encountered",
             labelnames=common_labels
-        ).labels(tenant_id=self.tenant_id,colony_id=self.colony_id)
+        ).labels(**ctx.to_dict())
         self.processing_errors = self.create_counter(
             "repo_sharding_errors",
             "Number of errors during sharding",
             labelnames=common_labels
-        ).labels(tenant_id=self.tenant_id,colony_id=self.colony_id)
+        ).labels(**ctx.to_dict())
 
 
 
@@ -451,13 +451,9 @@ class GitRepoShardingStrategy:
 
     def __init__(
         self,
-        tenant_id: str,
-        colony_id: str,
         prompt_strategy: ShardedInferencePromptStrategy,
         config: ShardingConfig | None = None,
     ):
-        self.tenant_id = tenant_id
-        self.colony_id = colony_id
         self.prompt_strategy = prompt_strategy
         self.config: ShardingConfig | None = config
         self._token_manager = None
@@ -469,10 +465,7 @@ class GitRepoShardingStrategy:
         self.shard_semaphore = None
 
         # Metrics
-        self.metrics = GitRepoShardingMetricsMonitor(
-            tenant_id=self.tenant_id,
-            colony_id=self.colony_id
-        )
+        self.metrics = GitRepoShardingMetricsMonitor()
 
         # Initialize shard cache with proper configuration
         self.shard_cache = None
@@ -513,8 +506,6 @@ class GitRepoShardingStrategy:
     async def get_token_manager(self) -> TokenManager:
         if self._token_manager is None:
             self._token_manager = TokenManager(
-                tenant_id=self.tenant_id,
-                colony_id=self.colony_id,
                 file_content_cache=self._file_content_cache,
                 config=self.config.tokenization_config,
             )
@@ -650,7 +641,7 @@ class GitRepoShardingStrategy:
         return shards
 
     def _get_cache_key(self, commit_hash: str):
-        return f"{self.tenant_id}:{self.colony_id}:{commit_hash}"
+        return f"{commit_hash}"
 
     async def _create_shards_internal(self, repo: git.Repo) -> tuple[list[RepositoryShard], FileGrouperWithGraph]:
         """
@@ -672,7 +663,8 @@ class GitRepoShardingStrategy:
 
             # Validate Git repository health
             if not validate_git_repository(repo):
-                logger.error(f"Git repository validation failed for {self.tenant_id}:{self.colony_id}")
+                syscontext = serving.require_execution_context()
+                logger.error(f"Git repository validation failed for {syscontext.to_dict()}")
                 raise ShardingError(f"Git repository is not in a healthy state: {repo.working_dir}")
 
             # TODO: Cache Invalidation: Ensure that the cache is invalidated or
@@ -720,8 +712,6 @@ class GitRepoShardingStrategy:
             # Group related files together
             # TODO: Ensure this is cached
             file_groups = await file_grouper.group_files(
-                colony_id=self.colony_id,
-                tenant_id=self.tenant_id,
                 repo=repo,
                 files=files
             )
@@ -945,9 +935,8 @@ class GitRepoShardingStrategy:
         segment_str = ",".join(sorted(segment_data))
 
         # Combine all identifying information
-        id_components = [
-            f"tenant_id={self.tenant_id}",
-            f"colony_id={self.colony_id}",
+        syscontext = serving.require_execution_context()
+        id_components = [f"{k}={v}" for k, v in syscontext.to_dict().items()] + [
             f"commit={commit_hash}",
             f"segments={segment_str}",
         ]
@@ -976,9 +965,10 @@ class GitRepoShardingStrategy:
                 file_contents: list[tuple[str, str, str]] = []
                 binary_files: set[str] = set()
 
+                syscontext = serving.require_execution_context()
                 logger.debug(
                     f"_process_file_group: files={len(file_paths)} "
-                    f"tenant_id={self.tenant_id} colony_id={self.colony_id} repo_path={repo_path}"
+                    f"syscontext={syscontext.to_dict()} repo_path={repo_path}"
                 )
 
                 for file_path in file_paths:

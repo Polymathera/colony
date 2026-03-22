@@ -271,8 +271,9 @@ class DeploymentProxyRayActor:
 
         # Restore execution context from request for proxy-local operations
         ctx = request.execution_context
-        if not isinstance(ctx, ExecutionContext):
-            ctx = ExecutionContext(ring=Ring.KERNEL, origin="legacy_request")
+        if ctx is None or not isinstance(ctx, ExecutionContext):
+            raise ValueError("Request is missing valid execution context for routing")
+            # ctx = ExecutionContext(ring=Ring.KERNEL, origin="legacy_request")
 
         with restore_execution_context(ctx):
             try:

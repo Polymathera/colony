@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
@@ -27,6 +27,7 @@ from sqlalchemy import Column, DateTime
 import sqlmodel as sqlm
 
 from ..distributed.state_management import SharedState
+from ..distributed.ray_utils import serving
 
 # Limits to prevent unbounded queue growth in long-running jobs
 MAX_PENDING_PAGE_FAULTS = 10000  # Maximum page faults in queue
@@ -97,11 +98,10 @@ class VirtualContextPage(BaseModel):
         size: Number of tokens (must be greater than or equal to len(tokens))
         metadata: Arbitrary metadata (source file, keywords, etc.)
         group_id: Optional group ID for spatial locality (pages in the same group should be loaded together)
-        colony_id: Optional colony ID to group one or more page sources into a shared address space (e.g., "code", "docs", "tools")
         storage_uri: Where the raw data is stored (S3, DB, etc.)
         created_at: Timestamp when page was created
         expires_at: Optional expiration timestamp for automatic cleanup
-        tenant_id: Required - identifies data owner for multi-tenancy isolation
+        syscontext: Execution context for this page
         created_by: Optional - identifies creator (agent_id, session_id, run_id, etc.) for finer-grained tracking within tenant
         isolation_level: 'shared' (tenant-isolated KV cache) or 'isolated' (dedicated instance)
         allowed_tenant_ids: Set of tenant IDs allowed to access this page (for sharing)
@@ -130,8 +130,10 @@ class VirtualContextPage(BaseModel):
     expires_at: float | None = Field(None, description="Optional expiration timestamp")
 
     # Multi-tenancy fields
-    tenant_id: str = Field(default="default", description="Tenant ID for multi-tenancy isolation")
-    colony_id: str = Field(description="Page group ID to group related page sources in one address space.")
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for access control and auditing"
+    )
     created_by: str | None = Field(None, description="Creator ID for finer-grained tracking within tenant (agent_id, session_id, run_id, etc.)")
     isolation_level: str = Field(
         default="shared",
@@ -207,6 +209,7 @@ class VirtualContextPage(BaseModel):
         return time.time() > self.expires_at
 
 
+
 class VCMBranch(BaseModel):
     """A branch in the VCM representing a version lineage for copy-on-write.
 
@@ -226,8 +229,7 @@ class VCMBranch(BaseModel):
 
     Attributes:
         branch_id: Unique identifier
-        colony_id: Colony this branch belongs to
-        tenant_id: Owning tenant
+        syscontext: Execution context for this branch
         parent_branch_id: Parent branch (None for root/main)
         name: Human-readable name
         created_at: Creation timestamp
@@ -243,8 +245,10 @@ class VCMBranch(BaseModel):
         default_factory=lambda: f"branch_{uuid.uuid4().hex[:12]}",
         description="Unique branch identifier"
     )
-    colony_id: str = Field(..., description="Colony this branch belongs to")
-    tenant_id: str = Field(..., description="Owning tenant")
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for the branch"
+    )
     parent_branch_id: BranchId | None = Field(
         None,
         description="Parent branch for lineage (None for root/main)"
@@ -315,6 +319,7 @@ class PageLocation:
 
     Attributes:
         page_id: Virtual page identifier
+        syscontext: Execution context for access control and auditing
         deployment_name: Name of the VLLMDeployment
         client_id: ID of the specific replica within the deployment
         replica_id: Alias for client_id (for backward compatibility)
@@ -322,21 +327,21 @@ class PageLocation:
         last_access_time: Timestamp of most recent access
         access_count: Number of times this page has been accessed
         size: Page size in tokens
-        colony_id: Colony ID to group related page sources into a shared address space (e.g., "code", "docs", "tools")
-        tenant_id: Tenant that owns this page
         has_appended_context: Whether this page has appended task-specific context
         appended_size: Size of appended context in tokens (0 if none)
     """
 
     page_id: str
-    colony_id: str
-    tenant_id: str
     deployment_name: str
     client_id: str
     load_time: float
     last_access_time: float
     access_count: int = 0
     size: int = 0
+
+    syscontext: serving.ExecutionContext = field(
+        default_factory=serving.require_execution_context,
+    )
 
     # Appended context tracking
     has_appended_context: bool = False
@@ -384,8 +389,7 @@ class PageLock(BaseModel):
 
     Attributes:
         page_id: ID of the locked page
-        colony_id: Optional colony ID to group related page sources into a shared address space (e.g., "code", "docs", "tools")
-        tenant_id: Tenant that owns this page group
+        syscontext: Execution context for this lock
         locked_by: Identifier of who locked the page (agent_id, session_id, run_id, etc.)
         lock_expires_at: Timestamp when lock expires (Unix time)
         reason: Human-readable reason for the lock
@@ -393,8 +397,10 @@ class PageLock(BaseModel):
     """
 
     page_id: str = Field(..., description="ID of the locked page")
-    colony_id: str = Field(..., description="Colony ID")
-    tenant_id: str = Field(..., description="Tenant ID")
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for access control and auditing"
+    )
     locked_by: str = Field(..., description="Identifier of who locked the page")
     lock_expires_at: float = Field(..., description="Lock expiration timestamp")
     reason: str = Field(default="", description="Reason for locking")
@@ -434,8 +440,7 @@ class PageGroup(BaseModel):
 
     Attributes:
         group_id: Unique group identifier
-        colony_id: Optional colony ID to group related page sources into a shared address space (e.g., "code", "docs", "tools")
-        tenant_id: Tenant that owns this page group
+        syscontext: Execution context for this page group
         page_ids: List of pages in this group
         priority: Load priority (higher = more urgent)
         metadata: Arbitrary metadata
@@ -445,8 +450,10 @@ class PageGroup(BaseModel):
         default_factory=lambda: f"vcm_page_group_{uuid.uuid4().hex[:12]}",
         description="Unique VCM page identifier"
     )
-    colony_id: str
-    tenant_id: str
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for access control and auditing"
+    )
     page_ids: list[str] = Field(default_factory=list)
     priority: int = 0
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -470,8 +477,7 @@ class PageFault(BaseModel):
         priority: Load priority (higher = more urgent)
         requested_at: When the fault occurred
         group_id: If part of a group, load entire group
-        colony_id: Colony ID to group related page sources into a shared address space (e.g., "code", "docs", "tools")
-        tenant_id: Tenant that owns these pages
+        syscontext: Execution context for this fault
         completed: Whether this fault has been processed
         completed_at: When the fault was completed (None if not completed)
         lock_duration_s: If set, lock pages after loading for this duration (seconds)
@@ -484,8 +490,10 @@ class PageFault(BaseModel):
     priority: int = 0
     requested_at: float = Field(default_factory=time.time)
     group_id: str | None = None
-    tenant_id: str
-    colony_id: str
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for access control and auditing"
+    )
     loaded_page_ids: set[str] = Field(default_factory=set)  # Pages that were successfully loaded for this fault
     completed: bool = False
     completed_at: float | None = None
@@ -547,15 +555,16 @@ class MmapResult(BaseModel):
         status: One of ``"mapped"``, ``"already_mapped"``, ``"not_mapped"``,
             ``"unmapped"``, ``"error"``.
         scope_id: The scope that was (un)mapped.
-        colony_id: The colony that was (un)mapped.
-        tenant_id: The tenant that was (un)mapped.
+        syscontext: Execution context for this operation.
         message: Optional human-readable message with details.
     """
 
     status: str
     scope_id: str
-    colony_id: str
-    tenant_id: str
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for access control and auditing"
+    )
     message: str = ""
 
 
@@ -567,8 +576,7 @@ class MappedScopeConfig(BaseModel):
 
     Attributes:
         scope_id: The blackboard/memory scope being mapped.
-        colony_id: The colony that owns this mapping (for grouping related scopes into shared address spaces).
-        tenant_id: Tenant that owns this mapping (for multi-tenancy isolation).
+        syscontext: Execution context for this mapping.
         source_type: Type of the scope (e.g., "blackboard", "memory", "file", "kg").
         config: The MmapConfig used for this mapping.
         created_at: Timestamp when the mapping was created.
@@ -576,8 +584,10 @@ class MappedScopeConfig(BaseModel):
     """
 
     scope_id: str
-    colony_id: str
-    tenant_id: str
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for access control and auditing"
+    )
     source_type: str  # e.g., "blackboard", "memory", "file", "kg"
     config: MmapConfig
     created_at: float = Field(default_factory=time.time)
@@ -658,30 +668,36 @@ class VirtualPageTableState(SharedState):
     # that must not contain ":".
 
     @staticmethod
-    def get_scope_key(scope_id: str, colony_id: str, tenant_id: str) -> str:
-        return f"{scope_id}:{colony_id}:{tenant_id}"
+    def get_scope_key(scope_id: str) -> str:
+        syscontext = serving.require_execution_context()
+        return f"{scope_id}:{syscontext.colony_id}:{syscontext.tenant_id}"
 
     @staticmethod
-    def get_group_key(group_id: str, colony_id: str, tenant_id: str) -> str:
-        return f"{group_id}:{colony_id}:{tenant_id}"
+    def get_group_key(group_id: str) -> str:
+        syscontext = serving.require_execution_context()
+        return f"{group_id}:{syscontext.colony_id}:{syscontext.tenant_id}"
 
     @staticmethod
-    def get_lock_key(page_id: str, colony_id: str, tenant_id: str) -> str:
-        return f"{page_id}:{colony_id}:{tenant_id}"
+    def get_lock_key(page_id: str) -> str:
+        syscontext = serving.require_execution_context()
+        return f"{page_id}:{syscontext.colony_id}:{syscontext.tenant_id}"
 
     @staticmethod
-    def get_branch_key(branch_id: str, colony_id: str, tenant_id: str) -> str:
-        return f"{branch_id}:{colony_id}:{tenant_id}"
+    def get_branch_key(branch_id: str) -> str:
+        syscontext = serving.require_execution_context()
+        return f"{branch_id}:{syscontext.colony_id}:{syscontext.tenant_id}"
 
     @staticmethod
-    def get_page_colony_ref(page_id: str, colony_id: str) -> str:
+    def get_page_colony_ref(page_id: str) -> str:
         """Composite ref for tenant_pages set values."""
-        return f"{page_id}:{colony_id}"
+        syscontext = serving.require_execution_context()
+        return f"{page_id}:{syscontext.colony_id}"
 
     @staticmethod
-    def get_page_ref(page_id: str, colony_id: str, tenant_id: str) -> str:
+    def get_page_ref(page_id: str) -> str:
         """Composite ref for client_pages set values."""
-        return f"{page_id}:{colony_id}:{tenant_id}"
+        syscontext = serving.require_execution_context()
+        return f"{page_id}:{syscontext.colony_id}:{syscontext.tenant_id}"
 
     @staticmethod
     def parse_page_ref(page_ref: str) -> dict[str, str]:
@@ -708,14 +724,13 @@ class VirtualPageTableState(SharedState):
         return f"{deployment_name}:{client_id}"
 
     @staticmethod
-    def _entry_key(page_id: str, colony_id: str, tenant_id: str) -> str:
-        return f"{tenant_id}:{colony_id}:{page_id}"
+    def _entry_key(page_id: str) -> str:
+        syscontext = serving.require_execution_context()
+        return f"{syscontext.tenant_id}:{syscontext.colony_id}:{page_id}"
 
     def register_page_load(
         self,
         page_id: str,
-        colony_id: str,
-        tenant_id: str,
         location: PageLocation,
         size: int = 0,
         metadata: dict[str, Any] | None = None,
@@ -727,8 +742,6 @@ class VirtualPageTableState(SharedState):
 
         Args:
             page_id: ID of the virtual page
-            colony_id: Colony that owns this page
-            tenant_id: Tenant that owns this page
             location: Physical location where page is loaded
             size: Page size in tokens
             metadata: Additional metadata
@@ -737,18 +750,20 @@ class VirtualPageTableState(SharedState):
             List of fault IDs that were completed by this load (if any)
         """
         # Get or create page table entry
-        key = VirtualPageTableState._entry_key(page_id, colony_id, tenant_id)
+        key = VirtualPageTableState._entry_key(page_id)
         if key not in self.entries:
             self.entries[key] = PageTableEntry(
                 page_id=page_id,
-                colony_id=colony_id,
-                tenant_id=tenant_id,
                 size=size,
                 created_at=time.time(),
                 metadata=metadata or {},
             )
 
         entry = self.entries[key]
+        serving.ensure_context(entry.page_id, entry.syscontext)
+
+        tenant_id = entry.syscontext.tenant_id
+        colony_id = entry.syscontext.colony_id
 
         # Add physical location to entry
         entry.add_location(location)
@@ -757,12 +772,12 @@ class VirtualPageTableState(SharedState):
         client_key = self._client_key(location.deployment_name, location.client_id)
         if client_key not in self.client_pages:
             self.client_pages[client_key] = set()
-        self.client_pages[client_key].add(self.get_page_ref(page_id, colony_id, tenant_id))
+        self.client_pages[client_key].add(self.get_page_ref(page_id))
 
         # Update tenant index
         if tenant_id not in self.tenant_pages:
             self.tenant_pages[tenant_id] = set()
-        self.tenant_pages[tenant_id].add(self.get_page_colony_ref(page_id, colony_id))
+        self.tenant_pages[tenant_id].add(self.get_page_colony_ref(page_id))
 
         # Update backward compatibility index
         if location.client_id not in self.replica_pages:
@@ -772,7 +787,9 @@ class VirtualPageTableState(SharedState):
 
         faults_to_signal_completion = []
         for fault in self.processing_faults.values():
-            if page_id in fault.page_ids and colony_id == fault.colony_id and tenant_id == fault.tenant_id:
+            if (page_id in fault.page_ids and
+                colony_id == fault.syscontext.colony_id and
+                tenant_id == fault.syscontext.tenant_id):
                 fault.loaded_page_ids.add(page_id)
                 if fault.loaded_page_ids == set(fault.page_ids):
                     faults_to_signal_completion.append(fault.fault_id)
@@ -789,8 +806,6 @@ class VirtualPageTableState(SharedState):
     def register_page_eviction(
         self,
         page_id: str,
-        colony_id: str,
-        tenant_id: str,
         deployment_name: str,
         client_id: str,
     ) -> bool:
@@ -798,20 +813,19 @@ class VirtualPageTableState(SharedState):
 
         Args:
             page_id: ID of the virtual page
-            colony_id: Colony ID
-            tenant_id: Tenant ID
             deployment_name: Deployment where page was evicted
             client_id: Client where page was evicted
 
         Returns:
             True if page was found and evicted, False otherwise
         """
-        key = VirtualPageTableState._entry_key(page_id, colony_id, tenant_id)
+        key = VirtualPageTableState._entry_key(page_id)
         if key not in self.entries:
             logger.warning(f"Attempted to evict unknown page: {key}")
             return False
 
         entry = self.entries[key]
+        serving.ensure_context(entry.page_id, entry.syscontext)
 
         # Remove physical location
         removed = entry.remove_location(deployment_name, client_id)
@@ -825,7 +839,7 @@ class VirtualPageTableState(SharedState):
         # Update reverse index
         client_key = self._client_key(deployment_name, client_id)
         if client_key in self.client_pages:
-            self.client_pages[client_key].discard(self.get_page_ref(page_id, colony_id, tenant_id))
+            self.client_pages[client_key].discard(self.get_page_ref(page_id))
             # Clean up empty entries
             if not self.client_pages[client_key]:
                 del self.client_pages[client_key]
@@ -839,9 +853,9 @@ class VirtualPageTableState(SharedState):
 
         # If page has no more physical locations, remove from tenant index
         if not entry.is_loaded():
-            tenant_id = entry.tenant_id
+            tenant_id = entry.syscontext.tenant_id
             if tenant_id in self.tenant_pages:
-                self.tenant_pages[tenant_id].discard(self.get_page_colony_ref(page_id, colony_id))
+                self.tenant_pages[tenant_id].discard(self.get_page_colony_ref(page_id))
                 if not self.tenant_pages[tenant_id]:
                     del self.tenant_pages[tenant_id]
 
@@ -861,8 +875,6 @@ class VirtualPageTableState(SharedState):
     def register_page_access(
         self,
         page_id: str,
-        colony_id: str | None,
-        tenant_id: str | None,
         deployment_name: str,
         client_id: str,
         current_time: float,
@@ -875,17 +887,14 @@ class VirtualPageTableState(SharedState):
             client_id: Client where page was accessed
             current_time: Current timestamp
         """
-
-        from ..distributed.ray_utils import serving
-        colony_id = serving.require_colony_id() if colony_id is None else colony_id
-        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
-
-        key = VirtualPageTableState._entry_key(page_id, colony_id, tenant_id)
+        key = VirtualPageTableState._entry_key(page_id)
         if key not in self.entries:
             logger.warning(f"Attempted to record access for unknown page: {key}")
             return
 
         entry = self.entries[key]
+        serving.ensure_context(entry.page_id, entry.syscontext)
+
         location = entry.get_location(deployment_name, client_id)
 
         if location:
@@ -900,21 +909,16 @@ class VirtualPageTableState(SharedState):
     def get_page_locations(
         self,
         page_id: str,
-        colony_id: str,
-        tenant_id: str,
     ) -> list[PageLocation]:
         """Get all physical locations where a page is loaded.
 
         Args:
             page_id: ID of the virtual page
-            colony_id: Colony ID for isolation
-            tenant_id: Tenant ID for isolation
 
         Returns:
             List of physical locations (empty if page not loaded)
         """
-
-        key = VirtualPageTableState._entry_key(page_id, colony_id, tenant_id)
+        key = VirtualPageTableState._entry_key(page_id)
         if key not in self.entries:
             return []
         return self.entries[key].physical_locations.copy()
@@ -946,74 +950,81 @@ class VirtualPageTableState(SharedState):
     def find_clients_with_page(
         self,
         page_id: str,
-        colony_id: str | None = None,
-        tenant_id: str | None = None,
     ) -> list[tuple[str, str]]:
         """Find all clients that have a specific page loaded.
 
         Args:
             page_id: ID of the virtual page
-            colony_id: Optional colony ID
-            tenant_id: Optional tenant ID
 
         Returns:
             List of (deployment_name, client_id) tuples
         """
-        key = VirtualPageTableState._entry_key(page_id, colony_id, tenant_id)
+        key = VirtualPageTableState._entry_key(page_id)
         if key not in self.entries:
             return []
 
         entry = self.entries[key]
+        serving.ensure_context(entry.page_id, entry.syscontext)
         return [
             (loc.deployment_name, loc.client_id)
             for loc in entry.physical_locations
         ]
 
-    def get_page_entry(self, page_id: str, colony_id: str, tenant_id: str) -> PageTableEntry | None:
+    def get_page_entry(self, page_id: str) -> PageTableEntry | None:
         """Get the full page table entry for a page.
 
         Args:
             page_id: ID of the virtual page
-            colony_id: Colony ID for isolation
-            tenant_id: Tenant ID for isolation
 
         Returns:
             PageTableEntry if page exists, None otherwise
         """
-        key = VirtualPageTableState._entry_key(page_id, colony_id, tenant_id)
-        return self.entries.get(key)
+        key = VirtualPageTableState._entry_key(page_id)
+        entry = self.entries.get(key)
+        serving.ensure_context(entry.page_id, entry.syscontext)
+        return entry
 
-    def is_page_loaded(self, page_id: str, colony_id: str, tenant_id: str) -> bool:
+    def is_page_loaded(self, page_id: str) -> bool:
         """Check if a page is loaded anywhere in the cluster.
 
         Args:
             page_id: ID of the virtual page
-            colony_id: Colony ID for isolation
-            tenant_id: Tenant ID for isolation
 
         Returns:
             True if page has at least one physical location
         """
-        key = VirtualPageTableState._entry_key(page_id, colony_id, tenant_id)
+        key = VirtualPageTableState._entry_key(page_id)
         if key not in self.entries:
             return False
-        return self.entries[key].is_loaded()
+        entry = self.entries[key]
+        serving.ensure_context(entry.page_id, entry.syscontext)
+        return entry.is_loaded()
 
-    def get_replication_factor(self, page_id: str, colony_id: str, tenant_id: str) -> int:
+    def get_replication_factor(self, page_id: str) -> int:
         """Get the replication factor (number of physical copies) of a page.
 
         Args:
             page_id: ID of the virtual page
-            colony_id: Colony ID for isolation
-            tenant_id: Tenant ID for isolation
 
         Returns:
             Number of physical locations (0 if page not loaded)
         """
-        key = VirtualPageTableState._entry_key(page_id, colony_id, tenant_id)
+        key = VirtualPageTableState._entry_key(page_id)
         if key not in self.entries:
             return 0
-        return self.entries[key].replication_factor()
+        entry = self.entries[key]
+        serving.ensure_context(entry.page_id, entry.syscontext)
+        return entry.replication_factor()
+
+    def get_page_entries(self) -> list[PageTableEntry]:
+        """Get all page entries for the current execution context."""
+        syscontext = serving.require_execution_context()
+
+        return [
+            entry for entry in self.entries.values()
+            if (entry.syscontext.colony_id == syscontext.colony_id and
+                entry.syscontext.tenant_id == syscontext.tenant_id)
+        ]
 
     def get_all_loaded_pages(self) -> list[str]:
         """Get all pages currently loaded across all replicas.
@@ -1023,34 +1034,41 @@ class VirtualPageTableState(SharedState):
         """
         return [
             entry.page_id
-            for entry in self.entries.values()
+            for entry in self.get_page_entries()
             if entry.is_loaded()
         ]
 
     # === Backward Compatibility Methods ===
 
-    def remove_page_location(self, page_id: str, colony_id: str, tenant_id: str) -> None:
+    def remove_page_location(self, page_id: str) -> None:
         """Remove a page from all locations (backward compatibility).
 
         Args:
             page_id: Page identifier
-            colony_id: Colony ID
-            tenant_id: Tenant ID
         """
-        key = VirtualPageTableState._entry_key(page_id, colony_id, tenant_id)
+        key = VirtualPageTableState._entry_key(page_id)
         if key not in self.entries:
             return
 
         entry = self.entries[key]
+        serving.ensure_context(entry.page_id, entry.syscontext)
         # Remove from all locations
         for location in entry.physical_locations.copy():
             self.register_page_eviction(
                 page_id=page_id,
-                colony_id=colony_id,
-                tenant_id=tenant_id,
                 deployment_name=location.deployment_name,
                 client_id=location.client_id,
             )
+
+    def get_pending_page_faults(self) -> list[PageFault]:
+        """Get all pending page faults for the current execution context."""
+        syscontext = serving.require_execution_context()
+
+        return [
+            f for f in self.pending_faults
+            if (f.syscontext.colony_id == syscontext.colony_id and
+                f.syscontext.tenant_id == syscontext.tenant_id)
+        ]
 
     def add_page_fault(self, fault: PageFault) -> None:
         """Add a page fault to the priority queue (maintains sort order).
@@ -1059,10 +1077,7 @@ class VirtualPageTableState(SharedState):
         """
         # Check if page fault already exists for this page
         existing = [
-            f for f in self.pending_faults
-            if (f.page_ids == fault.page_ids and
-                f.colony_id == fault.colony_id and
-                f.tenant_id == fault.tenant_id)
+            f for f in self.get_pending_page_faults() if f.page_ids == fault.page_ids
         ]
         if existing:
             # Update priority if new fault has higher priority
@@ -1081,7 +1096,7 @@ class VirtualPageTableState(SharedState):
                 dropped = self.pending_faults.pop()  # Remove lowest priority
                 logger.warning(
                     f"Page fault queue full ({MAX_PENDING_PAGE_FAULTS}), "
-                    f"dropped lowest priority fault for page {dropped.page_id} "
+                    f"dropped lowest priority fault for pages {dropped.page_ids} "
                     f"(priority={dropped.priority})"
                 )
             elif len(self.pending_faults) >= MAX_PAGE_FAULT_WARNING:
@@ -1182,8 +1197,6 @@ class VirtualPageTableState(SharedState):
     def lock_page(
         self,
         page_id: str,
-        colony_id: str,
-        tenant_id: str,
         locked_by: str,
         lock_duration_s: float,
         reason: str = "",
@@ -1193,8 +1206,6 @@ class VirtualPageTableState(SharedState):
 
         Args:
             page_id: ID of the page to lock
-            colony_id: Optional colony ID
-            tenant_id: Optional tenant ID
             locked_by: Identifier of who is locking the page (agent_id, session_id, run_id, etc.)
             lock_duration_s: Lock duration in seconds
             reason: Human-readable reason for the lock
@@ -1214,14 +1225,12 @@ class VirtualPageTableState(SharedState):
         now = current_time if current_time is not None else time.time()
         lock = PageLock(
             page_id=page_id,
-            colony_id=colony_id,
-            tenant_id=tenant_id,
             locked_by=locked_by,
             lock_expires_at=now + lock_duration_s,
             reason=reason,
             created_at=now,
         )
-        page_key = self.get_lock_key(page_id, colony_id, tenant_id)
+        page_key = self.get_lock_key(page_id)
         self.locked_pages[page_key] = lock
         logger.info(
             f"Locked page {page_key} for {lock_duration_s}s by {locked_by} "
@@ -1229,20 +1238,18 @@ class VirtualPageTableState(SharedState):
         )
         return lock
 
-    def unlock_page(self, page_id: str, colony_id: str, tenant_id: str) -> bool:
+    def unlock_page(self, page_id: str) -> bool:
         """Unlock a page, allowing it to be evicted.
 
         Args:
             page_id: ID of the page to unlock
-            colony_id: Optional colony ID
-            tenant_id: Optional tenant ID
 
         Returns:
             True if page was locked and is now unlocked, False if page wasn't locked
         """
         # TODO: Optionally check if locked_by matches?
 
-        page_key = self.get_lock_key(page_id, colony_id, tenant_id)
+        page_key = self.get_lock_key(page_id)
         if page_key in self.locked_pages:
             del self.locked_pages[page_key]
             logger.info(f"Unlocked page {page_key}")
@@ -1252,8 +1259,6 @@ class VirtualPageTableState(SharedState):
     def extend_page_lock(
         self,
         page_id: str,
-        colony_id: str,
-        tenant_id: str,
         additional_duration_s: float,
         current_time: float | None = None,
     ) -> bool:
@@ -1261,8 +1266,6 @@ class VirtualPageTableState(SharedState):
 
         Args:
             page_id: ID of the locked page
-            colony_id: Optional colony ID
-            tenant_id: Optional tenant ID
             additional_duration_s: Additional seconds to add to lock duration
             current_time: Optional current timestamp (defaults to now)
 
@@ -1275,7 +1278,7 @@ class VirtualPageTableState(SharedState):
         if additional_duration_s < 0:
             raise ValueError(f"Additional duration cannot be negative, got {additional_duration_s}")
 
-        page_key = self.get_lock_key(page_id, colony_id, tenant_id)
+        page_key = self.get_lock_key(page_id)
         if page_key not in self.locked_pages:
             return False
 
@@ -1292,37 +1295,33 @@ class VirtualPageTableState(SharedState):
         )
         return True
 
-    def is_page_locked(self, page_id: str, colony_id: str, tenant_id: str, current_time: float | None = None) -> bool:
+    def is_page_locked(self, page_id: str, current_time: float | None = None) -> bool:
         """Check if a page is currently locked (and lock hasn't expired).
 
         Args:
             page_id: ID of the page to check
-            colony_id: Optional colony ID
-            tenant_id: Optional tenant ID
             current_time: Optional current timestamp (defaults to now)
 
         Returns:
             True if page is locked and lock hasn't expired, False otherwise
         """
-        page_key = self.get_lock_key(page_id, colony_id, tenant_id)
+        page_key = self.get_lock_key(page_id)
         if page_key not in self.locked_pages:
             return False
 
         lock = self.locked_pages[page_key]
         return not lock.is_expired(current_time)
 
-    def get_page_lock(self, page_id: str, colony_id: str, tenant_id: str) -> PageLock | None:
+    def get_page_lock(self, page_id: str) -> PageLock | None:
         """Get the lock information for a page.
 
         Args:
             page_id: ID of the page
-            colony_id: Optional colony ID
-            tenant_id: Optional tenant ID
 
         Returns:
             PageLock if page is locked, None otherwise
         """
-        page_key = self.get_lock_key(page_id, colony_id, tenant_id)
+        page_key = self.get_lock_key(page_id)
         return self.locked_pages.get(page_key)
 
     def cleanup_expired_locks(self, current_time: float | None = None) -> int:
@@ -1371,21 +1370,21 @@ class VirtualPageTableState(SharedState):
 
     # === Scope Mapping Methods ===
 
-    def has_mapped_scope(self, scope_id: str, colony_id: str, tenant_id: str) -> bool:
+    def has_mapped_scope(self, scope_id: str) -> bool:
         """Check if a scope is mapped."""
-        return self.get_scope_key(scope_id, colony_id, tenant_id) in self.mapped_scopes
+        return self.get_scope_key(scope_id) in self.mapped_scopes
 
-    def get_mapped_scope(self, scope_id: str, colony_id: str, tenant_id: str) -> MappedScopeConfig | None:
+    def get_mapped_scope(self, scope_id: str) -> MappedScopeConfig | None:
         """Get a mapped scope configuration, or None if not mapped."""
-        return self.mapped_scopes.get(self.get_scope_key(scope_id, colony_id, tenant_id))
+        return self.mapped_scopes.get(self.get_scope_key(scope_id))
 
-    def set_mapped_scope(self, scope_id: str, colony_id: str, tenant_id: str, config: MappedScopeConfig) -> None:
+    def set_mapped_scope(self, scope_id: str, config: MappedScopeConfig) -> None:
         """Register or update a scope mapping."""
-        self.mapped_scopes[self.get_scope_key(scope_id, colony_id, tenant_id)] = config
+        self.mapped_scopes[self.get_scope_key(scope_id)] = config
 
-    def remove_mapped_scope(self, scope_id: str, colony_id: str, tenant_id: str) -> MappedScopeConfig | None:
+    def remove_mapped_scope(self, scope_id: str) -> MappedScopeConfig | None:
         """Remove a scope mapping. Returns the removed config or None."""
-        return self.mapped_scopes.pop(self.get_scope_key(scope_id, colony_id, tenant_id), None)
+        return self.mapped_scopes.pop(self.get_scope_key(scope_id), None)
 
     def iter_mapped_scopes(self) -> list[MappedScopeConfig]:
         """Get all mapped scope configurations."""
@@ -1399,17 +1398,26 @@ class VirtualPageTableState(SharedState):
 
     def register_page_group(self, group: PageGroup) -> None:
         """Register a virtual page group for spatial locality."""
-        self.page_groups[self.get_scope_key(group.group_id, group.colony_id, group.tenant_id)] = group
+        self.page_groups[self.get_scope_key(group.group_id)] = group
 
-    def get_page_group(self, group_id: str, colony_id: str, tenant_id: str) -> PageGroup | None:
+    def get_page_group(self, group_id: str) -> PageGroup | None:
         """Get a page group by ID, or None if not found."""
-        return self.page_groups.get(self.get_scope_key(group_id, colony_id, tenant_id))
+        return self.page_groups.get(self.get_scope_key(group_id))
 
-    def get_page_groups_for_page(self, page_id: str, colony_id: str, tenant_id: str) -> list[PageGroup]:
+    def get_page_groups_for_page(self, page_id: str) -> list[PageGroup]:
         """Get all groups that contain a specific page."""
         return [
+            group for group in self.get_page_groups() if page_id in group.page_ids
+        ]
+
+    def get_page_groups(self) -> list[PageGroup]:
+        """Get all page groups for the current execution context."""
+        syscontext = serving.require_execution_context()
+
+        return [
             group for group in self.page_groups.values()
-            if page_id in group.page_ids and group.colony_id == colony_id and group.tenant_id == tenant_id
+            if (group.syscontext.colony_id == syscontext.colony_id and
+                group.syscontext.tenant_id == syscontext.tenant_id)
         ]
 
     # === Branch Management Methods ===
@@ -1420,31 +1428,28 @@ class VirtualPageTableState(SharedState):
         Args:
             branch: VCMBranch to register
         """
-        key = self.get_branch_key(branch.branch_id, branch.colony_id, branch.tenant_id)
+        serving.ensure_context(branch.branch_id, branch.syscontext)
+        key = self.get_branch_key(branch.branch_id)
         self.branches[key] = branch
         self.branch_pages[key] = set()
-        logger.debug(f"Registered branch {branch.branch_id} for tenant {branch.tenant_id}")
+        logger.debug(f"Registered branch {branch.branch_id} for {branch.syscontext.to_dict()}")
 
-    def get_branch(self, branch_id: str, colony_id: str, tenant_id: str) -> VCMBranch | None:
+    def get_branch(self, branch_id: str) -> VCMBranch | None:
         """Get a branch by ID.
 
         Args:
             branch_id: Branch identifier
-            colony_id: Colony identifier
-            tenant_id: Tenant identifier
 
         Returns:
             VCMBranch if found, None otherwise
         """
-        return self.branches.get(self.get_branch_key(branch_id, colony_id, tenant_id))
+        return self.branches.get(self.get_branch_key(branch_id))
 
     def register_overlay(
         self,
         branch_id: str,
         original_page_id: str,
         overlay_page_id: str,
-        colony_id: str,
-        tenant_id: str,
     ) -> None:
         """Register a CoW overlay for a page on a branch.
 
@@ -1452,17 +1457,18 @@ class VirtualPageTableState(SharedState):
             branch_id: Branch to register overlay on
             original_page_id: Original page being overlaid
             overlay_page_id: New overlay page ID
-            colony_id: Colony identifier
-            tenant_id: Tenant identifier
 
         Raises:
             ValueError: If branch doesn't exist
         """
-        key = self.get_branch_key(branch_id, colony_id, tenant_id)
+        key = self.get_branch_key(branch_id)
         if key not in self.branches:
             raise ValueError(f"Branch {branch_id} not found")
 
-        self.branches[key].overlays[original_page_id] = overlay_page_id
+        branch = self.branches[key]
+        serving.ensure_context(branch.branch_id, branch.syscontext)
+
+        branch.overlays[original_page_id] = overlay_page_id
         self.branch_pages[key].add(overlay_page_id)
         logger.debug(f"Registered overlay {overlay_page_id} for page {original_page_id} on branch {branch_id}")
 
@@ -1470,8 +1476,6 @@ class VirtualPageTableState(SharedState):
         self,
         branch_id: str,
         page_id: str,
-        colony_id: str,
-        tenant_id: str,
     ) -> None:
         """Register a new page created on a branch (not an overlay).
 
@@ -1482,15 +1486,18 @@ class VirtualPageTableState(SharedState):
         Raises:
             ValueError: If branch doesn't exist
         """
-        key = self.get_branch_key(branch_id, colony_id, tenant_id)
+        key = self.get_branch_key(branch_id)
         if key not in self.branches:
             raise ValueError(f"Branch {branch_id} not found")
 
-        self.branches[key].new_pages.add(page_id)
+        branch = self.branches[key]
+        serving.ensure_context(branch.branch_id, branch.syscontext)
+
+        branch.new_pages.add(page_id)
         self.branch_pages[key].add(page_id)
         logger.debug(f"Registered new page {page_id} on branch {branch_id}")
 
-    def get_effective_page_id(self, base_page_id: str, branch_id: str, colony_id: str, tenant_id: str) -> str:
+    def get_effective_page_id(self, base_page_id: str, branch_id: str) -> str:
         """Get the effective page ID for a branch (resolves overlays).
 
         Walks up the branch lineage looking for overlays. Returns the
@@ -1499,19 +1506,18 @@ class VirtualPageTableState(SharedState):
         Args:
             base_page_id: Original page ID to look up
             branch_id: Branch to resolve from
-            colony_id: Colony identifier
-            tenant_id: Tenant identifier
 
         Returns:
             Effective page ID (overlay or original)
         """
-        key = self.get_branch_key(branch_id, colony_id, tenant_id)
+        key = self.get_branch_key(branch_id)
         branch = self.branches.get(key)
         while branch:
+            serving.ensure_context(branch.branch_id, branch.syscontext)
             if base_page_id in branch.overlays:
                 return branch.overlays[base_page_id]
             if branch.parent_branch_id:
-                parent_key = self.get_branch_key(branch.parent_branch_id, colony_id, tenant_id)
+                parent_key = self.get_branch_key(branch.parent_branch_id)
                 branch = self.branches.get(parent_key)
             else:
                 break
@@ -1528,10 +1534,10 @@ class VirtualPageTableState(SharedState):
         """
         return [
             branch for branch in self.branches.values()
-            if branch.tenant_id == tenant_id
+            if branch.syscontext.tenant_id == tenant_id
         ]
 
-    def get_branch_effective_pages(self, branch_id: str, colony_id: str, tenant_id: str) -> set[str]:
+    def get_branch_effective_pages(self, branch_id: str) -> set[str]:
         """Get all pages effectively visible from a branch.
 
         Includes:
@@ -1541,13 +1547,11 @@ class VirtualPageTableState(SharedState):
 
         Args:
             branch_id: Branch identifier
-            colony_id: Colony identifier
-            tenant_id: Tenant identifier
 
         Returns:
             Set of effective page IDs visible from this branch
         """
-        key = self.get_branch_key(branch_id, colony_id, tenant_id)
+        key = self.get_branch_key(branch_id)
         branch = self.branches.get(key)
         if not branch:
             return set()
@@ -1576,8 +1580,7 @@ class PageTableEntry(BaseModel):
     Attributes:
         page_id: ID of the virtual page
         physical_locations: List of physical locations where page is loaded
-        colony_id: Colony that owns this page (for grouping related page sources into shared address spaces)
-        tenant_id: Tenant that owns this page
+        syscontext: Execution context for this page
         size: Page size in tokens
         created_at: When this page was first registered
         total_access_count: Total accesses across all physical locations
@@ -1586,8 +1589,9 @@ class PageTableEntry(BaseModel):
 
     page_id: str
     physical_locations: list[PageLocation] = Field(default_factory=list)
-    colony_id: str
-    tenant_id: str
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context
+    )
     size: int = 0
     created_at: float = 0.0
     total_access_count: int = 0
@@ -1668,8 +1672,7 @@ class PageAllocationRequest(BaseModel):
     Attributes:
         virtual_page_ids: List of virtual page IDs to allocate
         group_id: Group ID for spatial locality and co-location (pages with same group_id should be allocated together if possible)
-        colony_id: Colony ID for grouping related page sources into a shared address space (e.g., "code", "docs", "tools")
-        tenant_id: Tenant requesting the allocation
+        syscontext: Execution context for the allocation request
         priority: Allocation priority
         preferred_deployment: Optional preferred deployment name
         target_client_id: Optional target replica ID (bypasses allocation strategy)
@@ -1680,8 +1683,9 @@ class PageAllocationRequest(BaseModel):
 
     virtual_page_ids: list[str]
     group_id: str
-    colony_id: str
-    tenant_id: str
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context
+    )
     priority: PagePriority = PagePriority.NORMAL
     preferred_deployment: str | None = None
     target_client_id: str | None = Field(
@@ -1720,13 +1724,15 @@ class PageEvictionRequest(BaseModel):
     Attributes:
         virtual_page_ids: Optional specific pages to evict (if None, use policy)
         num_pages: Number of pages to evict (if virtual_page_ids is None)
-        tenant_id: Optional tenant filter for eviction
+        syscontext: Execution context for the request
         deployment_name: Optional deployment filter for eviction
     """
 
     virtual_page_ids: list[str] | None = None
     num_pages: int = 1
-    tenant_id: str | None = None
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context
+    )
     deployment_name: str | None = None
 
 

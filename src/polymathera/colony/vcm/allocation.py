@@ -17,21 +17,22 @@ if TYPE_CHECKING:
         PageAllocationRequest,
         PageLocation,
         ContextPageId,
+        VirtualPageTableState,
     )
     from .page_table import VirtualPageTable
 
-from ..distributed.ray_utils.serving import require_colony_id, require_tenant_id
+from ..distributed.ray_utils import serving
 
 logger = logging.getLogger(__name__)
 
 
 def _check_page_allocation_request(request: PageAllocationRequest):
-    tenant_id = require_tenant_id()
-    colony_id = require_colony_id()
+    tenant_id = serving.require_tenant_id()
+    colony_id = serving.require_colony_id()
 
-    if request.colony_id != colony_id or request.tenant_id != tenant_id:
+    if request.syscontext.colony_id != colony_id or request.syscontext.tenant_id != tenant_id:
         raise ValueError(
-            f"Request colony_id {request.colony_id} / tenant_id {request.tenant_id} does not match current colony_id {colony_id} / tenant_id {tenant_id}"
+            f"Request colony_id {request.syscontext.colony_id} / tenant_id {request.syscontext.tenant_id} does not match current colony_id {colony_id} / tenant_id {tenant_id}"
         )
 
 
@@ -128,7 +129,7 @@ class BalancedAllocationStrategy(AllocationStrategy):
 
         # Filter clients by tenant isolation if needed
         available_clients = self._filter_clients_by_tenant(
-            client_states, request.tenant_id
+            client_states, request.syscontext.tenant_id
         )
 
         # Filter by preferred deployment if specified
@@ -140,7 +141,7 @@ class BalancedAllocationStrategy(AllocationStrategy):
 
         if not available_clients:
             logger.warning(
-                f"No available clients for tenant {request.tenant_id}. "
+                f"No available clients for tenant {request.syscontext.tenant_id}. "
                 f"Total clients: {len(client_states)}"
             )
             return []
@@ -150,9 +151,9 @@ class BalancedAllocationStrategy(AllocationStrategy):
             page_size = page_sizes.get(page_id, 0)
 
             # Check if page is already loaded
-            if await page_table.is_page_loaded(page_id, request.colony_id, request.tenant_id):
+            if await page_table.is_page_loaded(page_id):
                 # Page already loaded, check if we need more replicas
-                current_replication = await page_table.get_replication_factor(page_id, request.colony_id, request.tenant_id)
+                current_replication = await page_table.get_replication_factor(page_id)
                 if current_replication >= request.max_replication:
                     logger.debug(
                         f"Page {page_id} already loaded with sufficient replication "
@@ -323,18 +324,25 @@ class BalancedAllocationStrategy(AllocationStrategy):
 
         # Get locations for these pages on this client
         page_locations: list[tuple[str, PageLocation]] = []
-        for page_id, colony_id, tenant_id in client_pages:
-            locations = await page_table.get_page_locations(
-                page_id,
+        for page_ref in client_pages:
+            ref = VirtualPageTableState.parse_page_ref(page_ref)
+            page_id = ref["page_id"]
+            colony_id = ref["colony_id"]
+            tenant_id = ref["tenant_id"]
+            with serving.execution_context(
                 colony_id=colony_id,
                 tenant_id=tenant_id,
-                deployment_name=client_state.deployment_name,
-            )
-            # Find the location on this specific client
-            for loc in locations:
-                if loc.client_id == client_id:
-                    page_locations.append((page_id, loc))
-                    break
+                origin="allocation_strategy",
+            ):
+                locations = await page_table.get_page_locations(
+                    page_id,
+                    deployment_name=client_state.deployment_name,
+                )
+                # Find the location on this specific client
+                for loc in locations:
+                    if loc.client_id == client_id:
+                        page_locations.append((page_id, loc))
+                        break
 
         # Sort by last access time (LRU)
         page_locations.sort(key=lambda x: x[1].last_access_time)
@@ -356,7 +364,7 @@ class BalancedAllocationStrategy(AllocationStrategy):
                 logger.debug(f"Skipping locked page {page_id} during eviction")
                 continue
 
-            evict_pages.append((page_id, location.colony_id, location.tenant_id))
+            evict_pages.append((page_id, location.syscontext.colony_id, location.syscontext.tenant_id))
             freed_capacity += location.size
 
         # Warn if we couldn't free enough capacity due to locked pages

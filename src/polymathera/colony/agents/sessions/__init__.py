@@ -23,7 +23,14 @@ Example:
         get_current_session,
     )
 
-    with isolation_context(colony_id="my-colony", tenant_id="my-tenant"):
+    with execution_context(
+        ring=Ring.USER,
+        colony_id="colony-456",
+        tenant_id="tenant-1",
+        session_id="session-789",
+        run_id="run-abc",
+        origin="cli",
+    ):
         # Get session manager handle
         session_manager = serving.get_deployment(app_name, names.session_manager)
 

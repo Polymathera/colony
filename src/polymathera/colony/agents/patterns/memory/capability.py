@@ -454,8 +454,6 @@ class MemoryCapability(AgentCapability):
                     scope_id=self.scope_id,
                     source_type=BuilInContextPageSourceType.BLACKBOARD.value,
                     config=self.vcm_config or MmapConfig(),
-                    colony_id=self.agent.colony_id,
-                    tenant_id=self.agent.tenant_id,
                 )
                 logger.info(
                     f"MemoryCapability[{self.scope_id}]: VCM mapping status={result.status}"

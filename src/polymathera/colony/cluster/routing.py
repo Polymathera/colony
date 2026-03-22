@@ -15,7 +15,8 @@ from ..distributed.ray_utils.serving import (
     RequestRouter,
     LeastLoadedRouter,
     DeploymentReplicaInfo,
-    RoutingHints
+    RoutingHints,
+    require_execution_context
 )
 from .models import InferenceRequest, LLMClientRequirements, LLMClientState
 from ..vcm.models import ContextPageId
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from .config import LLMDeploymentConfig
 
 logger = logging.getLogger(__name__)
+
 
 
 class RoutingHintExtractor:
@@ -310,6 +312,8 @@ class ContextAwareRouter(RequestRouter):
         not only reads a snapshot of all client states, but also
         allocates pages to the selected replica atomically.
         """
+        _ensure_request_context(request)
+
         if not replicas:
             raise ValueError("No replicas available for routing")
 
@@ -335,7 +339,7 @@ class ContextAwareRouter(RequestRouter):
         # Score replicas using the atomic snapshot
         replica_scores = []
         for replica in replicas:
-            score = await self._score_replica(replica, required_pages, request.colony_id, request.tenant_id, client_states_snapshot)
+            score = await self._score_replica(replica, required_pages, client_states_snapshot)
             replica_scores.append((replica, score))
             logger.debug(
                 f"Replica {replica.replica_id}: score={score:.2f}, "
@@ -356,8 +360,6 @@ class ContextAwareRouter(RequestRouter):
         self,
         replica: DeploymentReplicaInfo,
         required_pages: set[ContextPageId],
-        colony_id: str,
-        tenant_id: str,
         client_states_snapshot: dict,
     ) -> float:
         """Score a replica based on page locality and load.
@@ -370,8 +372,6 @@ class ContextAwareRouter(RequestRouter):
         Args:
             replica: Replica to score
             required_pages: Set of required page IDs
-            colony_id: Colony ID for the request
-            tenant_id: Tenant ID for the request
             client_states_snapshot: Atomic snapshot of all client states from StateManager
 
         Returns:
@@ -400,7 +400,7 @@ class ContextAwareRouter(RequestRouter):
             # Calculate page hits
             pages_loaded = sum(
                 1 for page_id in required_pages
-                if client_state.has_page(page_id, colony_id, tenant_id)
+                if client_state.has_page(page_id)
             )
             page_hit_ratio = pages_loaded / len(required_pages) if required_pages else 0.0
 
@@ -502,6 +502,8 @@ class TargetClientRouter(RequestRouter):
         Raises:
             ValueError: If target_client_id not found or no matching replica
         """
+        _ensure_request_context(request)
+
         if not request.routing_hints or "target_client_id" not in request.routing_hints.metadata:
             raise ValueError("TargetClientRouter requires target_client_id in routing hints")
 
@@ -549,8 +551,6 @@ class PageAffinityRouter(ContextAwareRouter):
         self,
         replicas: list[DeploymentReplicaInfo],
         required_pages: set[ContextPageId],
-        colony_id: str,
-        tenant_id: str,
         client_states_snapshot: dict[str, LLMClientState],
     ) -> list[DeploymentReplicaInfo]:
         """Get replicas that have ALL required pages loaded.
@@ -563,7 +563,7 @@ class PageAffinityRouter(ContextAwareRouter):
             client_id = replica.metadata.get("client_id")
             if client_id and client_id in client_states_snapshot:
                 client_state = client_states_snapshot[client_id]
-                if all(client_state.has_page(page_id, colony_id, tenant_id) for page_id in required_pages):
+                if all(client_state.has_page(page_id) for page_id in required_pages):
                     candidates.append(replica)
         return candidates
 
@@ -591,6 +591,8 @@ class PageAffinityRouter(ContextAwareRouter):
         not only reads a snapshot of all client states, but also
         allocates pages to the selected replica atomically.
         """
+        _ensure_request_context(request)
+
         if not replicas:
             raise ValueError("No replicas available for routing")
 
@@ -618,8 +620,6 @@ class PageAffinityRouter(ContextAwareRouter):
         candidates = self._get_candidate_replicas(
             replicas,
             required_pages,
-            request.colony_id,
-            request.tenant_id,
             client_states_snapshot,
         )
 
@@ -640,8 +640,6 @@ class PageAffinityRouter(ContextAwareRouter):
             try:
                 fault_id = await self._vcm_handle.issue_page_fault(
                     page_ids=list(required_pages),
-                    colony_id=request.colony_id,
-                    tenant_id=request.tenant_id,
                     requester_id=f"PageAffinityRouter-{request.request_id}",
                     priority=10,  # High priority for router requests
                 )
@@ -679,8 +677,6 @@ class PageAffinityRouter(ContextAwareRouter):
             candidates = self._get_candidate_replicas(
                 replicas,
                 required_pages,
-                request.colony_id,
-                request.tenant_id,
                 client_states_snapshot,
             )
 

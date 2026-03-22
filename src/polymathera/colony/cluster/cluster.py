@@ -362,7 +362,7 @@ class LLMCluster:
 
         logger.debug(
             f"Routing request {request.request_id} to deployment '{deployment_name}' "
-            f"(tenant: {request.tenant_id}, colony: {request.colony_id})"
+            f"(syscontext: {request.syscontext.to_dict()})"
         )
 
         # Route and execute inference
@@ -468,8 +468,6 @@ class LLMCluster:
     async def evict_page(
         self,
         page_id: ContextPageId,
-        colony_id: str,
-        tenant_id: str,
         deployment_name: str | None = None,
     ) -> bool:
         """Evict a context page from the cluster.
@@ -478,8 +476,6 @@ class LLMCluster:
 
         Args:
             page_id: ID of page to evict
-            colony_id: ID of the colony
-            tenant_id: ID of the tenant
             deployment_name: Specific deployment to evict from (if None, evicts from all deployments)
 
         Returns:
@@ -499,16 +495,18 @@ class LLMCluster:
             # Evict from all deployments
             deployment_handles = all_handles
 
+        syscontext = serving.require_execution_context()
+
         # Evict page from selected deployment(s)
         success = False
         for dep_name, handle in deployment_handles.items():
             try:
-                result = await handle.evict_page(page_id, colony_id, tenant_id)
+                result = await handle.evict_page(page_id)
                 if result:
                     success = True
-                    logger.debug(f"Evicted page {page_id}:{colony_id}:{tenant_id} from deployment '{dep_name}'")
+                    logger.debug(f"Evicted page {page_id}: syscontext: {syscontext.to_dict()} from deployment '{dep_name}'")
             except Exception as e:
-                logger.warning(f"Failed to evict page {page_id}:{colony_id}:{tenant_id} from deployment '{dep_name}': {e}")
+                logger.warning(f"Failed to evict page {page_id}: syscontext: {syscontext.to_dict()} from deployment '{dep_name}': {e}")
 
         # Note: Page tracking is internal to each deployment's replicas
         # The ContextAwareRouter queries replica state directly
@@ -749,13 +747,10 @@ class LLMCluster:
             # No pages to validate
             return
 
-        colony_id = request.colony_id
-        tenant_id = request.tenant_id
-
         # Check each referenced page for tenant access
         # For now, this is a stub - full implementation requires loading page metadata
         # TODO: Implement full tenant validation by loading page metadata and checking allowed_tenant_ids
         logger.debug(
-            f"Tenant validation for colony {colony_id} in tenant {tenant_id}: "
+            f"Tenant validation for syscontext {request.syscontext.to_dict()}: "
             f"{len(request.context_page_ids)} pages (validation stub)"
         )

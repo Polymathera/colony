@@ -24,7 +24,11 @@ from ..vcm.events import (
     PageLoadedEvent,
     PageLoadFailedEvent,
 )
-from ..vcm.models import ContextPageId, VirtualContextPage
+from ..vcm.models import (
+    ContextPageId,
+    VirtualContextPage,
+    VirtualPageTableState,
+)
 from .models import (
     ContextPageState,
     InferenceRequest,
@@ -77,6 +81,8 @@ class APIResponse:
     raw_response: Any = None
 
 
+
+
 @serving.deployment
 class RemoteLLMDeployment:
     """Remote LLM deployment — drop-in replacement for VLLMDeployment.
@@ -96,8 +102,8 @@ class RemoteLLMDeployment:
         self.config = config
 
         # Page tracking (Layer 3 — same as VLLMDeployment)
-        # Keyed by (page_id, colony_id, tenant_id) for easier reconciliation with VCM state
-        self.loaded_pages: dict[tuple[ContextPageId, str, str], CachedPageEntry] = {}
+        # Keyed by page_ref ("page_id:colony_id:tenant_id") for easier reconciliation with VCM state
+        self.loaded_pages: dict[str, CachedPageEntry] = {}
 
         # Simulated capacity (mirrors GPU KV cache capacity)
         self.max_cached_tokens: int = config.max_cached_tokens
@@ -234,10 +240,12 @@ class RemoteLLMDeployment:
             True if page was loaded successfully
         """
         try:
+            serving.ensure_context(page.page_id, page.syscontext)
+
             # Check if page is already loaded
-            key = (page.page_id, page.colony_id, page.tenant_id)
-            if key in self.loaded_pages:
-                entry = self.loaded_pages[key]
+            page_key = VirtualPageTableState.get_page_ref(page.page_id)
+            if page_key in self.loaded_pages:
+                entry = self.loaded_pages[page_key]
                 entry.last_access = time.time()
                 entry.ttl_expiry = time.time() + self.ttl_seconds
                 entry.access_count += 1
@@ -271,8 +279,7 @@ class RemoteLLMDeployment:
 
             # Track locally (Layer 3)
             now = time.time()
-            key = (page.page_id, page.colony_id, page.tenant_id)
-            self.loaded_pages[key] = CachedPageEntry(
+            self.loaded_pages[page_key] = CachedPageEntry(
                 page=page,
                 text=page_text,
                 cached_tokens=page.size,
@@ -288,13 +295,11 @@ class RemoteLLMDeployment:
                     client_state = state.client_states.get(self.client_id)
                     if client_state:
                         client_state.kv_cache_used += page.size
-                        client_state.loaded_page_ids[(page.page_id, page.colony_id, page.tenant_id)] = page.size
+                        client_state.loaded_page_ids[page_key] = page.size
                         kv_cache_used = client_state.kv_cache_used
                     state.register_page_load(
                         page_id=page.page_id,
                         client_id=self.client_id,
-                        colony_id=page.colony_id,
-                        tenant_id=page.tenant_id,
                     )
 
             logger.info(
@@ -311,7 +316,6 @@ class RemoteLLMDeployment:
                     page_id=page.page_id,
                     deployment_name=deployment_name,
                     client_id=self.client_id,
-                    tenant_id=page.tenant_id,
                     timestamp=time.time(),
                     size=page.size,
                     kv_cache_slot=0,  # No physical KV slot for remote
@@ -331,7 +335,6 @@ class RemoteLLMDeployment:
                     page_id=page.page_id,
                     deployment_name=deployment_name,
                     client_id=self.client_id,
-                    tenant_id=page.tenant_id,
                     timestamp=time.time(),
                     error=str(e),
                     error_type=type(e).__name__,
@@ -340,7 +343,7 @@ class RemoteLLMDeployment:
             return False
 
     @serving.endpoint
-    async def evict_page(self, page_id: ContextPageId, colony_id: str, tenant_id: str) -> bool:
+    async def evict_page(self, page_id: ContextPageId) -> bool:
         """Evict a page from tracking. The remote cache expires via TTL.
 
         Same pattern as VLLMDeployment: vLLM handles cache eviction via LRU,
@@ -349,29 +352,28 @@ class RemoteLLMDeployment:
 
         Args:
             page_id: ID of the page to evict
-            colony_id: Colony ID of the page to evict
-            tenant_id: Tenant ID of the page to evict
 
         Returns:
             True if page was evicted
         """
         try:
-            page_key = (page_id, colony_id, tenant_id)
-            entry = self.loaded_pages.pop(page_key, None)
+            page_key = VirtualPageTableState.get_page_ref(page_id)
+            entry: CachedPageEntry = self.loaded_pages.pop(page_key, None)
             if not entry:
                 return True  # Already evicted
 
+            serving.ensure_context(entry.page.page_id, entry.page.syscontext)
+
             self.cached_tokens_used -= entry.cached_tokens
-            tenant_id = entry.page.tenant_id
 
             # Update distributed state (Layer 1)
             if self.state_manager:
                 async for state in self.state_manager.write_transaction():
-                    client_state = state.client_states.get(self.client_id)
+                    client_state: LLMClientState = state.client_states.get(self.client_id)
                     if client_state:
                         client_state.kv_cache_used -= entry.cached_tokens
                         client_state.loaded_page_ids.pop(page_key, None)
-                    state.register_page_eviction(page_id, self.client_id, colony_id, tenant_id)
+                    state.register_page_eviction(page_id, self.client_id)
 
             logger.info(f"Evicted page {page_key} from {self.client_id}")
 
@@ -380,8 +382,6 @@ class RemoteLLMDeployment:
             await self._emit_page_event(
                 PageEvictedEvent(
                     page_id=page_id,
-                    colony_id=colony_id,
-                    tenant_id=tenant_id,
                     deployment_name=deployment_name,
                     client_id=self.client_id,
                     timestamp=time.time(),
@@ -421,15 +421,19 @@ class RemoteLLMDeployment:
         Returns:
             InferenceResponse with generated text and cost metadata
         """
+        serving.ensure_context(request.request_id, request.syscontext)
+
         start_time = time.time()
 
-        # Validate base page is loaded
-        page_key = (base_page_id, request.colony_id, request.tenant_id)
+        # Check if page is already loaded
+        page_key = VirtualPageTableState.get_page_ref(base_page_id)
         entry = self.loaded_pages.get(page_key)
         if not entry:
             raise ValueError(
                 f"Page {page_key} not loaded in {self.client_id}"
             )
+
+        serving.ensure_context(entry.page.page_id, entry.page.syscontext)
 
         # Refresh tracking
         entry.last_access = time.time()
@@ -481,8 +485,6 @@ class RemoteLLMDeployment:
         suffix_size = len(suffix_tokens) if suffix_tokens else 0
         self.kv_metrics.record_request(
             page_id=base_page_id,
-            colony_id=request.colony_id,
-            tenant_id=request.tenant_id,
             suffix_size=suffix_size,
             cache_hit=cache_hit,
         )
@@ -545,6 +547,8 @@ class RemoteLLMDeployment:
         Returns:
             Inference response with generated text and page fault info
         """
+        serving.ensure_context(request.request_id, request.syscontext)
+
         start_time = time.time()
         page_faults = []
 
@@ -557,7 +561,7 @@ class RemoteLLMDeployment:
                     client_state.total_requests += 1
 
                     for page_id in request.context_page_ids:
-                        if not client_state.has_page(page_id, request.colony_id, request.tenant_id):
+                        if not client_state.has_page(page_id):
                             page_faults.append(page_id)
                             logger.warning(
                                 f"Page fault: {page_id} not loaded in {self.client_id}"
@@ -566,9 +570,12 @@ class RemoteLLMDeployment:
             # Build prompt from loaded page texts + request prompt
             page_context_parts = []
             for page_id in request.context_page_ids:
-                page_key = (page_id, request.colony_id, request.tenant_id)
+                # Check if page is already loaded
+                page_key = VirtualPageTableState.get_page_ref(page_id)
+
                 entry = self.loaded_pages.get(page_key)
                 if entry:
+                    serving.ensure_context(entry.page.page_id, entry.page.syscontext)
                     page_context_parts.append(entry.text)
                     entry.last_access = time.time()
                     entry.ttl_expiry = time.time() + self.ttl_seconds
@@ -649,8 +656,6 @@ class RemoteLLMDeployment:
     async def migrate_page(
         self,
         page_id: ContextPageId,
-        colony_id: str,
-        tenant_id: str,
         target_deployment_name: str,
         target_client_id: LLMClientId,
     ) -> bool:
@@ -661,8 +666,6 @@ class RemoteLLMDeployment:
 
         Args:
             page_id: ID of page to migrate
-            colony_id: Colony ID for address space grouping
-            tenant_id: Tenant ID for multi-tenancy isolation
             target_deployment_name: Name of the target deployment
             target_client_id: ID of target LLM client
 
@@ -670,12 +673,14 @@ class RemoteLLMDeployment:
             True if migration succeeded
         """
         try:
-            page_key = (page_id, colony_id, tenant_id)
+            # Check if page is already loaded
+            page_key = VirtualPageTableState.get_page_ref(page_id)
             if page_key not in self.loaded_pages:
                 raise ValueError(f"Page {page_key} not loaded in {self.client_id}")
 
             entry = self.loaded_pages[page_key]
             page = entry.page
+            serving.ensure_context(page.page_id, page.syscontext)
 
             logger.info(
                 f"Migrating page {page_key} from {self.client_id} to {target_client_id}"
@@ -696,7 +701,7 @@ class RemoteLLMDeployment:
                 logger.error(f"Failed to load page in target deployment: {e}")
                 raise RuntimeError(f"Page migration failed: {e}") from e
 
-            await self.evict_page(page_id, colony_id, tenant_id)
+            await self.evict_page(page_id)
 
             logger.info(
                 f"Successfully migrated page {page_key} from "
@@ -712,8 +717,6 @@ class RemoteLLMDeployment:
     async def append_context_to_page(
         self,
         page_id: ContextPageId,
-        colony_id: str,
-        tenant_id: str,
         tokens: list[int],
     ) -> bool:
         """Append task-specific context to a loaded page.
@@ -723,20 +726,20 @@ class RemoteLLMDeployment:
 
         Args:
             page_id: ID of the page to append to
-            colony_id: Colony ID for address space grouping
-            tenant_id: Tenant ID for multi-tenancy isolation
             tokens: Token IDs to append
 
         Returns:
             True if successful
         """
         try:
-            page_key = (page_id, colony_id, tenant_id)
+            # Check if page is already loaded
+            page_key = VirtualPageTableState.get_page_ref(page_id)
             if page_key not in self.loaded_pages:
                 logger.error(f"Cannot append to page {page_key}: page not loaded")
                 return False
 
             entry = self.loaded_pages[page_key]
+            serving.ensure_context(entry.page.page_id, entry.page.syscontext)
 
             if not entry.can_append(len(tokens)):
                 logger.error(
@@ -765,21 +768,17 @@ class RemoteLLMDeployment:
     async def remove_appended_context(
         self,
         page_id: ContextPageId,
-        colony_id: str,
-        tenant_id: str,
     ) -> bool:
         """Remove appended context from a loaded page, resetting to base page.
 
         Args:
             page_id: ID of the page to reset
-            colony_id: Colony ID for address space grouping
-            tenant_id: Tenant ID for multi-tenancy isolation
 
         Returns:
             True if successful
         """
         try:
-            page_key = (page_id, colony_id, tenant_id)
+            page_key = VirtualPageTableState.get_page_ref(page_id)
             if page_key not in self.loaded_pages:
                 logger.warning(
                     f"Cannot remove appended context: page {page_key} not loaded"
@@ -787,6 +786,7 @@ class RemoteLLMDeployment:
                 return True
 
             entry = self.loaded_pages[page_key]
+            serving.ensure_context(entry.page.page_id, entry.page.syscontext)
 
             if not entry.has_appended_context():
                 logger.debug(f"Page {page_key} has no appended context to remove")
@@ -886,7 +886,10 @@ class RemoteLLMDeployment:
         for entry in pages_by_lru:
             if available + freed_size >= required_size:
                 break
-            await self.evict_page(entry.page.page_id, entry.page.colony_id, entry.page.tenant_id)
+
+            with serving.restore_execution_context(entry.page.syscontext):
+                await self.evict_page(entry.page.page_id)
+
             freed_size += entry.cached_tokens
             evicted_pages.append(entry.page.page_id)
 

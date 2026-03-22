@@ -75,8 +75,8 @@ class ExecutionContext:
 
     Attributes:
         ring: Privilege level. KERNEL for infrastructure, USER for tenant-scoped.
-        colony_id: Colony instance identifier (required for Ring.USER).
-        tenant_id: Tenant/organization identifier (required for Ring.USER).
+        colony_id: Colony instance identifier (required for Ring.USER) for grouping related context sources (e.g., all repos in a virtual monorepo, and all VCM-mapped blackboard scopes).
+        tenant_id: Tenant/organization identifier for multi-tenant deployments (required for Ring.USER).
         session_id: Optional user session identifier.
         run_id: Optional analysis run identifier.
         trace_id: Optional distributed tracing identifier.
@@ -110,6 +110,25 @@ class ExecutionContext:
                     f"Ring.USER execution context requires colony_id and tenant_id. "
                     f"Got colony_id={self.colony_id!r}, tenant_id={self.tenant_id!r}"
                 )
+
+    def to_dict(self) -> dict:
+        """Convert to a dictionary for serialization."""
+        return {
+            "ring": self.ring.value,
+            "colony_id": self.colony_id,
+            "tenant_id": self.tenant_id,
+            "session_id": self.session_id,
+            "run_id": self.run_id,
+            "trace_id": self.trace_id,
+            "origin": self.origin,
+        }
+
+    def get_logging_prefix(self) -> str:
+        """Get a prefix string for logging to identify this context."""
+        if self.ring == Ring.KERNEL:
+            return f"[KERNEL:{self.origin}]"
+        else:
+            return f"[{self.tenant_id}:{self.colony_id}:{self.session_id}]"
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +234,27 @@ def require_tenant_id() -> str:
     return ctx.tenant_id
 
 
+def ensure_context(object_id: str, ctx: ExecutionContext | None) -> None:
+    """Ensure the request/page has a valid context that matches the execution context."""
+    if not ctx:
+        raise ValueError(
+            f"Request/page {object_id} is missing syscontext"
+        )
+    if not ctx.colony_id or not ctx.tenant_id:
+        raise ValueError(
+            f"Request/page {object_id} has invalid syscontext: "
+            f"colony_id and tenant_id are required"
+        )
+
+    syscontext = require_execution_context()
+    if (ctx.colony_id != syscontext.colony_id or ctx.tenant_id != syscontext.tenant_id):
+        raise ValueError(
+            f"Request/page {object_id} has colony_id={ctx.colony_id} and "
+            f"tenant_id={ctx.tenant_id} that do not match current execution context "
+            f"(colony_id={syscontext.colony_id}, tenant_id={syscontext.tenant_id})"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Public API — setting
 # ---------------------------------------------------------------------------
@@ -291,3 +331,65 @@ def restore_execution_context(ctx: ExecutionContext) -> Iterator[ExecutionContex
         yield ctx
     finally:
         _current_context.reset(token)
+
+
+
+@contextmanager
+def user_execution_context(
+    *,
+    colony_id: str | None = None,
+    tenant_id: str | None = None,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    trace_id: str | None = None,
+    origin: str | None = None,
+) -> Iterator[ExecutionContext]:
+    """Set the user execution context for the duration of the block.
+
+    Args:
+        colony_id: Colony instance identifier.
+        tenant_id: Tenant/organization identifier.
+        session_id: User session identifier.
+        run_id: Analysis run identifier.
+        trace_id: Distributed tracing identifier.
+        origin: What created this context.
+
+    Yields:
+        The ExecutionContext that was set.
+    """
+    ctx = ExecutionContext(
+        ring=Ring.USER,
+        colony_id=colony_id,
+        tenant_id=tenant_id,
+        session_id=session_id,
+        run_id=run_id,
+        trace_id=trace_id,
+        origin=origin,
+    )
+    token = _current_context.set(ctx)
+    try:
+        yield ctx
+    finally:
+        _current_context.reset(token)
+
+
+@contextmanager
+def kernel_execution_context(origin: str) -> Iterator[ExecutionContext]:
+    """Set the kernel execution context for the duration of the block.
+
+    Args:
+        origin: What created this context (e.g. "vcm_reconciler").
+
+    Yields:
+        The ExecutionContext that was set.
+    """
+    ctx = ExecutionContext(
+        ring=Ring.KERNEL,
+        origin=origin,
+    )
+    token = _current_context.set(ctx)
+    try:
+        yield ctx
+    finally:
+        _current_context.reset(token)
+

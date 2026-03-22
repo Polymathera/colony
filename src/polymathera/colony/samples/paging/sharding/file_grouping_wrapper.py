@@ -71,13 +71,11 @@ class FileGrouperWithGraph(FileGrouper):
 
     async def group_files(
         self,
-        colony_id: str,
-        tenant_id: str,
         repo,
         files
     ):
         """Override to ensure _last_graph is set even when loaded from cache."""
-        result = await super().group_files(colony_id, tenant_id, repo, files)
+        result = await super().group_files(repo, files)
 
         # _build_graph sets _last_graph when the graph is built fresh.
         # When the base class loads a cached graph, _build_graph is NOT called
@@ -85,7 +83,7 @@ class FileGrouperWithGraph(FileGrouper):
         if self._last_graph is None:
             commit_hash = repo.head.commit.hexsha
             cached = await self.file_graph_cache.get(
-                key=f"{tenant_id}:{colony_id}:{commit_hash}",
+                key=commit_hash,
                 version=self._get_graph_version(files),
             )
             if cached is not None:

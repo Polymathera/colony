@@ -87,6 +87,8 @@ from .context import (
     ExecutionContext,
     execution_context,
     restore_execution_context,
+    user_execution_context,
+    kernel_execution_context,
     get_execution_context,
     require_execution_context,
     get_colony_id,
@@ -95,6 +97,7 @@ from .context import (
     get_run_id,
     require_colony_id,
     require_tenant_id,
+    ensure_context,
 )
 
 # Internal components (exposed for advanced usage and testing)
@@ -141,6 +144,8 @@ __all__ = [
     "ExecutionContext",
     "execution_context",
     "restore_execution_context",
+    "user_execution_context",
+    "kernel_execution_context",
     "get_execution_context",
     "require_execution_context",
     "get_colony_id",
@@ -149,6 +154,7 @@ __all__ = [
     "get_run_id",
     "require_colony_id",
     "require_tenant_id",
+    "ensure_context",
     # Internal components
     "DeploymentProxyRayActor",
     "DeploymentHealthMonitor",

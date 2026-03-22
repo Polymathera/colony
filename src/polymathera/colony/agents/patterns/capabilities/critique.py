@@ -218,8 +218,7 @@ As a peer reviewer, evaluate:
         request = InferenceRequest(
             request_id=f"critique-{context.producer_id}",
             prompt=prompt,
-            colony_id=self.agent.colony_id,
-            tenant_id=self.agent.tenant_id,
+            syscontext=self.agent.syscontext,
             context_page_ids=[],
             max_tokens=self.max_tokens,
         )

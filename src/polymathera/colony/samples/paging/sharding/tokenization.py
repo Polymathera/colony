@@ -15,6 +15,7 @@ from tenacity import retry_if_exception_type
 from polymathera.colony.distributed.caching.simple import CacheConfig, DistributedSimpleCache
 from polymathera.colony.distributed.config import ConfigComponent, register_polymathera_config
 from polymathera.colony.distributed import get_polymathera
+from polymathera.colony.distributed.ray_utils import serving
 from polymathera.colony.distributed.metrics.common import BaseMetricsMonitor
 from polymathera.colony.utils.retry import standard_retry
 from polymathera.colony.utils import run_method_once, setup_logger
@@ -154,14 +155,9 @@ class TokenManager:
 
     def __init__(
         self,
-        tenant_id: str,
-        colony_id: str,
         file_content_cache: FileContentCache,
         config: TokenizationConfig | None = None,
     ):
-        self.tenant_id = tenant_id
-        self.colony_id = colony_id
-
         self.config: TokenizationConfig | None = config
         self.file_content_cache = file_content_cache
 
@@ -183,16 +179,16 @@ class TokenManager:
 
         # Use DistributedSimpleCache with "tokens" type for persistence
         # Separate caches for tokens and counts
-        # TODO: Add cache namespaces
+        syscontext = serving.require_execution_context()
         self.token_cache = (
             await get_polymathera().create_distributed_simple_cache(
-                namespace="tokens",  # TODO: Does this need to be VMR-specific?
+                namespace=f"{syscontext.tenant_id}:{syscontext.colony_id}:tokens",
                 config=self.config.token_cache_config,
             )
         )
         self.count_cache = (
             await get_polymathera().create_distributed_simple_cache(
-                namespace="counts",  # TODO: Does this need to be VMR-specific?
+                namespace=f"{syscontext.tenant_id}:{syscontext.colony_id}:token_counts",
                 config=self.config.count_cache_config,
             )
         )
@@ -238,7 +234,7 @@ class TokenManager:
         ### if not hasattr(self, "_file_count"):
         ###     self._file_count = 0
         ### self._file_count += 1
-        ### logger.info(f"________ get_file_tokens({self.tenant_id}:{self.colony_id}:{commit_hash}:{file_path}) [{self._file_count}:{self.file_content_cache.cache.currsize}]")
+        ### logger.info(f"________ get_file_tokens({commit_hash}:{file_path}) [{self._file_count}:{self.file_content_cache.cache.currsize}]")
         start_time = time.time()
         try:
             cache_key = self._make_cache_key(file_path, commit_hash)
@@ -378,4 +374,4 @@ class TokenManager:
         self, file_path: str, commit_hash: str | None
     ) -> str:
         """Generate consistent cache key"""
-        return f"{self.tenant_id}:{self.colony_id}:{file_path}:{commit_hash or 'latest'}"
+        return f"{file_path}:{commit_hash or 'latest'}"

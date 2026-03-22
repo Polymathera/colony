@@ -134,7 +134,7 @@ class SoftPageAffinityRouter(RequestRouter):
         vcm_handle = await self._get_vcm_handle()
 
         # Query VCM for page locations
-        page_locations = await self._get_page_locations(vcm_handle, bound_pages, colony_id=request.colony_id, tenant_id=request.tenant_id)
+        page_locations = await self._get_page_locations(vcm_handle, bound_pages)
 
         # Score and rank replicas
         ranked_replicas = await self._rank_replicas_by_affinity(
@@ -177,16 +177,12 @@ class SoftPageAffinityRouter(RequestRouter):
         self,
         vcm_handle: Any,
         page_ids: list[str],
-        colony_id: str,
-        tenant_id: str,
     ) -> dict[str, list[PageLocation]]:
         """Query VCM for page locations.
 
         Args:
             vcm_handle: VCM deployment handle
             page_ids: Page IDs to query
-            colony_id: Colony ID for isolation
-            tenant_id: Tenant ID for isolation
 
         Returns:
             Dict mapping page_id -> list of PageLocation objects
@@ -194,7 +190,7 @@ class SoftPageAffinityRouter(RequestRouter):
         page_locations = {}
         for page_id in page_ids:
             try:
-                locations = await vcm_handle.get_page_locations(page_id=page_id, colony_id=colony_id, tenant_id=tenant_id)
+                locations = await vcm_handle.get_page_locations(page_id=page_id)
                 page_locations[page_id] = locations or []
             except Exception as e:
                 logger.warning(f"Failed to get locations for page {page_id}: {e}")

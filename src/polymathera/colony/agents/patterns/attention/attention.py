@@ -67,8 +67,7 @@ class PageKey(BaseModel):
     """
 
     page_id: str
-    colony_id: str
-    tenant_id: str
+    syscontext: serving.ExecutionContext
     key_type: str = "structural"  # "structural", "semantic", "hybrid"
     structural_features: dict[str, Any] = Field(default_factory=dict)  # Domain-specific
     semantic_embedding: list[float] | None = None  # For embedding-based matching
@@ -121,12 +120,7 @@ class AttentionScore(BaseModel):
     page_id: str = Field(
         description="Page identifier"
     )
-    colony_id: str = Field(
-        description="Colony identifier"
-    )
-    tenant_id: str = Field(
-        description="Tenant identifier"
-    )
+    syscontext: serving.ExecutionContext
 
     score: float = Field(
         ge=0.0,
@@ -318,8 +312,7 @@ class BatchedLLMAttention(AttentionScoringMechanism):
             request = InferenceRequest(
                 request_id=f"attention-batch-{i}",
                 prompt=prompt,
-                colony_id=self.agent.colony_id,
-                tenant_id=self.agent.tenant_id,
+                syscontext=self.agent.syscontext,
                 context_page_ids=[],  # No pages needed
                 max_tokens=500 # TODO: Make fucking configurable
             )
@@ -353,8 +346,7 @@ class BatchedLLMAttention(AttentionScoringMechanism):
             summary = {
                 "index": idx,
                 "page_id": key.page_id,
-                "colony_id": key.colony_id,
-                "tenant_id": key.tenant_id,
+                "syscontext": key.syscontext.to_dict(),
                 "summary": key.summary or "No summary",
                 "key_type": key.key_type
             }
@@ -400,11 +392,10 @@ Output ONLY the JSON array, no extra text."""
                 reason = item.get("reason", "")
 
                 if idx is not None and 0 <= idx < len(keys):
-                    key = keys[idx]
+                    key: PageKey = keys[idx]
                     scores.append(AttentionScore(
                         page_id=key.page_id,
-                        colony_id=key.colony_id,
-                        tenant_id=key.tenant_id,
+                        syscontext=key.syscontext,
                         score=float(score_value),
                         explanation=reason,
                         matched_features={"llm_score": float(score_value)}
@@ -418,8 +409,7 @@ Output ONLY the JSON array, no extra text."""
             return [
                 AttentionScore(
                     page_id=key.page_id,
-                    colony_id=key.colony_id,
-                    tenant_id=key.tenant_id,
+                    syscontext=key.syscontext,
                     score=0.0,
                     explanation="Failed to parse LLM response",
                     matched_features={}
@@ -490,8 +480,7 @@ class EmbeddingBasedAttention(AttentionScoringMechanism):
                 scores.append(
                     AttentionScore(
                         page_id=key.page_id,
-                        colony_id=key.colony_id,
-                        tenant_id=key.tenant_id,
+                        syscontext=key.syscontext,
                         score=float(similarity),
                         explanation=f"Semantic similarity: {similarity:.3f}",
                         matched_features={"embedding_similarity": float(similarity)},
@@ -561,8 +550,7 @@ Output ONLY valid JSON, no extra text."""
         request = InferenceRequest(
             request_id=f"key-gen-structural-{page_id}",
             prompt=prompt,
-            colony_id=self.agent.colony_id,
-            tenant_id=self.agent.tenant_id,
+            syscontext=self.agent.syscontext,
             context_page_ids=[page_id],  # VCM loads page content
             max_tokens=1000, # TODO: Make fucking configurable
         )
@@ -579,8 +567,7 @@ Output ONLY valid JSON, no extra text."""
 
         return PageKey(
             page_id=page_id,
-            colony_id=self.agent.colony_id,
-            tenant_id=self.agent.tenant_id,
+            syscontext=self.agent.syscontext,
             key_type="structural",
             structural_features=features,
             metadata=metadata or {},
@@ -623,8 +610,7 @@ class SemanticKeyGenerator(KeyGenerator):
         summary_request = InferenceRequest(
             request_id=f"key-gen-semantic-summary-{page_id}",
             prompt=summary_prompt,
-            colony_id=self.agent.colony_id,
-            tenant_id=self.agent.tenant_id,
+            syscontext=self.agent.syscontext,
             context_page_ids=[page_id],  # VCM loads content
             max_tokens=100, # TODO: Make fucking configurable
         )
@@ -636,8 +622,7 @@ class SemanticKeyGenerator(KeyGenerator):
 
         return PageKey(
             page_id=page_id,
-            colony_id=self.agent.colony_id,
-            tenant_id=self.agent.tenant_id,
+            syscontext=self.agent.syscontext,
             key_type="semantic",
             semantic_embedding=embeddings[0],
             summary=summary,
@@ -675,8 +660,7 @@ class HybridKeyGenerator(KeyGenerator):
         # Combine into hybrid key
         return PageKey(
             page_id=page_id,
-            colony_id=self.agent.colony_id,
-            tenant_id=self.agent.tenant_id,
+            syscontext=self.agent.syscontext,
             key_type="hybrid",
             structural_features=structural_key.structural_features,
             semantic_embedding=semantic_key.semantic_embedding,
@@ -779,8 +763,7 @@ Output ONLY valid JSON, no extra text."""
         request = InferenceRequest(
             request_id=f"query-gen-{context.page_id}",
             prompt=prompt,
-            colony_id=self.agent.colony_id,
-            tenant_id=self.agent.tenant_id,
+            syscontext=self.agent.syscontext,
             context_page_ids=[],  # No pages needed, just reasoning
             max_tokens=1000, # TODO: Make fucking configurable
         )

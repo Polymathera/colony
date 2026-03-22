@@ -1512,8 +1512,6 @@ async def run_integration_test(
             scope_id=config.repo_id,
             source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
             config=mmap_config,
-            colony_id=config.repo_id,
-            tenant_id=config.tenant_id,
             origin_url=config.origin_url,
             branch=config.branch,
             commit=config.commit,
@@ -1566,8 +1564,6 @@ async def run_integration_test(
         metadata = AgentMetadata(
             role=f"{reg['label']} coordinator",
             tenant_id=config.tenant_id,
-            colony_id=config.repo_id,
-            session_id=config.session_id,
             run_id=config.run_id,
             goals=[f"Run {reg['label']} on {config.repo_id}"],
             max_iterations=analysis.max_iterations,

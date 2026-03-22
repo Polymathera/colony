@@ -68,7 +68,14 @@ class SessionManagerDeployment:
         ```python
         from polymathera.colony.agents.sessions import SessionManagerDeployment
 
-        with isolation_context(colony_id="my-colony", tenant_id="my-tenant"):
+        with execution_context(
+            ring=Ring.USER,
+            colony_id="colony-456",
+            tenant_id="tenant-1",
+            session_id="session-789",
+            run_id="run-abc",
+            origin="cli",
+        ):
             # Get session manager handle
             session_manager = serving.get_deployment(app_name, names.session_manager)
 
@@ -141,8 +148,6 @@ class SessionManagerDeployment:
     @serving.endpoint
     async def create_session(
         self,
-        colony_id: str | None = None,
-        tenant_id: str | None = None,
         metadata: SessionMetadata | None = None,
         ttl_seconds: float | None = None,
         fork_from_session_id: str | None = None,
@@ -154,8 +159,6 @@ class SessionManagerDeployment:
         NOTE: Colony ID and Tenant ID must be provided in the serving context.
 
         Args:
-            colony_id: Colony identifier (uses context if None)
-            tenant_id: Tenant identifier (uses context if None)
             metadata: Session metadata (uses defaults if None)
             ttl_seconds: Session TTL (uses default if None)
             fork_from_session_id: Fork from existing session's branch
@@ -166,11 +169,10 @@ class SessionManagerDeployment:
         Raises:
             ValueError: If tenant quota exceeded or parent session not found
         """
-        colony_id = serving.require_colony_id() if colony_id is None else colony_id
-        tenant_id = serving.require_tenant_id() if tenant_id is None else tenant_id
+        syscontext = serving.require_execution_context()
 
         # Check quota
-        await self._check_session_quota(tenant_id)
+        await self._check_session_quota()
 
         session_id = f"session_{uuid.uuid4().hex[:12]}"
 
@@ -188,8 +190,6 @@ class SessionManagerDeployment:
 
         # Create branch via VCM
         branch: VCMBranch | None = await self.vcm_handle.create_branch(
-            colony_id=colony_id,
-            tenant_id=tenant_id,
             parent_branch_id=parent_branch_id,
             name=f"session_{session_id}",
         )
@@ -197,12 +197,11 @@ class SessionManagerDeployment:
         # Create session
         session = Session(
             session_id=session_id,
-            colony_id=colony_id,
-            tenant_id=tenant_id,
+            syscontext=syscontext,
             branch_id=branch.branch_id,
             state=SessionState.ACTIVE,
             metadata=metadata or SessionMetadata(
-                tenant_id=tenant_id,
+                syscontext=syscontext,
                 created_by="session_manager",
             ),
             expires_at=time.time() + (ttl_seconds or self.default_session_ttl),
@@ -214,12 +213,12 @@ class SessionManagerDeployment:
             state.add_session(session)
 
             # Increment tenant's active session count
-            usage = self._get_or_create_usage(state, tenant_id)
+            usage = self._get_or_create_usage(state)
             usage.active_sessions += 1
 
         logger.info(
             f"Created session {session_id} with branch {branch.branch_id} "
-            f"for tenant {tenant_id}"
+            f"for syscontext={syscontext.to_dict()}"
             f"{f' (forked from {fork_from_session_id})' if forked_from else ''}"
         )
 
@@ -361,6 +360,14 @@ class SessionManagerDeployment:
             if not session:
                 return False
 
+            syscontext = serving.require_execution_context()
+            if session.syscontext.tenant_id != syscontext.tenant_id:
+                logger.warning(
+                    f"Tenant {syscontext.tenant_id} cannot close session {session_id} "
+                    f"owned by tenant {session.syscontext.tenant_id}"
+                )
+                return False
+
             # Only decrement if session was active
             was_active = session.state == SessionState.ACTIVE
 
@@ -369,7 +376,7 @@ class SessionManagerDeployment:
 
             # Decrement tenant's active session count
             if was_active:
-                usage = self._get_or_create_usage(state, session.tenant_id)
+                usage = self._get_or_create_usage(state)
                 usage.active_sessions = max(0, usage.active_sessions - 1)
 
         logger.info(f"Closed session {session_id} (archived={archive})")
@@ -437,15 +444,16 @@ class SessionManagerDeployment:
         if not source or not target:
             return {"success": False, "error": "Session not found"}
 
-        if source.tenant_id != target.tenant_id:
+        if source.syscontext.tenant_id != target.syscontext.tenant_id:
             return {"success": False, "error": "Cannot merge sessions from different tenants"}
+
+        if source.syscontext.colony_id != target.syscontext.colony_id:
+            return {"success": False, "error": "Cannot merge sessions from different colonies"}
 
         # Delegate to VCM branch merge
         result = await self.vcm_handle.merge_branches(
             source_branch_id=source.branch_id,
             target_branch_id=target.branch_id,
-            colony_id=source.colony_id,
-            tenant_id=source.tenant_id,
             strategy=strategy,
         )
 
@@ -621,7 +629,6 @@ class SessionManagerDeployment:
     @serving.endpoint
     async def increment_tenant_resources(
         self,
-        tenant_id: str,
         cpu_cores: float = 0.0,
         memory_mb: int = 0,
         gpu_cores: float = 0.0,
@@ -632,12 +639,14 @@ class SessionManagerDeployment:
         Called by AgentSystemDeployment when an agent is registered.
 
         Args:
-            tenant_id: Tenant identifier
             cpu_cores: CPU cores to add
             memory_mb: Memory (MB) to add
             gpu_cores: GPU cores to add
             gpu_memory_mb: GPU memory (MB) to add
         """
+        syscontext = serving.require_execution_context()
+        tenant_id = syscontext.tenant_id
+
         async for state in self.state_manager.write_transaction():
             usage = self._get_or_create_usage(state, tenant_id)
             usage.active_agents += 1
@@ -1088,15 +1097,15 @@ class SessionManagerDeployment:
     # Internal Methods
     # =========================================================================
 
-    async def _check_session_quota(self, tenant_id: str) -> None:
+    async def _check_session_quota(self) -> None:
         """Check if tenant can create more sessions.
-
-        Args:
-            tenant_id: Tenant identifier
 
         Raises:
             ValueError: If tenant has exceeded session quota
         """
+        syscontext = serving.require_execution_context()
+        tenant_id = syscontext.tenant_id
+
         async for state in self.state_manager.read_transaction():
             quota = state.tenant_quotas.get(tenant_id, TenantQuota())
             usage = state.tenant_resource_usage.get(tenant_id, TenantResourceUsage())
@@ -1110,17 +1119,18 @@ class SessionManagerDeployment:
     def _get_or_create_usage(
         self,
         state: SessionSystemState,
-        tenant_id: str,
     ) -> TenantResourceUsage:
         """Get or create TenantResourceUsage for a tenant.
 
         Args:
             state: Current state
-            tenant_id: Tenant identifier
 
         Returns:
             TenantResourceUsage for the tenant
         """
+        syscontext = serving.require_execution_context()
+        tenant_id = syscontext.tenant_id
+
         if tenant_id not in state.tenant_resource_usage:
             state.tenant_resource_usage[tenant_id] = TenantResourceUsage()
         return state.tenant_resource_usage[tenant_id]

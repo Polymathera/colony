@@ -16,9 +16,16 @@ Example:
     ```python
     from polymathera.colony.vcm.sources import BuilInContextPageSourceType
     from polymathera.colony.system import get_vcm
-    from polymathera.colony.distributed.ray_utils.serving.context import isolation_context
+    from polymathera.colony.distributed.ray_utils.serving.context import execution_context
 
-    with isolation_context(colony_id="colony-456", tenant_id="tenant-1"):
+    with execution_context(
+        ring=Ring.USER,
+        colony_id="colony-456",
+        tenant_id="tenant-1",
+        session_id="session-789",
+        run_id="run-abc",
+        origin="cli",
+    ):
         # Create context page source
         vcm_handle = get_vcm()
         mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
@@ -26,8 +33,6 @@ Example:
             source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
             config=MmapConfig(),
             repo_path="/path/to/repo",
-            colony_id="colony-456",
-            tenant_id="tenant-1",
         )
     ```
 """

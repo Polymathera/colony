@@ -21,11 +21,15 @@ async def list_all_mapped_memory_scopes(
     """List available mapped memory scopes (tenant_id, colony_id, scope_id)."""
     if not colony.is_connected:
         return []
-    try:
-        return await colony.get_vcm().get_all_mapped_scopes()
-    except Exception as e:
-        logger.warning("Failed to list page graph groups: %s", e)
-        return []
+
+    with colony.kernel_execution_context(
+        origin="dashboard",
+    ):
+        try:
+            return await colony.get_vcm().get_all_mapped_scopes()
+        except Exception as e:
+            logger.warning("Failed to list page graph groups: %s", e)
+            return []
 
 
 @router.get("/vcm/page-graph")
@@ -38,12 +42,16 @@ async def get_page_graph(
     """Get page graph data (nodes + edges with 3D positions) for visualization."""
     if not colony.is_connected:
         return {"nodes": [], "edges": [], "node_count": 0, "edge_count": 0}
-    try:
-        return await colony.get_vcm().get_page_graph_data(
-            tenant_id=tenant_id,
-            colony_id=colony_id,
-            max_nodes=max_nodes,
-        )
-    except Exception as e:
-        logger.warning("Failed to get page graph: %s", e)
-        return {"nodes": [], "edges": [], "node_count": 0, "edge_count": 0, "error": str(e)}
+
+    with colony.user_execution_context(
+        colony_id=colony_id,
+        tenant_id=tenant_id,
+        origin="dashboard",
+    ):
+        try:
+            return await colony.get_vcm().get_page_graph_data(
+                max_nodes=max_nodes,
+            )
+        except Exception as e:
+            logger.warning("Failed to get page graph: %s", e)
+            return {"nodes": [], "edges": [], "node_count": 0, "edge_count": 0, "error": str(e)}

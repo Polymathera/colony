@@ -46,15 +46,19 @@ async def analyze_repository(
     logger.info("Creating ContextPageSource...")
     # Map the repository to VCM pages using the built-in file grouper source type
     from polymathera.colony.system import get_agent_system, get_vcm
-    from polymathera.colony.distributed.ray_utils.serving.context import isolation_context
+    from polymathera.colony.distributed.ray_utils.serving.context import Ring, execution_context
 
-    with isolation_context(colony_id="my-vmr", tenant_id="my-tenant"):
-
+    with execution_context(
+        ring=Ring.USER,
+        colony_id="colony-456",
+        tenant_id="tenant-1",
+        session_id="session-789",
+        run_id="run-abc",
+        origin="cli",
+    ):
         vcm_handle = get_vcm()
         mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
             scope_id="repo-123",
-            colony_id="my-vmr",
-            tenant_id="my-tenant",
             source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
             config=MmapConfig(),
             repo_path=repo_path,

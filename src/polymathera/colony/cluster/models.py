@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from ..distributed.state_management import SharedState
+from ..distributed.ray_utils import serving
 from ..vcm.models import VirtualContextPage, ContextPageId, VirtualPageTableState
 
 LLMClientId = str
@@ -175,13 +176,12 @@ class LLMClientState(BaseModel):
         """Get available KV cache capacity in tokens."""
         return self.kv_cache_capacity - self.kv_cache_used
 
-    def has_page(self, page_id: ContextPageId, colony_id: str, tenant_id: str) -> bool:
+    def has_page(self, page_id: str) -> bool:
         """Check if a page is loaded in this client."""
-        return VirtualPageTableState.get_page_ref(page_id, colony_id, tenant_id) in self.loaded_page_ids
+        return VirtualPageTableState.get_page_ref(page_id) in self.loaded_page_ids
 
-    def add_page(self, page_id: str, colony_id: str, tenant_id: str, size: int) -> None:
-        self.loaded_page_ids[
-            VirtualPageTableState.get_page_ref(page_id, colony_id, tenant_id)] = size
+    def add_page(self, page_id: str, size: int) -> None:
+        self.loaded_page_ids[VirtualPageTableState.get_page_ref(page_id)] = size
 
 
 
@@ -191,8 +191,7 @@ class InferenceRequest(BaseModel):
     Attributes:
         request_id: Unique identifier for this request
         prompt: The prompt text
-        colony_id: Colony ID for address space grouping
-        tenant_id: Tenant ID for multi-tenancy isolation
+        syscontext: Execution context for this request
         context_page_ids: IDs of context pages required for this request
         requirements: Optional requirements for deployment selection
         max_tokens: Maximum number of tokens to generate
@@ -204,8 +203,10 @@ class InferenceRequest(BaseModel):
 
     request_id: str
     prompt: str
-    colony_id: str = Field(..., description="Colony ID used to group multiple page source in the same address space.")
-    tenant_id: str = Field(..., description="Tenant ID for multi-tenancy isolation.")
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for this request"
+    )
     context_page_ids: list[ContextPageId] = Field(default_factory=list)
     requirements: LLMClientRequirements | None = Field(
         default=None,
@@ -219,6 +220,7 @@ class InferenceRequest(BaseModel):
         description="JSON schema for structured output generation (vLLM guided decoding)"
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
+
 
 
 class InferenceResponse(BaseModel):
@@ -306,7 +308,7 @@ class VLLMDeploymentState(SharedState):
     total_page_faults: int = 0
 
     # Tenant tracking: tenant_id -> tuple(page_id, colony_id)
-    tenant_pages: dict[str, set[tuple[ContextPageId, str]]] = Field(default_factory=dict)
+    tenant_pages: dict[str, set[tuple[str, str]]] = Field(default_factory=dict)
 
     @staticmethod
     def get_state_key(app_name: str, deployment_name: str) -> str:
@@ -317,8 +319,6 @@ class VLLMDeploymentState(SharedState):
         self,
         page_id: ContextPageId,
         client_id: LLMClientId,
-        colony_id: str,
-        tenant_id: str,
     ) -> None:
         """Register that a page has been loaded on a client."""
         if page_id not in self.page_index:
@@ -330,6 +330,8 @@ class VLLMDeploymentState(SharedState):
             self.client_page_index[client_id] = set()
         self.client_page_index[client_id].add(page_id)
 
+        tenant_id = serving.require_tenant_id()
+        colony_id = serving.require_colony_id()
         if tenant_id not in self.tenant_pages:
             self.tenant_pages[tenant_id] = set()
         self.tenant_pages[tenant_id].add((page_id, colony_id))
@@ -338,8 +340,6 @@ class VLLMDeploymentState(SharedState):
         self,
         page_id: ContextPageId,
         client_id: LLMClientId,
-        colony_id: str,
-        tenant_id: str,
     ) -> None:
         """Register that a page has been evicted from a client."""
         if page_id in self.page_index:
@@ -439,8 +439,6 @@ class KVCacheMetrics(BaseModel):
     def record_request(
         self,
         page_id: ContextPageId | None,
-        colony_id: str,
-        tenant_id: str,
         suffix_size: int,
         cache_hit: bool,
     ) -> None:
@@ -448,8 +446,6 @@ class KVCacheMetrics(BaseModel):
 
         Args:
             page_id: Base page ID used (None if no composition)
-            colony_id: Colony ID
-            tenant_id: Tenant ID
             suffix_size: Size of appended suffix in tokens
             cache_hit: Whether prefix cache was hit
         """
@@ -464,7 +460,7 @@ class KVCacheMetrics(BaseModel):
             self.cache_hit_rate = self.cache_hit_count / self.total_requests
 
         if page_id:
-            key = f"{page_id}:{colony_id}:{tenant_id}"
+            key = VirtualPageTableState.get_page_ref(page_id)
             self.page_request_counts[key] = self.page_request_counts.get(key, 0) + 1
 
             if key not in self.page_suffix_sizes:
@@ -476,16 +472,14 @@ class KVCacheMetrics(BaseModel):
         if all_sizes:
             self.avg_suffix_size_tokens = sum(all_sizes) / len(all_sizes)
 
-    def update_concurrency(self, page_id: ContextPageId, colony_id: str, tenant_id: str, delta: int) -> None:
+    def update_concurrency(self, page_id: str, delta: int) -> None:
         """Update concurrent request count for a page.
 
         Args:
             page_id: Page ID
-            colony_id: Colony ID
-            tenant_id: Tenant ID
             delta: Change in concurrent requests (+1 for new, -1 for completed)
         """
-        key = (page_id, colony_id, tenant_id)
+        key = VirtualPageTableState.get_page_ref(page_id)
         current = self.concurrent_requests_per_page.get(key, 0)
         new_count = max(0, current + delta)
 

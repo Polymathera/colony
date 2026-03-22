@@ -142,11 +142,10 @@ class AgentPoolCapability(AgentCapability):
             - created: Whether creation succeeded
         """
         try:
-            # Inherit tenant_id and colony_id from parent when not explicitly set
+            # Inherit syscontext from parent when not explicitly set
             if metadata is None:
                 metadata = AgentMetadata(
-                    tenant_id=self.agent.tenant_id,
-                    colony_id=self.agent.colony_id,
+                    syscontext=self.agent.syscontext,
                     parent_agent_id=self.agent.agent_id,
                 )
             # Resolve agent class from fully qualified path

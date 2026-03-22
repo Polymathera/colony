@@ -36,8 +36,6 @@ class FileGrouperContextPageSource(ContextPageSource):
         self,
         *,
         scope_id: str,  # Repo ID
-        colony_id: str,
-        tenant_id: str,
         mmap_config: MmapConfig,
         origin_url: str,   # Git repo URL (https:// or file://)
         branch: str = "main",
@@ -47,14 +45,12 @@ class FileGrouperContextPageSource(ContextPageSource):
 
         Args:
             scope_id: Repository (or scope) identifier
-            colony_id: Group identifier for VCM address space
-            tenant_id: Tenant identifier
             mmap_config: Configuration for memory-mapped page graph data
             origin_url: Git repository URL (https:// or file:// for local repos)
             branch: Git branch to check out
             commit: Git commit SHA (defaults to branch HEAD)
         """
-        super().__init__(scope_id=scope_id, colony_id=colony_id, tenant_id=tenant_id, mmap_config=mmap_config)
+        super().__init__(scope_id=scope_id, mmap_config=mmap_config)
         self.origin_url = origin_url
         self.branch = branch
         self.commit = commit
@@ -105,13 +101,13 @@ class FileGrouperContextPageSource(ContextPageSource):
                 data_key="page_keys",
             ) or {}
             logger.info(
-                f"Loaded page graph for {self.tenant_id}:{self.colony_id}:{self.scope_id}: "
+                f"Loaded page graph for {self.scope_id}:{self.syscontext.to_dict()}: "
                 f"{len(self.page_graph.nodes)} nodes, {len(self.page_graph.edges)} edges"
             )
         else:
             # No existing graph — build from repository
             logger.info(
-                f"No existing page graph for {self.tenant_id}:{self.colony_id}:{self.scope_id}, "
+                f"No existing page graph for {self.scope_id}:{self.syscontext.to_dict()}, "
                 f"building from repository at {self.origin_url} (branch={self.branch}, commit={self.commit})"
             )
             await self._build_and_persist_page_graph()
@@ -149,14 +145,12 @@ class FileGrouperContextPageSource(ContextPageSource):
             origin_url=self.origin_url,
             branch=self.branch,
             commit=self.commit,
-            vmr_id=self.colony_id,
+            vmr_id=self.syscontext.colony_id,
         )
         logger.info(f"Repository cloned to {repo_path} ({_time.time() - build_start:.1f}s)")
 
         prompt_strategy = IdentityPromptStrategy()
         strategy = GitRepoShardingStrategy(
-            tenant_id=self.tenant_id,
-            colony_id=self.colony_id,
             prompt_strategy=prompt_strategy,
             config=None,  # Auto-loaded from Polymathera config system
         )
@@ -227,8 +221,6 @@ class FileGrouperContextPageSource(ContextPageSource):
                     },
                     scope_id=self.scope_id,
                     group_id=None,
-                    colony_id=self.colony_id,
-                    tenant_id=self.tenant_id,
                 )
                 await self.page_storage.store_page(page)
 
@@ -253,7 +245,7 @@ class FileGrouperContextPageSource(ContextPageSource):
 
             total_time = _time.time() - build_start
             logger.info(
-                f"Persisted page graph for {self.tenant_id}:{self.colony_id}:{self.scope_id}: "
+                f"Persisted page graph for {self.scope_id}:{self.syscontext.to_dict()}: "
                 f"{self.page_graph.number_of_nodes()} pages, "
                 f"{len(self.file_to_page)} files mapped "
                 f"(total build time: {total_time:.1f}s)"
