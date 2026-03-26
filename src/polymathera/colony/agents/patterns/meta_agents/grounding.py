@@ -130,13 +130,13 @@ async def spawn_grounding_agent(
     logger.info(f"Spawning GroundingAgent for {owner.agent_id}...")
 
     # Create grounding agent
-    agent_id = f"grounding_agent_{owner.tenant_id}_{uuid.uuid4().hex[:8]}"
+    agent_id = f"grounding_agent_{uuid.uuid4().hex[:8]}"
 
-    metadata = AgentMetadata(tenant_id=owner.tenant_id)
+    metadata = AgentMetadata()
     if session_id:
-        metadata.session_id = session_id
+        metadata.syscontext.session_id = session_id
     if run_id:
-        metadata.run_id = run_id
+        metadata.syscontext.run_id = run_id
 
     # TODO: Pass LLMClientRequirements and other deployment parameters to spawn_child_agents
     return await owner.spawn_child_agents(

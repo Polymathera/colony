@@ -42,7 +42,7 @@ from .blueprint import (
     ActionPolicyBlueprint,
     AgentBlueprint,
 )
-from .blackboard import EnhancedBlackboard, BlackboardScope, BlackboardEvent
+from .blackboard import EnhancedBlackboard, BlackboardEvent
 from .blackboard.types import KeyPatternFilter, EventFilter
 from .patterns.hooks.decorator import hookable
 from .sessions.models import AgentRun, AgentRunConfig, AgentRunEvent, RunStatus, RunResourceUsage
@@ -219,10 +219,10 @@ class AgentCapability(ABC):
 
         Args:
             agent: Agent using this capability (None for detached mode)
-            scope_id: Blackboard scope ID. Defaults to agent.agent_id.
+            scope_id: Blackboard scope ID. Defaults to {ScopeUtils.get_agent_level_scope(agent)}.
                 Required if agent is None (detached mode).
                 Can be set to:
-                - child_agent_id: For parent-child communication
+                - {ScopeUtils.get_agent_level_scope(agent)}: For parent-child communication
                 - game_id: For game participants sharing a namespace
                 - task_id: For agents collaborating on a shared task
             blackboard: Pre-configured blackboard (for detached mode)
@@ -239,8 +239,9 @@ class AgentCapability(ABC):
 
         # In attached mode, derive scope from agent
         # In detached mode, scope_id must be provided
+        from .scopes import ScopeUtils
         if agent is not None:
-            self.scope_id = scope_id or agent.agent_id
+            self.scope_id = scope_id or ScopeUtils.get_agent_level_scope(agent)
         elif scope_id is not None:
             self.scope_id = scope_id
         else:
@@ -287,7 +288,6 @@ class AgentCapability(ABC):
         if self._agent is not None:
             # Attached mode: use agent's blackboard
             self._blackboard = await self._agent.get_blackboard(
-                scope="shared",
                 scope_id=self.scope_id,
                 backend_type=backend_type,
                 enable_events=enable_events,
@@ -298,7 +298,6 @@ class AgentCapability(ABC):
 
             self._blackboard = EnhancedBlackboard(
                 app_name=app_name,
-                scope=BlackboardScope.SHARED,
                 scope_id=self.scope_id,
                 backend_type=backend_type,
                 enable_events=enable_events,
@@ -306,94 +305,6 @@ class AgentCapability(ABC):
             await self._blackboard.initialize()
 
         return self._blackboard
-
-    async def publish(
-        self,
-        record: BaseModel,
-        *,
-        tags: set[str] | None = None,
-        metadata: dict[str, Any] | None = None,
-        ttl_seconds: float | None = None,
-    ) -> str:
-        """Write a record to the capability's scoped blackboard.
-
-        Replaces the manual pattern of::
-
-            bb = await self.get_blackboard()
-            key = f"{self.scope_id}:analysis:result:{result.result_id}"
-            await bb.write(key=key, value=result.model_dump(), created_by=...)
-
-        With::
-
-            await self.publish(result, tags={"analysis"})
-
-        The key is resolved automatically from the record (via
-        ``BlackboardPublishable`` protocol or legacy ``get_blackboard_key``).
-
-        If this capability's scope is VCM-mapped (via ``mmap_application_scope()``), the
-        write event is automatically picked up by the ``BlackboardContextPageSource``
-        running inside the VCM. The record will eventually appear in a VCM page
-        and become discoverable via ``QueryAttentionCapability``. The producer
-        never needs to opt in per-record.
-
-        Args:
-            record: Any BaseModel. Must implement ``BlackboardPublishable``
-                (``key_schema`` + ``key_parts``) or have ``get_blackboard_key(scope_id)``.
-            tags: Tags for categorization and filtering.
-            ttl_seconds: Optional TTL.
-
-        Returns:
-            The blackboard key that was written.
-        """
-        key = self._resolve_key(record)
-
-        blackboard = await self.get_blackboard()
-        value = record.model_dump() if hasattr(record, "model_dump") else dict(record)
-        agent_id = self._agent.agent_id if self._agent else "detached"
-        await blackboard.write(
-            key=key,
-            value=value,
-            created_by=agent_id,
-            tags=tags,
-            metadata=metadata,
-            ttl_seconds=ttl_seconds,
-        )
-
-        return key
-
-    def _resolve_key(self, record: BaseModel) -> str:
-        """Resolve the blackboard key for a record.
-
-        Resolution order:
-        1. ``BlackboardPublishable`` protocol (``key_schema`` + ``key_parts``)
-        2. Legacy ``get_blackboard_key(scope_id)`` method
-        3. ``ValueError`` if neither is available
-
-        Args:
-            record: The record to resolve a key for.
-
-        Returns:
-            Resolved blackboard key string.
-
-        Raises:
-            ValueError: If no key resolution method is available.
-        """
-        # Try BlackboardPublishable protocol first
-        from .blackboard.keys import BlackboardPublishable
-        if isinstance(record, BlackboardPublishable):
-            schema = record.key_schema()
-            parts = record.key_parts()
-            return schema.format(scope_id=self.scope_id, **parts)
-
-        # Fall back to legacy get_blackboard_key
-        if hasattr(record, "get_blackboard_key"):
-            return record.get_blackboard_key(self.scope_id)
-
-        raise ValueError(
-            f"Cannot resolve blackboard key for {type(record).__name__}. "
-            f"Implement BlackboardPublishable (key_schema + key_parts) or "
-            f"add a get_blackboard_key(scope_id) method."
-        )
 
     @classmethod
     def get_capability_name(cls) -> str:
@@ -472,10 +383,11 @@ class AgentCapability(ABC):
         Args:
             event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
         """
+        from .scopes import ScopeUtils
         blackboard = await self.get_blackboard()
         blackboard.stream_events_to_queue(
             event_queue,
-            pattern=f"{self.scope_id}:*",
+            pattern=ScopeUtils.pattern_key(),
             event_types={"write"},
         )
 
@@ -566,7 +478,8 @@ class AgentCapability(ABC):
         """
         blackboard = await self.get_blackboard()
         # TODO: Should we listen to all request_ids?
-        result_key = f"{self.scope_id}:result:{self._pending_request_id or 'default'}"
+        from .scopes import ScopeUtils
+        result_key = ScopeUtils.format_key(result=self._pending_request_id or 'default')
         return CapabilityResultFuture(
             result_key=result_key,
             blackboard=blackboard,
@@ -600,7 +513,8 @@ class AgentCapability(ABC):
         sender_id = self._agent.agent_id if self._agent else "detached"
 
         # session_id auto-added by blackboard.write from context
-        key = f"{sender_id}:request:{request_type}:{request_id}"  # TODO: standardize key format
+        from .scopes import ScopeUtils
+        key = ScopeUtils.format_key(sender=sender_id, request_type=request_type, request_id=request_id)
         await blackboard.write(
             key=key,
             value={
@@ -958,10 +872,12 @@ class AgentHandle:
         if self._blackboard is not None:
             return self._blackboard
 
+        from .scopes import ScopeUtils
+        child_scope_id = ScopeUtils.get_agent_level_scope(self.child_agent_id)
+
         if self._owner is not None:
             return await self._owner.get_blackboard(
-                scope="shared",
-                scope_id=self.child_agent_id,
+                scope_id=child_scope_id,
                 backend_type=backend_type,
                 enable_events=enable_events,
             )
@@ -971,8 +887,7 @@ class AgentHandle:
 
         self._blackboard = EnhancedBlackboard(
             app_name=app_name,
-            scope=BlackboardScope.SHARED,
-            scope_id=self.child_agent_id,
+            scope_id=child_scope_id,
             backend_type=backend_type,
             enable_events=enable_events,
         )
@@ -985,11 +900,12 @@ class AgentHandle:
 
     def get_capability(
         self,
-        capability_type: type[AgentCapability]
+        capability_type: type[AgentCapability],
+        **kwargs,
     ) -> AgentCapability:
         """Get capability instance for communicating with agent.
 
-        Creates a capability instance with `scope_id=child_agent_id`,
+        Creates a capability instance with `**kwargs` passed to the constructor,
         enabling communication via the same capability interface.
 
         In detached mode, creates capability in detached mode using
@@ -997,6 +913,7 @@ class AgentHandle:
 
         Args:
             capability_type: Type of capability to instantiate
+            **kwargs: Additional kwargs to pass to the capability constructor
 
         Returns:
             Capability instance scoped to target agent
@@ -1015,13 +932,14 @@ class AgentHandle:
                 # Detached mode: create capability with scope_id only
                 self._capabilities[cap_name] = capability_type(
                     agent=None,
-                    scope_id=self.child_agent_id,
+                    **kwargs,
                 )
             else:
                 # Owned mode: existing behavior
                 self._capabilities[cap_name] = capability_type(
                     agent=self._owner,
-                    scope_id=self.child_agent_id,
+                    **kwargs,
+
                 )
         return self._capabilities[cap_name]
 
@@ -1158,8 +1076,7 @@ class AgentHandle:
             else:
                 # Create ephemeral run for return value
                 run = AgentRun(
-                    session_id=session_id or "",
-                    tenant_id="",  # TODO: Why is this empty?
+                    session_id=effective_session_id,
                     agent_id=self.child_agent_id,
                     status=RunStatus.COMPLETED,
                     input_data=input_data,
@@ -1200,8 +1117,7 @@ class AgentHandle:
         else:
             # Create ephemeral run for return value
             run = AgentRun(
-                session_id=session_id or "",
-                tenant_id="",  # TODO: Why is this empty?
+                session_id=effective_session_id,
                 agent_id=self.child_agent_id,
                 status=final_status,
                 input_data=input_data,
@@ -1649,7 +1565,10 @@ class Agent(BaseModel):
     agent_type: str = Field(default="general", description="Type of agent: specialized, general, service, supervisor, service.memory_management")
     state: AgentState = Field(default=AgentState.INITIALIZED)
 
-    syscontext: serving.ExecutionContext = Field(description="Execution context for tenant and colony isolation and user/kernel protection")
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for tenant and colony isolation and user/kernel protection"
+    )
 
     # Optional page binding
     bound_pages: list[str] = Field(default_factory=list)
@@ -1704,6 +1623,14 @@ class Agent(BaseModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
+    @property
+    def tenant_id(self) -> str:
+        return self.syscontext.tenant_id
+
+    @property
+    def colony_id(self) -> str:
+        return self.syscontext.colony_id
+
     @classmethod
     def bind(cls, **kwargs) -> AgentBlueprint:
         """Create an AgentBlueprint from this class and constructor kwargs.
@@ -1732,7 +1659,8 @@ class Agent(BaseModel):
             agent_id=self.agent_id,
             agent_type=self.agent_type,
             state=self.state,
-            tenant_id=self.tenant_id,
+            tenant_id=self.syscontext.tenant_id,
+            colony_id=self.syscontext.colony_id,
             bound_pages=self.bound_pages,
             metadata=self.metadata,
             capability_names=self.get_capability_names(),
@@ -2464,6 +2392,11 @@ class Agent(BaseModel):
 
         logger.info(f"Agent {self.agent_id} requested suspension: {reason}")
 
+    def _model_to_str(self, model: BaseModel, trunc: int = 1000) -> tuple[str, str]:
+        """Helper to convert a Pydantic model to a pretty string for logging."""
+        result_str = model.model_dump_json(indent=3)
+        return (result_str[:trunc], "truncated") if len(result_str) > trunc else (result_str, "full" )
+
     @hookable
     @check_isolation
     async def run_step(self) -> None:
@@ -2517,11 +2450,12 @@ class Agent(BaseModel):
                 f"  └──────────────────────────────────────────────┘"
             )
             iteration_result = await self.action_policy.execute_iteration(self.action_policy_state)
+            action_str, trunc = self._model_to_str(iteration_result.action_executed)
             logger.warning(
                 f"  ◀ RUN_STEP returned: success={iteration_result.success} "
                 f"completed={iteration_result.policy_completed} "
                 f"idle={iteration_result.idle} "
-                f"action={iteration_result.action_executed}"
+                f"action={action_str} ({trunc})"
             )
 
             # Policy-driven state transitions
@@ -2731,9 +2665,60 @@ class Agent(BaseModel):
 
     # === Blackboard (Delegated to manager) ===
 
+    async def get_agent_level_blackboard(
+        self,
+        *,
+        namespace: str | None = None,
+        backend_type: str | None = None,
+        enable_events: bool = True,
+    ) -> EnhancedBlackboard:
+        """Get blackboard scoped to this agent for private state."""
+        return await self._manager.get_agent_level_blackboard(
+            self,
+            namespace=namespace,
+            backend_type=backend_type,
+            enable_events=enable_events,
+        )
+
+    async def get_session_level_blackboard(
+        self,
+        *,
+        namespace: str | None = None,
+        backend_type: str | None = None,
+        enable_events: bool = True,
+    ) -> EnhancedBlackboard:
+        """Get blackboard scoped to this session for state shared across agents in the same session."""
+        return await self._manager.get_session_level_blackboard(
+            namespace=namespace,
+            backend_type=backend_type,
+            enable_events=enable_events,
+        )
+
+    async def get_colony_level_blackboard(
+        self,
+        *,
+        namespace: str | None = None,
+        backend_type: str | None = None,
+        enable_events: bool = True,
+    ) -> EnhancedBlackboard:
+        """Get blackboard scoped to this colony for state shared across agents in the same colony.
+        
+        Args:
+            namespace: Optional namespace for the blackboard within the colony scope (e.g., "coordination", "resources"). If None, defaults to the colony-level scope.
+            backend_type: Backend type for the blackboard (e.g., "redis")
+            enable_events: Whether to enable events on the blackboard
+
+        Returns:
+            Blackboard instance
+        """
+        return await self._manager.get_colony_level_blackboard(
+            namespace=namespace,
+            backend_type=backend_type,
+            enable_events=enable_events,
+        )
+
     async def get_blackboard(
         self,
-        scope: str = "shared",
         scope_id: str | None = None,
         backend_type: str = "redis",
         enable_events: bool = True,
@@ -2741,7 +2726,6 @@ class Agent(BaseModel):
         """Get blackboard for reading/writing shared state.
 
         Args:
-            scope: Blackboard scope (`"local"`, `"shared"`, `"global"`)
             scope_id: Scope identifier (defaults to `agent_id` for shared scope)
             backend_type: Backend type for the blackboard (e.g., "redis")
             enable_events: Whether to enable events on the blackboard
@@ -2753,7 +2737,7 @@ class Agent(BaseModel):
             ```python
             # Get shared blackboard with parent
             parent_id = self.metadata.parent_id
-            board = await self.get_blackboard(scope="shared", scope_id=parent_id)
+            board = await self.get_blackboard(scope_id=parent_id)
 
             # Write results
             await board.write("analysis_complete", my_results)
@@ -2766,11 +2750,11 @@ class Agent(BaseModel):
             raise RuntimeError(f"Agent {self.agent_id} not attached to manager")
 
         # Default scope_id to agent_id for shared scope
-        if scope == "shared" and scope_id is None:
-            scope_id = self.agent_id
+        if scope_id is None:
+            from .scopes import ScopeUtils
+            scope_id = ScopeUtils.get_agent_level_scope(self)
 
         return await self._manager.get_blackboard(
-            scope=scope,
             scope_id=scope_id,
             backend_type=backend_type,
             enable_events=enable_events,
@@ -3024,10 +3008,11 @@ class Agent(BaseModel):
         Returns:
             STM capability
         """
-        from .patterns.memory import MemoryCapability, MemoryScope
+        from .patterns.memory import MemoryCapability
+        from .scopes import MemoryScope
 
         # Find STM capability
-        stm_scope = MemoryScope.agent_stm(self.agent_id)
+        stm_scope = MemoryScope.agent_stm(self)
 
         for cap_name in self.get_capability_names():
             cap = self.get_capability(cap_name)
@@ -3072,8 +3057,9 @@ class Agent(BaseModel):
         return self.get_capability_by_type(EpisodicMemoryCapability)
 
         ### # Find episodic memory capability
-        ### from .patterns.memory import MemoryCapability, MemoryScope
-        ### episodic_scope = MemoryScope.agent_ltm_episodic(self.agent_id)
+        ### from .patterns.memory import MemoryCapability
+        ### from .scopes import MemoryScope
+        ### episodic_scope = MemoryScope.agent_ltm_episodic(self)
 
         ### for cap_name in self.get_capability_names():
         ###     cap = self.get_capability(cap_name)
@@ -3618,7 +3604,6 @@ class AgentManagerBase:
 
             # Get shared blackboard for plan coordination
             blackboard = await self.get_blackboard(
-                scope="shared",
                 scope_id="plan_coordination"  # TODO: Use actual plan ID if available instead of generic "plan_coordination"
             )
 
@@ -4204,9 +4189,66 @@ class AgentManagerBase:
 
         return is_loaded
 
+    async def get_agent_level_blackboard(
+        self,
+        agent: Agent,
+        *,
+        namespace: str | None = None,
+        backend_type: str | None = None,
+        enable_events: bool = True,
+    ) -> EnhancedBlackboard:
+        """Get blackboard scoped to this agent for private state."""
+        from .scopes import ScopeUtils
+        scope_id = ScopeUtils.get_agent_level_scope(agent)
+        if namespace:
+            scope_id = f"{scope_id}:{namespace}"
+
+        return await self.get_blackboard(
+            scope_id=scope_id,
+            backend_type=backend_type,
+            enable_events=enable_events,
+        )
+
+    async def get_session_level_blackboard(
+        self,
+        *,
+        namespace: str | None = None,
+        backend_type: str | None = None,
+        enable_events: bool = True,
+    ) -> EnhancedBlackboard:
+        """Get blackboard scoped to this session for state shared across agents in the same session."""
+        from .scopes import ScopeUtils
+        scope_id = ScopeUtils.get_session_level_scope()
+        if namespace:
+            scope_id = f"{scope_id}:{namespace}"
+
+        return await self.get_blackboard(
+            scope_id=scope_id,
+            backend_type=backend_type,
+            enable_events=enable_events,
+        )
+
+    async def get_colony_level_blackboard(
+        self,
+        *,
+        namespace: str | None = None,
+        backend_type: str | None = None,
+        enable_events: bool = True,
+    ) -> EnhancedBlackboard:
+        """Get blackboard scoped to this colony for state shared across agents in the same colony."""
+        from .scopes import ScopeUtils
+        scope_id = ScopeUtils.get_colony_level_scope()
+        if namespace:
+            scope_id = f"{scope_id}:{namespace}"
+
+        return await self.get_blackboard(
+            scope_id=scope_id,
+            backend_type=backend_type,
+            enable_events=enable_events,
+        )
+
     async def get_blackboard(
         self,
-        scope: str = "shared",
         scope_id: str = "default",
         backend_type: str | None = None,
         enable_events: bool = True,
@@ -4214,7 +4256,6 @@ class AgentManagerBase:
         """Get blackboard for shared state access.
 
         Args:
-            scope: Blackboard scope ("local", "shared", "global")
             scope_id: Scope identifier
             backend_type: Backend type ("memory", "distributed", "redis"). If None, the globally configured backend will be used.
             enable_events: Enable event system for reactive updates (default: True)
@@ -4229,7 +4270,7 @@ class AgentManagerBase:
         Example:
             ```python
             # Get shared blackboard with events enabled
-            board = await self.get_blackboard(scope="shared", scope_id="group-1")
+            board = await self.get_blackboard(scope_id="group-1")
 
             # Subscribe to events for reactive coordination
             async def on_task_complete(event):
@@ -4249,7 +4290,6 @@ class AgentManagerBase:
         # Create and initialize enhanced blackboard
         blackboard = EnhancedBlackboard(
             app_name=app_name,
-            scope=BlackboardScope(scope),
             scope_id=scope_id,
             backend_type=backend_type,
             enable_events=enable_events,

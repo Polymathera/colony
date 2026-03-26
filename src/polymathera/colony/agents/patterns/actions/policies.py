@@ -51,6 +51,7 @@ from ...models import (
 )
 from ...base import Agent, ActionPolicy, ActionPolicyIterationResult, AgentCapability
 from ...blackboard import BlackboardEvent
+from ...scopes import ScopeUtils, BlackboardScope
 from ..hooks import hookable
 from ...blackboard.backend import ConcurrentModificationError
 from .repl import PolicyPythonREPL, REPLCapability, get_repl_guidance
@@ -676,6 +677,12 @@ def action_executor(
 
 
 
+def _model_to_str(model: BaseModel, trunc: int = 1000) -> tuple[str, str]:
+    """Helper to convert a Pydantic model to a pretty string for logging."""
+    model_str = model.model_dump_json(indent=3)
+    return (model_str[:trunc], "truncated") if len(model_str) > trunc else (model_str, "full" )
+
+
 class ActionGroup(BaseModel):
     """Mapping of a group of action keys to action executors sharing
     a common group description. This is needed to disambiguate actions
@@ -1176,12 +1183,13 @@ class ActionDispatcher:
         #     )
         # else:
         if isinstance(executor, (MethodWrapperActionExecutor, FunctionWrapperActionExecutor)):
-            result = await executor.execute(action, resolved_params)
+            result: ActionResult = await executor.execute(action, resolved_params)
         else:
             # Fallback for other executor types
-            result = await executor.execute(action)
+            result: ActionResult = await executor.execute(action)
 
-        logger.info(f"______ Action execution result: {result}")
+        result_str, trunc = _model_to_str(result)
+        logger.info(f"______ Action execution result: {result_str} ({trunc})")  # Log a truncated version of the result for readability
 
         # Update action status
         action.status = ActionStatus.COMPLETED if result.success else ActionStatus.FAILED
@@ -1473,14 +1481,14 @@ class ActionDispatcher:
             capability = self.agent.get_capability(cap_name)
             if capability is None:
                 raise ValueError(f"Capability not found: {cap_name}")
-            return self._navigate(capability, remaining[1:])
+            return self._navigate(capability, remaining[1:])  # TODO: _navigate does not handle capabilities. What the fuck?
 
         elif root == "global":
             # $global.blackboard_key
             key = ".".join(remaining) if remaining else ""
             if not key:
                 raise ValueError(f"Blackboard reference missing key: {ref.path}")
-            board = await self.agent.get_blackboard()  # TODO: This is the agent's blackboard. Is this correct, or should there be a separate "global" blackboard for cross-agent shared state?
+            board = await self.agent.get_agent_level_blackboard()  # TODO: This is the agent's blackboard. Is this correct, or should there be a separate "global" blackboard for cross-agent shared state?
             entry = await board.read(key)
             return entry.value if entry else None
 
@@ -1792,7 +1800,8 @@ class BaseActionPolicy(ActionPolicy):
                 f"    └────────────────────────────────────────────┘"
             )
             next_action = await self.plan_step(state)
-            logger.warning(f"    ⚙ EXEC_ITER: plan_step returned → {type(next_action).__name__}: {next_action}")
+            action_str, trunc = _model_to_str(next_action)
+            logger.warning(f"    ⚙ EXEC_ITER: plan_step returned → {type(next_action).__name__}: {action_str} ({trunc})")
 
             # Re-check session_id in case plan_step updated it from a new event
             updated_session_id = state.custom.get("current_session_id")
@@ -2267,10 +2276,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             )
 
             # Learning policy needs blackboard for ExecutionHistoryStore
-            learning_policy = LearningPlanningPolicy(
-                agent=self,
-                blackboard=self.plan_blackboard.blackboard
-            )
+            learning_policy = LearningPlanningPolicy(agent=self.agent)
             await learning_policy.initialize()
             logger.info(
                 f"Created default LearningPlanningPolicy for agent {self.agent.agent_id}"
@@ -2379,7 +2385,8 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             List of recalled memory dicts for the planning context
         """
         # Import here to avoid circular imports
-        from ..memory import AgentContextEngine, MemoryQuery, MemoryScope
+        from ..memory import AgentContextEngine, MemoryQuery
+        from ...scopes import MemoryScope
 
         ctx_engine: AgentContextEngine = self.agent.get_capability_by_type(AgentContextEngine)
         if ctx_engine is None:
@@ -2390,9 +2397,9 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             entries = await ctx_engine.gather_context(
                 query=MemoryQuery(max_results=50),
                 ### scopes=[
-                ###     MemoryScope.agent_working(self.agent.agent_id),
-                ###     MemoryScope.agent_stm(self.agent.agent_id),
-                ###     MemoryScope.agent_ltm_episodic(self.agent.agent_id),
+                ###     MemoryScope.agent_working(self.agent),
+                ###     MemoryScope.agent_stm(self.agent),
+                ###     MemoryScope.agent_ltm_episodic(self.agent),
                 ### ],
             )
 
@@ -2608,23 +2615,23 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
 
     async def _get_plan_blackboard(self) -> PlanBlackboard:
         """Get or create plan blackboard with access control."""
-        if not hasattr(self, "_plan_blackboard_cached"):
-            # Create access policy with agent hierarchy
-            agent_hierarchy = await self.agent.get_agent_hierarchy()
-            team_structure = await self.agent.get_team_structure()
+        # Create access policy with agent hierarchy
+        agent_hierarchy = await self.agent.get_agent_hierarchy()
+        team_structure = await self.agent.get_team_structure()
 
-            access_policy = HierarchicalAccessPolicy(
-                agent_hierarchy=agent_hierarchy,
-                team_structure=team_structure,
-            )
+        # TODO: The agent hierarchy and team structure are dynamic. FIXME
+        access_policy = HierarchicalAccessPolicy(
+            agent_hierarchy=agent_hierarchy,
+            team_structure=team_structure,
+        )
 
-            planning_scope_id = f"tenant:{self.agent.tenant_id}:agent:{self.agent.agent_id}:action_plan_scope"
-            self._plan_blackboard_cached = PlanBlackboard(
-                plan_access_policy=access_policy,
-                scope_id=planning_scope_id,
-            )
-            await self._plan_blackboard_cached.initialize()
-        return self._plan_blackboard_cached
+        plan_blackboard = PlanBlackboard(
+            agent=self.agent,
+            plan_access_policy=access_policy,
+            scope=BlackboardScope.COLONY,
+        )
+        await plan_blackboard.initialize()
+        return plan_blackboard
 
     async def _build_system_prompt(self) -> str:
         """Build stable agent identity prompt.

@@ -30,6 +30,7 @@ Example:
 
 from __future__ import annotations
 
+import uuid
 import asyncio
 import logging
 import time
@@ -37,6 +38,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from overrides import override
 
 from ...base import AgentCapability, CapabilityResultFuture
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
 from ...blackboard.types import BlackboardEntry, BlackboardEvent
 from ..actions.policies import action_executor
@@ -50,7 +52,6 @@ from .types import (
     MemoryValidationIssue,
 )
 from .capability import MemoryCapability
-from .scopes import MemoryScope
 
 if TYPE_CHECKING:
     from ...base import Agent
@@ -81,17 +82,17 @@ class AgentContextEngine(AgentCapability):
     def __init__(
         self,
         agent: "Agent",
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.AGENT,
     ):
         """Initialize context engine.
 
         Args:
             agent: Agent that owns this capability
-            scope_id: Optional scope ID (defaults to agent.agent_id:context)
+            scope: Scope of the context engine (defaults to AGENT)
         """
         super().__init__(
             agent=agent,
-            scope_id=scope_id or f"{agent.agent_id}:context"
+            scope_id=f"{get_scope_prefix(scope, agent)}:context:{uuid.uuid4()}"
         )
 
         # Discovered capabilities (populated during initialize)
@@ -873,6 +874,7 @@ class AgentContextEngine(AgentCapability):
             "agent_type:coder:collective:semantic" -> "collective:semantic"
             "game:g1:state" -> "game:state"
         """
+        from ...scopes import MemoryScope
         parsed = MemoryScope.parse_agent_scope(scope_id)
         if parsed:
             return parsed[1]  # level (e.g., "working", "stm", "ltm:episodic")

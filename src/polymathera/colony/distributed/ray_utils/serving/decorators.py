@@ -350,6 +350,13 @@ def periodic_health_check(interval_s: float = 30.0) -> Callable[[Callable], Call
     def decorator(func: Callable) -> Callable:
         func.__periodic_health_check__ = True  # type: ignore
         func.__health_check_interval_s__ = interval_s  # type: ignore
+        # Also register as a Ring.KERNEL endpoint so __handle_request__ can
+        # dispatch to it (periodic health checks are routed through
+        # __handle_request__ to get proper ExecutionContext).
+        func.__is_endpoint__ = True  # type: ignore
+        func.__endpoint_ring__ = 0  # Ring.KERNEL (use int to avoid import)
+        func.__router_class__ = None  # type: ignore
+        func.__router_kwargs__ = {}  # type: ignore
         return func
 
     return decorator

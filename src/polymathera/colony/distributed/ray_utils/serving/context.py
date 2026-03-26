@@ -234,6 +234,42 @@ def require_tenant_id() -> str:
     return ctx.tenant_id
 
 
+def require_session_id() -> str:
+    """Get session_id, raising if not set.
+
+    Returns:
+        Current session_id.
+
+    Raises:
+        RuntimeError: If no execution context or session_id is None.
+    """
+    ctx = require_execution_context()
+    if ctx.session_id is None:
+        raise RuntimeError(
+            "session_id not set in execution context. "
+            "Use Ring.USER with session_id at the entry point."
+        )
+    return ctx.session_id
+
+
+def require_run_id() -> str:
+    """Get run_id, raising if not set.
+
+    Returns:
+        Current run_id.
+
+    Raises:
+        RuntimeError: If no execution context or run_id is None.
+    """
+    ctx = require_execution_context()
+    if ctx.run_id is None:
+        raise RuntimeError(
+            "run_id not set in execution context. "
+            "Use Ring.USER with run_id at the entry point."
+        )
+    return ctx.run_id
+
+
 def ensure_context(object_id: str, ctx: ExecutionContext | None) -> None:
     """Ensure the request/page has a valid context that matches the execution context."""
     if not ctx:

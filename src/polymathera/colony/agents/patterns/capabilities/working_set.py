@@ -36,7 +36,8 @@ from overrides import override
 import networkx as nx
 
 from ...base import AgentCapability
-from ...models import AgentSuspensionState
+from ...models import AgentSuspensionState, RunContext
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...cache_coordination import (
     CacheAwareCoordinationPolicy,
     PageScorer,
@@ -140,7 +141,7 @@ class WorkingSetCapability(AgentCapability):
     All agents in the same tenant share the same working set state since
     VCM pages are shared across sessions/runs.
 
-    Key: "vcm:working_set:{tenant_id}" in blackboard
+    Key: "{colony_level_scope}:vcm:working_set" in blackboard
 
     This capability provides working-set manager functionality but adds:
     - Cluster-wide state via blackboard
@@ -152,17 +153,14 @@ class WorkingSetCapability(AgentCapability):
     any specific cache strategy.
     """
 
-    # Blackboard key patterns for cluster-wide state
-    WORKING_SET_KEY = "vcm:working_set:{tenant_id}"
-    PAGE_STATUS_KEY = "vcm:page_status:{tenant_id}"
-
     def __init__(
         self,
         agent: Agent,
         eviction_policy: PageEvictionPolicy | None = None,
         coordination_policy: CacheAwareCoordinationPolicy | None = None,
         working_set_size: int = 50,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "working_set",
     ):
         """Initialize working set capability.
 
@@ -171,9 +169,10 @@ class WorkingSetCapability(AgentCapability):
             eviction_policy: Policy for selecting pages to evict
             coordination_policy: Policy for working set selection (optional)
             working_set_size: Maximum pages in working set (job quota)
-            scope_id: Blackboard scope (defaults to agent_id)
+            scope: Blackboard scope (defaults to COLONY)
+            namespace: Namespace for the working set (defaults to "working_set")
         """
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
         self.eviction_policy = eviction_policy or LRUEvictionPolicy()
         self.coordination_policy = coordination_policy
         self.working_set_size: int = working_set_size
@@ -193,11 +192,11 @@ class WorkingSetCapability(AgentCapability):
 
     def _get_working_set_key(self) -> str:
         """Get blackboard key for working set state."""
-        return self.WORKING_SET_KEY.format(tenant_id=self.agent.tenant_id)
+        return ScopeUtils.format_key(vcm="working_set")
 
     def _get_page_status_key(self) -> str:
         """Get blackboard key for page status."""
-        return self.PAGE_STATUS_KEY.format(tenant_id=self.agent.tenant_id)
+        return ScopeUtils.format_key(vcm="page_status")
 
     async def _read_cluster_state(self) -> dict[str, Any]:
         """Read working set state from blackboard (cluster-wide)."""
@@ -543,7 +542,7 @@ class WorkingSetCapability(AgentCapability):
     async def initialize_from_policy(
         self,
         available_pages: list[str] | None = None,
-        run_context: dict[str, Any] | None = None,
+        run_context: RunContext | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Initialize cluster-wide working set using coordination policy.
 
@@ -570,7 +569,6 @@ class WorkingSetCapability(AgentCapability):
             available_pages = list(page_graph.nodes()) if page_graph else []
 
         # Create RunContext if needed
-        from ...models import RunContext
         if run_context is None:
             run_context = RunContext(analysis_goal="")
         elif isinstance(run_context, dict):

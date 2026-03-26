@@ -39,7 +39,7 @@ if TYPE_CHECKING:
         ConsolidationContext,
         MemorySubscription,
     )
-
+from ...scopes import ScopeUtils
 from ...blackboard.types import BlackboardEntry, BlackboardEvent, KeyPatternFilter
 
 # =============================================================================
@@ -65,7 +65,7 @@ class StorageBackend(Protocol):
     - All write operations MUST emit events that can be subscribed to via
       `stream_events_to_queue`. This is essential for the subscription-based
       dataflow architecture where higher memory levels subscribe to lower levels.
-    - The event key pattern follows the data type's `get_key_pattern(scope_id)`.
+    - TODO: The event key pattern needs to follow a pattern.
 
     Implementations:
     - BlackboardStorageBackend: Default, delegates to EnhancedBlackboard
@@ -89,7 +89,7 @@ class StorageBackend(Protocol):
         """Write an entry to storage.
 
         Args:
-            key: Storage key (typically from data.get_blackboard_key())
+            key: Storage key (typically from ScopeUtils.format_key())
             value: Serialized data (dict from model_dump())
             metadata: Entry metadata (relevance, timestamps, etc.)
             tags: Tags for categorization and filtering
@@ -335,7 +335,7 @@ class ConsolidationTransformer(ABC, Generic[TSource, TTarget]):
     - Enrichment: Add metadata, embeddings, tags
 
     Returns `list[BlackboardEntry]` where:
-    - `entry.value` is a BaseModel instance with `get_blackboard_key(scope_id)` method
+    - `entry.value` is a BaseModel instance with `record_id` property
     - `entry.tags` are the tags for the target entry
     - `entry.metadata` is the metadata for the target entry
     - `entry.ttl_seconds` is the TTL for the target entry (optional)
@@ -379,8 +379,8 @@ class ConsolidationTransformer(ABC, Generic[TSource, TTarget]):
 
         Returns:
             Consolidated entries to write to target scope, where entry.value is a TTarget instance ready for target scope.
-            Each entry.value must have get_blackboard_key(scope_id).
-            The TTarget must have `get_blackboard_key(scope_id)` instance method.
+            Each entry.value must have record_id.
+            The TTarget must have `record_id` instance property.
             The entry.key field is ignored (set by memory capability).
         """
         ...
@@ -407,7 +407,7 @@ class IdentityConsolidationTransformer(ConsolidationTransformer[TSource, TSource
         result = []
         for entry in entries:
             value = entry.value
-            if not hasattr(value, "get_blackboard_key"):
+            if not hasattr(value, "record_id"):
                 if isinstance(value, str):
                     value = MemoryRecord(content={"text": value}, tags=entry.tags)
                 elif isinstance(value, dict):
@@ -416,7 +416,7 @@ class IdentityConsolidationTransformer(ConsolidationTransformer[TSource, TSource
                     raise TypeError(
                         f"IdentityConsolidationTransformer: entry.value is "
                         f"{type(value).__name__}, expected BaseModel with "
-                        f"get_blackboard_key or dict/str for auto-wrapping."
+                        f"record_id or dict/str for auto-wrapping."
                     )
             result.append(BlackboardEntry(
                 key=entry.key,
@@ -503,7 +503,7 @@ Summary:"""
         )
 
         return [BlackboardEntry(
-            key="",  # Key set by memory capability via get_blackboard_key
+            key="",  # Key set by memory capability via record_id
             value=summary_record,
             tags=all_tags,
             metadata={
@@ -560,7 +560,7 @@ class FilteringTransformer(ConsolidationTransformer[TSource, TTarget]):
 
             # Re-wrap serialized values to satisfy the contract
             value = entry.value
-            if not hasattr(value, "get_blackboard_key"):
+            if not hasattr(value, "record_id"):
                 if isinstance(value, str):
                     value = MemoryRecord(content={"text": value}, tags=entry.tags)
                 elif isinstance(value, dict):
@@ -569,7 +569,7 @@ class FilteringTransformer(ConsolidationTransformer[TSource, TTarget]):
                     raise TypeError(
                         f"FilteringTransformer: entry.value is "
                         f"{type(value).__name__}, expected BaseModel with "
-                        f"get_blackboard_key or dict/str for auto-wrapping."
+                        f"record_id or dict/str for auto-wrapping."
                     )
 
             results.append(BlackboardEntry(
@@ -1260,10 +1260,11 @@ class ConsolidationMaintenancePolicy:
         written = 0
         for entry in consolidated:
             data = entry.value
-            if hasattr(data, "get_blackboard_key"):
-                key = data.get_blackboard_key(backend.scope_id)
-            else:
-                key = f"{backend.scope_id}:consolidated:{int(time.time())}:{written}"
+            key = ScopeUtils.format_key(
+                scope="consolidated",
+                timestamp=int(time.time()),
+                index=written
+            )
 
             value = data.model_dump() if hasattr(data, "model_dump") else data
 

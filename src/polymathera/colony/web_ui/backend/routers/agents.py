@@ -80,6 +80,7 @@ async def get_agent_hierarchy(
                     capability_names=getattr(info, "capability_names", []),
                     bound_pages=getattr(info, "bound_pages", []),
                     tenant_id=getattr(metadata, "tenant_id", "") if metadata else "",
+                    colony_id=getattr(metadata, "colony_id", "") if metadata else "",
                 ))
             return nodes
 

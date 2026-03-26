@@ -424,9 +424,9 @@ class LLMCluster:
 
         # Validate tenant access
         if self.config.enable_tenant_isolation:
-            if page.tenant_id not in page.allowed_tenant_ids:
+            if page.syscontext.tenant_id not in page.allowed_tenant_ids:
                 # Auto-add page creator to allowed tenants
-                page.allowed_tenant_ids.add(page.tenant_id)
+                page.allowed_tenant_ids.add(page.syscontext.tenant_id)
 
         # If client_id specified, deployment_name is required
         if client_id and not deployment_name:

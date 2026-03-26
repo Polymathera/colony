@@ -33,11 +33,12 @@ from pydantic import BaseModel, Field
 
 from ...base import AgentCapability, CapabilityResultFuture, Agent
 from ...models import AgentSuspensionState
+from ...scopes import MemoryScope, ScopeUtils, BlackboardScope, get_scope_prefix
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
+from ....distributed.ray_utils import serving
 from ..hooks.types import HookContext, HookType
 from ..hooks.pointcuts import Pointcut
 from ..hooks.decorator import register_hook
-from .scopes import MemoryScope
 from .context import AgentContextEngine
 from .working import WorkingMemoryCapability
 
@@ -59,21 +60,21 @@ class MemoryLifecycleHooks(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.AGENT,
         stm_scope_id: str | None = None,
     ):
         """Initialize memory lifecycle hooks.
 
         Args:
             agent: Agent that owns this capability
-            scope_id: Scope ID for this capability
+            scope: Blackboard scope for this capability
             stm_scope_id: Target STM scope (defaults to agent's STM)
         """
         super().__init__(
             agent=agent,
-            scope_id=scope_id or f"{agent.agent_id}:memory_lifecycle",
+            scope_id=f"{get_scope_prefix(scope, agent)}:memory_lifecycle",
         )
-        self._stm_scope_id = stm_scope_id or MemoryScope.agent_stm(agent.agent_id)
+        self._stm_scope_id = stm_scope_id or MemoryScope.agent_stm(agent)
 
     def get_action_group_description(self) -> str:
         return (
@@ -103,7 +104,7 @@ class MemoryLifecycleHooks(AgentCapability):
         blackboard = await self.get_blackboard()
         blackboard.stream_events_to_queue(
             event_queue,
-            KeyPatternFilter(pattern=f"{self.scope_id}:*")
+            KeyPatternFilter(pattern=ScopeUtils.pattern_key())
         )
 
     @override
@@ -145,14 +146,14 @@ class MemoryLifecycleHooks(AgentCapability):
         the new agent's LTM from collective memory.
         """
         try:
-            await self._emit_creation_event()
+            await self._emit_creation_event(ctx)
         except Exception as e:
             logger.error(f"Failed to emit creation event: {e}")
 
         return result
 
     @register_hook(
-        pointcut=Pointcut.pattern("*.task_complete"),
+        pointcut=Pointcut.pattern("*.task_complete"),  # TODO: Make sure this pointcut exists.
         hook_type=HookType.AFTER,
         priority=50,
     )
@@ -207,7 +208,7 @@ class MemoryLifecycleHooks(AgentCapability):
 
         # 3. Emit termination event for MemoryManagementAgent
         try:
-            await self._emit_termination_event()
+            await self._emit_termination_event(ctx)
         except Exception as e:
             logger.error(f"Failed to emit termination event: {e}")
 
@@ -217,48 +218,44 @@ class MemoryLifecycleHooks(AgentCapability):
     # Lifecycle Events
     # -------------------------------------------------------------------------
 
-    async def _emit_creation_event(self) -> None:
+    async def _emit_creation_event(self, ctx: HookContext) -> None:
         """Emit event to notify MemoryManagementAgent of agent creation.
 
         The MemoryManagementAgent listens to these events and:
         1. Reads collective memory for this agent_type
         2. Initializes the new agent's LTM with relevant entries
         """
-        lifecycle_scope = MemoryScope.control_plane(
-            self.agent.tenant_id,
-            "lifecycle",
-        )
+        lifecycle_scope = MemoryScope.colony_control_plane("lifecycle")
 
         blackboard = await self.agent.get_blackboard(
-            scope="shared",
             scope_id=lifecycle_scope,
         )
 
-        agent_id = self.agent.agent_id
+        agent: Agent = ctx.instance
+        agent_id = agent.agent_id
 
         creation_data = AgentCreationEvent(
             agent_id=agent_id,
-            agent_type=self.agent.agent_type,
-            tenant_id=self.agent.tenant_id,
+            agent_type=agent.agent_type,
             timestamp=time.time(),
         )
 
         await blackboard.write(
-            key=creation_data.get_blackboard_key(lifecycle_scope),
+            key=ScopeUtils.format_key(scope="agent_created", agent_id=agent_id),
             value=creation_data.model_dump(),
             agent_id=agent_id,
             tags={"agent_created", "memory_init_pending"},
             metadata={
-                "agent_type": self.agent.agent_type,
+                "agent_type": agent.agent_type,
             },
         )
 
         logger.info(
             f"Emitted creation event for {agent_id} "
-            f"(type={self.agent.agent_type})"
+            f"(type={agent.agent_type})"
         )
 
-    async def _emit_termination_event(self) -> None:
+    async def _emit_termination_event(self, ctx: HookContext) -> None:
         """Emit event to notify MemoryManagementAgent of termination.
 
         The MemoryManagementAgent listens to these events and:
@@ -266,40 +263,36 @@ class MemoryLifecycleHooks(AgentCapability):
         2. Merges relevant memories into collective memory
         3. Cleans up the agent's private scopes
         """
-        lifecycle_scope = MemoryScope.control_plane(
-            self.agent.tenant_id,
-            "lifecycle",
-        )
+        lifecycle_scope = MemoryScope.colony_control_plane("lifecycle")
 
         blackboard = await self.agent.get_blackboard(
-            scope="shared",
             scope_id=lifecycle_scope,
         )
 
         # List all memory scopes that should be recycled
-        agent_id = self.agent.agent_id
+        agent: Agent = ctx.instance
+        agent_id = agent.agent_id
         memory_scopes = [
-            MemoryScope.agent_stm(agent_id),
-            MemoryScope.agent_ltm_episodic(agent_id),
-            MemoryScope.agent_ltm_semantic(agent_id),
-            MemoryScope.agent_ltm_procedural(agent_id),
+            MemoryScope.agent_stm(agent),
+            MemoryScope.agent_ltm_episodic(agent),
+            MemoryScope.agent_ltm_semantic(agent),
+            MemoryScope.agent_ltm_procedural(agent),
         ]
 
         termination_data = AgentTerminationEvent(
             agent_id=agent_id,
-            agent_type=self.agent.agent_type,
-            tenant_id=self.agent.tenant_id,
+            agent_type=agent.agent_type,
             timestamp=time.time(),
             memory_scopes=memory_scopes,
         )
 
         await blackboard.write(
-            key=termination_data.get_blackboard_key(lifecycle_scope),
+            key=ScopeUtils.format_key(scope="agent_terminated", agent_id=agent_id),
             value=termination_data.model_dump(),
             agent_id=agent_id,
             tags={"agent_terminated", "memory_recycle_pending"},
             metadata={
-                "agent_type": self.agent.agent_type,
+                "agent_type": agent.agent_type,
                 "scope_count": len(memory_scopes),
             },
         )
@@ -324,20 +317,14 @@ class AgentTerminationEvent(BaseModel):
 
     agent_id: str = Field(description="ID of the terminated agent")
     agent_type: str = Field(description="Type of the agent for collective memory routing")
-    tenant_id: str = Field(description="Tenant the agent belonged to")
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="System context the agent belongs to",
+    )
     timestamp: float = Field(description="When termination occurred")
     memory_scopes: list[str] = Field(
         description="List of memory scope IDs to recycle"
     )
-
-    def get_blackboard_key(self, scope_id: str) -> str:
-        """Generate blackboard key for this event."""
-        return f"{scope_id}:agent:{self.agent_id}:terminated"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Pattern for matching termination events."""
-        return f"{scope_id}:agent:*:terminated"
 
 
 class AgentCreationEvent(BaseModel):
@@ -349,15 +336,9 @@ class AgentCreationEvent(BaseModel):
 
     agent_id: str = Field(description="ID of the new agent")
     agent_type: str = Field(description="Type of the agent")
-    tenant_id: str = Field(description="Tenant the agent belongs to")
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="System context the agent belongs to",
+    )
     timestamp: float = Field(description="When creation occurred")
-
-    def get_blackboard_key(self, scope_id: str) -> str:
-        """Generate blackboard key for this event."""
-        return f"{scope_id}:agent:{self.agent_id}:created"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Pattern for matching creation events."""
-        return f"{scope_id}:agent:*:created"
 

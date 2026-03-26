@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from ..scope import ScopeAwareResult
 from ...base import Agent, AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
 from ....utils import setup_logger
 from ..actions import action_executor
@@ -624,9 +625,9 @@ class RefinementCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None
+        scope: BlackboardScope = BlackboardScope.AGENT
     ):
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
         self.refinement_policy: RefinementPolicy | None = None
         self._refiner: IncrementalRefiner | None = None
 

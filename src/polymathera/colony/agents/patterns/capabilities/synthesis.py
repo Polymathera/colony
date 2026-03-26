@@ -9,6 +9,7 @@ This module implements synthesis patterns that combine results progressively:
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any, Generic, TypeVar
 from pydantic import BaseModel, Field
 from overrides import override
@@ -17,6 +18,7 @@ from ..scope import ScopeAwareResult
 from .merge import MergePolicy, MergeContext
 from .refinement import RefinementPolicy, RefinementContext
 from ...base import Agent, AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
 from ....utils import setup_logger
 from ..actions import action_executor
@@ -257,10 +259,12 @@ class SynthesisCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None
+        scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "synthesis_final"
     ):
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
         # Internal state only - no capability references stored
+        self.namespace = namespace
         self.partial_results: dict[str, ScopeAwareResult] = {}
         self.synthesis_history: list[SynthesisUpdate] = []
 

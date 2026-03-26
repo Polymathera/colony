@@ -241,6 +241,7 @@ class SessionManagerDeployment:
     async def list_sessions(
         self,
         tenant_id: str | None = None,
+        colony_id: str | None = None,
         state_filter: SessionState | None = None,
         include_expired: bool = False,
         limit: int = 100,
@@ -249,6 +250,7 @@ class SessionManagerDeployment:
 
         Args:
             tenant_id: Filter by tenant (None = all tenants)
+            colony_id: Filter by colony (None = all colonies)
             state_filter: Filter by state (None = all states)
             include_expired: Include expired sessions
             limit: Maximum number of sessions to return
@@ -272,6 +274,9 @@ class SessionManagerDeployment:
 
                 session = state.sessions.get(sid)
                 if not session:
+                    continue
+
+                if colony_id and session.syscontext.colony_id != colony_id:
                     continue
 
                 # Apply state filter
@@ -645,10 +650,9 @@ class SessionManagerDeployment:
             gpu_memory_mb: GPU memory (MB) to add
         """
         syscontext = serving.require_execution_context()
-        tenant_id = syscontext.tenant_id
 
         async for state in self.state_manager.write_transaction():
-            usage = self._get_or_create_usage(state, tenant_id)
+            usage = self._get_or_create_usage(state)
             usage.active_agents += 1
             usage.total_cpu_cores += cpu_cores
             usage.total_memory_mb += memory_mb
@@ -656,14 +660,13 @@ class SessionManagerDeployment:
             usage.total_gpu_memory_mb += gpu_memory_mb
 
         logger.debug(
-            f"Incremented resources for tenant {tenant_id}: "
+            f"Incremented resources for syscontext {syscontext.to_dict()}: "
             f"cpu={cpu_cores}, mem={memory_mb}MB, gpu={gpu_cores}, gpu_mem={gpu_memory_mb}MB"
         )
 
     @serving.endpoint
     async def decrement_tenant_resources(
         self,
-        tenant_id: str,
         cpu_cores: float = 0.0,
         memory_mb: int = 0,
         gpu_cores: float = 0.0,
@@ -674,14 +677,15 @@ class SessionManagerDeployment:
         Called by AgentSystemDeployment when an agent is unregistered.
 
         Args:
-            tenant_id: Tenant identifier
             cpu_cores: CPU cores to remove
             memory_mb: Memory (MB) to remove
             gpu_cores: GPU cores to remove
             gpu_memory_mb: GPU memory (MB) to remove
         """
+        syscontext = serving.require_execution_context()
+
         async for state in self.state_manager.write_transaction():
-            usage = self._get_or_create_usage(state, tenant_id)
+            usage = self._get_or_create_usage(state)
             usage.active_agents = max(0, usage.active_agents - 1)
             usage.total_cpu_cores = max(0.0, usage.total_cpu_cores - cpu_cores)
             usage.total_memory_mb = max(0, usage.total_memory_mb - memory_mb)
@@ -689,7 +693,7 @@ class SessionManagerDeployment:
             usage.total_gpu_memory_mb = max(0, usage.total_gpu_memory_mb - gpu_memory_mb)
 
         logger.debug(
-            f"Decremented resources for tenant {tenant_id}: "
+            f"Decremented resources for syscontext {syscontext.to_dict()}: "
             f"cpu={cpu_cores}, mem={memory_mb}MB, gpu={gpu_cores}, gpu_mem={gpu_memory_mb}MB"
         )
 

@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from ....base import AgentCapability
 from ....models import AgentSuspensionState
+from ....scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...actions.policies import action_executor
 from .types import (
     HypothesisFilter,
@@ -51,10 +52,11 @@ class HypothesisTrackingCapability(AgentCapability):
     """Capability for tracking hypotheses across games.
 
     Uses scope_id for flexible sharing:
-    - scope_id = agent_id: Per-agent tracking (default)
-    - scope_id = coordinator_id: Per-coordinator (shared across games)
-    - scope_id = "global": Cross-agent tracking
-    - scope_id = tenant_id: Multi-tenant isolation
+    - scope = BlackboardScope.AGENT: Per-agent tracking (default)
+    - scope = BlackboardScope.COLONY: Per-colony cross-agent tracking (e.g., all colony-level games)
+    - scope = BlackboardScope.SESSION: Per-session cross-agent tracking (e.g., for all session-level games)
+
+    In all cases, multi-tenant and multi-colony isolation is maintained.
 
     Delegates contradiction detection to ValidationCapability.
     Stores hypothesis data on blackboard for persistence and sharing.
@@ -63,15 +65,15 @@ class HypothesisTrackingCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.AGENT,
     ):
         """Initialize tracking capability.
 
         Args:
             agent: Owning agent
-            scope_id: Scope for sharing (defaults to agent.agent_id)
+            scope: Scope for sharing (defaults to BlackboardScope.AGENT)
         """
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
 
         # Local cache (authoritative data is on blackboard)
         self._cache: dict[str, TrackedHypothesis] = {}
@@ -93,11 +95,11 @@ class HypothesisTrackingCapability(AgentCapability):
 
     def _get_hypotheses_key(self) -> str:
         """Get blackboard key for tracked hypotheses."""
-        return f"{self.scope_id}:tracked_hypotheses"
+        return ScopeUtils.format_key(tracked_hypotheses=True)
 
     def _get_games_key(self) -> str:
         """Get blackboard key for game mappings."""
-        return f"{self.scope_id}:hypothesis_games"
+        return ScopeUtils.format_key(hypothesis_games=True)
 
     async def _load_from_blackboard(self) -> None:
         """Load cached data from blackboard."""

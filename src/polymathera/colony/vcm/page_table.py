@@ -417,7 +417,7 @@ class VirtualPageTable:
         async for state in self.state_manager.write_transaction():
             state.add_page_fault(fault)
             logger.info(
-                f"Added page fault for {fault.page_id} "
+                f"Added page fault for pages {fault.page_ids} "
                 f"(priority={fault.priority}, agent={fault.requesting_agent_id})"
             )
 
@@ -432,7 +432,7 @@ class VirtualPageTable:
         async for state in self.state_manager.write_transaction():
             fault = state.pop_next_fault()
             if fault:
-                logger.info(f"Popped page fault for {fault.page_id} (priority={fault.priority})")
+                logger.info(f"Popped page fault for pages {fault.page_ids} (priority={fault.priority})")
             return fault
 
     async def get_pending_fault_count(self) -> int:

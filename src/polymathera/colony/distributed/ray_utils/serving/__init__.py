@@ -97,6 +97,8 @@ from .context import (
     get_run_id,
     require_colony_id,
     require_tenant_id,
+    require_session_id,
+    require_run_id,
     ensure_context,
 )
 
@@ -154,6 +156,8 @@ __all__ = [
     "get_run_id",
     "require_colony_id",
     "require_tenant_id",
+    "require_session_id",
+    "require_run_id",
     "ensure_context",
     # Internal components
     "DeploymentProxyRayActor",

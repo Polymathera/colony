@@ -54,6 +54,7 @@ from ..scope import ScopeAwareResult, AnalysisScope
 from ..actions.policies import (
     action_executor,
 )
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import Action, PolicyREPL, AgentSuspensionState
 from ... import KeyPatternFilter, BlackboardEvent
 from ..games.epistemic import EpistemicLayer
@@ -72,31 +73,6 @@ class ConsistencyCheckRequest(BaseModel):
     new_result: ScopeAwareResult[Any] = Field(
         description="New result to check for consistency"
     )
-
-    @staticmethod
-    def get_blackboard_key(scope_id: str, requesting_agent_id: str, result_id: str) -> str:
-        """Get blackboard key for storing consistency check request.
-
-        Args:
-            scope_id: Blackboard scope ID
-            requesting_agent_id: ID of agent requesting the check
-            result_id: ID of the result being checked
-        Returns:
-            Blackboard key
-        """
-        return f"{scope_id}:consistency_check:request:{requesting_agent_id}:{result_id}"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Get blackboard key pattern for consistency check requests.
-
-        Args:
-            scope_id: Blackboard scope ID
-
-        Returns:
-            Key pattern
-        """
-        return f"{scope_id}:consistency_check:request:*:*"
 
 
 
@@ -159,32 +135,6 @@ class ConsistencyCheck(BaseModel):
         description="When check was performed"
     )
 
-    @staticmethod
-    def get_blackboard_key(scope_id: str, requesting_agent_id: str, result_id: str) -> str:
-        """Get blackboard key for storing consistency check result.
-
-        Args:
-            scope_id: Blackboard scope ID
-            requesting_agent_id: ID of agent requesting the check
-            result_id: ID of the result being checked
-
-        Returns:
-            Blackboard key
-        """
-        return f"{scope_id}:consistency_check:result:{requesting_agent_id}:{result_id}"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Get blackboard key pattern for consistency check results.
-
-        Args:
-            scope_id: Blackboard scope ID
-
-        Returns:
-            Key pattern
-        """
-        return f"{scope_id}:consistency_check:result:*:*"
-
 
 
 class ConsistencyCapability(AgentCapability):
@@ -211,14 +161,14 @@ class ConsistencyCapability(AgentCapability):
     - resolve_contradictions: Attempt to resolve detected contradictions
     """
 
-    def __init__(self, agent: Agent, scope_id: str | None = None):
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize consistency capability.
 
         Args:
             agent: Agent using this capability
-            scope_id: Blackboard scope ID. Defaults to agent.agent_id.
+            scope: Scope for the capability
         """
-        super().__init__(agent, scope_id)
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
         self.epistemic_layer = EpistemicLayer(self.agent)  # TODO: Currently unused
         self.checked_results: dict[str, ScopeAwareResult] = {}
 
@@ -270,7 +220,7 @@ class ConsistencyCapability(AgentCapability):
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(
-                pattern=ConsistencyCheckRequest.get_key_pattern(self.scope_id)
+                pattern=ScopeUtils.pattern_key(consistency_check_request=None)
             )
         )
 
@@ -283,7 +233,7 @@ class ConsistencyCapability(AgentCapability):
         """
         blackboard = await self.get_blackboard()
         return CapabilityResultFuture(
-            result_key=ConsistencyCheck.get_key_pattern(self.scope_id),
+            result_key=ScopeUtils.pattern_key(consistency_check_result=None),
             blackboard=blackboard,
         )
 
@@ -365,7 +315,11 @@ class ConsistencyCapability(AgentCapability):
         """
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=ConsistencyCheck.get_blackboard_key(self.scope_id, result.requesting_agent_id, result.result_id),
+            key=ScopeUtils.format_key(
+                scope="consistency_check_result",
+                requesting_agent_id=result.requesting_agent_id,
+                result_id=result.result_id
+            ),
             value=result.model_dump(),
             agent_id=self.agent.agent_id,
         )

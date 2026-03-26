@@ -86,7 +86,7 @@ class AgentSystemState(SharedState):
     # Statistics (updated periodically, not per-message!)
     stats: dict[str, Any] = Field(default_factory=dict)
 
-    # Blackboard scope registry: (scope, scope_id) -> {backend_type, registered_at, ...}
+    # Blackboard scope registry: scope_id -> {backend_type, registered_at, ...}
     # Populated by EnhancedBlackboard.initialize() via register_blackboard_scope()
     blackboard_scopes: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
@@ -495,21 +495,19 @@ class AgentSystemDeployment:
 
             logger.info(f"Registered agent {agent_info.agent_id} on deployment replica {deployment_replica_id}")
 
-        # Update tenant resource usage if agent has tenant_id
-        tenant_id = agent_info.tenant_id
-        if tenant_id and self.session_manager_handle:
+        # Update tenant resource usage
+        if self.session_manager_handle:
             try:
                 # Increment resource usage (update via SessionManager)
                 await self.session_manager_handle.increment_tenant_resources(
-                    tenant_id=tenant_id,
                     cpu_cores=agent_info.resource_requirements.cpu_cores,
                     memory_mb=agent_info.resource_requirements.memory_mb,
                     gpu_cores=agent_info.resource_requirements.gpu_cores,
                     gpu_memory_mb=agent_info.resource_requirements.gpu_memory_mb,
                 )
-                logger.debug(f"Updated tenant {tenant_id} resource usage after registering agent {agent_info.agent_id}")
+                logger.debug(f"Updated tenant {agent_info.tenant_id} resource usage after registering agent {agent_info.agent_id}")
             except Exception as e:
-                logger.warning(f"Failed to update tenant resource usage for {tenant_id}: {e}")
+                logger.warning(f"Failed to update tenant resource usage for {agent_info.tenant_id}: {e}")
 
     @serving.endpoint
     async def unregister_agent(self, agent_id: str) -> None:
@@ -554,21 +552,24 @@ class AgentSystemDeployment:
                 logger.info(f"Unregistered agent {agent_id}")
 
         # Update tenant resource usage if agent had tenant_id
-        if agent:
-            tenant_id = agent.tenant_id
-            if tenant_id and self.session_manager_handle:
-                try:
-                    # Decrement resource usage (update via SessionManager)
-                    await self.session_manager_handle.decrement_tenant_resources(
-                        tenant_id=tenant_id,
-                        cpu_cores=agent.resource_requirements.cpu_cores,
-                        memory_mb=agent.resource_requirements.memory_mb,
-                        gpu_cores=agent.resource_requirements.gpu_cores,
-                        gpu_memory_mb=agent.resource_requirements.gpu_memory_mb,
-                    )
-                    logger.debug(f"Updated tenant {tenant_id} resource usage after unregistering agent {agent_id}")
-                except Exception as e:
-                    logger.warning(f"Failed to update tenant resource usage for {tenant_id}: {e}")
+        if agent and agent.tenant_id and self.session_manager_handle:
+            syscontext = serving.require_execution_context()
+            if syscontext.tenant_id != agent.tenant_id:
+                raise ValueError(
+                    f"Tenant ID mismatch when unregistering agent {agent_id}: "
+                    f"syscontext tenant {syscontext.tenant_id} vs agent tenant {agent.tenant_id}"
+                )
+            try:
+                # Decrement resource usage (update via SessionManager)
+                await self.session_manager_handle.decrement_tenant_resources(
+                    cpu_cores=agent.resource_requirements.cpu_cores,
+                    memory_mb=agent.resource_requirements.memory_mb,
+                    gpu_cores=agent.resource_requirements.gpu_cores,
+                    gpu_memory_mb=agent.resource_requirements.gpu_memory_mb,
+                )
+                logger.debug(f"Updated tenant {agent.tenant_id} resource usage after unregistering agent {agent_id}")
+            except Exception as e:
+                logger.warning(f"Failed to update tenant resource usage for {agent.tenant_id}: {e}")
 
     @serving.endpoint
     async def update_agent_state(self, agent_id: str, new_state: AgentState) -> None:
@@ -1317,7 +1318,6 @@ class AgentSystemDeployment:
     @serving.endpoint
     async def register_blackboard_scope(
         self,
-        scope: str,
         scope_id: str,
         backend_type: str,
     ) -> None:
@@ -1327,10 +1327,8 @@ class AgentSystemDeployment:
         discover scopes without scanning Redis keys.
         """
         import time
-        key = f"{scope}:{scope_id}"
         async for state in self.state_manager.write_transaction():
-            state.blackboard_scopes[key] = {
-                "scope": scope,
+            state.blackboard_scopes[scope_id] = {
                 "scope_id": scope_id,
                 "backend_type": backend_type,
                 "registered_at": time.time(),
@@ -1346,30 +1344,25 @@ class AgentSystemDeployment:
         and queries each scope's backend for current stats.
         """
         from ..agents.blackboard import EnhancedBlackboard
-        from ..agents.blackboard.types import BlackboardScope as BBScope
 
         # Read registered scopes from shared state
         async for state in self.state_manager.read_transaction():
             registered = dict(state.blackboard_scopes)
 
         scopes: list[dict[str, Any]] = []
-        for key, info in registered.items():
-            scope = info["scope"]
+        for _key, info in registered.items():
             scope_id = info["scope_id"]
             backend_type = info.get("backend_type", self.blackboard_backend_type)
-            scope_enum = BBScope(scope) if scope in BBScope._value2member_map_ else BBScope.SHARED
 
             try:
                 bb = EnhancedBlackboard(
                     app_name=self.app_name,
-                    scope=scope_enum,
                     scope_id=scope_id,
                     enable_events=False,
                     backend_type=backend_type,
                 )
                 stats = await bb.get_statistics()
                 scopes.append({
-                    "scope": scope,
                     "scope_id": scope_id,
                     "entry_count": stats.get("entry_count", 0),
                     "oldest_entry_age": stats.get("oldest_entry_age"),
@@ -1378,9 +1371,8 @@ class AgentSystemDeployment:
                     "subscriber_count": stats.get("subscriber_count", 0),
                 })
             except Exception as e:
-                logger.debug("Failed to get stats for %s/%s: %s", scope, scope_id, e)
+                logger.debug(f"Failed to get stats for {scope_id}: {e}")
                 scopes.append({
-                    "scope": scope,
                     "scope_id": scope_id,
                     "entry_count": 0,
                     "backend_type": backend_type,
@@ -1392,7 +1384,6 @@ class AgentSystemDeployment:
     @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_blackboard_entries(
         self,
-        scope: str,
         scope_id: str,
         limit: int = 100,
         backend_type: str = "",
@@ -1400,8 +1391,6 @@ class AgentSystemDeployment:
         """List entries in a specific blackboard scope."""
         try:
             from ..agents.blackboard import EnhancedBlackboard
-            from ..agents.blackboard.types import BlackboardScope as BBScope
-            scope_enum = BBScope(scope) if scope in BBScope._value2member_map_ else BBScope.SHARED
             # Map backend class name to backend_type string for EnhancedBlackboard
             bt = None
             if backend_type == "RedisBackend":
@@ -1412,7 +1401,6 @@ class AgentSystemDeployment:
                 bt = "memory"
             bb = EnhancedBlackboard(
                 app_name=self.app_name,
-                scope=scope_enum,
                 scope_id=scope_id,
                 enable_events=False,
                 backend_type=bt,
@@ -1432,7 +1420,7 @@ class AgentSystemDeployment:
                 for e in entries
             ]
         except Exception as e:
-            logger.warning("Failed to get blackboard entries for %s/%s: %s", scope, scope_id, e)
+            logger.warning(f"Failed to get blackboard entries for {scope_id}: {e}")
             return []
 
     # === Resource-Driven Resumption ===

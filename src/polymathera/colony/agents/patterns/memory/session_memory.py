@@ -23,7 +23,6 @@ Example:
     # Create session memory capability (one per tenant)
     session_memory = SessionMemoryCapability(
         agent=agent,
-        tenant_id="my-tenant",
     )
     await session_memory.initialize()
     agent.add_capability(session_memory)
@@ -46,7 +45,7 @@ from typing import Any, TYPE_CHECKING
 from pydantic import BaseModel
 
 from .capability import MemoryCapability
-from .scopes import MemoryScope
+from ...scopes import MemoryScope
 from .types import MemoryQuery, RetrievalContext, ScoredEntry
 from .protocols import (
     MaintenancePolicy,
@@ -86,7 +85,6 @@ class SessionMemoryCapability(MemoryCapability):
     capability instances or storage scopes per session.
 
     Attributes:
-        `tenant_id`: The tenant this capability serves
         `include_cross_session`: If `True`, cross-session memories are
             included with lower ranking (default: False)
     """
@@ -94,7 +92,6 @@ class SessionMemoryCapability(MemoryCapability):
     def __init__(
         self,
         agent: "Agent",
-        tenant_id: str,
         *,
         # Session-specific options
         include_cross_session: bool = False,
@@ -113,7 +110,6 @@ class SessionMemoryCapability(MemoryCapability):
 
         Args:
             `agent`: Agent that owns this capability
-            `tenant_id`: Tenant this capability serves
 
             `include_cross_session`: Whether to include cross-session memories
                 in retrieval (with lower weight). Default: False.
@@ -129,7 +125,7 @@ class SessionMemoryCapability(MemoryCapability):
             `utility_scorer`: Scorer for memory utility
         """
         # Use tenant-level session scope
-        scope_id = MemoryScope.session(tenant_id)
+        scope_id = MemoryScope.session()
 
         super().__init__(
             agent=agent,
@@ -146,7 +142,6 @@ class SessionMemoryCapability(MemoryCapability):
             utility_scorer=utility_scorer,
         )
 
-        self.tenant_id = tenant_id
         self.include_cross_session = include_cross_session
         self.cross_session_weight = cross_session_weight
 

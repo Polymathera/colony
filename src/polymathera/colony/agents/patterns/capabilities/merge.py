@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from ..scope import AnalysisScope, ScopeAwareResult, merge_scopes
 from ...base import Agent, AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
 from ....utils import setup_logger
 from ..actions import action_executor
@@ -850,10 +851,12 @@ class MergeCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "merge",
         merge_policy: MergePolicy | None = None
     ):
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
+        self.namespace = namespace
         self.merge_policy: MergePolicy | None = merge_policy
 
     def get_action_group_description(self) -> str:

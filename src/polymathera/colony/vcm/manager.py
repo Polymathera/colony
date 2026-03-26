@@ -149,8 +149,12 @@ class VirtualContextManager:
     @staticmethod
     def _local_scope_key(scope_id: str) -> str:
         """Key for the manager's own _local_mapped_scopes dict."""
+        from ..agents.scopes import ScopeUtils
+        colony_level_scope = ScopeUtils.get_colony_level_scope()
+        if not scope_id.startswith(colony_level_scope):
+            raise ValueError(f"Scope ID {scope_id} must be at colony level or below: {colony_level_scope}")
         syscontext = serving.require_execution_context()
-        return f"{scope_id}:{syscontext.colony_id}:{syscontext.tenant_id}"
+        return f"{syscontext.tenant_id}:{syscontext.colony_id}:{scope_id}"
 
     @serving.initialize_deployment
     async def initialize(self):
@@ -307,7 +311,7 @@ class VirtualContextManager:
         """
         start_time = time.time()
         logger.info(
-            f"Allocating {len(request.virtual_page_ids)} pages for tenant {request.tenant_id}"
+            f"Allocating {len(request.virtual_page_ids)} pages for syscontext={request.syscontext.to_dict()}"
         )
 
         try:
@@ -566,7 +570,7 @@ class VirtualContextManager:
 
         logger.info(
             f"Issued page fault {fault.fault_id} for {len(page_ids)} pages "
-            f"(priority={priority}, requester={requester_id}, tenant={fault.syscontext.tenant_id}, lock_duration={lock_duration_s}s)"
+            f"(priority={priority}, requester={requester_id}, syscontext={fault.syscontext.to_dict()}, lock_duration={lock_duration_s}s)"
         )
 
         return fault.fault_id

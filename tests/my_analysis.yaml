@@ -6,6 +6,7 @@
 
 repo_id: "my-project"
 tenant_id: "test-tenant"
+colony_id: "test-colony"
 # session_id: "auto-generated-if-omitted"
 # run_id: "auto-generated-if-omitted"
 

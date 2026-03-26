@@ -44,6 +44,7 @@ from ...models import PolicyREPL
 from .backing_store import BackingStore, BlackboardBackingStore, StorageHint
 
 from ...base import AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 
 if TYPE_CHECKING:
     from ...base import Agent
@@ -1017,6 +1018,7 @@ class REPLCapability(AgentCapability):
     def __init__(
         self,
         agent: "Agent",
+        scope: BlackboardScope = BlackboardScope.AGENT,
         capability_key: str = "repl",
         backing_stores: dict[str, BackingStore] | None = None,
         allowed_imports: list[str] | None = None,
@@ -1035,7 +1037,7 @@ class REPLCapability(AgentCapability):
         """
         super().__init__(
             agent=agent,
-            scope_id=f"repl:{agent.agent_id}",
+            scope_id=f"{get_scope_prefix(scope, agent)}:repl",
             capability_key=capability_key
         )
 

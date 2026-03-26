@@ -15,14 +15,12 @@ Quick Start:
     ```python
     from polymathera.colony.agents.blackboard import (
         EnhancedBlackboard,
-        BlackboardScope,
         KeyPatternFilter,
     )
 
     # Create blackboard
     board = EnhancedBlackboard(
         app_name="my-app",
-        scope=BlackboardScope.SHARED,
         scope_id="team-1",
     )
     await board.initialize()
@@ -60,7 +58,6 @@ from .types import (
     AccessPolicy,
     BlackboardEntry,
     BlackboardEvent,
-    BlackboardScope,
     EventFilter,
     EvictionPolicy,
     ValidationPolicy,
@@ -105,7 +102,6 @@ __all__ = [
     # Core types
     "BlackboardEntry",
     "BlackboardEvent",
-    "BlackboardScope",
     # Policy ABCs
     "AccessPolicy",
     "EvictionPolicy",

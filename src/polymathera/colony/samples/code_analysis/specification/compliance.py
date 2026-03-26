@@ -27,6 +27,7 @@ from typing import Any
 from overrides import override
 from pydantic import BaseModel, Field
 
+from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -328,7 +329,7 @@ class SpecificationComplianceCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.AGENT,
         infer_contracts: bool = True,
         check_invariants: bool = True,
         trace_requirements: bool = True
@@ -337,12 +338,12 @@ class SpecificationComplianceCapability(AgentCapability):
 
         Args:
             agent: Agent instance for LLM inference via VCM
-            scope_id: Scope identifier for this capability
+            scope: Blackboard scope for this capability (default: AGENT)
             infer_contracts: Whether to infer contracts from code
             check_invariants: Whether to check invariants
             trace_requirements: Whether to trace requirements
         """
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:specification_compliance:{agent.agent_id}")
         self.infer_contracts = infer_contracts
         self.check_invariants = check_invariants
         self.trace_requirements = trace_requirements
@@ -368,7 +369,7 @@ class SpecificationComplianceCapability(AgentCapability):
         if not self._page_graph_cap:
             self._page_graph_cap = PageGraphCapability(
                 agent=self.agent,
-                scope_id=self.scope_id,
+                scope=BlackboardScope.COLONY,
             )
             await self._page_graph_cap.initialize()
             self.agent.add_capability(self._page_graph_cap)
@@ -528,7 +529,7 @@ class SpecificationComplianceCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=f"{self.scope_id}:result:{request_id}",  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+                key=ScopeUtils.format_key(result=request_id),
                 value=result.model_dump(),
             )
 

@@ -53,6 +53,7 @@ from ...base import (
     AgentHandle,
     CapabilityResultFuture,
 )
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions.policies import action_executor
 from ... import KeyPatternFilter, BlackboardEvent
 from ...models import Action, PolicyREPL, AgentSuspensionState
@@ -75,31 +76,6 @@ class GoalAlignmentRequest(BaseModel):
         description="Output to check for alignment"
     )
 
-    @staticmethod
-    def get_blackboard_key(scope_id: str, requesting_agent_id: str, goal_id: str) -> str:
-        """Get blackboard key for goal alignment request.
-
-        Args:
-            scope_id: Blackboard scope ID
-            requesting_agent_id: ID of agent requesting the check
-            goal_id: ID of the goal being checked
-        Returns:
-            Blackboard key
-        """
-        return f"{scope_id}:goal_alignment:request:{requesting_agent_id}:{goal_id}"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Get blackboard key pattern for goal alignment requests.
-
-        Args:
-            scope_id: Blackboard scope ID
-
-        Returns:
-            Blackboard key pattern
-        """
-        return f"{scope_id}:goal_alignment:request:*:*"
-
 
 class JointGoalRegistration(BaseModel):
     """Registration request of a joint goal to agents."""
@@ -107,31 +83,6 @@ class JointGoalRegistration(BaseModel):
     goal: JointGoal = Field(
         description="Joint goal to register"
     )
-
-    @staticmethod
-    def get_blackboard_key(scope_id: str, goal_id: str) -> str:
-        """Get blackboard key for joint goal registration.
-
-        Args:
-            scope_id: Blackboard scope ID
-            goal_id: ID of the goal being registered
-
-        Returns:
-            Blackboard key
-        """
-        return f"{scope_id}:goal_alignment:joint_goal:{goal_id}"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Get blackboard key pattern for joint goal registrations.
-
-        Args:
-            scope_id: Blackboard scope ID
-
-        Returns:
-            Blackboard key pattern
-        """
-        return f"{scope_id}:goal_alignment:joint_goal:*"
 
 
 
@@ -182,20 +133,6 @@ class GoalAlignment(BaseModel):
         le=1.0,
         description="Confidence in alignment judgment"
     )
-
-    @staticmethod
-    def get_blackboard_key(scope_id: str, requesting_agent_id: str, goal_id: str) -> str:
-        """Get blackboard key for storing goal alignment result.
-
-        Args:
-            scope_id: Blackboard scope ID
-            requesting_agent_id: ID of agent requesting the check
-            goal_id: ID of the goal being checked
-
-        Returns:
-            Blackboard key
-        """
-        return f"{scope_id}:goal_alignment:result:{requesting_agent_id}:{goal_id}"
 
 
 class JointGoal(BaseModel):
@@ -266,14 +203,14 @@ class ObjectiveGuardCapability(AgentCapability):
     - register_goal: Register a new goal to monitor
     """
 
-    def __init__(self, agent: Agent, scope_id: str | None = None):
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize objective guard capability.
 
         Args:
             agent: Agent using this capability
-            scope_id: Blackboard scope ID. Defaults to agent.agent_id.
+            scope: Blackboard scope. Defaults to BlackboardScope.COLONY.
         """
-        super().__init__(agent, scope_id)
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
         self.active_goals: dict[str, JointGoal] = {}
 
     def get_action_group_description(self) -> str:
@@ -309,7 +246,6 @@ class ObjectiveGuardCapability(AgentCapability):
         """
         # TODO: We can get either explicit goal alignment check requests or we can snoop
         # on published analysis results to convert them into goal alignment check requests in the action policy.
-        # TODO: Stream code analysis result events? Use `AnalysisResult.get_key_pattern()` when available.
         # TODO: Code analyzers even better separate their output results into different categories (e.g.,
         # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
         # consistency check can focus on specific categories.
@@ -318,13 +254,13 @@ class ObjectiveGuardCapability(AgentCapability):
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(
-                pattern=GoalAlignmentRequest.get_key_pattern(self.scope_id)
+                pattern=ScopeUtils.pattern_key(goal_alignment_request=None)
             )
         )
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(
-                pattern=JointGoalRegistration.get_key_pattern(self.scope_id)
+                pattern=ScopeUtils.pattern_key(joint_goal_registration=None)
             )
         )
 
@@ -337,7 +273,7 @@ class ObjectiveGuardCapability(AgentCapability):
         """
         blackboard = await self.get_blackboard()
         return CapabilityResultFuture(
-            result_key=GoalAlignment.get_key_pattern(self.scope_id),
+            result_key=ScopeUtils.pattern_key(goal_alignment_result=None),
             blackboard=blackboard,
         )
 
@@ -346,7 +282,7 @@ class ObjectiveGuardCapability(AgentCapability):
     # -------------------------------------------------------------------------
 
     @event_handler(
-        pattern=lambda self: f"{self.scope_id}:{GoalAlignmentRequest.get_key_pattern(self.scope_id)}"
+        pattern=ScopeUtils.pattern_key(goal_alignment_request=None)
     )
     async def handle_goal_alignment_request(
         self,
@@ -367,7 +303,7 @@ class ObjectiveGuardCapability(AgentCapability):
         )
 
     @event_handler(
-        pattern=lambda self: f"{self.scope_id}:{JointGoalRegistration.get_key_pattern(self.scope_id)}"
+        pattern=ScopeUtils.pattern_key(joint_goal_registration=None)
     )
     async def handle_joint_goal_registration(
         self,
@@ -420,7 +356,10 @@ class ObjectiveGuardCapability(AgentCapability):
         # Write goal to this capability's scope
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=JointGoalRegistration.get_blackboard_key(self.scope_id, goal.goal_id),
+            key=ScopeUtils.format_key(
+                scope="goal_alignment",
+                joint_goal=goal.goal_id
+            ),
             value=goal.model_dump(),
             agent_id=self.agent.agent_id,
         )
@@ -482,7 +421,11 @@ class ObjectiveGuardCapability(AgentCapability):
         """
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=GoalAlignment.get_blackboard_key(self.scope_id, result.requesting_agent_id, result.goal_id),
+            key=ScopeUtils.format_key(
+                scope="goal_alignment",
+                goal_id=result.goal_id,
+                requesting_agent_id=result.requesting_agent_id
+            ),
             value=result.model_dump(),
             agent_id=self.agent.agent_id,
         )

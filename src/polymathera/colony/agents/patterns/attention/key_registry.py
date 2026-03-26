@@ -14,12 +14,11 @@ from .attention import PageKey
 from ...base import Agent
 from ....vcm.page_storage import PageStorage
 from ...blackboard import EnhancedBlackboard
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+
 
 logger = logging.getLogger(__name__)
 
-
-_PAGE_KEY_PREFIX: str = "key:"
-_CLUSTER_SUMMARY_PREFIX: str = "cluster:"
 
 
 class GlobalPageKeyRegistry:
@@ -51,36 +50,14 @@ class GlobalPageKeyRegistry:
 
     async def initialize(self) -> None:
         """Initialize global blackboard for key registry."""
-        self.page_keys_blackboard = await self.agent.get_blackboard(
-            scope="global",
-            scope_id="page_keys"  # TODO: Make it dependent on tenant if multi-tenant
+        self.page_keys_blackboard = await self.agent.get_colony_level_blackboard(
+            namespace="page_keys"
         )
-        self.cluster_summaries_blackboard = await self.agent.get_blackboard(
-            scope="global",
-            scope_id="cluster_summaries"  # TODO: Make it dependent on tenant if multi-tenant
+        self.cluster_summaries_blackboard = await self.agent.get_colony_level_blackboard(
+            namespace="cluster_summaries"
         )
         self.page_storage: PageStorage = self.agent.get_page_storage()
         logger.info("GlobalPageKeyRegistry initialized with global blackboard")
-
-    def _get_page_blackboard_key(self, page_id: str) -> str:
-        """Get blackboard key for page key.
-
-        Args:
-            page_id: Page identifier
-        """
-        ctx = self.agent.syscontext
-        return f"{_PAGE_KEY_PREFIX}{ctx.tenant_id}:{ctx.colony_id}:{page_id}"
-
-    def _get_cluster_summary_key(self, cluster_id: str) -> str:
-        """Get blackboard key for cluster summary.
-
-        Args:
-            cluster_id: Cluster identifier
-        Returns:
-            Blackboard key for this cluster summary
-        """
-        ctx = self.agent.syscontext
-        return f"{_CLUSTER_SUMMARY_PREFIX}{ctx.tenant_id}:{ctx.colony_id}:{cluster_id}"
 
     async def publish_page_key(
         self,
@@ -99,7 +76,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             await self.page_keys_blackboard.write(
-                self._get_page_blackboard_key(page_id),
+                ScopeUtils.format_key(page_id=page_id),
                 {
                     "key": key.model_dump(),
                     "cluster_id": cluster_id,
@@ -127,7 +104,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             data = await self.page_keys_blackboard.read(
-                self._get_page_blackboard_key(page_id)
+                ScopeUtils.format_key(page_id=page_id)
             )
             if data:
                 return (page_id, PageKey(**data["key"]), data.get("cluster_id", "unknown"))
@@ -157,7 +134,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             await self.cluster_summaries_blackboard.write(
-                self._get_cluster_summary_key(cluster_id),
+                ScopeUtils.format_key(cluster_id=cluster_id),
                 {
                     "summary": summary,
                     "representative_key": representative_key.model_dump(),
@@ -193,12 +170,12 @@ class GlobalPageKeyRegistry:
 
             results = []
             for key_id in all_key_ids:
-                if not key_id.startswith(_PAGE_KEY_PREFIX):
+                page_id = self.page_keys_blackboard.parse_key_part(key_id, "page_id")
+                if page_id is None:
                     continue
 
                 data = await self.page_keys_blackboard.read(key_id)
                 if data:
-                    page_id = key_id[len(_PAGE_KEY_PREFIX):]  # Remove "key:" prefix
                     key = PageKey(**data["key"])
                     cluster_id = data.get("cluster_id", "unknown")
                     results.append((page_id, key, cluster_id))
@@ -255,12 +232,12 @@ class GlobalPageKeyRegistry:
 
             results = []
             for cluster_key in all_cluster_ids:
-                if not cluster_key.startswith(_CLUSTER_SUMMARY_PREFIX):
+                cluster_id = self.cluster_summaries_blackboard.parse_key_part(cluster_key, "cluster_id")
+                if cluster_id is None:
                     continue
 
                 data = await self.cluster_summaries_blackboard.read(cluster_key)
                 if data:
-                    cluster_id = cluster_key[len(_CLUSTER_SUMMARY_PREFIX):]  # Remove "cluster:" prefix
                     summary = data.get("summary", {})
                     representative_key = PageKey(**data["representative_key"])
                     results.append((cluster_id, summary, representative_key))
@@ -283,7 +260,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             data = await self.cluster_summaries_blackboard.read(
-                self._get_cluster_summary_key(cluster_id)
+                ScopeUtils.format_key(cluster_id=cluster_id),
             )
             if data:
                 summary = data.get("summary", {})

@@ -36,9 +36,8 @@ async def list_blackboard_scopes(
             return []
 
 
-@router.get("/blackboard/scopes/{scope}/{scope_id}/entries")
+@router.get("/blackboard/scopes/{scope_id}/entries")
 async def get_blackboard_entries(
-    scope: str,
     scope_id: str,
     limit: int = Query(default=100, le=1000),
     backend_type: str = Query(default=""),
@@ -54,7 +53,7 @@ async def get_blackboard_entries(
         try:
             handle = colony.get_agent_system()
             return await handle.get_blackboard_entries(
-                scope=scope, scope_id=scope_id, limit=limit,
+                scope_id=scope_id, limit=limit,
                 backend_type=backend_type,
             )
         except Exception as e:

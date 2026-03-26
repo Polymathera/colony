@@ -549,7 +549,7 @@ async def create_page_query_router1(
     from .attention import EmbeddingBasedAttention
 
     # Create attention components (needed for query routing)
-    attention_mechanism = EmbeddingBasedAttention()
+    attention_mechanism = EmbeddingBasedAttention(agent=agent)
 
     # Create attention policy
     attention_policy = HierarchicalAttentionPolicy(
@@ -586,7 +586,7 @@ async def create_page_query_router2(
     from .attention import EmbeddingBasedAttention
 
     # Attention mechanism
-    attention_mechanism = EmbeddingBasedAttention()
+    attention_mechanism = EmbeddingBasedAttention(agent=agent)
 
     # Initialize attention policy (injectable, defaults to hierarchical)
     if attention_policy_type == "hierarchical":

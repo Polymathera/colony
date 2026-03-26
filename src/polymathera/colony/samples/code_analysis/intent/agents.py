@@ -23,9 +23,7 @@ from __future__ import annotations
 import logging
 from pydantic import BaseModel, Field
 
-from polymathera.colony.agents.patterns.capabilities.merge import (
-    MergeCapability,
-)
+from polymathera.colony.agents.patterns.capabilities.merge import MergeCapability
 from polymathera.colony.agents.base import Agent
 from polymathera.colony.agents.patterns.capabilities.synthesis import SynthesisCapability
 from polymathera.colony.agents.patterns.games.consensus_game import ConsensusGameProtocol

@@ -60,6 +60,7 @@ class SessionSummary(BaseModel):
 
     session_id: str
     tenant_id: str = ""
+    colony_id: str = ""
     state: str = ""
     created_at: float = 0.0
     run_count: int = 0
@@ -71,6 +72,7 @@ class RunSummary(BaseModel):
     run_id: str
     session_id: str = ""
     agent_id: str = ""
+    colony_id: str = ""
     status: str = ""
     started_at: float | None = None
     completed_at: float | None = None
@@ -99,6 +101,7 @@ class AgentHierarchyNode(BaseModel):
     capability_names: list[str] = Field(default_factory=list)
     bound_pages: list[str] = Field(default_factory=list)
     tenant_id: str = ""
+    colony_id: str = ""
 
 
 class VCMStats(BaseModel):

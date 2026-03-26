@@ -11,6 +11,7 @@ from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ..scope import ScopeAwareResult
 from ...models import AgentSuspensionState, QueryContext, ActionPolicyIO
 from ...base import Agent, AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ....utils import setup_logger
 from .attention import PageQuery
 from ..actions.policies import (
@@ -30,6 +31,7 @@ T = TypeVar("T")
 
 async def create_adaptive_query_policy(
     agent: Agent,
+    scope: BlackboardScope = BlackboardScope.COLONY,
     **kwargs,
 ) -> CacheAwareActionPolicy:
     """Create a cache-aware action policy with adaptive query generation.
@@ -45,7 +47,7 @@ async def create_adaptive_query_policy(
         `CacheAwareActionPolicy` with query generator as action provider
     """
     if not agent.has_capability(AdaptiveQueryGenerator.get_capability_name()):
-        capability = AdaptiveQueryGenerator(agent)
+        capability = AdaptiveQueryGenerator(agent, scope=scope)
         await capability.initialize()
         agent.add_capability(capability)
 
@@ -80,9 +82,9 @@ class AdaptiveQueryGenerator(AgentCapability):
     - Generating next queries based on history
     """
 
-    def __init__(self, agent: Agent):
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize strategy."""
-        super().__init__(agent)
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
         self.query_history: list[dict[str, Any]] = []
         self.successful_patterns: list[dict[str, Any]] = []
         self.failed_patterns: list[dict[str, Any]] = []
@@ -116,7 +118,6 @@ class AdaptiveQueryGenerator(AgentCapability):
         """
         # TODO: We can get either explicit adaptive query requests or we can snoop
         # on published analysis results to convert them into adaptive queries in the action policy.
-        # TODO: Stream code analysis result events? Use `AnalysisResult.get_key_pattern()` when available.
         # TODO: Code analyzers even better separate their output results into different categories (e.g.,
         # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
         # adaptive queries can focus on specific categories.
@@ -125,7 +126,7 @@ class AdaptiveQueryGenerator(AgentCapability):
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(
-                pattern=AdapativeQueryRequest.get_key_pattern()
+                pattern=ScopeUtils.pattern_key(analysis_result=None),  # Listen for analysis results to trigger adaptive queries
             )
         )
 

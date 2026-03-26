@@ -10,6 +10,7 @@ from overrides import override
 import itertools
 
 
+from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -346,14 +347,14 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     5. Produces unified impact report with recommendations
     """
 
-    def __init__(self, agent: Agent):
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize coordinator.
 
         Args:
-            agent_id: Coordinator ID
-            max_agents: Maximum concurrent page agents
+            agent: Coordinator agent
+            scope: Blackboard scope for coordination (default: COLONY)
         """
-        super().__init__(agent=agent)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:impact_coordinator:{agent.agent_id}")
 
         self.page_agents: dict[str, str] = {}  # page_id -> agent_id
         self.blackboard: EnhancedBlackboard | None = None
@@ -405,7 +406,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         # Initialize agent pool capability for lifecycle management
         self.agent_pool_cap: AgentPoolCapability | None = self.agent.get_capability_by_type(AgentPoolCapability)
         if not self.agent_pool_cap:
-            self.agent_pool_cap = AgentPoolCapability(agent=self.agent, scope_id=self.scope_id)
+            self.agent_pool_cap = AgentPoolCapability(agent=self.agent, scope=BlackboardScope.COLONY)
             await self.agent_pool_cap.initialize()
             self.agent.add_capability(self.agent_pool_cap)
 
@@ -419,7 +420,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         # Initialize page graph capability for standardized graph operations
         self.page_graph_cap: PageGraphCapability | None = self.agent.get_capability_by_type(PageGraphCapability)
         if not self.page_graph_cap:
-            self.page_graph_cap = PageGraphCapability(agent=self.agent, scope_id=self.scope_id)
+            self.page_graph_cap = PageGraphCapability(agent=self.agent, scope=BlackboardScope.COLONY)
             await self.page_graph_cap.initialize()
             self.agent.add_capability(self.page_graph_cap)
 
@@ -645,7 +646,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         retry_count = error_data.get("context", {}).get("retry_count", 0)
         if retry_count < 1:
             logger.info(f"Retrying child {agent_id}")
-            await self.blackboard.delete(f"error:{agent_id}")
+            await self.blackboard.delete(ScopeUtils.format_key(error=agent_id))
         else:
             # Max retries exceeded - remove from tracking
             logger.error(f"Child {agent_id} ({page_id}) failed after {retry_count} retries, skipping")
@@ -697,17 +698,16 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         # TODO: Write this summary to agent memory to be used by the action policy
 
         # Phase 1: Initialize working set from page graph
-        run_id = self.agent.metadata.run_id
         await self.working_set_cap.initialize_from_policy(
             page_graph=page_graph,
             available_pages=page_ids,
             run_context=RunContext(
                 analysis_goal=f"Impact analysis: {change_description}",
-                run_id=run_id,
             )
         )
 
         # Phase 2: Get or compute dependency graph
+        # TODO: What the fuck is this method? Use the PageStorage.
         dependency_graph = await self._get_or_compute_dependency_graph(page_ids)
 
         # Phase 3: Set up pending pages and spawn first batch
@@ -784,7 +784,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         # Reset synthesizer and add all validated results for proper synthesis
         final_synthesizer = SynthesisCapability(
             agent=self.agent,
-            scope_id=f"synthesis_final:{uuid.uuid4()}"
+            scope=BlackboardScope.SESSION,
         )
 
         for result in validated_results:
@@ -1047,8 +1047,7 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
             # Check blackboard for pre-computed dependency graph
             dep_graph_key = f"dependency_graph:{':'.join(sorted(page_ids[:10]))}"  # TODO: Add DependencyGraphResult.get_key(page_ids, tenant_id) method?
             dep_data = await self.blackboard.read(
-                key=dep_graph_key,
-                namespace="analysis"  # TODO: Add DependencyGraphResult.get_namespace(tenant_id, agent_type, agent_id) method?
+                key=ScopeUtils.format_key(dependency_graph=dep_graph_key),
             )
 
             if dep_data and isinstance(dep_data, dict):
@@ -1529,16 +1528,22 @@ class ChangeImpactAnalysisCoordinator(Agent):
         self.add_capability_blueprints([
             # Add WorkingSetCapability for cache-aware coordination
             WorkingSetCapability.bind(
+                scope=BlackboardScope.COLONY,
                 working_set_size=job_quota,
             ),
-            CriticCapability.bind(),
+            CriticCapability.bind(
+                scope=BlackboardScope.AGENT,
+                namespace="critique_reports",
+            ),
             ChangeImpactAnalysisCoordinatorCapability.bind(),
             MergeCapability.bind(
-                scope_id=f"{self.agent_id}:merged_change_impact_reports",
+                scope=BlackboardScope.AGENT,
+                namespace="merged_change_impact_reports",
                 merge_policy=ImpactMergePolicy()
             ),
             SynthesisCapability.bind(
-                scope_id=f"{self.agent_id}:change_impact_analysis"
+                scope=BlackboardScope.AGENT,
+                namespace="change_impact_analysis"
             ),
         ])
 

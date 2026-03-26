@@ -20,9 +20,11 @@ from overrides import override
 from pydantic import Field
 
 from ....distributed import get_polymathera
+from ....distributed.ray_utils import serving
 from ....distributed.state_management import SharedState, StateManager
 from ...self_concept import AgentSelfConcept
 from ...base import AgentCapability, CapabilityResultFuture
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ..actions.policies import action_executor
@@ -82,22 +84,6 @@ class SystemDocumentation(SharedState):
     version: str = Field(default="1.0.0")
     last_updated: float = Field(default_factory=lambda: time.time())
 
-    @classmethod
-    def get_state_key(cls, tenant_id: str, session_id: str | None = None) -> str:
-        """Generate state key for system documentation.
-
-        Args:
-            tenant_id: Tenant identifier
-            session_id: Optional session identifier (if session-specific)
-
-        Returns:
-            State key
-        """
-        key = f"polymathera:serving:agents:system_docs:{tenant_id}"
-        if session_id:
-            key += f":session:{session_id}"
-        return key
-
 
 class ConsciousnessCapability(AgentCapability):
     """Agent capability for self-awareness and consciousness.
@@ -131,24 +117,15 @@ class ConsciousnessCapability(AgentCapability):
     def __init__(
         self,
         agent: "Agent | None" = None,
-        scope_id: str | None = None,
-        *,
-        tenant_id: str | None = None,
-        session_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.COLONY,
     ):
         """Initialize consciousness capability.
 
         Args:
             agent: Owning agent (None for detached mode)
-            scope_id: Blackboard scope ID (defaults to agent.agent_id)
-            tenant_id: Tenant ID for system documentation (defaults from agent metadata)
-            session_id: Session ID for system documentation (defaults from agent metadata)
+            scope: Blackboard scope (defaults to COLONY)
         """
-        super().__init__(agent=agent, scope_id=scope_id)
-
-        # Tenant/session for system documentation access
-        self._tenant_id = tenant_id
-        self._session_id = session_id
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
 
         # Cached self-concept (loaded lazily)
         self._self_concept: AgentSelfConcept | None = None
@@ -185,24 +162,6 @@ class ConsciousnessCapability(AgentCapability):
                 metadata=metadata,
             )
 
-    @property
-    def tenant_id(self) -> str:
-        """Get tenant ID for system documentation."""
-        if self._tenant_id:
-            return self._tenant_id
-        if self.agent is not None:
-            return self.agent.metadata.tenant_id
-        return "default"
-
-    @property
-    def session_id(self) -> str | None:
-        """Get session ID for system documentation."""
-        if self._session_id:
-            return self._session_id
-        if self.agent is not None:
-            return self.agent.metadata.session_id
-        return None
-
     def get_action_group_description(self) -> str:
         return (
             "Self-Awareness — provides access to system documentation (architecture, guidelines) "
@@ -226,11 +185,9 @@ class ConsciousnessCapability(AgentCapability):
     # Internal Helpers (Direct Storage Access)
     # =========================================================================
 
-    async def _get_state_manager(
-        self, tenant_id: str, session_id: str | None = None
-    ) -> StateManager[SystemDocumentation]:
+    async def _get_state_manager(self) -> StateManager[SystemDocumentation]:
         """Get or create StateManager for system documentation."""
-        state_key = SystemDocumentation.get_state_key(tenant_id, session_id)
+        state_key = f"{ScopeUtils.get_colony_level_scope()}:system_docs"
 
         if state_key not in self._state_managers:
             polymathera = get_polymathera()
@@ -360,7 +317,7 @@ class ConsciousnessCapability(AgentCapability):
         blackboard = await self.get_blackboard()
         blackboard.stream_events_to_queue(
             event_queue,
-            KeyPatternFilter(pattern=f"{self.scope_id}:consciousness:*"),
+            KeyPatternFilter(pattern=ScopeUtils.pattern_key(consciousness=None)),
         )
 
     @override
@@ -380,24 +337,13 @@ class ConsciousnessCapability(AgentCapability):
     # =========================================================================
 
     @action_executor(action_key="consciousness_get_system_docs")
-    async def get_system_documentation(
-        self,
-        tenant_id: str | None = None,
-        session_id: str | None = None,
-    ) -> SystemDocumentation:
+    async def get_system_documentation(self) -> SystemDocumentation:
         """Get system documentation for self-awareness.
-
-        Args:
-            tenant_id: Tenant identifier (uses capability default if None)
-            session_id: Session identifier (uses capability default if None)
 
         Returns:
             System documentation
         """
-        effective_tenant = tenant_id or self.tenant_id
-        effective_session = session_id or self.session_id
-
-        state_manager = await self._get_state_manager(effective_tenant, effective_session)
+        state_manager = await self._get_state_manager()
         async for state in state_manager.read_transaction():
             return state
 
@@ -405,30 +351,20 @@ class ConsciousnessCapability(AgentCapability):
         return SystemDocumentation()
 
     @action_executor(action_key="consciousness_update_system_docs")
-    async def update_system_documentation(
-        self,
-        updates: dict[str, Any],
-        tenant_id: str | None = None,
-        session_id: str | None = None,
-    ) -> None:
+    async def update_system_documentation(self, updates: dict[str, Any]) -> None:
         """Update system documentation.
 
         Args:
             updates: Fields to update
-            tenant_id: Tenant identifier (uses capability default if None)
-            session_id: Session identifier (uses capability default if None)
         """
-        effective_tenant = tenant_id or self.tenant_id
-        effective_session = session_id or self.session_id
-
-        state_manager = await self._get_state_manager(effective_tenant, effective_session)
+        state_manager = await self._get_state_manager()
         async for state in state_manager.write_transaction():
             for key, value in updates.items():
                 if hasattr(state, key):
                     setattr(state, key, value)
             state.last_updated = time.time()
 
-        logger.info(f"Updated system documentation for tenant {effective_tenant}")
+        logger.info(f"Updated system documentation for agent {self.agent.agent_id}")
 
     @action_executor(action_key="consciousness_update_metrics")
     async def update_performance_metrics(
@@ -457,7 +393,7 @@ class ConsciousnessCapability(AgentCapability):
 
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=f"{self.scope_id}:consciousness:metrics:{int(time.time() * 1000)}",
+            key=ScopeUtils.format_key(consciousness="metrics", timestamp=int(time.time() * 1000)),
             value=metrics_entry,
             created_by=self.scope_id,
             tags={"consciousness", "metrics"},
@@ -521,7 +457,7 @@ class ConsciousnessCapability(AgentCapability):
         # Write update event to blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=f"{self.scope_id}:consciousness:self_concept_update:{int(time.time() * 1000)}",
+            key=ScopeUtils.format_key(consciousness="self_concept_update", timestamp=int(time.time() * 1000)),
             value={"updated_fields": list(updates.keys()), "timestamp": time.time()},
             created_by=self.scope_id,
             tags={"consciousness", "self_concept"},

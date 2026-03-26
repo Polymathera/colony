@@ -17,6 +17,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..scope import ScopeAwareResult
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 
 
 class Relationship(BaseModel):
@@ -113,16 +114,7 @@ class Relationship(BaseModel):
             Key pattern for querying relationships
         """
         # Build query pattern
-        if source_id and target_id and relationship_type:
-            return f"relationship:{source_id}:{target_id}:{relationship_type}"
-        elif source_id and relationship_type:
-            return f"relationship:{source_id}:*:{relationship_type}"
-        elif source_id:
-            return f"relationship:{source_id}:*"
-        elif relationship_type:
-            return f"relationship:*:*:{relationship_type}"
-        else:
-            return "relationship:*"
+        return ScopeUtils.pattern_key(relationship=True, source_id=source_id, target_id=target_id, relationship_type=relationship_type)
 
 
 class RelationshipGraph(BaseModel):

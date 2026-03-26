@@ -516,7 +516,6 @@ class LLMClientRequirements(BaseModel):
         requirements = LLMClientRequirements(
             min_context_window=32000,
             model_family="llama",
-            tenant_id="customer-123",
             isolation_level="shared",
             requires_structured_output=True,
         )
@@ -590,17 +589,9 @@ class LLMClientRequirements(BaseModel):
     )
 
     # Multi-tenancy and isolation
-    tenant_id: str = Field(
-        default="default",
-        description="Tenant ID for multi-tenancy isolation"
-    )
-    run_id: str | None = Field(
-        default=None,
-        description="AgentRun ID for finer-grained tracking within tenant"
-    )
-    session_id: str | None = Field(
-        default=None,
-        description="Session ID for session-level tracking and isolation"
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for multi-tenancy and isolation"
     )
     isolation_level: Literal["shared", "isolated"] = Field(
         default="shared",

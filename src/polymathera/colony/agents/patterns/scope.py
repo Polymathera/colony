@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import time
 from typing import Any, Generic, TypeVar
-
 from pydantic import BaseModel, Field
 
 

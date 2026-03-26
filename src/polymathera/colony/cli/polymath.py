@@ -1221,6 +1221,7 @@ async def run_integration_test(
     from polymathera.colony.vcm.sources import BuilInContextPageSourceType, ContextPageSourceFactory
     from polymathera.colony.vcm.models import MmapConfig, MmapResult
     from polymathera.colony.agents import AgentMetadata, AgentHandle, AgentRunEvent
+    from polymathera.colony.agents import ScopeUtils
     from polymathera.colony.system import (
         PolymatheraCluster, PolymatheraClusterConfig,
         get_vcm, get_session_manager,
@@ -1509,7 +1510,7 @@ async def run_integration_test(
 
     with console.status("[cyan]Mapping codebase into VCM pages..."):
         mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
-            scope_id=config.repo_id,
+            scope_id=ScopeUtils.get_colony_level_scope(),
             source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
             config=mmap_config,
             origin_url=config.origin_url,
@@ -1563,8 +1564,8 @@ async def run_integration_test(
         self_concept_config = reg.get("self_concept", {})
         metadata = AgentMetadata(
             role=f"{reg['label']} coordinator",
-            tenant_id=config.tenant_id,
             run_id=config.run_id,
+            session_id=config.session_id,
             goals=[f"Run {reg['label']} on {config.repo_id}"],
             max_iterations=analysis.max_iterations,
             self_concept=AgentSelfConcept(

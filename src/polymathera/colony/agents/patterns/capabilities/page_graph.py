@@ -28,6 +28,7 @@ from overrides import override
 import networkx as nx
 
 from ...base import AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
 from ..actions.policies import action_executor
 
@@ -56,14 +57,14 @@ class PageGraphCapability(AgentCapability):
     The ActionPolicy decides how to use these primitives.
     """
 
-    def __init__(self, agent: Agent, scope_id: str | None = None):
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize page graph capability.
 
         Args:
             agent: Owning agent
-            scope_id: Blackboard scope (defaults to agent_id)
+            scope: Blackboard scope (defaults to COLONY)
         """
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
         self._page_graph: nx.DiGraph | None = None
 
     def get_action_group_description(self) -> str:
@@ -723,7 +724,7 @@ class PageGraphCapability(AgentCapability):
             rel_type = rel_dict.get("relationship_type", "unknown")
             discovered_by = rel_dict.get("discovered_by")
 
-            key = f"relationship:{source}:{target}:{rel_type}"
+            key = ScopeUtils.format_key(relationship=True, source=source, target=target, type=rel_type)
             await blackboard.write(
                 key=key,
                 value=rel_dict,

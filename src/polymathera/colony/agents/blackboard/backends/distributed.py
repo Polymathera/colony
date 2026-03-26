@@ -19,9 +19,8 @@ class DistributedBackend(BlackboardBackend):
     - TTL cleanup happens in query (not on every read)
     """
 
-    def __init__(self, app_name: str, scope: str, scope_id: str):
+    def __init__(self, app_name: str, scope_id: str):
         self.app_name = app_name
-        self.scope = scope
         self.scope_id = scope_id
         self.state_manager: StateManager | None = None
 
@@ -32,11 +31,11 @@ class DistributedBackend(BlackboardBackend):
             data: dict[str, dict[str, Any]] = Field(default_factory=dict)  # key -> entry dict
 
             @classmethod
-            def get_state_key(cls, app_name: str, scope: str, scope_id: str) -> str:
-                return f"polymathera:serving:{app_name}:blackboard:{scope}:{scope_id}"
+            def get_state_key(cls, app_name: str, scope_id: str) -> str:
+                return f"polymathera:serving:{app_name}:blackboard:{scope_id}"
 
         polymathera = get_polymathera()
-        state_key = BlackboardState.get_state_key(self.app_name, self.scope, self.scope_id)
+        state_key = BlackboardState.get_state_key(self.app_name, self.scope_id)
         self.state_manager = await polymathera.get_state_manager(
             state_type=BlackboardState, state_key=state_key
         )

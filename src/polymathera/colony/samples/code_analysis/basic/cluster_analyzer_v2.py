@@ -17,6 +17,7 @@ import logging
 from typing import Any
 from overrides import override
 
+from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.base import Agent, AgentCapability
 from polymathera.colony.agents.models import (
     ActionType,
@@ -54,8 +55,9 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
     """Capability providing cluster analysis action executors.
     """
 
-    def __init__(self, agent = None, scope_id = None, *, blackboard = None):
-        super().__init__(agent, scope_id, blackboard=blackboard)
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY, *, blackboard = None):
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent), blackboard=blackboard)
+        self.blackboard_scope = scope
         self.key_registry: GlobalPageKeyRegistry | None = None
         self.key_generator: HybridKeyGenerator | None = None
         self.query_generator: QueryGenerator | None = None
@@ -118,7 +120,7 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
         # Get or create ResultCapability for cluster-wide result visibility
         self.result_cap: ResultCapability | None = self.agent.get_capability_by_type(ResultCapability)
         if not self.result_cap:
-            self.result_cap = ResultCapability(agent=self.agent, scope_id=self.scope_id)
+            self.result_cap = ResultCapability(agent=self.agent, scope=self.blackboard_scope)
             await self.result_cap.initialize()
             self.agent.add_capability(self.result_cap)
 
@@ -127,7 +129,7 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
         if not self.query_attention_cap:
             self.query_attention_cap = QueryAttentionCapability(
                 agent=self.agent,
-                scope_id=self.scope_id,
+                scope=self.blackboard_scope,
                 query_generator=self.query_generator,
                 routing_policy=self.query_router,
             )
@@ -503,11 +505,10 @@ Output format (JSON):
             parent_id = self.agent.metadata.parent_agent_id
             if parent_id:
                 parent_blackboard = await self.agent.get_blackboard(
-                    scope="shared",
-                    scope_id=parent_id
+                    scope_id=ScopeUtils.get_agent_level_scope(parent_id)
                 )
                 await parent_blackboard.write(
-                    f"{self.agent.agent_id}:cluster_analysis_complete",
+                    ScopeUtils.format_key(cluster_analysis_complete=self.agent.agent_id),
                     {
                         "summary": summary,
                         "cluster_id": self.cluster.cluster_id,
@@ -577,10 +578,10 @@ Output format (JSON):
         try:
             parent_id = self.agent.metadata.parent_agent_id
             if parent_id:
-                blackboard = await self.agent.get_blackboard(
-                    scope="shared", scope_id=parent_id
+                parent_blackboard = await self.agent.get_blackboard(
+                    scope_id=ScopeUtils.get_agent_level_scope(parent_id)
                 )
-                await blackboard.write(key, value)
+                await parent_blackboard.write(key, value)
 
             return ActionResult(success=True, output={"key": key})
 

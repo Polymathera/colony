@@ -74,7 +74,6 @@ class ReputationAgent(Agent):
         agent = ReputationAgent(
             agent_id="reputation_agent_001",
             agent_type="reputation",
-            tenant_id="tenant_001"
         )
         await agent.initialize()
         # Agent now monitors task_completed and game outcome events
@@ -137,13 +136,13 @@ async def spawn_reputation_agent(
         AgentHandle for interacting with the reputation agent
     """
     logger.info(f"Spawning ReputationAgent for {owner.agent_id}...")
-    agent_id = f"reputation_agent_{owner.tenant_id}_{uuid4().hex[:8]}"
+    agent_id = f"reputation_agent_{uuid4().hex[:8]}"
 
-    metadata = AgentMetadata(tenant_id=owner.tenant_id)
+    metadata = AgentMetadata()
     if session_id:
-        metadata.session_id = session_id
+        metadata.syscontext.session_id = session_id
     if run_id:
-        metadata.run_id = run_id
+        metadata.syscontext.run_id = run_id
 
     # TODO: Pass LLMClientRequirements and other deployment parameters to spawn_child_agents
     return await owner.spawn_child_agents(

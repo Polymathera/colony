@@ -82,33 +82,6 @@ class Critique(BaseModel):
         description="When this critique was created"
     )
 
-    # -------------------------------------------------------------------------
-    # Memory System Integration
-    # -------------------------------------------------------------------------
-
-    def get_blackboard_key(self, scope_id: str) -> str:
-        """Generate blackboard key for storing this critique in memory.
-
-        Args:
-            scope_id: Memory scope ID (e.g., "agent:abc123:stm")
-
-        Returns:
-            Key like "agent:abc123:stm:critique:critique_123456789"
-        """
-        return f"{scope_id}:critique:{self.critique_id}"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Pattern for matching all critiques in a scope.
-
-        Args:
-            scope_id: Memory scope ID
-
-        Returns:
-            Pattern like "agent:abc123:stm:critique:*"
-        """
-        return f"{scope_id}:critique:*"
-
 
 
 class Reflection(BaseModel):
@@ -140,33 +113,6 @@ class Reflection(BaseModel):
     reasoning: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: float = Field(default_factory=time.time)
-
-    # -------------------------------------------------------------------------
-    # Memory System Integration
-    # -------------------------------------------------------------------------
-
-    def get_blackboard_key(self, scope_id: str) -> str:
-        """Generate blackboard key for storing this reflection in memory.
-
-        Args:
-            scope_id: Memory scope ID (e.g., "agent:abc123:ltm:semantic")
-
-        Returns:
-            Key like "agent:abc123:ltm:semantic:reflection:reflection_abc12345"
-        """
-        return f"{scope_id}:reflection:{self.reflection_id}"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Pattern for matching all reflections in a scope.
-
-        Args:
-            scope_id: Memory scope ID
-
-        Returns:
-            Pattern like "agent:abc123:ltm:semantic:reflection:*"
-        """
-        return f"{scope_id}:reflection:*"
 
 
 class Hypothesis(BaseModel):

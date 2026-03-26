@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ...models import AgentSuspensionState, QueryContext, ActionPolicyIO
 from ...base import Agent, AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ....utils import setup_logger
 from ..actions.policies import CacheAwareActionPolicy, action_executor
 from .attention import PageQuery, AttentionScore
@@ -75,7 +76,8 @@ class MultiHopSearchCapability(AgentCapability):
         self,
         agent: Agent,
         base_router: PageQueryRoutingPolicy,  # Base query routing policy
-        max_hops: int = 2
+        max_hops: int = 2,
+        scope: BlackboardScope = BlackboardScope.COLONY
     ):
         """Initialize multi-hop search capability.
 
@@ -83,8 +85,9 @@ class MultiHopSearchCapability(AgentCapability):
             agent: Agent using this capability
             base_router: Base query routing policy (single-hop)
             max_hops: Maximum number of hops to explore
+            scope: Scope for the capability
         """
-        super().__init__(agent)
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
         self.base_router = base_router
         self.max_hops = max_hops
         self._visited: set[str] = set()
@@ -121,7 +124,6 @@ class MultiHopSearchCapability(AgentCapability):
         """
         # TODO: We can get either explicit multi-hop search requests or we can snoop
         # on published analysis results to convert them into multi-hop search requests in the action policy.
-        # TODO: Stream code analysis result events? Use `AnalysisResult.get_key_pattern()` when available.
         # TODO: Code analyzers even better separate their output results into different categories (e.g.,
         # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
         # multi-hop search requests can focus on specific categories.
@@ -130,7 +132,7 @@ class MultiHopSearchCapability(AgentCapability):
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(
-                pattern=MultiHopSearchRequest.get_key_pattern()
+                pattern=ScopeUtils.pattern_key(multi_hop_search_request=None)
             )
         )
 

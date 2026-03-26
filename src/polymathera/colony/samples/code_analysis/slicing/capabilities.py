@@ -21,6 +21,7 @@ import logging
 from typing import Any
 from overrides import override
 
+from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -86,7 +87,7 @@ class ProgramSlicingCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.AGENT,
         interprocedural: bool = True,
         max_depth: int = 5,
     ):
@@ -94,11 +95,11 @@ class ProgramSlicingCapability(AgentCapability):
 
         Args:
             agent: Agent using this capability
-            scope_id: Blackboard scope ID. Defaults to agent.agent_id.
+            scope: Blackboard scope for this capability (default: AGENT)
             interprocedural: Whether to follow function calls
             max_depth: Maximum call depth for interprocedural
         """
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:program_slicing:{agent.agent_id}")
         self.interprocedural = interprocedural
         self.max_depth = max_depth
 
@@ -221,7 +222,7 @@ class ProgramSlicingCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=f"{self.scope_id}:result:{request_id}",  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+                key=ScopeUtils.format_key(result=request_id),
                 value=result.model_dump(),
                 agent_id=self.agent.agent_id,
             )
@@ -524,15 +525,15 @@ class SlicingAnalysisCapability(VCMAnalysisCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.COLONY,
     ):
         """Initialize slicing analysis capability.
 
         Args:
             agent: Agent using this capability (coordinator agent)
-            scope_id: Blackboard scope ID
+            scope: Blackboard scope
         """
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope=scope)
         self._dependency_graph: dict[str, list[str]] = {}  # location -> dependent pages
 
     # =========================================================================
@@ -640,8 +641,8 @@ class SlicingAnalysisCapability(VCMAnalysisCapability):
         # Store resolutions in blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            f"{self.scope_id}:interprocedural_resolutions",
-            {
+            key=ScopeUtils.format_key(interprocedural_resolutions=True),
+            value={
                 "resolutions": resolutions,
                 "unresolved": unresolved,
             },
@@ -811,17 +812,17 @@ class SlicingCoordinatorCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.AGENT,
         batching_policy: BatchingPolicy | None = None,
     ):
         """Initialize coordinator capability.
 
         Args:
             agent: Agent using this capability
-            scope_id: Blackboard scope ID
+            scope: Blackboard scope for this capability (default: AGENT)
             batching_policy: Policy for cache-aware batch selection
         """
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:program_slicing:{agent.agent_id}")
         self._worker_handles: dict[str, AgentHandle] = {}
         self._collected_results: list[ScopeAwareResult[ProgramSlice]] = []
         self.max_agents: int = 10
@@ -849,8 +850,8 @@ class SlicingCoordinatorCapability(AgentCapability):
         if not self._agent_pool_cap:
             self._agent_pool_cap = AgentPoolCapability(
                 agent=self.agent,
-                scope_id=self.scope_id,
-                max_agents=self.max_agents,
+                scope=BlackboardScope.COLONY,
+                #max_agents=self.max_agents,
             )
             await self._agent_pool_cap.initialize()
             self.agent.add_capability(self._agent_pool_cap)
@@ -860,7 +861,7 @@ class SlicingCoordinatorCapability(AgentCapability):
         if not self._result_cap:
             self._result_cap = ResultCapability(
                 agent=self.agent,
-                scope_id=self.scope_id,
+                scope=BlackboardScope.COLONY,
             )
             await self._result_cap.initialize()
             self.agent.add_capability(self._result_cap)
@@ -870,7 +871,7 @@ class SlicingCoordinatorCapability(AgentCapability):
         if not self._page_graph_cap:
             self._page_graph_cap = PageGraphCapability(
                 agent=self.agent,
-                scope_id=self.scope_id,
+                scope=BlackboardScope.COLONY,
             )
             await self._page_graph_cap.initialize()
             self.agent.add_capability(self._page_graph_cap)
@@ -976,7 +977,7 @@ class SlicingCoordinatorCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=f"{self.scope_id}:result:{request_id}",  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+                key=ScopeUtils.format_key(result=request_id),
                 value=final_result.model_dump(),
                 agent_id=self.agent.agent_id,
             )

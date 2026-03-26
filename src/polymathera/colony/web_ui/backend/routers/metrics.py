@@ -179,6 +179,7 @@ async def get_metrics_debug(
                 s_info["session_id"] = sid
                 s_info["state"] = str(_get(s, "state", "???"))
                 s_info["tenant_id"] = _get(s, "tenant_id", "???")
+                s_info["colony_id"] = _get(s, "colony_id", "???")
 
                 # Get runs for this session
                 try:

@@ -265,8 +265,10 @@ class AgentRun(BaseModel):
         default_factory=lambda: f"run_{uuid.uuid4().hex[:12]}",
         description="Unique run identifier"
     )
-    session_id: str = Field(..., description="Owning session")
-    tenant_id: str = Field(..., description="Owning tenant")
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="Execution context for this run"
+    )
 
     # Target
     agent_id: str = Field(..., description="The agent that was invoked")
@@ -298,6 +300,41 @@ class AgentRun(BaseModel):
 
     # Parent run (if this is a nested call)
     parent_run_id: str | None = Field(None, description="Parent run if nested")
+
+    def __post_init__(self):
+        # Ensure consistency of total_tokens
+        if self.syscontext.session_id is None:
+            raise ValueError("syscontext must have session_id for AgentRun")
+        if self.syscontext.tenant_id is None:
+            raise ValueError("syscontext must have tenant_id for AgentRun")
+        if self.syscontext.colony_id is None:
+            raise ValueError("syscontext must have colony_id for AgentRun")
+        if self.syscontext.run_id is not None:
+            raise ValueError("syscontext must not have run_id for AgentRun")
+        self.syscontext = serving.ExecutionContext(
+            ring=self.syscontext.ring,
+            tenant_id=self.syscontext.tenant_id,
+            colony_id=self.syscontext.colony_id,
+            session_id=self.syscontext.session_id,
+            trace_id=self.syscontext.trace_id,
+            origin=self.syscontext.origin,
+            run_id=self.run_id,
+        )
+
+    @property
+    def tenant_id(self) -> str:
+        """Get tenant_id from syscontext."""
+        return self.syscontext.tenant_id
+
+    @property
+    def colony_id(self) -> str:
+        """Get colony_id from syscontext."""
+        return self.syscontext.colony_id
+
+    @property
+    def session_id(self) -> str:
+        """Get session_id from syscontext."""
+        return self.syscontext.session_id
 
     def duration_seconds(self) -> float | None:
         """Get run duration in seconds."""
@@ -380,6 +417,32 @@ class Session(BaseModel):
         None,
         description="Default configuration for agent runs in this session"
     )
+
+    @property
+    def tenant_id(self) -> str:
+        """Get tenant_id from syscontext."""
+        return self.syscontext.tenant_id
+
+    @property
+    def colony_id(self) -> str:
+        """Get colony_id from syscontext."""
+        return self.syscontext.colony_id
+
+    def __post_init__(self):
+        if self.syscontext.session_id is not None and self.syscontext.session_id != self.session_id:
+            raise ValueError("syscontext.session_id must match Session.session_id")
+        if self.syscontext.tenant_id is None:
+            raise ValueError("syscontext.tenant_id must be set for Session")
+        if self.syscontext.colony_id is None:
+            raise ValueError("syscontext.colony_id must be set for Session")
+        self.syscontext = serving.ExecutionContext(
+            ring=self.syscontext.ring,
+            tenant_id=self.syscontext.tenant_id,
+            colony_id=self.syscontext.colony_id,
+            session_id=self.session_id,
+            trace_id=self.syscontext.trace_id,
+            origin=self.syscontext.origin,
+        )
 
     def is_active(self) -> bool:
         """Check if session is active."""

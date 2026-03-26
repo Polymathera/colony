@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Awaitable, Literal
 
@@ -173,12 +174,9 @@ class MemoryRecord(BaseModel):
     """Generic container for storing arbitrary data in the memory system.
 
     When the LLM plans a memory store action, it produces plain JSON dicts.
-    The memory system requires data objects to implement ``get_blackboard_key``.
+    The memory system requires data objects to have a ``record_id`` property.
     ``MemoryRecord`` bridges this gap: ``MemoryCapability.store()`` auto-wraps
     raw dicts into a ``MemoryRecord`` so they satisfy the blackboard protocol.
-
-    The blackboard key is deterministic — derived from the sorted tags and a
-    content hash — so identical data+tags always maps to the same key.
 
     Example::
 
@@ -186,10 +184,11 @@ class MemoryRecord(BaseModel):
             content={"task": "impact_analysis", "repo_id": "my-project"},
             tags={"task_context", "config"},
         )
-        key = record.get_blackboard_key("agent-abc:working")
-        # -> "agent-abc:working:record:config+task_context:a1b2c3d4"
     """
-
+    record_id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex[:8],
+        description="Unique ID for this record (default: random hash)",
+    )
     content: dict[str, Any] = Field(
         description="The stored data payload.",
     )
@@ -201,14 +200,6 @@ class MemoryRecord(BaseModel):
         default_factory=time.time,
         description="Timestamp when this record was created.",
     )
-
-    def get_blackboard_key(self, scope_id: str) -> str:
-        """Generate a deterministic blackboard key from tags + content hash."""
-        tag_part = "+".join(sorted(self.tags)) if self.tags else "untagged"
-        # Short content hash for uniqueness within same tags
-        content_bytes = str(sorted(self.content.items())).encode()
-        content_hash = hashlib.sha256(content_bytes).hexdigest()[:8]
-        return f"{scope_id}:record:{tag_part}:{content_hash}"
 
 
 @dataclass
@@ -228,11 +219,11 @@ class MemorySubscription:
         # STM pulls from working memory and sensory memory
         stm = MemoryCapability(
             agent=agent,
-            scope_id=MemoryScope.agent_stm(agent_id),
+            scope_id=MemoryScope.agent_stm(agent),
             ingestion_policy=MemoryIngestPolicy(
                 subscriptions=[
-                    MemorySubscription(source_scope_id=MemoryScope.agent_working(agent_id)),
-                    MemorySubscription(source_scope_id=MemoryScope.agent_sensory(agent_id)),
+                    MemorySubscription(source_scope_id=MemoryScope.agent_working(agent)),
+                    MemorySubscription(source_scope_id=MemoryScope.agent_sensory(agent)),
                 ],
                 transformer=SummarizingTransformer(  # Consolidates ALL inputs
                     agent=agent,
@@ -246,8 +237,11 @@ class MemorySubscription:
     """Blackboard scope to listen to."""
 
     data_type: type[BaseModel] | None = None
-    """Data type to subscribe to (must have get_key_pattern class method).
-    If None, subscribes to all data in the source scope."""
+    """Data type to subscribe to."""
+
+    key_pattern: str | None = None
+    """Optional key pattern to filter events from the source scope.
+    Can be an arbitrary glob pattern (e.g., "agent:working:*") or a specific pattern defined by the data type. If None, subscribes to "*" which matches all data in the source scope."""
 
     filters: list[Callable[["BlackboardEntry"], bool]] | None = None
     """Optional filter predicates to select entries."""
@@ -267,7 +261,7 @@ class MaintenanceConfig:
         ```python
         stm = MemoryCapability(
             agent=agent,
-            scope_id=f"{agent.agent_id}:stm",
+            scope_id=MemoryScope.agent_stm(agent),
             maintenance=MaintenanceConfig(
                 decay_rate=0.01,  # 1% per minute
                 prune_threshold=0.1,  # Remove if relevance < 10%
@@ -341,7 +335,7 @@ class MemoryProducerConfig:
         # Working memory observes action execution
         working_memory = MemoryCapability(
             agent=agent,
-            scope_id=MemoryScope.agent_working(agent.agent_id),
+            scope_id=MemoryScope.agent_working(agent),
             producers=[
                 # Store completed actions (extract from args, not return value)
                 MemoryProducerConfig(
@@ -387,7 +381,7 @@ class MemoryProducerConfig:
     - `result`: The method's return value
     
     Return None to skip storage (e.g., for filtering).
-    If None (default), stores the result directly (must have get_blackboard_key).
+    If None (default), stores the result directly (must have record_id).
     """
 
     priority: int = 1000

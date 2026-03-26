@@ -28,16 +28,14 @@ class EventBus:
     def __init__(
         self,
         app_name: str,
-        scope: str,
         scope_id: str,
         max_queue_size: int = 1000,
         distributed: bool = True,
     ):
         self.app_name = app_name
-        self.scope = scope
         self.scope_id = scope_id
         self.distributed = distributed
-        self.namespace = f"{app_name}:blackboard:events:{scope}:{scope_id}"
+        self.namespace = f"{app_name}:blackboard:events:{scope_id}"
 
         self.listeners: list[tuple[EventFilter | None, Callable[[BlackboardEvent], Awaitable[None]]]] = []
         self.event_queue: asyncio.Queue[BlackboardEvent] = asyncio.Queue(maxsize=max_queue_size)
@@ -163,12 +161,12 @@ class EventBus:
                 )
 
                 # Also write to Redis Stream for consumer group subscribers.
-                # Stream name: bb:events:{scope}:{scope_id}
+                # Stream name: bb:events:{scope_id}
                 # Bounded by MAXLEN ~10000 to prevent unbounded growth.
                 # This enables VCM's BlackboardContextPageSource to use
                 # XREADGROUP for exactly-once delivery across replicas.
                 if self.redis_client:
-                    stream_name = f"bb:events:{self.scope}:{self.scope_id}"
+                    stream_name = f"bb:events:{self.scope_id}"
                     stream_fields = {
                         "event_type": event.event_type or "",
                         "key": event.key or "",
@@ -257,9 +255,9 @@ class EventBus:
         import json as json_mod
 
         # Derive stream name from key pattern and scope.
-        # EventBus writes to: bb:events:{scope}:{scope_id}
-        # The scope/scope_id come from the blackboard's EventBus.
-        stream_name = f"bb:events:{self.scope}:{self.scope_id}"
+        # EventBus writes to: bb:events:{scope_id}
+        # The scope_id comes from the blackboard's EventBus.
+        stream_name = f"bb:events:{self.scope_id}"
 
         if self.redis_client is None:
             logger.warning(

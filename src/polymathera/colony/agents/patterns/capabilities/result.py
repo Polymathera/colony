@@ -29,6 +29,7 @@ from typing import Any, TYPE_CHECKING
 from overrides import override
 
 from ...base import AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
 from ..actions.policies import action_executor
 
@@ -50,18 +51,14 @@ class ResultCapability(AgentCapability):
     capability implementations.
     """
 
-    # Blackboard key patterns
-    PARTIAL_RESULT_KEY = "results:partial:{tenant_id}:{result_id}"
-    RESULTS_INDEX_KEY = "results:index:{tenant_id}"
-
-    def __init__(self, agent: Agent, scope_id: str | None = None):
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize result capability.
 
         Args:
             agent: Owning agent
-            scope_id: Blackboard scope (defaults to agent_id)
+            scope: Blackboard scope (defaults to COLONY)
         """
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
 
     def get_action_group_description(self) -> str:
         return (
@@ -74,14 +71,11 @@ class ResultCapability(AgentCapability):
 
     def _get_partial_key(self, result_id: str) -> str:
         """Get blackboard key for a partial result."""
-        return self.PARTIAL_RESULT_KEY.format(
-            tenant_id=self.agent.tenant_id,
-            result_id=result_id,
-        )
+        return ScopeUtils.format_key(results="partial", result_id=result_id)
 
     def _get_index_key(self) -> str:
         """Get blackboard key for results index."""
-        return self.RESULTS_INDEX_KEY.format(tenant_id=self.agent.tenant_id)
+        return ScopeUtils.format_key(results="index")
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:

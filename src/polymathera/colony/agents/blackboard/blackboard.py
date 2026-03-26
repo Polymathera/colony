@@ -27,7 +27,6 @@ from .types import (
     AccessPolicy,
     BlackboardEntry,
     BlackboardEvent,
-    BlackboardScope,
     EventFilter,
     EventTypeFilter,
     CombinationFilter,
@@ -196,7 +195,6 @@ class EnhancedBlackboard:
         # Create blackboard with custom policies
         board = EnhancedBlackboard(
             app_name="my-app",
-            scope=BlackboardScope.SHARED,
             scope_id="team-1",
             access_policy=MyAccessPolicy(),
             validation_policy=SchemaValidator(MySchema),
@@ -235,7 +233,6 @@ class EnhancedBlackboard:
     def __init__(
         self,
         app_name: str,
-        scope: BlackboardScope = BlackboardScope.LOCAL,
         scope_id: str = "default",
         # Policy customization points
         access_policy: AccessPolicy | None = None,
@@ -254,7 +251,6 @@ class EnhancedBlackboard:
 
         Args:
             app_name: Application name for namespacing
-            scope: Visibility scope (LOCAL, SHARED, GLOBAL)
             scope_id: Scope identifier for SHARED/GLOBAL scopes
             access_policy: Policy for access control
             eviction_policy: Policy for evicting entries when memory is constrained
@@ -266,7 +262,6 @@ class EnhancedBlackboard:
             max_entries: Maximum number of entries (None = unlimited)
         """
         self.app_name = app_name
-        self.scope = scope
         self.scope_id = scope_id
 
         # Policies (use defaults if not provided)
@@ -283,10 +278,9 @@ class EnhancedBlackboard:
         self.event_bus = (
             EventBus(
                 app_name=app_name,
-                scope=scope.value,
                 scope_id=scope_id,
                 max_queue_size=max_event_queue_size,
-                distributed=(scope != BlackboardScope.LOCAL),
+                distributed=(backend_type != "memory"),
             )
             if enable_events
             else None
@@ -307,23 +301,19 @@ class EnhancedBlackboard:
         if self.backend is None:
             # Determine backend type
             if self.backend_type is None:
-                # Auto-select based on scope
-                if self.scope == BlackboardScope.LOCAL:
-                    self.backend_type = "memory"
-                else:
-                    # Use configured default from AgentSystemDeployment
-                    self.backend_type = await self._get_configured_backend_type()
+                # Use configured default from AgentSystemDeployment
+                self.backend_type = await self._get_blackboard_backend_type()
 
             # Create backend
             if self.backend_type == "memory":
                 self.backend = InMemoryBackend()
             elif self.backend_type == "distributed":
                 self.backend = DistributedBackend(
-                    app_name=self.app_name, scope=self.scope.value, scope_id=self.scope_id
+                    app_name=self.app_name, scope_id=self.scope_id
                 )
             elif self.backend_type == "redis":
                 self.backend = RedisBackend(
-                    app_name=self.app_name, scope=self.scope.value, scope_id=self.scope_id
+                    app_name=self.app_name, scope_id=self.scope_id
                 )
             else:
                 raise ValueError(f"Unknown backend type: {self.backend_type}")
@@ -336,14 +326,14 @@ class EnhancedBlackboard:
 
         self._initialized = True
         logger.info(
-            f"Initialized EnhancedBlackboard (app={self.app_name}, scope={self.scope}, "
+            f"Initialized EnhancedBlackboard (app={self.app_name}, "
             f"scope_id={self.scope_id}, backend={type(self.backend).__name__})"
         )
 
         # Register scope with the agent system (best-effort, non-blocking)
         await self._register_scope()
 
-    async def _get_configured_backend_type(self) -> str:
+    async def _get_blackboard_backend_type(self) -> str:
         """Get the configured default blackboard backend type from AgentSystemDeployment."""
         try:
             from ...system import get_agent_system
@@ -354,19 +344,25 @@ class EnhancedBlackboard:
 
     async def _register_scope(self) -> None:
         """Register this blackboard scope with the agent system for discovery."""
-        if self.scope == BlackboardScope.LOCAL:
+        if self.backend_type == "memory":
             return  # LOCAL blackboards are not discoverable
         try:
             from ...system import get_agent_system
             handle = get_agent_system(self.app_name)
             await handle.register_blackboard_scope(
-                scope=self.scope.value,
                 scope_id=self.scope_id,
                 backend_type=self.backend_type,
             )
         except Exception as e:
-            logger.debug("Failed to register blackboard scope %s/%s: %s",
-                         self.scope.value, self.scope_id, e)
+            logger.debug(f"Failed to register blackboard scope {self.scope_id}: {e}")
+
+    def parse_key(self, key: str) -> dict[str, str]:
+        from ..scopes import ScopeUtils
+        return ScopeUtils.parse_key(self.scope_id, key)
+
+    def parse_key_part(self, key: str, part: str) -> str:
+        from ..scopes import ScopeUtils
+        return ScopeUtils.parse_key_part(self.scope_id, key, part)
 
     async def write(
         self,
@@ -924,7 +920,6 @@ class EnhancedBlackboard:
 
         # Add configuration info
         stats["app_name"] = self.app_name
-        stats["scope"] = self.scope.value
         stats["scope_id"] = self.scope_id
         stats["max_entries"] = self.max_entries
 

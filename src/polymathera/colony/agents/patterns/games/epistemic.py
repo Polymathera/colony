@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 
 from ...base import Agent
 from ...blackboard.blackboard import EnhancedBlackboard
-
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 
 class BeliefStrength(str, Enum):
     """Strength of belief in a proposition."""
@@ -356,7 +356,6 @@ class EpistemicLayer:
     - GameProtocolCapability.apply_move
     It is not even derived from GameProtocolCapability yet.
 
-
     Provides:
     - Proposition tracking
     - Belief updates
@@ -364,29 +363,30 @@ class EpistemicLayer:
     - Intention management
     """
 
-    def __init__(self, agent: Agent):
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize epistemic layer.
 
         Args:
             agent: Owning agent
+            scope: Blackboard scope (defaults to COLONY)
         """
         self.agent = agent
-        self.namespace = f"{agent.tenant_id}:epistemic"
+        self.scope = scope
         self.blackboard: EnhancedBlackboard | None = None
 
     async def initialize(self) -> None:
         self.blackboard = await self.agent.get_blackboard(
-            scope="shared", scope_id=self.namespace
+            scope_id = f"{get_scope_prefix(self.scope, self.agent)}:epistemic"
         )
 
     def _get_proposition_key(self, proposition_id: str) -> str:
-        return f"{self.namespace}:proposition:{proposition_id}"
+        return ScopeUtils.format_key(proposition=proposition_id)
 
     def _get_intention_key(self, intention_id: str) -> str:
-        return f"{self.namespace}:intention:{intention_id}"
+        return ScopeUtils.format_key(intention=intention_id)
 
     def _get_joint_intention_key(self, intention_id: str) -> str:
-        return f"{self.namespace}:joint_intention:{intention_id}"
+        return ScopeUtils.format_key(joint_intention=intention_id)
 
     async def record_proposition(
         self,

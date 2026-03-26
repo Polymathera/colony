@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ...models import AgentSuspensionState, QueryContext, ActionPolicyIO
 from ...base import Agent, AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ....utils import setup_logger
 from ..actions.policies import CacheAwareActionPolicy, action_executor
 from .incremental import PageQuery
@@ -90,6 +91,7 @@ class QueryDrivenExplorationCapability(AgentCapability):
         agent: Agent,
         query_generator: QueryGenerator,  # Generates queries from findings
         query_router: PageQueryRoutingPolicy,     # Routes queries to contexts
+        scope: BlackboardScope = BlackboardScope.COLONY
     ):
         """Initialize explorer.
 
@@ -98,7 +100,7 @@ class QueryDrivenExplorationCapability(AgentCapability):
             query_generator: Component that generates queries from findings
             query_router: Component that routes queries to relevant contexts
         """
-        super().__init__(agent)
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
         self.query_generator = query_generator
         self.query_router = query_router
         self._all_findings: list[Any] = []
@@ -136,7 +138,6 @@ class QueryDrivenExplorationCapability(AgentCapability):
         """
         # TODO: We can get either explicit exploration requests or we can snoop
         # on published analysis results to convert them into exploration requests in the action policy.
-        # TODO: Stream code analysis result events? Use `AnalysisResult.get_key_pattern()` when available.
         # TODO: Code analyzers even better separate their output results into different categories (e.g.,
         # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
         # exploration requests can focus on specific categories.
@@ -145,7 +146,7 @@ class QueryDrivenExplorationCapability(AgentCapability):
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(
-                pattern=ExplorationRequest.get_key_pattern()
+                pattern=ScopeUtils.pattern_key(exploration_request=None)
             )
         )
 

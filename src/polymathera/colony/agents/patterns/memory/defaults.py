@@ -38,7 +38,6 @@ import logging
 from typing import Any
 
 from ...base import Agent, AgentCapability
-from .scopes import MemoryScope
 from .types import (
     MaintenanceConfig,
     MemorySubscription,
@@ -109,6 +108,8 @@ async def create_default_memory_hierarchy(
     Returns:
         Dict of capability_name -> capability instance
     """
+    from ...scopes import MemoryScope
+
     capabilities: dict[str, AgentCapability] = {}
     agent_id = agent.agent_id
 
@@ -125,7 +126,7 @@ async def create_default_memory_hierarchy(
     if include_sensory:
         sensory = MemoryCapability(
             agent=agent,
-            scope_id=MemoryScope.agent_sensory(agent_id),
+            scope_id=MemoryScope.agent_sensory(agent),
             capability_key="sensory",
             storage_backend_factory=storage_factory,
             ttl_seconds=10,  # Very short retention
@@ -154,12 +155,12 @@ async def create_default_memory_hierarchy(
     working_subscriptions = []
     if include_sensory:
         working_subscriptions.append(
-            MemorySubscription(source_scope_id=MemoryScope.agent_sensory(agent_id)),
+            MemorySubscription(source_scope_id=MemoryScope.agent_sensory(agent)),
         )
 
     working = WorkingMemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_working(agent_id),
+        scope_id=MemoryScope.agent_working(agent),
         capability_key="working",
         storage_backend_factory=storage_factory,
         max_tokens=working_max_tokens,
@@ -213,7 +214,7 @@ async def create_default_memory_hierarchy(
     # Uses summarizing transformer to consolidate incoming working memory items
     stm = MemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_stm(agent_id),
+        scope_id=MemoryScope.agent_stm(agent),
         capability_key="stm",
         storage_backend_factory=storage_factory,
         ttl_seconds=stm_ttl,
@@ -222,7 +223,7 @@ async def create_default_memory_hierarchy(
         ingestion_policy=MemoryIngestPolicy(
             # Pull model: subscribe to working memory
             subscriptions=[
-                MemorySubscription(source_scope_id=MemoryScope.agent_working(agent_id)),
+                MemorySubscription(source_scope_id=MemoryScope.agent_working(agent)),
             ],
             trigger=CompositeMemoryIngestPolicyTrigger(
                 policies=[
@@ -274,7 +275,7 @@ async def create_default_memory_hierarchy(
     # Filters for episodic content (events, actions, game states) and consolidates
     ltm_episodic = MemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_ltm_episodic(agent_id),
+        scope_id=MemoryScope.agent_ltm_episodic(agent),
         capability_key="ltm:episodic",
         storage_backend_factory=storage_factory,
         ttl_seconds=ltm_ttl,
@@ -282,7 +283,7 @@ async def create_default_memory_hierarchy(
         ingestion_policy=MemoryIngestPolicy(
             # Pull model: subscribe to STM
             subscriptions=[
-                MemorySubscription(source_scope_id=MemoryScope.agent_stm(agent_id)),
+                MemorySubscription(source_scope_id=MemoryScope.agent_stm(agent)),
             ],
             trigger=CompositeMemoryIngestPolicyTrigger(
                 policies=[
@@ -335,7 +336,7 @@ async def create_default_memory_hierarchy(
     # Filters for semantic content (reflections, knowledge, patterns) and consolidates
     ltm_semantic = MemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_ltm_semantic(agent_id),
+        scope_id=MemoryScope.agent_ltm_semantic(agent),
         capability_key="ltm:semantic",
         storage_backend_factory=storage_factory,
         ttl_seconds=ltm_ttl,
@@ -343,7 +344,7 @@ async def create_default_memory_hierarchy(
         ingestion_policy=MemoryIngestPolicy(
             # Pull model: subscribe to STM
             subscriptions=[
-                MemorySubscription(source_scope_id=MemoryScope.agent_stm(agent_id)),
+                MemorySubscription(source_scope_id=MemoryScope.agent_stm(agent)),
             ],
             trigger=CompositeMemoryIngestPolicyTrigger(
                 policies=[
@@ -398,7 +399,7 @@ async def create_default_memory_hierarchy(
     # Both successes (what to do) and failures (what to avoid) contribute to skill learning
     ltm_procedural = MemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_ltm_procedural(agent_id),
+        scope_id=MemoryScope.agent_ltm_procedural(agent),
         capability_key="ltm:procedural",
         storage_backend_factory=storage_factory,
         ttl_seconds=ltm_ttl,
@@ -406,7 +407,7 @@ async def create_default_memory_hierarchy(
         ingestion_policy=MemoryIngestPolicy(
             # Pull model: subscribe to episodic memory to learn from ALL experiences
             subscriptions=[
-                MemorySubscription(source_scope_id=MemoryScope.agent_ltm_episodic(agent_id)),
+                MemorySubscription(source_scope_id=MemoryScope.agent_ltm_episodic(agent)),
             ],
             trigger=CompositeMemoryIngestPolicyTrigger(
                 policies=[
@@ -467,7 +468,7 @@ async def create_default_memory_hierarchy(
 
     lifecycle_hooks = MemoryLifecycleHooks(
         agent=agent,
-        stm_scope_id=MemoryScope.agent_stm(agent_id),
+        stm_scope_id=MemoryScope.agent_stm(agent),
     )
     capabilities["lifecycle_hooks"] = lifecycle_hooks
 
@@ -513,6 +514,8 @@ async def create_minimal_memory_hierarchy(
     Returns:
         Dict of capability_name -> capability instance
     """
+    from ...scopes import MemoryScope
+
     capabilities: dict[str, AgentCapability] = {}
     agent_id = agent.agent_id
 
@@ -522,7 +525,7 @@ async def create_minimal_memory_hierarchy(
     # Working memory
     working = WorkingMemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_working(agent_id),
+        scope_id=MemoryScope.agent_working(agent),
         capability_key="working",
         storage_backend_factory=storage_factory,
         max_tokens=4000,
@@ -532,7 +535,7 @@ async def create_minimal_memory_hierarchy(
     # Short-term memory - subscribes to working memory
     stm = MemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_stm(agent_id),
+        scope_id=MemoryScope.agent_stm(agent),
         capability_key="stm",
         storage_backend_factory=storage_factory,
         ttl_seconds=1800,  # 30 minutes
@@ -540,7 +543,7 @@ async def create_minimal_memory_hierarchy(
         # Trigger on threshold or periodic
         ingestion_policy=MemoryIngestPolicy(
             subscriptions=[
-                MemorySubscription(source_scope_id=MemoryScope.agent_working(agent_id)),
+                MemorySubscription(source_scope_id=MemoryScope.agent_working(agent)),
             ],
             trigger=ThresholdMemoryIngestPolicyTrigger(
                 min_items=3,
@@ -576,7 +579,6 @@ async def create_minimal_memory_hierarchy(
 
 async def create_session_memory(
     agent: Agent,
-    tenant_id: str,
     *,
     include_cross_session: bool = False,
     cross_session_weight: float = 0.3,
@@ -595,7 +597,6 @@ async def create_session_memory(
 
     Args:
         `agent`: The agent to create session memory for
-        `tenant_id`: Tenant this session memory serves
         `include_cross_session`: Whether to include cross-session memories
             in retrieval (with lower weight). Default: False.
         `cross_session_weight`: Weight for cross-session entries when
@@ -615,7 +616,6 @@ async def create_session_memory(
         # Create session memory for tenant
         session_memory = await create_session_memory(
             agent=agent,
-            tenant_id="my-tenant",
         )
 
         # Use within session context
@@ -629,7 +629,6 @@ async def create_session_memory(
     """
     session_memory = SessionMemoryCapability(
         agent=agent,
-        tenant_id=tenant_id,
         include_cross_session=include_cross_session,
         cross_session_weight=cross_session_weight,
         ttl_seconds=ttl_seconds,
@@ -648,7 +647,7 @@ async def create_session_memory(
         agent.add_capability(session_memory)
 
     logger.info(
-        f"Created session memory for tenant {tenant_id} on agent {agent.agent_id}"
+        f"Created session memory for context {agent.syscontext.to_dict()} on agent {agent.agent_id}"
     )
 
     return session_memory

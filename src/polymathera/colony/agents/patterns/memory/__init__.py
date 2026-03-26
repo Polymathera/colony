@@ -6,7 +6,6 @@ This module provides the unified `MemoryCapability` class for managing agent mem
 - `WorkingMemoryCapability`: Specialized for token-bounded working memory
 - `AgentContextEngine`: Unified interface for cross-level memory operations
 - `MemoryLifecycleHooks`: Lifecycle hooks for task/shutdown integration
-- `MemoryScope`: Standardized scope ID generation
 - `MemoryManagementAgent`: System administrator agent for memory lifecycle
 - Memory management capabilities for recycling and collective memory
 
@@ -35,10 +34,8 @@ Usage:
     ```python
     #######################################################
 
-    from polymathera.colony.agents.patterns.memory import (
-        create_default_memory_hierarchy,
-        MemoryScope,
-    )
+    from polymathera.colony.agents.patterns.memory import create_default_memory_hierarchy
+    from polymathera.colony.agents MemoryScope
 
     # Create standard memory hierarchy (recommended)
     capabilities = await create_default_memory_hierarchy(agent)
@@ -60,7 +57,7 @@ Usage:
     # Working memory with hook-based capture (no transformer)
     working = WorkingMemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_working(agent_id),
+        scope_id=MemoryScope.agent_working(agent),
         max_tokens=8000,
         producers=[
             MemoryProducerConfig(
@@ -73,10 +70,10 @@ Usage:
     # STM subscribes to working memory, consolidates ALL inputs
     stm = MemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_stm(agent_id),
+        scope_id=MemoryScope.agent_stm(agent),
         ingestion_policy=MemoryIngestPolicy(
             subscriptions=[
-                MemorySubscription(source_scope_id=MemoryScope.agent_working(agent_id)),
+                MemorySubscription(source_scope_id=MemoryScope.agent_working(agent)),
             ],
             trigger=PeriodicMemoryIngestPolicyTrigger(
                 interval_seconds=120.0,  # Every 2 minutes
@@ -92,9 +89,9 @@ Usage:
     # LTM subscribes to STM
     ltm = MemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_ltm_episodic(agent_id),
+        scope_id=MemoryScope.agent_ltm_episodic(agent),
         subscriptions=[
-            MemorySubscription(source_scope_id=MemoryScope.agent_stm(agent_id)),
+            MemorySubscription(source_scope_id=MemoryScope.agent_stm(agent)),
         ],
         ingestion_transformer=EpisodicConsolidationTransformer(),
     )
@@ -153,9 +150,6 @@ from .types import (
     MemoryValidationIssue,
     CapabilityMemoryRequirements,
 )
-
-# Scope ID generation
-from .scopes import MemoryScope
 
 # Unified memory capability (primary)
 from .capability import MemoryCapability
@@ -244,8 +238,6 @@ __all__ = [
     "extract_terminal_game_state",
     "extract_reflection",
     "extract_critique",
-    # Scope ID generation
-    "MemoryScope",
     # Unified memory capability (primary)
     "MemoryCapability",
     # Specialized capabilities

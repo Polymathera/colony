@@ -11,6 +11,7 @@ This module provides the complete agent infrastructure:
 - Rich action tracking with reasoning traces
 - Blackboard working memory
 - Standalone agent deployment
+- `MemoryScope` and `ScopeUtils`: Standardized scope ID generation
 
 Example:
     ```python
@@ -50,6 +51,14 @@ from .base import (
     AgentRunEvent,
 )
 
+# Scope ID generation
+from .scopes import (
+    MemoryScope,
+    ScopeUtils,
+    BlackboardScope,
+    get_scope_prefix,
+)
+
 # Agent system coordination
 from .system import AgentSystemDeployment, AgentSystemState
 
@@ -58,7 +67,6 @@ from .config import AgentSystemConfig
 # Blackboard (new enhanced implementation)
 from .blackboard import (
     EnhancedBlackboard,
-    BlackboardScope,
     KeyPatternFilter,
     EventTypeFilter,
     AgentFilter,
@@ -135,7 +143,6 @@ __all__ = [
     # Blackboard
     "Blackboard",
     "EnhancedBlackboard",
-    "BlackboardScope",
     "KeyPatternFilter",
     "EventTypeFilter",
     "AgentFilter",
@@ -181,4 +188,9 @@ __all__ = [
     "AgentProfile",
     "AgentSelfConcept",
     "AgentSkill",
+    # Scope ID generation
+    "MemoryScope",
+    "ScopeUtils",
+    "BlackboardScope",
+    "get_scope_prefix",
 ]

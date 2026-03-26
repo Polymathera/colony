@@ -33,6 +33,7 @@ from typing import Any, TYPE_CHECKING
 from overrides import override
 
 from ...base import AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..attention.attention import (
     PageQuery,
     AttentionScore,
@@ -72,7 +73,7 @@ class QueryAttentionCapability(AgentCapability):
         query_generator: QueryGenerator | None = None,
         routing_policy: PageQueryRoutingPolicy | None = None,
         attention_mechanism: AttentionScoringMechanism | None = None,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.AGENT,
     ):
         """Initialize query attention capability.
 
@@ -81,9 +82,9 @@ class QueryAttentionCapability(AgentCapability):
             query_generator: Generator for creating queries from context
             routing_policy: Policy for routing queries to pages
             attention_mechanism: Mechanism for scoring query-key attention
-            scope_id: Blackboard scope (defaults to agent_id)
+            scope: Blackboard scope (defaults to AGENT)
         """
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
         self.query_generator = query_generator
         self.routing_policy = routing_policy
         self.attention_mechanism = attention_mechanism

@@ -97,12 +97,6 @@ async def test_plan_methods():
     assert pending[0].action_id == "a4"
 
 
-def test_plan_key():
-    """Test Plan.get_plan_key static method."""
-    key = ActionPlan.get_plan_key("agent_123")
-    assert key == "agent:agent_123:action_plan"
-
-
 def test_action_creation():
     """Test creating an Action."""
     action = Action(

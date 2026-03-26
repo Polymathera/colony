@@ -6,6 +6,7 @@ import logging
 from typing import Any
 from overrides import override
 
+from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -63,7 +64,7 @@ class ComplianceAnalysisCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.AGENT,
         requirements: list[ComplianceRequirement] | None = None,
         check_licenses: bool = True,
         check_security: bool = True
@@ -72,12 +73,12 @@ class ComplianceAnalysisCapability(AgentCapability):
 
         Args:
             agent: Agent instance for LLM inference via VCM
-            scope_id: Scope identifier for this capability
+            scope: Scope identifier for this capability
             requirements: Specific requirements to check
             check_licenses: Whether to check license compliance
             check_security: Whether to check security compliance
         """
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:compliance_analysis:{agent.agent_id}")
         self.requirements = requirements or self._default_requirements()
         self.check_licenses = check_licenses
         self.check_security = check_security
@@ -112,7 +113,7 @@ class ComplianceAnalysisCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for ComplianceAnalysisCapability")
         pass
 
-    @event_handler(pattern="{scope_id}:request:*")
+    @event_handler(pattern=ScopeUtils.pattern_key(request=None))
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -246,7 +247,7 @@ class ComplianceAnalysisCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=f"{self.scope_id}:result:{request_id}",  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+                key=ScopeUtils.format_key(result=request_id),
                 value=merged.model_dump(),
             )
 
@@ -1106,15 +1107,15 @@ class ComplianceVCMCapability(VCMAnalysisCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.COLONY,
     ):
         """Initialize compliance VCM capability.
 
         Args:
             agent: Agent using this capability (coordinator agent)
-            scope_id: Blackboard scope ID
+            scope: BlackboardScope = BlackboardScope.COLONY,
         """
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope=scope)
         self._obligation_graph: ObligationGraph | None = None
 
     async def initialize(self) -> None:
@@ -1208,7 +1209,7 @@ class ComplianceVCMCapability(VCMAnalysisCapability):
                 obligation_id = f"fix_{violation.get('location', page_id)}"
                 blackboard = await self.get_blackboard()
                 await blackboard.write(
-                    f"{self.scope_id}:obligation:{obligation_id}",
+                    ScopeUtils.format_key(obligation=obligation_id),
                     {
                         "obligation_id": obligation_id,
                         "description": f"Fix {violation.get('type', 'compliance')} violation: {violation.get('description', '')}",
@@ -1413,7 +1414,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.COLONY,
         max_agents: int = 10,
         batching_policy: BatchingPolicy | None = None,
     ):
@@ -1421,11 +1422,11 @@ class ComplianceCoordinatorCapability(AgentCapability):
 
         Args:
             agent: Agent instance
-            scope_id: Scope identifier
+            scope: Scope identifier
             max_agents: Maximum page agents
             batching_policy: Policy for cache-aware batch selection
         """
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:compliance_coordinator:{agent.agent_id}")
         self.max_agents = max_agents
         self._page_agents: dict[str, str] = {}  # page_id -> agent_id
         self._worker_handles: dict[str, Any] = {}  # page_id -> AgentHandle
@@ -1454,8 +1455,8 @@ class ComplianceCoordinatorCapability(AgentCapability):
         if not self._agent_pool_cap:
             self._agent_pool_cap = AgentPoolCapability(
                 agent=self.agent,
-                scope_id=self.scope_id,
-                max_agents=self.max_agents,
+                scope=BlackboardScope.COLONY,
+                #max_agents=self.max_agents,
             )
             await self._agent_pool_cap.initialize()
             self.agent.add_capability(self._agent_pool_cap)
@@ -1465,7 +1466,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
         if not self._result_cap:
             self._result_cap = ResultCapability(
                 agent=self.agent,
-                scope_id=self.scope_id,
+                scope=BlackboardScope.COLONY,
             )
             await self._result_cap.initialize()
             self.agent.add_capability(self._result_cap)
@@ -1475,7 +1476,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
         if not self._page_graph_cap:
             self._page_graph_cap = PageGraphCapability(
                 agent=self.agent,
-                scope_id=self.scope_id,
+                scope=BlackboardScope.COLONY,
             )
             await self._page_graph_cap.initialize()
             self.agent.add_capability(self._page_graph_cap)
@@ -1711,7 +1712,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
         # Write result to blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=f"{self.scope_id}:result:{request_id}",  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+            key=ScopeUtils.format_key(result=request_id),  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
             value=merged_result.model_dump(),
         )
 

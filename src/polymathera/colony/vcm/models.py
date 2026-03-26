@@ -184,8 +184,8 @@ class VirtualContextPage(BaseModel):
             )
 
         # Ensure tenant_id is in allowed_tenant_ids
-        if self.tenant_id and self.tenant_id not in self.allowed_tenant_ids:
-            self.allowed_tenant_ids.add(self.tenant_id) # TODO: Should we raise an error instead?
+        if self.syscontext.tenant_id and self.syscontext.tenant_id not in self.allowed_tenant_ids:
+            self.allowed_tenant_ids.add(self.syscontext.tenant_id) # TODO: Should we raise an error instead?
 
     def can_access(self, tenant_id: str) -> bool:
         """Check if a tenant can access this page.

@@ -20,7 +20,6 @@ Programming Model (AgentHandle Pattern):
 # Spawn objective guard agent with handle
 handle = (await owner.spawn_child_agents(
     blueprints=[ObjectiveGuardAgent.bind(
-        tenant_id=owner.tenant_id,
         capability_blueprints=[ObjectiveGuardCapability.bind()],
     )],
     return_handles=True,
@@ -147,14 +146,14 @@ async def spawn_objective_guard_agent(
     Returns:
         AgentHandle for interacting with the objective guard agent
     """
-    agent_id = f"objective_guard_{owner.tenant_id}_{uuid4().hex[:8]}"
+    agent_id = f"objective_guard_{uuid4().hex[:8]}"
     logger.info(f"Spawning ObjectiveGuardAgent for {owner.agent_id}...")
 
-    metadata = AgentMetadata(tenant_id=owner.tenant_id)
+    metadata = AgentMetadata()
     if session_id:
-        metadata.session_id = session_id
+        metadata.syscontext.session_id = session_id
     if run_id:
-        metadata.run_id = run_id
+        metadata.syscontext.run_id = run_id
 
     # TODO: Pass LLMClientRequirements and other deployment parameters to spawn_child_agents
     return await owner.spawn_child_agents(

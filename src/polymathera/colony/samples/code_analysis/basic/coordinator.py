@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 import time
 
 from polymathera.colony.agents.base import Agent, AgentState, AgentCapability
+from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope
 from polymathera.colony.agents.models import (
     Action,
     ActionResult,
@@ -121,14 +122,14 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         # Write critique to blackboard for child to see
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            f"{agent_id}:critique",
+            ScopeUtils.format_key(critique=agent_id),
             critique.model_dump(),
             created_by=self.agent.agent_id
         )
 
         if critique.requires_revision:
             await blackboard.write(
-                f"{agent_id}:revision_request",
+                ScopeUtils.format_key(revision_request=agent_id),
                 {
                     "critique": critique.model_dump(),
                     "timestamp": time.time()
@@ -163,7 +164,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
             )
         return None
 
-    @event_handler(pattern="error:*") # TODO: Use a more specific pattern to avoid conflicts (e.g., include scope_id or use a structured event type)
+    @event_handler(pattern=ScopeUtils.pattern_key(error=None)) # TODO: Use a more specific pattern to avoid conflicts (e.g., include scope_id or use a structured event type)
     async def on_child_error(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult | None:
         agent_id = event.key.split(":")[1]
         role = None
@@ -189,7 +190,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         if retry_count < 1:
             logger.info(f"Retrying child {agent_id}")
             blackboard = await self.get_blackboard()
-            await blackboard.delete(f"error:{agent_id}")
+            await blackboard.delete(ScopeUtils.format_key(error=agent_id))
 
             # TODO: In future, use LLM inference to decide best retry strategy
             # For now, just log and let the child continue
@@ -501,7 +502,7 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
         # Initialize agent pool capability for lifecycle management
         self.agent_pool_cap: AgentPoolCapability | None = self.agent.get_capability_by_type(AgentPoolCapability)
         if not self.agent_pool_cap:
-            self.agent_pool_cap = AgentPoolCapability(agent=self.agent, scope_id=self.scope_id)
+            self.agent_pool_cap = AgentPoolCapability(agent=self.agent, scope=BlackboardScope.COLONY)
             await self.agent_pool_cap.initialize()
             self.agent.add_capability(self.agent_pool_cap)
 
@@ -513,14 +514,14 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
         # Initialize result capability for cluster-wide result visibility
         self.result_cap: ResultCapability | None = self.agent.get_capability_by_type(ResultCapability)
         if not self.result_cap:
-            self.result_cap = ResultCapability(agent=self.agent, scope_id=self.scope_id)
+            self.result_cap = ResultCapability(agent=self.agent, scope=BlackboardScope.COLONY)
             await self.result_cap.initialize()
             self.agent.add_capability(self.result_cap)
 
         # Initialize page graph capability for standardized graph operations
         self.page_graph_cap: PageGraphCapability | None = self.agent.get_capability_by_type(PageGraphCapability)
         if not self.page_graph_cap:
-            self.page_graph_cap = PageGraphCapability(agent=self.agent, scope_id=self.scope_id)
+            self.page_graph_cap = PageGraphCapability(agent=self.agent, scope=BlackboardScope.COLONY)
             await self.page_graph_cap.initialize()
             self.agent.add_capability(self.page_graph_cap)
 
@@ -610,7 +611,6 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
                 available_pages=all_page_ids,
                 run_context=RunContext(
                     analysis_goal=self.agent.metadata.parameters.get("goal", "code analysis"),
-                    run_id=self.agent.metadata.run_id,
                 )
             )
 

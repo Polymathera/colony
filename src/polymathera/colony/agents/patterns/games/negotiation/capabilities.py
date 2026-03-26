@@ -82,6 +82,7 @@ from ....models import (
     Action,
     PolicyREPL,
 )
+from ....scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...actions.policies import action_executor
 from ....blackboard import BlackboardEvent
 
@@ -382,6 +383,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
     def __init__(
         self,
         agent: Any,
+        scope: BlackboardScope = BlackboardScope.COLONY,
         game_id: str | None = None,
         role: str | None = None,
         strategy: NegotiationStrategy = NegotiationStrategy.COMPROMISING,
@@ -395,6 +397,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
 
         Args:
             agent: Owning agent
+            scope: Blackboard scope for game state (default: colony-level shared blackboard)
             game_id: Game instance ID. All participants should use the same game_id
                 to share the same blackboard namespace for coordination.
             role: Agent's role ("participant", "coordinator", "mediator").
@@ -408,6 +411,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
         """
         super().__init__(
             agent,
+            scope=scope,
             game_type=_NEGOTIATION_GAME_TYPE,
             game_id=game_id,
             role=role,
@@ -774,7 +778,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
                 summary=f"Negotiation failed after {data.deadlock_count} deadlocks"
             )
 
-    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern()) # TODO: Ensure this pattern correctly captures the game state updates for this protocol (e.g., by game_id)
+    @event_handler(pattern=ScopeUtils.pattern_key(state=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def _populate_game_specific_scope(
         self,
         event: BlackboardEvent,
@@ -946,7 +950,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
     # Event Handler Overrides
     # =========================================================================
 
-    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern())  # TODO: Ensure this pattern correctly captures the game state updates for this protocol (e.g., by game_id)
+    @event_handler(pattern=ScopeUtils.pattern_key(state=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def _get_additional_context(
         self,
         event: BlackboardEvent,

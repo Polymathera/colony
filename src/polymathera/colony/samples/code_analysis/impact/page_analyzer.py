@@ -56,6 +56,7 @@ from polymathera.colony.agents.patterns import (
 from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
 from polymathera.colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
 from polymathera.colony.agents.base import Agent, AgentCapability
+from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.patterns.actions.policies import action_executor
 from polymathera.colony.agents.patterns.capabilities.reflection import ReflectionCapability
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
@@ -672,8 +673,8 @@ class ChangeImpactAnalysisCapability(AgentCapability):
     Also uses FeedbackLoopPredictor for cache-aware prefetching.
     """
 
-    def __init__(self, agent: Agent):
-        super().__init__(agent=agent)
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.AGENT):
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:change_impact_analysis:{agent.agent_id}")
 
         # Analysis state
         self.page_id: str | None = None
@@ -764,7 +765,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         # Store in blackboard
         if self.blackboard:
             await self.blackboard.write(
-                key=f"impact:{self.page_id}",  # TODO: Add ImpactAnalysisResult.get_key(page_id, tenant_id) method?
+                key=ScopeUtils.format_key(impact=self.page_id),
                 value=result.model_dump(),
                 tags={"impact", self.agent.agent_id}
             )
@@ -794,10 +795,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         changes = changes or []
 
         # Get blackboard from agent
-        blackboard = await self.agent.get_blackboard(
-            scope="shared",
-            scope_id=self.agent.agent_id  # TODO: Which blackboard scope is best for analysis results? Shared across agents or private to this agent?
-        )
+        blackboard = await self.agent.get_agent_level_blackboard() # TODO: Which blackboard scope is best for analysis results? Shared across agents or private to this agent?
 
         # Create policy and analyze
         policy = ChangeImpactAnalysisPolicy(
@@ -960,16 +958,14 @@ class ChangeImpactAnalysisCapability(AgentCapability):
 
         try:
             # Query blackboard for test coverage results
-            coverage_key = f"test_coverage:{self.page_id}"  # TODO: Add TestCoverageResult.get_key(page_id, tenant_id) method?
             coverage_data = await self.blackboard.read(
-                key=coverage_key,
+                key=ScopeUtils.format_key(test_coverage=self.page_id),
                 agent_id=self.agent.agent_id
             )
             return coverage_data
         except Exception:
             # No coverage data available
             return None
-
 
     # ============================================================================
     # EVENT HANDLERS

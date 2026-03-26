@@ -32,6 +32,7 @@ from typing import Any, TYPE_CHECKING
 from overrides import override
 
 from ...base import AgentCapability, AgentHandle
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentMetadata, AgentResourceRequirements, AgentSuspensionState
 from ..actions.policies import action_executor
 
@@ -57,14 +58,14 @@ class AgentPoolCapability(AgentCapability):
     The ActionPolicy decides when to create/assign/suspend/terminate agents.
     """
 
-    def __init__(self, agent: Agent, scope_id: str | None = None):
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize agent pool capability.
 
         Args:
             agent: Owning agent (coordinator)
-            scope_id: Blackboard scope (defaults to agent_id)
+            scope: Blackboard scope (defaults to COLONY)
         """
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
 
         # Track created agents
         self._agent_handles: dict[str, AgentHandle] = {}
@@ -298,7 +299,7 @@ class AgentPoolCapability(AgentCapability):
         # Send work assignment via blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            f"{agent_id}:work_assignment",
+            ScopeUtils.format_key(agent_id=agent_id, work_assignment=True),
             {
                 "work_unit": work_unit,
                 "priority": priority,
@@ -349,7 +350,7 @@ class AgentPoolCapability(AgentCapability):
                 if result_type != "all" and result_type != rtype:
                     continue
 
-                key = f"{agent_id}:result:{rtype}"
+                key = ScopeUtils.format_key(agent_id=agent_id, result_type=rtype)
                 data = await blackboard.read(key)
                 if data:
                     results.append({
@@ -616,7 +617,7 @@ class AgentPoolCapability(AgentCapability):
 
         for agent_id in agent_ids:
             await blackboard.write(
-                f"{agent_id}:broadcast",
+                ScopeUtils.format_key(agent_id=agent_id, broadcast=True),
                 {
                     "message": message,
                     "from": self.agent.agent_id,

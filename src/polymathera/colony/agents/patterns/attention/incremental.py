@@ -25,6 +25,7 @@ from .query_routing import PageQueryRoutingPolicy
 from ...models import AgentSuspensionState, QueryContext, ActionPolicyIO
 from ..models import QueryAnswer
 from ...base import Agent, AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions.policies import CacheAwareActionPolicy, action_executor
 from ....utils import setup_logger
 
@@ -83,8 +84,9 @@ class IncrementalQueryCapability(AgentCapability):
         attention_threshold: float = 0.5,
         attention_top_k: int = 5,
         max_iterations: int = 3,
+        scope: BlackboardScope = BlackboardScope.COLONY
     ):
-        super().__init__(agent)
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
         self.answer_generator = answer_generator
         self.query_router = query_router
         self.confidence_threshold = confidence_threshold
@@ -121,7 +123,6 @@ class IncrementalQueryCapability(AgentCapability):
         """
         # TODO: We can get either explicit incremental query requests or we can snoop
         # on published analysis results to convert them into incremental query requests in the action policy.
-        # TODO: Stream code analysis result events? Use `AnalysisResult.get_key_pattern()` when available.
         # TODO: Code analyzers even better separate their output results into different categories (e.g.,
         # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
         # incremental query requests can focus on specific categories.
@@ -130,7 +131,7 @@ class IncrementalQueryCapability(AgentCapability):
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(
-                pattern=IncrementalQueryRequest.get_key_pattern()
+                pattern=ScopeUtils.pattern_key(incremental_query_request=None)
             )
         )
 

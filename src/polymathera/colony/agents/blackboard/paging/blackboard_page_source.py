@@ -43,7 +43,7 @@ from ....vcm.models import VirtualContextPage, ContextPageId, MmapConfig
 from ....distributed.ray_utils import serving
 
 if TYPE_CHECKING:
-    from ..types import BlackboardEvent, BlackboardScope
+    from ..types import BlackboardEvent
     from ..blackboard import EnhancedBlackboard
     from ....cluster.tokenization import TokenizerProtocol
     from ....vcm.page_storage import PageStorage, PageStorageConfig
@@ -700,7 +700,6 @@ class BlackboardContextPageSource(ContextPageSource):
         self.app_name = serving.get_my_app_name()
         self.blackboard = EnhancedBlackboard(
             app_name=self.app_name,
-            scope=BlackboardScope.SHARED,
             scope_id=scope_id,
             enable_events=True,
             backend_type=None, # Use the globally configured backend.

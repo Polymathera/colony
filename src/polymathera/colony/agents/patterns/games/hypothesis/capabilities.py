@@ -69,6 +69,7 @@ from pydantic import BaseModel, Field
 from logging import getLogger
 
 from ....base import Agent, CapabilityResultFuture
+from ....scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...events import event_handler, EventProcessingResult
 
 from ..acl import ACLMessage, Performative
@@ -865,7 +866,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
     # Event Handler Overrides
     # =========================================================================
 
-    @event_handler(pattern="{scope_id}:" + GameState.get_key_pattern()) # TODO: Make sure this pattern correctly captures all relevant game events for this protocol (e.g., by game_id)
+    @event_handler(pattern=ScopeUtils.pattern_key(state=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def _get_additional_context(
         self,
         event: BlackboardEvent,

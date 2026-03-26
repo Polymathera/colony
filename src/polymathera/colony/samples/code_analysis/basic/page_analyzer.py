@@ -14,10 +14,12 @@ import time
 from overrides import override
 
 from polymathera.colony.agents.base import Agent, AgentCapability
+from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.models import AgentSuspensionState
 from polymathera.colony.cluster.models import InferenceResponse
 from polymathera.colony.agents.patterns.scope import ScopeAwareResult
 from polymathera.colony.agents.patterns.actions.policies import action_executor
+from polymathera.colony.agents.scopes import ScopeUtils
 
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,9 @@ class PageAnalyzerCapability(AgentCapability):
     2. Write to blackboard
     3. Stop
     """
+
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.AGENT):
+        super().__init__(agent, scope_id=f"{get_scope_prefix(scope, agent)}:page_analyzer:{agent.agent_id}")
 
     def get_action_group_description(self) -> str:
         return (
@@ -218,10 +223,15 @@ Be concise. Focus on facts, not speculation."""
             return
 
         # Get shared blackboard with parent
-        blackboard = await self.agent.get_blackboard(scope="shared", scope_id=parent_id)
+        blackboard = await self.agent.get_blackboard(
+            scope_id=ScopeUtils.get_agent_level_scope(parent_id)
+        )
 
         # Write page summary to blackboard
-        await blackboard.write(f"page_summary:{self.page_id}", self.summary)
+        await blackboard.write(
+            ScopeUtils.format_key(page_summary=self.page_id),
+            self.summary
+        )
 
         logger.info(f"Wrote summary for {self.page_id} to blackboard (parent: {parent_id})")
 

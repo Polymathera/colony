@@ -14,6 +14,7 @@ This module extends it for distributed analysis use cases.
 from __future__ import annotations
 
 import time
+import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Generic, TypeVar
 from overrides import override
@@ -21,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from ..scope import ScopeAwareResult
 from ...base import Agent, AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
 from ....utils import setup_logger
 from ..actions import action_executor
@@ -719,9 +721,9 @@ class ValidationCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None
+        scope: BlackboardScope = BlackboardScope.AGENT
     ):
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:validation:{uuid.uuid4()}")
         self.validators: list[AnalysisValidationPolicy] = []
         self.contradiction_resolver: ContradictionResolver | None = None
         self._consensus_validator = ConsensusValidator()

@@ -41,20 +41,20 @@ Example:
     ```python
     from polymathera.colony.agents.patterns.memory import (
         MemoryCapability,
-        MemoryScope,
         MemorySubscription,
         MemoryProducerConfig,
         SummarizingTransformer,
     )
+    from polymathera.colony.agents import MemoryScope
     from polymathera.colony.agents.patterns.hooks import Pointcut
 
     # STM subscribes to working memory and consolidates inputs
     stm = MemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_stm(agent_id),
+        scope_id=MemoryScope.agent_stm(agent),
         ingestion_policy=MemoryIngestPolicy(
             subscriptions=[
-                MemorySubscription(source_scope_id=MemoryScope.agent_working(agent_id)),
+                MemorySubscription(source_scope_id=MemoryScope.agent_working(agent)),
             ],
             trigger=PeriodicMemoryIngestPolicyTrigger(
                 interval_seconds=120.0,  # Every 2 minutes
@@ -71,7 +71,7 @@ Example:
     # Working memory with hook-based capture (no extractor = store as-is)
     working = MemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_working(agent_id),
+        scope_id=MemoryScope.agent_working(agent),
         ttl_seconds=3600,  # 1 hour
         max_entries=50,
         producers=[
@@ -88,7 +88,7 @@ Example:
     agent.add_capability(stm)
     agent.add_capability(working)
 
-    # Store a memory explicitly (data instance provides its own key via `get_blackboard_key`)
+    # Store a memory explicitly (with key via `ScopeUtils.format_key()`)
     observation = Observation(content="User asked about auth", timestamp=time.time())
     await working.store(observation)
 
@@ -111,6 +111,7 @@ from pydantic import BaseModel
 
 from ...base import AgentCapability, CapabilityResultFuture
 from ...models import AgentSuspensionState
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...blackboard.types import BlackboardEntry, BlackboardEvent
 from ....vcm.models import MmapConfig
 from ....vcm.sources import BuilInContextPageSourceType
@@ -569,13 +570,11 @@ class MemoryCapability(AgentCapability):
         observations for later retrieval.
 
         If ``data`` is a string or raw dict (e.g. from an LLM-planned action),
-        it is automatically wrapped in a :class:`MemoryRecord` which provides
-        the required ``get_blackboard_key`` method.
+        it is automatically wrapped in a :class:`MemoryRecord`.
 
         Args:
             data: Memory data to store. A string or dict is auto-wrapped
-                into a :class:`MemoryRecord`. A Pydantic model with
-                ``get_blackboard_key`` is stored directly.
+                into a :class:`MemoryRecord`. A Pydantic model is stored directly.
             tags: Tags for categorization and retrieval
             ttl_seconds: TTL override (uses level default if None)
             metadata: Additional metadata
@@ -590,13 +589,10 @@ class MemoryCapability(AgentCapability):
             from .types import MemoryRecord
             data = MemoryRecord(content=data, tags=tags or set())
 
-        if not hasattr(data, "get_blackboard_key"):
-            raise ValueError(
-                f"Data instance of type {type(data).__name__} must have "
-                f"get_blackboard_key(scope_id) instance method"
-            )
-
-        key = data.get_blackboard_key(self.scope_id)
+        key = ScopeUtils.format_key(
+            scope="memory_record",
+            record_id=data.record_id
+        )
         effective_ttl = ttl_seconds if ttl_seconds is not None else self.ttl_seconds
 
         # Serialize to dict
@@ -613,7 +609,7 @@ class MemoryCapability(AgentCapability):
             key=key,
             value=value,
             metadata=entry_metadata,
-            tags=tags,
+            tags=data.tags,
             ttl_seconds=effective_ttl,
         )
 
@@ -833,17 +829,9 @@ class MemoryCapability(AgentCapability):
 
         count = 0
         for entry in entries:
-            # Generate new key for target scope
-            data = entry.value
-            if hasattr(data, "get_blackboard_key"):
-                new_key = data.get_blackboard_key(target_scope)
-            else:
-                # Fallback: replace scope prefix in key
-                new_key = entry.key.replace(self.scope_id, target_scope, 1)
-
             # Build transfer metadata (session_id is auto-added by EnhancedBlackboard.write())
             await target_storage.write(
-                key=new_key,
+                key=entry.key,
                 value=entry.value,
                 metadata={
                     **entry.metadata,
@@ -993,11 +981,11 @@ class MemoryCapability(AgentCapability):
         event_queue: asyncio.Queue[BlackboardEvent] = asyncio.Queue()
 
         # Get key pattern from data type
-        if subscription.data_type and hasattr(subscription.data_type, "get_key_pattern"):
-            pattern = subscription.data_type.get_key_pattern(subscription.source_scope_id)
+        if subscription.key_pattern:
+            pattern = subscription.key_pattern
         else:
-            # Fallback for data types without get_key_pattern
-            pattern = f"{subscription.source_scope_id}:*"
+            # Fallback for subscriptions without key_pattern
+            pattern = "*" # f"{subscription.source_scope_id}:*"
 
         # Get storage backend for source scope and subscribe to events
         # The StorageBackend contract requires all writes to emit events.
@@ -1169,19 +1157,23 @@ class MemoryCapability(AgentCapability):
         # Write transformed entries to this scope
         # session_id is auto-added by EnhancedBlackboard.write()
         # Per the ConsolidationTransformer contract (protocols.py):
-        #   entry.value MUST be a BaseModel with get_blackboard_key(scope_id)
+        #   entry.value MUST be a BaseModel with record_id
         #   entry.key is ignored — we generate it here using self.scope_id
         count = 0
         for entry in transformed:
             data = entry.value
-            if not hasattr(data, "get_blackboard_key"):
+            if not hasattr(data, "record_id"):
                 raise TypeError(
                     f"Transformer returned entry.value of type "
-                    f"{type(data).__name__} without get_blackboard_key(scope_id). "
+                    f"{type(data).__name__} without record_id. "
                     f"Transformers must return "
-                    f"BlackboardEntry(value=<BaseModel with get_blackboard_key>)."
+                    f"BlackboardEntry(value=<BaseModel with record_id>)."
                 )
-            key = data.get_blackboard_key(self.scope_id)
+
+            key = ScopeUtils.format_key(
+                scope="memory_record",
+                record_id=data.record_id
+            )
 
             value = data.model_dump() if hasattr(data, "model_dump") else data
 
@@ -1260,7 +1252,7 @@ class MemoryCapability(AgentCapability):
                         extracted = await extracted
                 else:
                     # Default: use result directly with empty tags/metadata
-                    # Result must be a BaseModel with get_blackboard_key
+                    # Result must be a BaseModel with record_id
                     extracted = (result, set(), {})
 
                 # Handle list results
@@ -1279,11 +1271,11 @@ class MemoryCapability(AgentCapability):
                     if data is None:
                         continue
 
-                    # Verify data is storable (has get_blackboard_key)
-                    if not hasattr(data, "get_blackboard_key"):
+                    # Verify data is storable (has record_id)
+                    if not hasattr(data, "record_id"):
                         logger.debug(
                             f"Memory producer data from {ctx.join_point} does not have "
-                            f"get_blackboard_key (type={type(data).__name__}), skipping storage"
+                            f"record_id (type={type(data).__name__}), skipping storage"
                         )
                         continue
 

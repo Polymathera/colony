@@ -273,33 +273,6 @@ class Action(BaseModel):
         """Check if action is long-running (has checkpoints or sub-plan)."""
         return len(self.checkpoints) > 0 or self.sub_plan is not None
 
-    # -------------------------------------------------------------------------
-    # Memory System Integration
-    # -------------------------------------------------------------------------
-
-    def get_blackboard_key(self, scope_id: str) -> str:
-        """Generate blackboard key for storing this action in memory.
-
-        Args:
-            scope_id: Memory scope ID (e.g., "agent:abc123:working")
-
-        Returns:
-            Key like "agent:abc123:working:action:action_001"
-        """
-        return f"{scope_id}:action:{self.action_id}"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Pattern for matching all actions in a scope.
-
-        Args:
-            scope_id: Memory scope ID
-
-        Returns:
-            Pattern like "agent:abc123:working:action:*"
-        """
-        return f"{scope_id}:action:*"
-
 
 
 # ============================================================================
@@ -841,16 +814,12 @@ class RunContext(BaseModel):
     
     Fields:
         analysis_goal: Goal of the analysis job
-        run_id: Job identifier
-        tenant_id: Tenant identifier
         priority: Job priority
         constraints: Job constraints (time, resources, etc.)
         custom_data: Additional custom context data
     """
     
     analysis_goal: str = Field(description="Goal of the analysis job")
-    run_id: str | None = Field(default=None, description="Identifier of AgentRun")
-    tenant_id: str = Field(default="default", description="Tenant identifier")
     priority: int = Field(default=0, description="Job priority")
     constraints: dict[str, Any] = Field(default_factory=dict, description="Job constraints (time, resources, etc.)")
     custom_data: dict[str, Any] = Field(default_factory=dict, description="Additional custom context data")
@@ -1326,15 +1295,6 @@ class ActionPlan(BaseModel):
             )
         )
 
-    @staticmethod
-    def get_plan_key(agent_id: str) -> str:
-        """Get blackboard key for agent's plan (static method)."""
-        return f"agent:{agent_id}:action_plan" # It will automatically be scoped by agent ID when stored in blackboard
-
-    @staticmethod
-    def get_all_plans_key_pattern() -> str:
-        return "agent:*:action_plan"
-
     # Modification methods
     def insert_action(self, action: Action, position: int | None = None) -> None:
         """Insert action at position (default: after current)."""
@@ -1426,33 +1386,6 @@ class ActionPlan(BaseModel):
                 sub_depth = action.sub_plan.get_depth()
                 max_depth = max(max_depth, sub_depth + 1)
         return max_depth
-
-    # -------------------------------------------------------------------------
-    # Memory System Integration
-    # -------------------------------------------------------------------------
-
-    def get_blackboard_key(self, scope_id: str) -> str:
-        """Generate blackboard key for storing this plan in memory.
-
-        Args:
-            scope_id: Memory scope ID (e.g., "agent:abc123:working")
-
-        Returns:
-            Key like "agent:abc123:working:plan:plan_001"
-        """
-        return f"{scope_id}:plan:{self.plan_id}"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Pattern for matching all plans in a scope.
-
-        Args:
-            scope_id: Memory scope ID
-
-        Returns:
-            Pattern like "agent:abc123:working:plan:*"
-        """
-        return f"{scope_id}:plan:*"
 
 
 
@@ -2581,20 +2514,6 @@ class AgentMetadata(BaseModel):
         description="System context for the agent (e.g., request info, user info)"
     )
     team_id: str | None = None
-    session_id: str = Field(
-        default="default",
-        description=(
-            "Session that created this agent. Used for tracking purposes only. "
-            "An Agent is not associated with a session."
-        )
-    )
-    run_id: str = Field(
-        default="default",
-        description=(
-            "AgentRun that created this agent. Used for tracking purposes only. "
-            "An Agent is not associated with a session or a run."
-        )
-    )
     parent_agent_id: str | None = None
 
     goals: list[str] = Field(default_factory=list)
@@ -2644,6 +2563,22 @@ class AgentMetadata(BaseModel):
         default_factory=dict
     )
 
+    @property
+    def tenant_id(self) -> str:
+        return self.syscontext.tenant_id
+
+    @property
+    def colony_id(self) -> str:
+        return self.syscontext.colony_id
+
+    @property
+    def session_id(self) -> str:
+        return self.syscontext.session_id
+
+    @property
+    def run_id(self) -> str:
+        return self.syscontext.run_id
+
     def update(self, **kwargs) -> None:
         """Update metadata fields."""
         for key, value in kwargs.items():
@@ -2662,7 +2597,8 @@ class AgentRegistrationInfo(BaseModel):
     agent_id: str
     agent_type: str
     state: AgentState = AgentState.INITIALIZED
-    tenant_id: str = "system"
+    tenant_id: str
+    colony_id: str
     bound_pages: list[str] = Field(default_factory=list)
     metadata: AgentMetadata = Field(default_factory=AgentMetadata)
     capability_names: list[str] = Field(default_factory=list)

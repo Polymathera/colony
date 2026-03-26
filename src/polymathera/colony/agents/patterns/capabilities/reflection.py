@@ -14,6 +14,7 @@ from .consciousness import SystemDocumentation
 from ..models import Reflection
 from ...models import Action, ActionResult, ActionPlan, AgentSuspensionState
 from ...base import Agent, AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ....distributed import get_polymathera
 from ..actions.policies import action_executor
 
@@ -40,15 +41,6 @@ class ReflectionRequest(BaseModel):
         description="Additional context for reflection (e.g., system architecture, recent actions, challenges, current plan)"
     )
     created_at: float = Field(default_factory=time.time)
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Pattern for matching reflection requests."""
-        return f"{scope_id}:reflection_request:*"
-
-    def get_blackboard_key(self, scope_id: str) -> str:
-        """Get blackboard key for this request."""
-        return f"{scope_id}:reflection_request:{self.request_id}"
 
 
 class ReflectionContext(BaseModel):
@@ -140,13 +132,14 @@ class ReflectionCapability(AgentCapability):
         ```
     """
 
-    def __init__(self, agent: Agent):
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize reflection capability.
 
         Args:
             agent: The owning agent
+            scope: Blackboard scope. Defaults to BlackboardScope.COLONY.
         """
-        super().__init__(agent=agent, scope_id=agent.agent_id)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
         self._state_managers: dict[str, Any] = {}
 
     def get_action_group_description(self) -> str:
@@ -183,7 +176,6 @@ class ReflectionCapability(AgentCapability):
         """
         # TODO: We can get either explicit reflection requests or we can snoop
         # on published analysis results to convert them into reflection updates in the action policy.
-        # TODO: Stream code analysis result events? Use `AnalysisResult.get_key_pattern()` when available.
         # TODO: Code analyzers even better separate their output results into different categories (e.g.,
         # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
         # reflection updates can focus on specific categories.
@@ -191,23 +183,16 @@ class ReflectionCapability(AgentCapability):
         blackboard = await self.get_blackboard()
         blackboard.stream_events_to_queue(
             event_queue,
-            KeyPatternFilter(pattern=ReflectionRequest.get_key_pattern(scope_id=self.agent.agent_id)),
+            KeyPatternFilter(pattern=ScopeUtils.pattern_key(reflection_request=None)),  # Listen for reflection requests to trigger reflection actions
         )
 
-    async def get_system_documentation(
-        self, tenant_id: str | None = None, session_id: str | None = None
-    ) -> SystemDocumentation:
+    async def get_system_documentation(self) -> SystemDocumentation:
         """Get system documentation for self-awareness.
-
-        Args:
-            tenant_id: Tenant identifier
-            session_id: Optional session identifier
 
         Returns:
             System documentation
         """
-        effective_tenant = tenant_id or self.agent.tenant_id or "default"
-        state_key = SystemDocumentation.get_state_key(effective_tenant, session_id)
+        state_key = f"{ScopeUtils.get_agent_level_scope(self.agent.agent_id)}:system_documentation"
 
         if state_key not in self._state_managers:
             polymathera = get_polymathera()
@@ -361,9 +346,7 @@ Respond with a structured analysis."""
         focus = context.focus
 
         # Get system documentation for LLM-based reflection (TODO: use in prompt)
-        session_id = getattr(self.agent.metadata, "session_id", None)
-        tenant_id = getattr(self.agent, "tenant_id", "default")
-        sys_docs = await self.get_system_documentation(tenant_id, session_id)
+        sys_docs = await self.get_system_documentation()
 
         # Load self-concept directly from storage
         # TODO: This should be cached in the ConsciousnessCapability which
@@ -489,10 +472,13 @@ Respond with a structured analysis."""
 
         # Post request to peer's blackboard
         peer_blackboard = await self.agent.get_blackboard(
-            scope="shared", scope_id=peer_id
+            scope_id=ScopeUtils.get_agent_level_scope(peer_id)
         )
         await peer_blackboard.write(
-            key=request.get_blackboard_key(peer_id),
+            key=ScopeUtils.format_key(
+                scope="reflection_request",
+                request_id=request.request_id
+            ),
             value=request.model_dump(),
             created_by=self.agent.agent_id,
             tags={"reflection_request", f"from:{self.agent.agent_id}"},
@@ -502,7 +488,7 @@ Respond with a structured analysis."""
         response_event = asyncio.Event()
         response_data: dict[str, Any] = {}
 
-        response_key = f"{self.agent.agent_id}:reflection_response:{request.request_id}"
+        response_key = f"reflection_response:{request.request_id}"
 
         async def on_response(event: BlackboardEvent) -> None:
             if event.key == response_key:
@@ -510,9 +496,7 @@ Respond with a structured analysis."""
                 response_event.set()
 
         # Subscribe to our own blackboard for response
-        my_blackboard = await self.agent.get_blackboard(
-            scope="shared", scope_id=self.agent.agent_id
-        )
+        my_blackboard = await self.agent.get_agent_level_blackboard()
         my_blackboard.subscribe(on_response, filter=KeyPatternFilter(response_key))
 
         try:

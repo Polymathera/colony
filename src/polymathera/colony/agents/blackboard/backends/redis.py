@@ -43,13 +43,11 @@ class RedisBackend(BlackboardBackend):
     - Batch operations via pipeline
     """
 
-    def __init__(self, app_name: str, scope: str, scope_id: str):
+    def __init__(self, app_name: str, scope_id: str):
         """Initialize Redis backend."""
-        # TODO: Why both scope and scope_id needed? Keep just one?
         self.app_name = app_name
-        self.scope = scope
         self.scope_id = scope_id
-        self.namespace = f"{app_name}:blackboard:{scope}:{scope_id}"
+        self.namespace = f"{app_name}:blackboard:{scope_id}"
         self.redis_client: RedisClient | None = None
         self.redis_om: RedisOM | None = None
 

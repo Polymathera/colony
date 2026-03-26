@@ -73,6 +73,7 @@ from ...base import (
     AgentHandle,
     CapabilityResultFuture,
 )
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions.policies import (
     action_executor,
     ActionPolicyExecutionState,
@@ -289,15 +290,6 @@ class TaskOutcome(BaseModel):
         default_factory=time.time,
         description="When task completed"
     )
-
-    @classmethod
-    def get_key_pattern(cls) -> str:
-        """Get blackboard key pattern for task outcomes.
-
-        Returns:
-            Key pattern string
-        """
-        return "task_outcome:*"
 
 
 
@@ -787,11 +779,6 @@ class ReputationUpdateRequest(BaseModel):
         description="Task outcome for reputation update"
     )
 
-    @classmethod
-    def get_key_pattern(cls) -> str:
-        """Get blackboard key pattern for reputation update requests."""
-        return "*:reputation:request:*"
-
 
 # ============================================================================
 # New Pattern: ReputationCapability + Agent + CacheAwareActionPolicy
@@ -829,14 +816,14 @@ class ReputationCapability(AgentCapability):
     - Detect reputation trends
     """
 
-    def __init__(self, agent: Agent, scope_id: str | None = None):
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize reputation capability.
 
         Args:
             agent: Agent using this capability
-            scope_id: Blackboard scope ID. Defaults to agent.agent_id.
+            scope: Blackboard scope. Defaults to BlackboardScope.COLONY.
         """
-        super().__init__(agent, scope_id)
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
         self.reputation_tracker = None
         self.update_history: list[ReputationUpdate] = []
 
@@ -850,11 +837,11 @@ class ReputationCapability(AgentCapability):
 
     def _get_result_key(self) -> str:
         """Get blackboard key for this capability's result."""
-        return f"{self.scope_id}:reputation:result"
+        return ScopeUtils.format_key(reputation="result")
 
     def _get_event_pattern(self) -> str:
         """Get pattern for reputation events."""
-        return f"{self.scope_id}:reputation:*"
+        return ScopeUtils.pattern_key(reputation=None)
 
     async def ensure_tracker(self) -> ReputationTracker:
         """Ensure reputation tracker is initialized."""
@@ -890,7 +877,7 @@ class ReputationCapability(AgentCapability):
         ### blackboard.stream_events_to_queue(
         ###     event_queue,
         ###     KeyPatternFilter(
-        ###         pattern=TaskOutcomeCompletion.get_key_pattern()
+        ###         pattern=ScopeUtils.pattern_key(task_outcome=None)
         ###     )
         ### )
         blackboard.stream_events_to_queue(
@@ -898,7 +885,7 @@ class ReputationCapability(AgentCapability):
             KeyPatternFilter(pattern=self._get_event_pattern())
         )
 
-    @event_handler(pattern="{scope_id}:" + ReputationUpdateRequest.get_key_pattern())
+    @event_handler(pattern=ScopeUtils.pattern_key(reputation="update", requesting_agent_id=None))
     async def handle_reputation_update_request(
         self,
         event: BlackboardEvent,
@@ -920,7 +907,7 @@ class ReputationCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern=GameState.get_key_pattern())
+    @event_handler(pattern=ScopeUtils.pattern_key(state=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def handle_game_completion(
         self,
         event: BlackboardEvent,
@@ -943,7 +930,7 @@ class ReputationCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern="{scope_id}:" + TaskOutcome.get_key_pattern())
+    @event_handler(pattern=ScopeUtils.pattern_key(task_outcome=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def handle_task_outcome(
         self,
         event: BlackboardEvent,

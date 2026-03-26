@@ -261,7 +261,6 @@ class BlackboardStorageBackendFactory:
             BlackboardStorageBackend instance for the scope
         """
         blackboard = await self._agent.get_blackboard(
-            scope="shared",
             scope_id=scope_id,
         )
         return BlackboardStorageBackend(

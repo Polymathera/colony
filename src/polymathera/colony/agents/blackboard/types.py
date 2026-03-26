@@ -11,14 +11,6 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 
-class BlackboardScope(str, Enum):
-    """Blackboard visibility scope."""
-
-    LOCAL = "local"  # Agent-local (in-memory, not shared)
-    SHARED = "shared"  # Shared among specific agents
-    GLOBAL = "global"  # Shared among all agents in app
-    PERSISTENT = "persistent"  # Persisted to VCM/disk
-
 
 class BlackboardEntry(BaseModel):
     """Entry with metadata for debugging and audit trails.
@@ -55,33 +47,6 @@ class BlackboardEvent:
     agent_id: str | None = None
     tags: set[str] = field(default_factory=set)  # For querying
     metadata: dict[str, Any] = field(default_factory=dict)
-
-    # -------------------------------------------------------------------------
-    # Memory System Integration
-    # -------------------------------------------------------------------------
-
-    def get_blackboard_key(self, scope_id: str) -> str:
-        """Generate blackboard key for storing this event in memory.
-
-        Args:
-            scope_id: Memory scope ID (e.g., "agent:abc123:sensory")
-
-        Returns:
-            Key like "agent:abc123:sensory:blackboard_event:1704067200.123456"
-        """
-        return f"{scope_id}:blackboard_event:{self.timestamp}"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Pattern for matching all events in a scope.
-
-        Args:
-            scope_id: Memory scope ID
-
-        Returns:
-            Pattern like "agent:abc123:sensory:event:*"
-        """
-        return f"{scope_id}:blackboard_event:*"
 
 
 # ============================================================================

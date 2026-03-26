@@ -16,7 +16,8 @@ from ..distributed.ray_utils.serving import (
     LeastLoadedRouter,
     DeploymentReplicaInfo,
     RoutingHints,
-    require_execution_context
+    require_execution_context,
+    ensure_context,
 )
 from .models import InferenceRequest, LLMClientRequirements, LLMClientState
 from ..vcm.models import ContextPageId
@@ -153,7 +154,7 @@ class RoutingHintExtractor:
                 request_id="req-1",
                 prompt="Generate code",
                 context_page_ids=["page-1", "page-2"],
-                requirements=LLMClientRequirements(tenant_id="tenant-a"),
+                requirements=LLMClientRequirements(min_context_window=4096),
             )
 
             hints = RoutingHints.from_inference_request(request)
@@ -312,7 +313,7 @@ class ContextAwareRouter(RequestRouter):
         not only reads a snapshot of all client states, but also
         allocates pages to the selected replica atomically.
         """
-        _ensure_request_context(request)
+        ensure_context(request.request_id, request.execution_context)
 
         if not replicas:
             raise ValueError("No replicas available for routing")
@@ -502,7 +503,7 @@ class TargetClientRouter(RequestRouter):
         Raises:
             ValueError: If target_client_id not found or no matching replica
         """
-        _ensure_request_context(request)
+        ensure_context(request.request_id, request.execution_context)
 
         if not request.routing_hints or "target_client_id" not in request.routing_hints.metadata:
             raise ValueError("TargetClientRouter requires target_client_id in routing hints")
@@ -591,7 +592,7 @@ class PageAffinityRouter(ContextAwareRouter):
         not only reads a snapshot of all client states, but also
         allocates pages to the selected replica atomically.
         """
-        _ensure_request_context(request)
+        ensure_context(request.request_id, request.execution_context)
 
         if not replicas:
             raise ValueError("No replicas available for routing")

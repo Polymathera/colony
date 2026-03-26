@@ -65,6 +65,7 @@ from ...base import (
     AgentCapability,
     CapabilityResultFuture,
 )
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..attention import PageQuery
 from .validation import ValidationResult, ValidationIssue
 from ..actions.policies import action_executor
@@ -107,14 +108,6 @@ class GroundingRequest(BaseModel):
         description="Agent requesting grounding"
     )
 
-    @staticmethod
-    def get_blackboard_key(requesting_agent_id: str, claim_id: str) -> str:
-        return f"{requesting_agent_id}:grounding_request:{claim_id}:performative:inform"
-
-    @staticmethod
-    def get_key_pattern() -> str:
-        return "*:grounding_request:*:performative:inform"
-
 
 class GroundingResult(BaseModel):
     """Result of grounding check."""
@@ -152,10 +145,6 @@ class GroundingResult(BaseModel):
         default_factory=list,
         description="Suggestions for better grounding"
     )
-
-    @staticmethod
-    def get_blackboard_key(agent_id: str, claim_id: str) -> str:
-        return f"{agent_id}:grounding_response:{claim_id}",
 
 
 # ============================================================================
@@ -203,16 +192,16 @@ class GroundingCapability(AgentCapability):
     - ValidationPolicy for grounding checks
     """
 
-    def __init__(self, agent: Agent, scope_id: str | None = None):
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize grounding capability.
 
         Args:
             agent: Agent using this capability
-            scope_id: Blackboard scope ID. Defaults to agent.agent_id.
+            scope: Blackboard scope. Defaults to BlackboardScope.COLONY.
                 Parent agents set this to child_agent_id to communicate
                 with the child's grounding capability.
         """
-        super().__init__(agent, scope_id)
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
 
     def get_action_group_description(self) -> str:
         return (
@@ -224,11 +213,7 @@ class GroundingCapability(AgentCapability):
 
     def _get_result_key(self) -> str:
         """Get blackboard key for this capability's result."""
-        return f"{self.scope_id}:grounding:result"
-
-    def _get_event_pattern(self) -> str:
-        """Get pattern for grounding events."""
-        return f"{self.scope_id}:grounding:*"
+        return ScopeUtils.format_key(grounding="result")
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
@@ -258,7 +243,6 @@ class GroundingCapability(AgentCapability):
         """
         # TODO: We can get either explicit grounding requests or we can snoop
         # on published analysis results to convert them into grounding requests in the action policy.
-        # TODO: Stream code analysis result events? Use `AnalysisResult.get_key_pattern()` when available.
         # TODO: Code analyzers even better separate their output results into different categories (e.g.,
         # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
         # grounding can focus on specific categories.
@@ -267,7 +251,7 @@ class GroundingCapability(AgentCapability):
         # Stream grounding-related events from this scope
         blackboard.stream_events_to_queue(
             event_queue,
-            KeyPatternFilter(pattern=self._get_event_pattern())
+            KeyPatternFilter(pattern=ScopeUtils.pattern_key(grounding_request=None))
         )
 
     @override
@@ -290,7 +274,7 @@ class GroundingCapability(AgentCapability):
     # Capability-Specific Request Methods
     # -------------------------------------------------------------------------
 
-    @event_handler(pattern="{scope_id}:" + GroundingRequest.get_key_pattern())
+    @event_handler(pattern=ScopeUtils.pattern_key(grounding_request=None))
     async def handle_grounding_request(
         self,
         event: BlackboardEvent,

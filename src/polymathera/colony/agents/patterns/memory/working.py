@@ -13,7 +13,7 @@ Example:
     ```python
     working = WorkingMemoryCapability(
         agent=agent,
-        scope_id=MemoryScope.agent_working(agent.agent_id),
+        scope_id=MemoryScope.agent_working(agent),
         max_tokens=8000,
         compaction_threshold=0.9,  # Compact at 90% capacity
     )
@@ -203,7 +203,7 @@ class WorkingMemoryCapability(MemoryCapability):
         parent ``MemoryCapability.store()`` into a :class:`MemoryRecord`.
 
         Args:
-            data: Content to store (string, dict, or Pydantic model with get_blackboard_key)
+            data: Content to store (string, dict, or Pydantic model with record_id)
             tags: Tags for categorization
             ttl_seconds: TTL override
             metadata: Additional metadata
@@ -528,13 +528,4 @@ class CompactionSummary(BaseModel):
 
     timestamp: float
     """When compaction occurred."""
-
-    def get_blackboard_key(self, scope_id: str) -> str:
-        """Generate blackboard key for this summary."""
-        return f"{scope_id}:compaction_summary:{self.id}"
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Pattern for matching compaction summaries."""
-        return f"{scope_id}:compaction_summary:*"
 

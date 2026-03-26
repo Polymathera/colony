@@ -133,7 +133,7 @@ def _resolve_pattern(pattern: str | Callable, capability: Any) -> str:
 def event_handler(
     func: Callable | None = None,
     *,
-    pattern: str | None = None,
+    pattern: str | Callable[[Any], str] | None = None,
 ):
     """Decorator to mark a capability method as an event handler.
 

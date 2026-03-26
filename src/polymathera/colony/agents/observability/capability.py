@@ -21,6 +21,7 @@ from collections import deque
 from typing import Any, Callable, TYPE_CHECKING
 
 from ..base import AgentCapability
+from ..scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..patterns.hooks.types import HookContext, HookType, ErrorMode
 from ..patterns.hooks.pointcuts import Pointcut
 from .config import TracingConfig
@@ -61,9 +62,9 @@ class TracingCapability(AgentCapability):
         agent: Agent,
         config: TracingConfig,
         *,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.TENANT,
     ):
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
         self._config = config
         self._trace_id: str | None = None
         self._current_run_id: str | None = None

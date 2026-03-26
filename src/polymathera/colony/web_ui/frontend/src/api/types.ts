@@ -38,6 +38,7 @@ export interface AgentSummary {
 export interface SessionSummary {
   session_id: string;
   tenant_id: string;
+  colony_id: string;
   state: string;
   created_at: number;
   run_count: number;
@@ -74,6 +75,7 @@ export interface PageLoadedEntry {
   page_id: string;
   size: number;
   tenant_id: string;
+  colony_id: string;
   total_access_count: number;
   locations: PageLocationSummary[];
 }
@@ -87,6 +89,7 @@ export interface AgentHierarchyNode {
   capability_names: string[];
   bound_pages: string[];
   tenant_id: string;
+  colony_id: string;
 }
 
 export interface VCMStats {

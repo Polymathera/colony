@@ -11,19 +11,16 @@ agent for global memories and cross-tenant coordination.
 
 Example:
     ```python
-    # Create tenant-level memory management agent
-    memory_agent = MemoryManagementAgent(
-        agent_id="memory_mgmt_tenant_acme",
+    # Create colony-level memory management agent
+    with serving.user_execution_context(
         tenant_id="acme_corp",
-    )
-    await memory_agent.initialize()
-    await memory_agent.start()
-
-    # Or create system-level agent (tenant_id=None)
-    system_memory_agent = MemoryManagementAgent(
-        agent_id="memory_mgmt_system",
-        tenant_id=None,  # System-level
-    )
+        colony_id="colony_123",
+        session_id="session_123"):
+        memory_agent = MemoryManagementAgent(
+            agent_id="memory_mgmt_tenant_acme",
+        )
+        await memory_agent.initialize()
+        await memory_agent.start()
     ```
 """
 
@@ -36,11 +33,12 @@ from typing import Any
 from pydantic import PrivateAttr
 from overrides import override
 
+from ....distributed.ray_utils import serving
 from ...base import Agent, AgentCapability, AgentState, CapabilityResultFuture
 from ...models import AgentSuspensionState
 from ...blackboard.types import BlackboardEntry, BlackboardEvent, KeyPatternFilter
+from ...scopes import MemoryScope, ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions.policies import action_executor
-from .scopes import MemoryScope
 from .lifecycle import AgentTerminationEvent, AgentCreationEvent
 from ..hooks.decorator import hookable
 
@@ -55,7 +53,7 @@ logger = logging.getLogger(__name__)
 class AgentMemoryRecycler(AgentCapability):
     """Capability for recycling terminated agents' memories to collective.
 
-    When an agent terminates, this capability:
+    When an agent terminates within the monitored colony, this capability:
     1. Reads the agent's private LTM (episodic, semantic, procedural)
     2. Transforms and merges into collective memory for that agent_type
     3. Deletes the agent's private memory scopes
@@ -66,15 +64,17 @@ class AgentMemoryRecycler(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "memory_recycler",
     ):
         """Initialize memory recycler.
 
         Args:
             agent: The MemoryManagementAgent that owns this capability
-            scope_id: Scope ID for this capability
+            scope: Blackboard scope for this capability
+            namespace: Namespace for this capability (appended to scope prefix for blackboard keys)
         """
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
         self._monitor_task: asyncio.Task | None = None
         self._initialized = False
 
@@ -95,7 +95,7 @@ class AgentMemoryRecycler(AgentCapability):
         self._initialized = True
 
         logger.info(
-            f"AgentMemoryRecycler initialized for tenant={self.agent.tenant_id}"
+            f"AgentMemoryRecycler initialized for syscontext={self.agent.syscontext.to_dict()}"
         )
 
     async def shutdown(self) -> None:
@@ -114,10 +114,12 @@ class AgentMemoryRecycler(AgentCapability):
         event_queue: asyncio.Queue[BlackboardEvent],
     ) -> None:
         """Stream recycling events to queue."""
+        # TODO: This only streams events from the lifecycle scope.
+        # So, the agent owning this capability won't see events from the monitored scopes.
         blackboard = await self.get_blackboard()
         blackboard.stream_events_to_queue(
             event_queue,
-            KeyPatternFilter(pattern=f"{self.scope_id}:*"),
+            KeyPatternFilter(pattern=ScopeUtils.pattern_key()),
         )
 
     async def get_result_future(self) -> CapabilityResultFuture:
@@ -148,18 +150,14 @@ class AgentMemoryRecycler(AgentCapability):
         Uses async for to stream events from the lifecycle scope. The iterator
         automatically handles subscription/unsubscription lifecycle.
         """
-        lifecycle_scope = MemoryScope.control_plane(
-            self.agent.tenant_id,
-            "lifecycle",
-        )
+        lifecycle_scope = MemoryScope.colony_control_plane("lifecycle")
 
         blackboard = await self.agent.get_blackboard(
-            scope="shared",
             scope_id=lifecycle_scope,
         )
 
         # Stream termination events using async for
-        pattern = AgentTerminationEvent.get_key_pattern(lifecycle_scope)
+        pattern = ScopeUtils.pattern_key(scope="agent_terminated", agent_id=None)
         try:
             async for event in blackboard.stream_events(
                 filter=KeyPatternFilter(pattern=pattern)
@@ -167,9 +165,7 @@ class AgentMemoryRecycler(AgentCapability):
                 if event.event_type != "write":
                     continue
 
-                # Parse termination event
-                if ":terminated" in event.key:
-                    await self._handle_termination(event)
+                await self._handle_termination(event)
 
         except asyncio.CancelledError:
             logger.debug("Lifecycle event monitoring cancelled")
@@ -220,6 +216,9 @@ class AgentMemoryRecycler(AgentCapability):
             agent_type: Type of the agent (for collective scope routing)
             memory_scopes: List of scope IDs to recycle (auto-detected if None)
 
+        NOTE: It is assumed that this agent memory recycler is running in the same
+        colony and session context as the terminated agent.
+
         Returns:
             Dict mapping memory type to count of recycled entries
         """
@@ -227,6 +226,9 @@ class AgentMemoryRecycler(AgentCapability):
 
         # Default scopes if not provided
         if memory_scopes is None:
+            # Must ensure the session ID is set in the execution context to access
+            # the agent's session-specific scopes
+            serving.require_session_id()
             memory_scopes = [
                 MemoryScope.agent_ltm_episodic(terminated_agent_id),
                 MemoryScope.agent_ltm_semantic(terminated_agent_id),
@@ -237,6 +239,8 @@ class AgentMemoryRecycler(AgentCapability):
         for scope_id in memory_scopes:
             try:
                 # Determine memory type from scope
+                # Collective memory scopes are colony-specific (used by all sessions within
+                # the same colony/tenant). So, no need to reset the session context here.
                 if ":ltm:episodic" in scope_id:
                     target_scope = MemoryScope.collective_episodic(agent_type)
                     memory_type = "episodic"
@@ -280,12 +284,11 @@ class AgentMemoryRecycler(AgentCapability):
     async def _read_scope(self, scope_id: str) -> list[BlackboardEntry]:
         """Read all entries from a scope."""
         blackboard = await self.agent.get_blackboard(
-            scope="shared",
             scope_id=scope_id,
         )
 
         entries = await blackboard.query(
-            namespace=f"{scope_id}:*",
+            namespace=ScopeUtils.pattern_key(),  # TODO: The blackboard should handle namespacing based on the scope_id of the blackboard itself, so we can just query with "*" here.
             limit=10000,  # High limit for memory recycling
         )
 
@@ -307,7 +310,6 @@ class AgentMemoryRecycler(AgentCapability):
             return 0
 
         target_blackboard = await self.agent.get_blackboard(
-            scope="shared",
             scope_id=target_scope,
         )
 
@@ -319,8 +321,9 @@ class AgentMemoryRecycler(AgentCapability):
                 # Generate new key for collective scope
                 # Preserve data ID but change scope prefix
                 original_key = entry.key
-                data_suffix = original_key.split(":")[-1]  # Get data ID
-                new_key = f"{target_scope}:{data_suffix}"
+                ### data_suffix = original_key.split(":")[-1]  # Get data ID
+                ### new_key = ScopeUtils.format_key(data_suffix) # TODO: Do not prepend the target scope here, as the blackboard will handle namespacing based on the scope_id of the blackboard itself. Just use the data_suffix as the key.
+                new_key = original_key
 
                 # Add attribution metadata
                 new_metadata = {
@@ -351,13 +354,12 @@ class AgentMemoryRecycler(AgentCapability):
     async def _cleanup_scope(self, scope_id: str) -> None:
         """Clean up a scope after recycling."""
         blackboard = await self.agent.get_blackboard(
-            scope="shared",
             scope_id=scope_id,
         )
 
         # Delete all entries in scope
         entries = await blackboard.query(
-            namespace=f"{scope_id}:*",
+            namespace=ScopeUtils.pattern_key(),  # TODO: The blackboard should handle namespacing based on the scope_id of the blackboard itself, so we can just query with "*" here.
             limit=10000,
         )
 
@@ -376,13 +378,9 @@ class AgentMemoryRecycler(AgentCapability):
     ) -> None:
         """Mark a termination event as processed."""
         # Update the event with processing result
-        lifecycle_scope = MemoryScope.control_plane(
-            self.agent.tenant_id,
-            "lifecycle",
-        )
+        lifecycle_scope = MemoryScope.colony_control_plane("lifecycle")
 
         blackboard = await self.agent.get_blackboard(
-            scope="shared",
             scope_id=lifecycle_scope,
         )
 
@@ -424,15 +422,17 @@ class CollectiveMemoryInitializer(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "collective_memory_initializer",
     ):
         """Initialize collective memory initializer.
 
         Args:
             agent: The MemoryManagementAgent that owns this capability
-            scope_id: Scope ID for this capability
+            scope: Blackboard scope for this capability
+            namespace: Namespace for this capability (appended to scope prefix for blackboard keys)
         """
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
         self._monitor_task: asyncio.Task | None = None
         self._initialized = False
 
@@ -453,7 +453,7 @@ class CollectiveMemoryInitializer(AgentCapability):
         self._initialized = True
 
         logger.info(
-            f"CollectiveMemoryInitializer initialized for tenant={self.agent.tenant_id}"
+            f"CollectiveMemoryInitializer initialized for syscontext={self.agent.syscontext.to_dict()}"
         )
 
     async def shutdown(self) -> None:
@@ -475,7 +475,7 @@ class CollectiveMemoryInitializer(AgentCapability):
         blackboard = await self.get_blackboard()
         blackboard.stream_events_to_queue(
             event_queue,
-            KeyPatternFilter(pattern=f"{self.scope_id}:*"),
+            KeyPatternFilter(pattern=ScopeUtils.pattern_key()),  # TODO: Do we need to filter by scope or does the blackboard handle this based on the scope_id of the blackboard itself?
         )
 
     async def get_result_future(self) -> CapabilityResultFuture:
@@ -506,18 +506,14 @@ class CollectiveMemoryInitializer(AgentCapability):
         Uses async for to stream events from the lifecycle scope. The iterator
         automatically handles subscription/unsubscription lifecycle.
         """
-        lifecycle_scope = MemoryScope.control_plane(
-            self.agent.tenant_id,
-            "lifecycle",
-        )
+        lifecycle_scope = MemoryScope.colony_control_plane("lifecycle")
 
         blackboard = await self.agent.get_blackboard(
-            scope="shared",
             scope_id=lifecycle_scope,
         )
 
         # Stream creation events using async for
-        pattern = AgentCreationEvent.get_key_pattern(lifecycle_scope)
+        pattern = ScopeUtils.pattern_key(scope="agent_created", agent_id=None)
         try:
             async for event in blackboard.stream_events(
                 filter=KeyPatternFilter(pattern=pattern)
@@ -525,9 +521,7 @@ class CollectiveMemoryInitializer(AgentCapability):
                 if event.event_type != "write":
                     continue
 
-                # Parse creation event
-                if ":created" in event.key:
-                    await self._handle_creation(event)
+                await self._handle_creation(event)
 
         except asyncio.CancelledError:
             logger.debug("Creation event monitoring cancelled")
@@ -581,9 +575,16 @@ class CollectiveMemoryInitializer(AgentCapability):
             include_semantic: Also copy semantic memories
             max_entries_per_type: Max entries to copy per memory type
 
+        NOTE: It is assumed that this agent memory initializer is running in the same
+        colony and session context as the agent being initialized.
+
         Returns:
             Total number of memories initialized
         """
+        # Must ensure the session ID is set in the execution context to access
+        # the agent's session-specific scopes
+        serving.require_session_id()
+
         count = 0
 
         # Always initialize procedural memory (prompts, skills, self-concept)
@@ -627,12 +628,11 @@ class CollectiveMemoryInitializer(AgentCapability):
         """Copy entries from collective to new agent's scope."""
         # Read from collective
         source_blackboard = await self.agent.get_blackboard(
-            scope="shared",
             scope_id=source_scope,
         )
 
         entries = await source_blackboard.query(
-            namespace=f"{source_scope}:*",
+            namespace=ScopeUtils.pattern_key(),  # TODO: The blackboard should handle namespacing based on the scope_id of the blackboard itself, so we can just query with "*" here.
             limit=max_entries,
         )
 
@@ -641,7 +641,6 @@ class CollectiveMemoryInitializer(AgentCapability):
 
         # Write to agent's scope
         target_blackboard = await self.agent.get_blackboard(
-            scope="shared",
             scope_id=target_scope,
         )
 
@@ -650,9 +649,10 @@ class CollectiveMemoryInitializer(AgentCapability):
 
         for entry in entries:
             try:
-                # Generate new key for agent's scope
-                data_suffix = entry.key.split(":")[-1]
-                new_key = f"{target_scope}:{data_suffix}"
+                ### # Generate new key for agent's scope
+                ### data_suffix = entry.key.split(":")[-1]
+                ### new_key = f"{target_scope}:{data_suffix}"  # TODO: Do not prepend the target scope here, as the blackboard will handle namespacing based on the scope_id of the blackboard itself. Just use the data_suffix as the key.
+                new_key = entry.key
 
                 # Update metadata
                 new_metadata = {
@@ -703,9 +703,10 @@ class CollectiveMemoryMaintainer(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "collective_memory_maintainer",
     ):
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
 
     def get_action_group_description(self) -> str:
         return (
@@ -718,7 +719,7 @@ class CollectiveMemoryMaintainer(AgentCapability):
         """Initialize maintainer."""
         # TODO: Start periodic maintenance task
         logger.info(
-            f"CollectiveMemoryMaintainer initialized for tenant={self.agent.tenant_id}"
+            f"CollectiveMemoryMaintainer initialized for syscontext={self.agent.syscontext.to_dict()}"
         )
 
     async def stream_events_to_queue(
@@ -729,7 +730,7 @@ class CollectiveMemoryMaintainer(AgentCapability):
         blackboard = await self.get_blackboard()
         blackboard.stream_events_to_queue(
             event_queue,
-            KeyPatternFilter(pattern=f"{self.scope_id}:*"),
+            KeyPatternFilter(pattern=ScopeUtils.pattern_key()),  # TODO: Do we need to filter by scope or does the blackboard handle this based on the scope_id of the blackboard itself?
         )
 
     @override
@@ -790,7 +791,7 @@ class MemoryManagementAgent(Agent):
 
     Deployment modes:
     - **Tenant-level**: One per tenant, manages that tenant's agents
-    - **System-level**: One global (tenant_id=None), manages cross-tenant coordination
+    - **System-level**: One global (session_id=None), manages cross-tenant coordination
 
     The agent runs persistently (not tied to specific tasks) and reacts to
     lifecycle events on the control plane blackboard scope.
@@ -809,34 +810,34 @@ class MemoryManagementAgent(Agent):
         Collective Memory Scopes
         (agent_type:{type}:collective:*)
 
-        ┌─────────────────────────────────────────────────┐
-        │                        CONTROL PLANE            │
-        │   control_plane:tenant:{tenant_id}:lifecycle    │
-        │   ┌─────────────────┐    ┌──────────────────┐   │
-        │   │ AgentCreation   │    │ AgentTermination │   │
-        │   │ Events          │    │ Events           │   │
-        │   └────────┬────────┘    └────────┬─────────┘   │
-        └────────────┼──────────────────────┼─────────────┘
-                     │                      │
-                     ▼                      ▼
-            ┌────────────────────────────────────────┐
-            │       MemoryManagementAgent            │
-            │  ┌──────────────────────────────┐      │
-            │  │ CollectiveMemoryInitializer  │──────┼───▶ Initialize new agent's LTM
-            │  └──────────────────────────────┘      │     from collective
-            │  ┌──────────────────────────────┐      │
-            │  │ AgentMemoryRecycler          │──────┼───▶ Recycle terminated agent's
-            │  └──────────────────────────────┘      │     LTM to collective
-            │  ┌──────────────────────────────┐      │
-            │  │ CollectiveMemoryMaintainer   │──────┼───▶ Periodic maintenance
-            │  └──────────────────────────────┘      │
-            └────────────────────────────────────────┘
-                              │
-                              ▼
-            ┌────────────────────────────────────────┐
-            │         COLLECTIVE MEMORY              │
-            │  agent_type:{type}:collective:*        │
-            └────────────────────────────────────────┘
+        ┌────────────────────────────────────────────────────────────────┐
+        │                             CONTROL PLANE                      │
+        │  tenant:{tenant_id}:colony:{colony_id}:control_plane:lifecycle │
+        │        ┌─────────────────┐    ┌──────────────────┐             │
+        │        │ AgentCreation   │    │ AgentTermination │             │
+        │        │ Events          │    │ Events           │             │
+        │        └────────┬────────┘    └────────┬─────────┘             │
+        └─────────────────┼──────────────────────┼───────────────────────┘
+                          │                      │
+                          ▼                      ▼
+                ┌───────────────────────────────────────┐
+                │        MemoryManagementAgent          │
+                │   ┌──────────────────────────────┐    │
+                │   │ CollectiveMemoryInitializer  │────┼───▶ Initialize new agent's LTM
+                │   └──────────────────────────────┘    │     from collective
+                │   ┌──────────────────────────────┐    │
+                │   │ AgentMemoryRecycler          │────┼───▶ Recycle terminated agent's
+                │   └──────────────────────────────┘    │     LTM to collective
+                │   ┌──────────────────────────────┐    │
+                │   │ CollectiveMemoryMaintainer   │────┼───▶ Periodic maintenance
+                │   └──────────────────────────────┘    │
+                └───────────────────────────────────────┘
+                                    │
+                                    ▼
+                ┌────────────────────────────────────────┐
+                │         COLLECTIVE MEMORY              │
+                │  agent_type:{type}:collective:*        │
+                └────────────────────────────────────────┘
         ```
 
     Example:
@@ -844,21 +845,16 @@ class MemoryManagementAgent(Agent):
         from polymathera.colony.agents.patterns.memory.management import MemoryManagementAgent
         from polymathera.colony.system import spawn_agents
 
-        # Create tenant-level memory management agent
-        agent_ids = await spawn_agents([
-            MemoryManagementAgent.bind(
-                agent_type="service.memory_management",
-                tenant_id="acme_corp",
-            ),
-        ])
-
-        # System-level agent (no tenant)
-        agent_ids = await spawn_agents([
-            MemoryManagementAgent.bind(
-                agent_type="service.memory_management",
-                tenant_id="system",
-            ),
-        ])
+        # Create colony-level memory management agent
+        with serving.user_execution_context(
+            tenant_id="acme_corp",
+            colony_id="colony_123",
+            session_id="session_123"):
+            agent_ids = await spawn_agents([
+                MemoryManagementAgent.bind(
+                    agent_type="service.memory_management",
+                ),
+            ])
         ```
 
     Integration:
@@ -895,21 +891,22 @@ class MemoryManagementAgent(Agent):
         self.state = AgentState.INITIALIZED
 
         # Create capabilities
-        base_scope = f"memory_mgmt:{self.tenant_id}"
-
         self._recycler = AgentMemoryRecycler(
             agent=self,
-            scope_id=f"{base_scope}:recycler",
+            scope=ScopeUtils.get_colony_level_scope(),
+            namespace="memory_mgmt:recycler",
         )
 
         self._initializer = CollectiveMemoryInitializer(
             agent=self,
-            scope_id=f"{base_scope}:initializer",
+            scope=ScopeUtils.get_colony_level_scope(),
+            namespace="memory_mgmt:initializer",
         )
 
         self._maintainer = CollectiveMemoryMaintainer(
             agent=self,
-            scope_id=f"{base_scope}:maintainer",
+            scope=ScopeUtils.get_colony_level_scope(),
+            namespace="memory_mgmt:maintainer",
         )
 
         # Add capabilities to agent
@@ -924,7 +921,7 @@ class MemoryManagementAgent(Agent):
 
         logger.info(
             f"MemoryManagementAgent initialized: {self.agent_id} "
-            f"(tenant={self.tenant_id})"
+            f"(syscontext={self.syscontext.to_dict()})"
         )
 
     @hookable

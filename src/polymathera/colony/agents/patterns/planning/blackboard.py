@@ -11,8 +11,9 @@ import logging
 import time
 from typing import Any
 
+from ...base import Agent
 from ...blackboard.blackboard import EnhancedBlackboard
-from ...blackboard.types import BlackboardScope
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from .policies import PlanAccessPolicy
 from ...models import ActionPlan, PlanStatus
 from ....distributed.ray_utils import serving
@@ -25,18 +26,21 @@ class PlanBlackboard:
 
     def __init__(
         self,
+        agent: Agent,
         *,
-        scope_id: str,
+        scope: BlackboardScope = BlackboardScope.COLONY,
         plan_access_policy: PlanAccessPolicy | None = None,
     ):
         """Initialize plan blackboard.
 
         Args:
-            scope_id: Scope ID for blackboard. This scope may contain multiple
+            agent: Agent using this blackboard (for scoping and access control)
+            scope: Scope for blackboard. This scope may contain multiple
                 plans for different agents that need to coordinate.
             plan_access_policy: Policy for plan-level access control (optional)
         """
-        self.scope_id = scope_id
+        self.agent = agent
+        self.scope_id = f"{get_scope_prefix(scope, agent)}:action_plans"
         self.plan_access_policy = plan_access_policy
         self.blackboard: EnhancedBlackboard | None = None
         self._initialized = False
@@ -52,7 +56,6 @@ class PlanBlackboard:
         # we need plan-level semantics, not key-level semantics
         self.blackboard = EnhancedBlackboard(
             app_name=app_name,
-            scope=BlackboardScope.SHARED,
             scope_id=self.scope_id,
             access_policy=None,  # Use plan_access_policy instead
             backend_type=None,  # Use the globally configured blackboard backend
@@ -64,7 +67,7 @@ class PlanBlackboard:
 
     async def get_plan(self, agent_id: str) -> ActionPlan | None:
         """Get plan for specific agent."""
-        key = ActionPlan.get_plan_key(agent_id)
+        key = ScopeUtils.format_key(agent_id=agent_id)
         plan_dict = await self.blackboard.read(key)
         return ActionPlan(**plan_dict) if plan_dict else None
 
@@ -73,7 +76,7 @@ class PlanBlackboard:
         # TODO: Implement efficient search for plan by ID. Use RedisOM indexing.
         # Query all plans
         entries = await self.blackboard.query(
-            namespace=ActionPlan.get_all_plans_key_pattern(),
+            namespace=ScopeUtils.pattern_key(agent_id=None),  # Query all agent_id keys
             limit=1000,
         )
 
@@ -85,9 +88,8 @@ class PlanBlackboard:
 
     async def get_all_plans(self, limit: int | None = None) -> list[ActionPlan]:
         """Get all plans."""
-        # TODO: Add tenant_id filtering in future for multi-tenant support
         entries = await self.blackboard.query(
-            namespace=ActionPlan.get_all_plans_key_pattern(),
+            namespace=ScopeUtils.pattern_key(agent_id=None),  # Query all agent_id keys
             limit=limit or 1000,  # Reasonable limit for plan discovery
         )
 
@@ -97,7 +99,7 @@ class PlanBlackboard:
         """Update plan using plan's key method."""
         plan.updated_at = time.time()
         await self.blackboard.write(
-            key=ActionPlan.get_plan_key(plan.agent_id),
+            key=ScopeUtils.format_key(agent_id=plan.agent_id),
             value=plan.model_dump(),
             created_by=plan.agent_id,
             tags={"plan", plan.status.value},
@@ -122,11 +124,8 @@ class PlanBlackboard:
             plan.status = PlanStatus.PROPOSED
 
         # Store plan
-        # TODO: Add tenant_id (necessary even if agent_id is unique, since we need scoped search in other places)
-        # The tenant_id can be added to the Plan model and used in the blackboard keys and/or metadata
-        plan_key = ActionPlan.get_plan_key(plan.agent_id)
         await self.blackboard.write(
-            key=plan_key,
+            key = ScopeUtils.format_key(agent_id=plan.agent_id),
             value=plan.model_dump(),
             created_by=requesting_agent_id,
             tags={"plan", plan.status.value},
@@ -159,7 +158,10 @@ class PlanBlackboard:
 
     async def detect_conflicts(self, plan: ActionPlan) -> list[dict]:
         """Detect conflicts."""
-        entries = await self.blackboard.query(namespace=ActionPlan.get_all_plans_key_pattern())
+        entries = await self.blackboard.query(
+            namespace=ScopeUtils.pattern_key(agent_id=None),  # Query all agent_id keys
+            limit=1000,
+        )
 
         active_plans = [
             ActionPlan(**entry.value)
@@ -261,7 +263,7 @@ class PlanBlackboard:
         """
         # Query all plans with this parent
         entries = await self.blackboard.query(
-            namespace=ActionPlan.get_all_plans_key_pattern(),
+            namespace=ScopeUtils.pattern_key(agent_id=None),  # Query all agent_id keys
             limit=1000,
         )
 

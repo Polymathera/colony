@@ -21,6 +21,7 @@ import asyncio
 from ...models import Action, ActionResult, PolicyREPL, AgentSuspensionState
 from ..models import Reflection, Critique
 from ...base import Agent, AgentCapability
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions import action_executor
 from ..events import event_handler, EventProcessingResult, PROCESSED
 from ...blackboard import KeyPatternFilter, BlackboardEvent
@@ -85,15 +86,6 @@ class CritiqueRequest(BaseModel):
         description="Evidence supporting the output"
     )
     created_at: float = Field(default_factory=time.time)
-
-    @staticmethod
-    def get_key_pattern(scope_id: str) -> str:
-        """Pattern for matching critique requests in a scope."""
-        return f"{scope_id}:critique_request:*"
-
-    def get_blackboard_key(self, scope_id: str) -> str:
-        """Get blackboard key for this request."""
-        return f"{scope_id}:critique_request:{self.request_id}"
 
 
 class CritiquePolicy(ABC):
@@ -321,8 +313,8 @@ class CriticCapability(AgentCapability):
     - Event-driven handling of incoming CritiqueRequest events via @event_handler
     - Plannable actions for requesting critique from peers/parents via @action_executor
     """
-    def __init__(self, agent: Agent):
-        super().__init__(agent=agent, scope_id=agent.agent_id)
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY, namespace: str = "critique"):
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
         # Injected critique policies for different relationships
         self.critique_policy_self: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_self")  # FIXME: Get the policy instances properly
         self.critique_policy_child: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_child")  # FIXME: Get the policy instances properly
@@ -368,25 +360,25 @@ class CriticCapability(AgentCapability):
         blackboard.stream_events_to_queue(
             event_queue,
             KeyPatternFilter(
-                pattern=CritiqueRequest.get_key_pattern(scope_id=self.agent.agent_id)
+                pattern=ScopeUtils.pattern_key(critique_request=None)
             )
         )
 
     def _get_request_from_peer_key(self, requester_id: str) -> str:
         """Get blackboard key for peer critique request."""
-        return f"{requester_id}:critique_request_from_peer"
+        return ScopeUtils.format_key(requester_id=requester_id, critique_request_from_peer=True)
 
     def _get_request_from_parent_key(self, child_id: str) -> str:
         """Get blackboard key for parent critique request."""
-        return f"{child_id}:critique_request_from_parent"
+        return ScopeUtils.format_key(child_id=child_id, critique_request_from_parent=True)
 
     def _get_request_from_child_key(self, parent_id: str) -> str:
         """Get blackboard key for child critique request."""
-        return f"{parent_id}:critique_request_from_child"
+        return ScopeUtils.format_key(parent_id=parent_id, critique_request_from_child=True)
 
     def _get_response_from_agent_key(self, responder_id: str, requester_id: str) -> str:
         """Get blackboard key for critique response."""
-        return f"{requester_id}:critique_response_from_{responder_id}"
+        return ScopeUtils.format_key(requester_id=requester_id, critique_response_from=responder_id)
 
     async def _send_critique_request(
         self,
@@ -404,7 +396,8 @@ class CriticCapability(AgentCapability):
         elif relation == "parent2child":
             request_key = self._get_request_from_parent_key(to_agent)
 
-        to_blackboard = await self.agent.get_blackboard(scope="shared", scope_id=to_agent)
+        # TODO: What the fuck is this get_agent method do? It does not exist.
+        to_blackboard = await self.agent.get_agent(scope_id=ScopeUtils.get_agent_level_scope(to_agent))
         await to_blackboard.write(
             request_key,
             request,
@@ -413,7 +406,7 @@ class CriticCapability(AgentCapability):
 
     async def _send_critique_response(self, responder_id: str, requester_id: str, critique: Critique) -> None:
         # Write response back to requester's blackboard
-        requester_blackboard = await self.agent.get_blackboard(scope="shared", scope_id=requester_id)
+        requester_blackboard = await self.agent.get_blackboard(scope_id=ScopeUtils.get_agent_level_scope(requester_id))
         await requester_blackboard.write(
             self._get_response_from_agent_key(responder_id, requester_id),
             critique.model_dump()
@@ -585,7 +578,7 @@ class CriticCapability(AgentCapability):
         response_event = asyncio.Event()
         critique_data = {}
 
-        response_blackboard = await self.agent.get_blackboard(scope="shared", scope_id=from_agent)
+        response_blackboard = await self.agent.get_blackboard(scope_id=ScopeUtils.get_agent_level_scope(from_agent))
 
         response_key = self._get_response_from_agent_key(to_agent, from_agent)
 

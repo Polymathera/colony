@@ -28,6 +28,7 @@ from typing import Any
 from overrides import override
 from pydantic import BaseModel, Field
 
+from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -87,7 +88,7 @@ class ContractInferenceCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.AGENT,
         formalism: FormalismLevel = FormalismLevel.SEMI_FORMAL,
         use_examples: bool = True,
     ):
@@ -95,11 +96,11 @@ class ContractInferenceCapability(AgentCapability):
 
         Args:
             agent: Agent using this capability
-            scope_id: Blackboard scope ID (defaults to agent.agent_id)
+            scope: Blackboard scope ID (defaults to agent.agent_id)
             formalism: Target formalism level
             use_examples: Whether to use examples for learning
         """
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:contract_inference:{agent.agent_id}")
         self.formalism = formalism
         self.use_examples = use_examples
 
@@ -233,7 +234,7 @@ class ContractInferenceCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=f"{self.scope_id}:result:{request_id}",  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+                key=ScopeUtils.format_key(result=request_id),  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
                 value=final_result.model_dump(),
                 created_by=self.agent.agent_id,
             )
@@ -902,15 +903,15 @@ class ContractAnalysisCapability(VCMAnalysisCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.COLONY,
     ):
         """Initialize contract analysis capability.
 
         Args:
             agent: Agent using this capability (coordinator agent)
-            scope_id: Blackboard scope ID
+            scope: Blackboard scope
         """
-        super().__init__(agent=agent, scope_id=scope_id)
+        super().__init__(agent=agent, scope=scope)
 
     async def initialize(self) -> None:
         """Initialize contract analysis capability."""
@@ -1167,7 +1168,7 @@ class ContractCoordinatorCapability(AgentCapability):
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.COLONY,
         max_agents: int = 10,
         batching_policy: BatchingPolicy | None = None,
     ):
@@ -1179,7 +1180,7 @@ class ContractCoordinatorCapability(AgentCapability):
             max_agents: Maximum worker agents to spawn
             batching_policy: Policy for cache-aware batch selection
         """
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:contract_coordinator:{agent.agent_id}")
         self.max_agents = max_agents
         self._worker_handles: dict[str, Any] = {}  # page_id -> AgentHandle
         self._pending_results: dict[str, ScopeAwareResult] = {}
@@ -1226,8 +1227,8 @@ class ContractCoordinatorCapability(AgentCapability):
         if not self._agent_pool_cap:
             self._agent_pool_cap = AgentPoolCapability(
                 agent=self.agent,
-                scope_id=self.scope_id,
-                max_agents=self.max_agents,
+                scope=BlackboardScope.COLONY,
+                #max_agents=self.max_agents,
             )
             await self._agent_pool_cap.initialize()
             self.agent.add_capability(self._agent_pool_cap)
@@ -1237,7 +1238,7 @@ class ContractCoordinatorCapability(AgentCapability):
         if not self._result_cap:
             self._result_cap = ResultCapability(
                 agent=self.agent,
-                scope_id=self.scope_id,
+                scope=BlackboardScope.COLONY,
             )
             await self._result_cap.initialize()
             self.agent.add_capability(self._result_cap)
@@ -1247,7 +1248,7 @@ class ContractCoordinatorCapability(AgentCapability):
         if not self._page_graph_cap:
             self._page_graph_cap = PageGraphCapability(
                 agent=self.agent,
-                scope_id=self.scope_id,
+                scope=BlackboardScope.COLONY,
             )
             await self._page_graph_cap.initialize()
             self.agent.add_capability(self._page_graph_cap)
@@ -1452,7 +1453,7 @@ class ContractCoordinatorCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=f"{self.scope_id}:result:{request_id}",  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+                key=ScopeUtils.format_key(result=request_id),  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
                 value=final_result.model_dump(),
                 created_by=self.agent.agent_id,
             )
@@ -1496,7 +1497,7 @@ class ContractCoordinatorCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=f"{self.scope_id}:result:{request_id}",  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+                key=ScopeUtils.format_key(result=request_id),  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
                 value=final_result.model_dump(),
                 created_by=self.agent.agent_id,
             )

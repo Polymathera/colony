@@ -188,7 +188,7 @@ class HybridStorageBackendFactory:
         otherwise falls back to BlackboardStorageBackend.
         """
         blackboard = await self._agent.get_blackboard(
-            scope="shared", scope_id=scope_id,
+            scope_id=scope_id,
         )
         bb_backend = BlackboardStorageBackend(
             scope_id=scope_id,

@@ -31,16 +31,16 @@ export function useBlackboardScopes() {
   });
 }
 
-export function useBlackboardEntries(scope: string, scopeId: string, backendType: string = "") {
+export function useBlackboardEntries(scopeId: string, backendType: string = "") {
   return useQuery({
-    queryKey: ["blackboard", "entries", scope, scopeId],
+    queryKey: ["blackboard", "entries", scopeId],
     queryFn: () => {
       const params = backendType ? `?backend_type=${encodeURIComponent(backendType)}` : "";
       return apiFetch<BlackboardEntryInfo[]>(
-        `/blackboard/scopes/${scope}/${scopeId}/entries${params}`
+        `/blackboard/scopes/${scopeId}/entries${params}`
       );
     },
-    enabled: !!scope && !!scopeId,
+    enabled: !!scopeId,
     refetchInterval: 5000,
   });
 }

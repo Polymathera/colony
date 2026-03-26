@@ -117,14 +117,14 @@ async def spawn_consistency_agent(
     Returns:
         AgentHandle for interacting with the consistency agent
     """
-    agent_id = f"consistency_agent_{owner.tenant_id}_{uuid4().hex[:8]}"
+    agent_id = f"consistency_agent_{uuid4().hex[:8]}"
     logger.info(f"Spawning ConsistencyAgent for {owner.agent_id}...")
 
-    metadata = AgentMetadata(tenant_id=owner.tenant_id)
+    metadata = AgentMetadata()
     if session_id:
-        metadata.session_id = session_id
+        metadata.syscontext.session_id = session_id
     if run_id:
-        metadata.run_id = run_id
+        metadata.syscontext.run_id = run_id
 
     # TODO: Pass LLMClientRequirements and other deployment parameters to spawn_child_agents
     return await owner.spawn_child_agents(

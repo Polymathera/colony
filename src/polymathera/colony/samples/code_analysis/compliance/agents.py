@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from polymathera.colony.agents.patterns import MergeCapability
 from polymathera.colony.agents.base import Agent
+from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from .types import ComplianceType
 from .capabilities import (
     ComplianceVCMCapability,  # New VCMAnalysisCapability-based coordinator
@@ -58,7 +59,14 @@ class ComplianceAnalysisAgent(Agent):
         """Initialize agent and configure capabilities."""
         # Extract and set up capability classes
         self.add_capability_blueprints([
-            ComplianceVCMCapability.bind(), MergeCapability.bind()
+            ComplianceVCMCapability.bind(
+                scope=BlackboardScope.AGENT,
+                namespace="compliance_analysis_vcm",
+            ),
+            MergeCapability.bind(
+                scope=BlackboardScope.AGENT,
+                namespace="compliance_analysis_merge",
+            ),
         ])
 
         # Set bound_pages from page_id
@@ -94,7 +102,10 @@ class ComplianceAnalysisCoordinator(Agent):
         """Initialize coordinator and configure capabilities."""
         self.add_capability_blueprints([
             ComplianceVCMCapability.bind(),
-            MergeCapability.bind()
+            MergeCapability.bind(
+                scope=BlackboardScope.COLONY,
+                namespace="compliance_analysis_merge",
+            )
         ])
         await super().initialize()
 

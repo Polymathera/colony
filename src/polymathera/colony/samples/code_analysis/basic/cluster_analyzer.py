@@ -10,6 +10,7 @@ when they don't all fit in LLM context:
 
 from __future__ import annotations
 
+import uuid
 import asyncio
 import json
 import logging
@@ -17,6 +18,7 @@ from collections import defaultdict
 from overrides import override
 
 from polymathera.colony.agents.base import Agent, AgentState, AgentCapability
+from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.models import (
     AgentSuspensionState,
     AttentionContext,
@@ -38,8 +40,8 @@ class ClusterAnalyzerCapability(AgentCapability):
     """Capability providing cluster analysis action executors.
     """
 
-    def __init__(self, agent = None, scope_id = None, *, blackboard = None):
-        super().__init__(agent, scope_id, blackboard=blackboard)
+    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.AGENT, *, blackboard = None):
+        super().__init__(agent, scope_id=f"{get_scope_prefix(scope, agent)}:cluster_analyzer:{uuid.uuid4()}", blackboard=blackboard)
         self.query_router: PageQueryRoutingPolicy | None = None
 
     def get_action_group_description(self) -> str:

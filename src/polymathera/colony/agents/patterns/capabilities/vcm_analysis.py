@@ -48,6 +48,7 @@ from overrides import override
 
 from ...models import AgentSuspensionState
 from ...base import AgentCapability, AgentMetadata
+from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions.policies import action_executor
 from ..scope import ScopeAwareResult, AnalysisScope
 
@@ -76,24 +77,19 @@ class VCMAnalysisCapability(AgentCapability, ABC):
     - Outstanding queries: Queries generated but not yet answered
     """
 
-    # Blackboard key patterns
-    RESULT_KEY = "vcm_analysis:{tenant_id}:{scope_id}:result:{page_id}"
-    REVISIT_QUEUE_KEY = "vcm_analysis:{tenant_id}:{scope_id}:revisit_queue"
-    OUTSTANDING_QUERIES_KEY = "vcm_analysis:{tenant_id}:{scope_id}:outstanding_queries"
-    ANALYSIS_STATE_KEY = "vcm_analysis:{tenant_id}:{scope_id}:state"
-
     def __init__(
         self,
         agent: Agent,
-        scope_id: str | None = None,
+        scope: BlackboardScope = BlackboardScope.COLONY,
     ):
         """Initialize VCM analysis capability.
 
         Args:
             agent: Owning agent (coordinator)
-            scope_id: Blackboard scope (defaults to agent_id)
+            scope: Blackboard scope (defaults to COLONY)
         """
-        super().__init__(agent=agent, scope_id=scope_id or agent.agent_id)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
+        self.blackboard_scope = scope
 
         # Internal tracking (backed by blackboard for persistence)
         self._worker_ids: dict[str, str] = {}  # page_id -> worker_agent_id
@@ -218,32 +214,19 @@ class VCMAnalysisCapability(AgentCapability, ABC):
 
     def _get_result_key(self, page_id: str) -> str:
         """Get blackboard key for a page result."""
-        return self.RESULT_KEY.format(
-            tenant_id=self.agent.tenant_id,
-            scope_id=self.scope_id,
-            page_id=page_id,
-        )
+        return ScopeUtils.format_key(result=page_id)
 
     def _get_revisit_queue_key(self) -> str:
         """Get blackboard key for revisit queue."""
-        return self.REVISIT_QUEUE_KEY.format(
-            tenant_id=self.agent.tenant_id,
-            scope_id=self.scope_id,
-        )
+        return ScopeUtils.format_key(revisit_queue=True)
 
     def _get_outstanding_queries_key(self) -> str:
         """Get blackboard key for outstanding queries."""
-        return self.OUTSTANDING_QUERIES_KEY.format(
-            tenant_id=self.agent.tenant_id,
-            scope_id=self.scope_id,
-        )
+        return ScopeUtils.format_key(outstanding_queries=True)
 
     def _get_state_key(self) -> str:
         """Get blackboard key for capability state."""
-        return self.ANALYSIS_STATE_KEY.format(
-            tenant_id=self.agent.tenant_id,
-            scope_id=self.scope_id,
-        )
+        return ScopeUtils.format_key(state=True)
 
     async def _persist_state(self) -> None:
         """Persist internal state to blackboard."""
@@ -265,7 +248,7 @@ class VCMAnalysisCapability(AgentCapability, ABC):
 
         pool_cap = self.agent.get_capability_by_type(AgentPoolCapability)
         if not pool_cap:
-            pool_cap = AgentPoolCapability(agent=self.agent, scope_id=self.scope_id)
+            pool_cap = AgentPoolCapability(agent=self.agent, scope=BlackboardScope.COLONY)
             await pool_cap.initialize()
             self.agent.add_capability(pool_cap)
         return pool_cap
@@ -276,7 +259,7 @@ class VCMAnalysisCapability(AgentCapability, ABC):
 
         result_cap = self.agent.get_capability_by_type(ResultCapability)
         if not result_cap:
-            result_cap = ResultCapability(agent=self.agent, scope_id=self.scope_id)
+            result_cap = ResultCapability(agent=self.agent, scope=BlackboardScope.COLONY)
             await result_cap.initialize()
             self.agent.add_capability(result_cap)
         return result_cap
@@ -287,7 +270,7 @@ class VCMAnalysisCapability(AgentCapability, ABC):
 
         merge_cap = self.agent.get_capability_by_type(MergeCapability)
         if not merge_cap:
-            merge_cap = MergeCapability(agent=self.agent, scope_id=self.scope_id)
+            merge_cap = MergeCapability(agent=self.agent, scope=self.blackboard_scope)
             merge_cap.set_policy(self.get_domain_merge_policy())
             await merge_cap.initialize()
             self.agent.add_capability(merge_cap)
@@ -959,15 +942,6 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         Returns:
             Dict with list of analyzed page IDs.
         """
-        blackboard = await self.get_blackboard()
-
-        # Find all result keys for our scope
-        pattern = self.RESULT_KEY.format(
-            tenant_id=self.agent.tenant_id,
-            scope_id=self.scope_id,
-            page_id="*",
-        )
-
         # Get keys matching pattern
         analyzed = []
         result_cap = await self._get_result_cap()
