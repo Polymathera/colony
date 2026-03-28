@@ -25,8 +25,8 @@ import itertools
 from typing import Any
 from overrides import override
 
-from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
-from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol
+from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, IntentAnalysisProtocol
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -989,7 +989,7 @@ class IntentAnalysisCapability(VCMAnalysisCapability):
                 # Store hierarchy in blackboard for access
                 blackboard = await self.get_blackboard()
                 await blackboard.write(
-                    key=ScopeUtils.format_key(intent_hierarchy=category),
+                    key=IntentAnalysisProtocol.intent_hierarchy_key(category, namespace="intent"),
                     value={
                         "category": category,
                         "parent_id": f"category_{category}",
@@ -1078,7 +1078,7 @@ class IntentAnalysisCapability(VCMAnalysisCapability):
             # Store in blackboard for tracking
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=ScopeUtils.format_key(intent_misalignments=True),
+                key=IntentAnalysisProtocol.intent_misalignments_key(namespace="intent"),
                 value={
                     "misalignments": misalignments,
                     "count": len(misalignments),

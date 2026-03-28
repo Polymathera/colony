@@ -37,7 +37,7 @@ import networkx as nx
 
 from ...base import AgentCapability
 from ...models import AgentSuspensionState, RunContext
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...scopes import BlackboardScope, get_scope_prefix
 from ...cache_coordination import (
     CacheAwareCoordinationPolicy,
     PageScorer,
@@ -196,11 +196,11 @@ class WorkingSetCapability(AgentCapability):
 
     def _get_working_set_key(self) -> str:
         """Get blackboard key for working set state."""
-        return ScopeUtils.format_key(vcm="working_set")
+        return WorkingSetStateProtocol.cluster_state_key(namespace="working_set")
 
     def _get_page_status_key(self) -> str:
         """Get blackboard key for page status."""
-        return ScopeUtils.format_key(vcm="page_status")
+        return WorkingSetStateProtocol.page_status_key(namespace="working_set")
 
     async def _read_cluster_state(self) -> dict[str, Any]:
         """Read working set state from blackboard (cluster-wide)."""

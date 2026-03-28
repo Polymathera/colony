@@ -18,6 +18,7 @@ from typing import Any
 from overrides import override
 
 from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from polymathera.colony.agents.blackboard.protocol import BasicAnalysisProtocol
 from polymathera.colony.agents.base import Agent, AgentCapability
 from polymathera.colony.agents.models import (
     ActionType,
@@ -508,7 +509,7 @@ Output format (JSON):
                     scope_id=ScopeUtils.get_agent_level_scope(parent_id)
                 )
                 await parent_blackboard.write(
-                    ScopeUtils.format_key(cluster_analysis_complete=self.agent.agent_id),
+                    BasicAnalysisProtocol.cluster_analysis_complete_key(self.agent.agent_id, namespace="basic"),
                     {
                         "summary": summary,
                         "cluster_id": self.cluster.cluster_id,

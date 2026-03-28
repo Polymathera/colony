@@ -248,7 +248,7 @@ class AgentMemoryRecycler(AgentCapability):
         )
 
         entries = await blackboard.query(
-            namespace=ScopeUtils.pattern_key(),  # TODO: The blackboard should handle namespacing based on the scope_id of the blackboard itself, so we can just query with "*" here.
+            namespace="*",  # TODO: The blackboard should handle namespacing based on the scope_id of the blackboard itself, so we can just query with "*" here.
             limit=10000,  # High limit for memory recycling
         )
 
@@ -281,8 +281,6 @@ class AgentMemoryRecycler(AgentCapability):
                 # Generate new key for collective scope
                 # Preserve data ID but change scope prefix
                 original_key = entry.key
-                ### data_suffix = original_key.split(":")[-1]  # Get data ID
-                ### new_key = ScopeUtils.format_key(data_suffix) # TODO: Do not prepend the target scope here, as the blackboard will handle namespacing based on the scope_id of the blackboard itself. Just use the data_suffix as the key.
                 new_key = original_key
 
                 # Add attribution metadata
@@ -319,7 +317,7 @@ class AgentMemoryRecycler(AgentCapability):
 
         # Delete all entries in scope
         entries = await blackboard.query(
-            namespace=ScopeUtils.pattern_key(),  # TODO: The blackboard should handle namespacing based on the scope_id of the blackboard itself, so we can just query with "*" here.
+            namespace="*",  # TODO: The blackboard should handle namespacing based on the scope_id of the blackboard itself, so we can just query with "*" here.
             limit=10000,
         )
 
@@ -526,7 +524,7 @@ class CollectiveMemoryInitializer(AgentCapability):
         )
 
         entries = await source_blackboard.query(
-            namespace=ScopeUtils.pattern_key(),  # TODO: The blackboard should handle namespacing based on the scope_id of the blackboard itself, so we can just query with "*" here.
+            namespace="*",  # TODO: The blackboard should handle namespacing based on the scope_id of the blackboard itself, so we can just query with "*" here.
             limit=max_entries,
         )
 

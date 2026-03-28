@@ -26,13 +26,14 @@ Usage:
 
 from __future__ import annotations
 
+import uuid
 import logging
 import time
 from typing import Any, TYPE_CHECKING
 from overrides import override
 
 from ...base import AgentCapability, AgentHandle
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...scopes import BlackboardScope, get_scope_prefix
 from ...models import AgentMetadata, AgentResourceRequirements, AgentSuspensionState
 from ..actions.policies import action_executor
 from ...blackboard.protocol import WorkAssignmentProtocol
@@ -303,7 +304,7 @@ class AgentPoolCapability(AgentCapability):
         # Send work assignment via blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            ScopeUtils.format_key(agent_id=agent_id, work_assignment=True),
+            WorkAssignmentProtocol.assignment_key(namespace="pool", agent_id=agent_id, request_id=str(uuid.uuid4())),
             {
                 "work_unit": work_unit,
                 "priority": priority,
@@ -354,7 +355,7 @@ class AgentPoolCapability(AgentCapability):
                 if result_type != "all" and result_type != rtype:
                     continue
 
-                key = ScopeUtils.format_key(agent_id=agent_id, result_type=rtype)
+                key = WorkAssignmentProtocol.result_key(namespace="pool", agent_id=agent_id, result_type=rtype)
                 data = await blackboard.read(key)
                 if data:
                     results.append({
@@ -614,7 +615,7 @@ class AgentPoolCapability(AgentCapability):
 
         for agent_id in agent_ids:
             await blackboard.write(
-                ScopeUtils.format_key(agent_id=agent_id, broadcast=True),
+                WorkAssignmentProtocol.broadcast_key(namespace="pool", agent_id=agent_id),
                 {
                     "message": message,
                     "from": self.agent.agent_id,

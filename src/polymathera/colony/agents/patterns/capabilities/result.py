@@ -29,7 +29,8 @@ from typing import Any, TYPE_CHECKING
 from overrides import override
 
 from ...base import AgentCapability
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import ResultStorageProtocol
+from ...scopes import BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
 from ..actions.policies import action_executor
 
@@ -71,11 +72,11 @@ class ResultCapability(AgentCapability):
 
     def _get_partial_key(self, result_id: str) -> str:
         """Get blackboard key for a partial result."""
-        return ScopeUtils.format_key(results="partial", result_id=result_id)
+        return ResultStorageProtocol.partial_key(result_id, namespace="result_store")
 
     def _get_index_key(self) -> str:
         """Get blackboard key for results index."""
-        return ScopeUtils.format_key(results="index")
+        return ResultStorageProtocol.index_key(namespace="result_store")
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:

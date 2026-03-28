@@ -88,7 +88,7 @@ Example:
     agent.add_capability(stm)
     agent.add_capability(working)
 
-    # Store a memory explicitly (with key via `ScopeUtils.format_key()`)
+    # Store a memory explicitly
     observation = Observation(content="User asked about auth", timestamp=time.time())
     await working.store(observation)
 
@@ -111,7 +111,7 @@ from pydantic import BaseModel
 
 from ...base import AgentCapability, CapabilityResultFuture
 from ...models import AgentSuspensionState
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import MemoryRecordProtocol
 from ...blackboard.types import BlackboardEntry, BlackboardEvent
 from ....vcm.models import MmapConfig
 from ....vcm.sources import BuilInContextPageSourceType
@@ -589,10 +589,7 @@ class MemoryCapability(AgentCapability):
             from .types import MemoryRecord
             data = MemoryRecord(content=data, tags=tags or set())
 
-        key = ScopeUtils.format_key(
-            scope="memory_record",
-            record_id=data.record_id
-        )
+        key = MemoryRecordProtocol.record_key(data.record_id, namespace="memory")
         effective_ttl = ttl_seconds if ttl_seconds is not None else self.ttl_seconds
 
         # Serialize to dict
@@ -1170,10 +1167,7 @@ class MemoryCapability(AgentCapability):
                     f"BlackboardEntry(value=<BaseModel with record_id>)."
                 )
 
-            key = ScopeUtils.format_key(
-                scope="memory_record",
-                record_id=data.record_id
-            )
+            key = MemoryRecordProtocol.record_key(data.record_id, namespace="memory")
 
             value = data.model_dump() if hasattr(data, "model_dump") else data
 

@@ -65,7 +65,7 @@ from ...base import (
     AgentCapability,
     CapabilityResultFuture,
 )
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...scopes import BlackboardScope, get_scope_prefix
 from ..attention import PageQuery
 from .validation import ValidationResult, ValidationIssue
 from ..actions.policies import action_executor
@@ -217,7 +217,7 @@ class GroundingCapability(AgentCapability):
 
     def _get_result_key(self) -> str:
         """Get blackboard key for this capability's result."""
-        return ScopeUtils.format_key(grounding="result")
+        return GroundingProtocol.result_key("default", namespace="grounding")
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:

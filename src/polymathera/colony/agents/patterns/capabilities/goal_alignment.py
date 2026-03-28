@@ -53,7 +53,7 @@ from ...base import (
     AgentHandle,
     CapabilityResultFuture,
 )
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...scopes import BlackboardScope, get_scope_prefix
 from ..actions.policies import action_executor
 from ... import KeyPatternFilter, BlackboardEvent
 from ...models import Action, PolicyREPL, AgentSuspensionState
@@ -172,7 +172,7 @@ class JointGoal(BaseModel):
 
     def generate_goal_key(self) -> str:
         """Generate a unique goal key for blackboard storage."""
-        return f"joint_goal:{self.goal_id}"
+        return GoalAlignmentProtocol.joint_goal_state_key(self.goal_id, namespace="goal_alignment")
 
 
 # ============================================================================
@@ -250,7 +250,7 @@ class ObjectiveGuardCapability(AgentCapability):
         """
         blackboard = await self.get_blackboard()
         return CapabilityResultFuture(
-            result_key=ScopeUtils.pattern_key(goal_alignment_result=None),
+            result_key=GoalAlignmentProtocol.result_pattern(namespace="goal_alignment"),
             blackboard=blackboard,
         )
 
@@ -333,10 +333,7 @@ class ObjectiveGuardCapability(AgentCapability):
         # Write goal to this capability's scope
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=ScopeUtils.format_key(
-                scope="goal_alignment",
-                joint_goal=goal.goal_id
-            ),
+            key=GoalAlignmentProtocol.joint_goal_key(goal.goal_id, namespace="goal_alignment"),
             value=goal.model_dump(),
             agent_id=self.agent.agent_id,
         )
@@ -398,11 +395,7 @@ class ObjectiveGuardCapability(AgentCapability):
         """
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=ScopeUtils.format_key(
-                scope="goal_alignment",
-                goal_id=result.goal_id,
-                requesting_agent_id=result.requesting_agent_id
-            ),
+            key=GoalAlignmentProtocol.request_key(f"{result.goal_id}:{result.requesting_agent_id}", namespace="goal_alignment"),
             value=result.model_dump(),
             agent_id=self.agent.agent_id,
         )

@@ -378,7 +378,7 @@ class ConsciousnessCapability(AgentCapability):
 
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=ScopeUtils.format_key(consciousness="metrics", timestamp=int(time.time() * 1000)),
+            key=ConsciousnessProtocol.state_key(f"metrics:{int(time.time() * 1000)}", namespace="consciousness"),
             value=metrics_entry,
             created_by=self.scope_id,
             tags={"consciousness", "metrics"},
@@ -442,7 +442,7 @@ class ConsciousnessCapability(AgentCapability):
         # Write update event to blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=ScopeUtils.format_key(consciousness="self_concept_update", timestamp=int(time.time() * 1000)),
+            key=ConsciousnessProtocol.state_key(f"self_concept_update:{int(time.time() * 1000)}", namespace="consciousness"),
             value={"updated_fields": list(updates.keys()), "timestamp": time.time()},
             created_by=self.scope_id,
             tags={"consciousness", "self_concept"},

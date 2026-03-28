@@ -39,7 +39,7 @@ if TYPE_CHECKING:
         ConsolidationContext,
         MemorySubscription,
     )
-from ...scopes import ScopeUtils
+from ...blackboard.protocol import MemoryRecordProtocol
 from ...blackboard.types import BlackboardEntry, BlackboardEvent, KeyPatternFilter
 
 # =============================================================================
@@ -89,7 +89,7 @@ class StorageBackend(Protocol):
         """Write an entry to storage.
 
         Args:
-            key: Storage key (typically from ScopeUtils.format_key())
+            key: Storage key
             value: Serialized data (dict from model_dump())
             metadata: Entry metadata (relevance, timestamps, etc.)
             tags: Tags for categorization and filtering
@@ -1260,11 +1260,7 @@ class ConsolidationMaintenancePolicy:
         written = 0
         for entry in consolidated:
             data = entry.value
-            key = ScopeUtils.format_key(
-                scope="consolidated",
-                timestamp=int(time.time()),
-                index=written
-            )
+            key = MemoryRecordProtocol.consolidated_key(int(time.time()), written, namespace="memory")
 
             value = data.model_dump() if hasattr(data, "model_dump") else data
 

@@ -6,8 +6,8 @@ import logging
 from typing import Any
 from overrides import override
 
-from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
-from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol
+from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, ComplianceAnalysisProtocol
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -1213,7 +1213,7 @@ class ComplianceVCMCapability(VCMAnalysisCapability):
                 obligation_id = f"fix_{violation.get('location', page_id)}"
                 blackboard = await self.get_blackboard()
                 await blackboard.write(
-                    ScopeUtils.format_key(obligation=obligation_id),
+                    ComplianceAnalysisProtocol.obligation_key(obligation_id, namespace="compliance"),
                     {
                         "obligation_id": obligation_id,
                         "description": f"Fix {violation.get('type', 'compliance')} violation: {violation.get('description', '')}",

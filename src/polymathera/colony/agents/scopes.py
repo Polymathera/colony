@@ -46,30 +46,36 @@ class BlackboardScope(Enum):
     AGENT = "agent"
 
 
-def get_scope_prefix(scope: BlackboardScope, agent: Agent | str | None = None) -> str:
+def get_scope_prefix(scope: BlackboardScope, agent: Agent | str | None = None, **kwargs) -> str:
     """Get the prefix string for a given blackboard scope.
 
     Args:
         scope: The blackboard scope enum value.
         agent: The agent instance or agent ID (optional, required for AGENT scope).
+        **kwargs: Additional keyword arguments for scope formatting.
 
     Returns:
         The prefix string for the specified scope.
     Raises:
         ValueError: If the scope is AGENT and agent is not provided.
     """
+    prefix = ""
     if scope == BlackboardScope.COLONY:
-        return ScopeUtils.get_colony_level_scope() or "colony"
+        prefix = ScopeUtils.get_colony_level_scope() or "colony"
     elif scope == BlackboardScope.TENANT:
-        return ScopeUtils.get_tenant_level_scope() or "tenant"
+        prefix = ScopeUtils.get_tenant_level_scope() or "tenant"
     elif scope == BlackboardScope.SESSION:
-        return ScopeUtils.get_session_level_scope() or "session"
+        prefix = ScopeUtils.get_session_level_scope() or "session"
     elif scope == BlackboardScope.AGENT:
         if agent is None:
             raise ValueError("Agent must be provided for AGENT scope")
-        return ScopeUtils.get_agent_level_scope(agent) or "agent"
+        prefix = ScopeUtils.get_agent_level_scope(agent) or "agent"
     else:
         raise ValueError(f"Unsupported blackboard scope: {scope}")
+
+    if kwargs:
+        prefix += ":" + ScopeUtils.format_key(**kwargs)
+    return prefix
 
 
 class ScopeUtils:

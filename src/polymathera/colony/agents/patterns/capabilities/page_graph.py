@@ -28,7 +28,8 @@ from overrides import override
 import networkx as nx
 
 from ...base import AgentCapability
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import RelationshipProtocol
+from ...scopes import BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
 from ..actions.policies import action_executor
 
@@ -724,7 +725,7 @@ class PageGraphCapability(AgentCapability):
             rel_type = rel_dict.get("relationship_type", "unknown")
             discovered_by = rel_dict.get("discovered_by")
 
-            key = ScopeUtils.format_key(relationship=True, source=source, target=target, type=rel_type)
+            key = RelationshipProtocol.relationship_key(source, target, rel_type, namespace="page_graph")
             await blackboard.write(
                 key=key,
                 value=rel_dict,

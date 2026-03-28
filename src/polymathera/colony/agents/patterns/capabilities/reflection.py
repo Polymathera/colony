@@ -456,10 +456,7 @@ Respond with a structured analysis."""
             scope_id=ScopeUtils.get_agent_level_scope(peer_id)
         )
         await peer_blackboard.write(
-            key=ScopeUtils.format_key(
-                scope="reflection_request",
-                request_id=request.request_id
-            ),
+            key=ReflectionProtocol.request_key(request.request_id, namespace="reflection"),
             value=request.model_dump(),
             created_by=self.agent.agent_id,
             tags={"reflection_request", f"from:{self.agent.agent_id}"},
@@ -469,7 +466,7 @@ Respond with a structured analysis."""
         response_event = asyncio.Event()
         response_data: dict[str, Any] = {}
 
-        response_key = f"reflection_response:{request.request_id}"
+        response_key = ReflectionProtocol.response_key(request.request_id, namespace="reflection")
 
         async def on_response(event: BlackboardEvent) -> None:
             if event.key == response_key:

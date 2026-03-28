@@ -53,7 +53,8 @@ from ...models import (
 )
 from ...base import Agent, ActionPolicy, ActionPolicyIterationResult, AgentCapability
 from ...blackboard import BlackboardEvent
-from ...scopes import ScopeUtils, BlackboardScope
+from ...blackboard.protocol import ActionPolicyProtocol
+from ...scopes import BlackboardScope
 from ..hooks import hookable
 from ...blackboard.backend import ConcurrentModificationError
 from .repl import PolicyPythonREPL, REPLCapability, get_repl_guidance
@@ -2178,7 +2179,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             working_memory = self.agent.get_working_memory()
             if working_memory:
                 await working_memory.store(
-                    key=f"{namespace}:action_policy_iteration:{state.iteration_count}",
+                    key=ActionPolicyProtocol.iteration_key(namespace, state.iteration_count, namespace="action_policy"),
                     value=context,
                     tags={namespace, "planning_context"},
                     ttl_seconds=3600,  # 1 hour - TODO: Make configurable

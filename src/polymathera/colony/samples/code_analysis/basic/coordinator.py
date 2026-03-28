@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 import time
 
 from polymathera.colony.agents.base import Agent, AgentState, AgentCapability
-from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope
+from polymathera.colony.agents.scopes import BlackboardScope
 from polymathera.colony.agents.models import (
     Action,
     ActionResult,
@@ -37,7 +37,7 @@ from polymathera.colony.agents.blackboard import KeyPatternFilter, BlackboardEve
 from polymathera.colony.agents.patterns.attention import HierarchicalAttentionRouting
 from polymathera.colony.agents.patterns.actions.policies import action_executor
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
-from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, ErrorSignalProtocol
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, BasicAnalysisProtocol, ErrorSignalProtocol
 from polymathera.colony.agents.patterns.capabilities.working_set import WorkingSetCapability
 from polymathera.colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
 from polymathera.colony.agents.patterns.capabilities.result import ResultCapability
@@ -126,14 +126,14 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         # Write critique to blackboard for child to see
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            ScopeUtils.format_key(critique=agent_id),
+            BasicAnalysisProtocol.critique_key(agent_id, namespace="basic"),
             critique.model_dump(),
             created_by=self.agent.agent_id
         )
 
         if critique.requires_revision:
             await blackboard.write(
-                ScopeUtils.format_key(revision_request=agent_id),
+                BasicAnalysisProtocol.revision_request_key(agent_id, namespace="basic"),
                 {
                     "critique": critique.model_dump(),
                     "timestamp": time.time()
@@ -194,7 +194,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         if retry_count < 1:
             logger.info(f"Retrying child {agent_id}")
             blackboard = await self.get_blackboard()
-            await blackboard.delete(ScopeUtils.format_key(error=agent_id))
+            await blackboard.delete(ErrorSignalProtocol.error_key(agent_id, namespace="basic"))
 
             # TODO: In future, use LLM inference to decide best retry strategy
             # For now, just log and let the child continue

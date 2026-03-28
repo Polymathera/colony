@@ -13,7 +13,8 @@ from typing import Any
 
 from ...base import Agent
 from ...blackboard.blackboard import EnhancedBlackboard
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import PlanProtocol
+from ...scopes import BlackboardScope, get_scope_prefix
 from .policies import PlanAccessPolicy
 from ...models import ActionPlan, PlanStatus
 from ....distributed.ray_utils import serving
@@ -67,7 +68,7 @@ class PlanBlackboard:
 
     async def get_plan(self, agent_id: str) -> ActionPlan | None:
         """Get plan for specific agent."""
-        key = ScopeUtils.format_key(agent_id=agent_id)
+        key = PlanProtocol.plan_key(agent_id, namespace="plan")
         plan_dict = await self.blackboard.read(key)
         return ActionPlan(**plan_dict) if plan_dict else None
 
@@ -76,7 +77,7 @@ class PlanBlackboard:
         # TODO: Implement efficient search for plan by ID. Use RedisOM indexing.
         # Query all plans
         entries = await self.blackboard.query(
-            namespace=ScopeUtils.pattern_key(agent_id=None),  # Query all agent_id keys
+            namespace=PlanProtocol.plan_pattern(namespace="plan"),  # Query all agent_id keys
             limit=1000,
         )
 
@@ -89,7 +90,7 @@ class PlanBlackboard:
     async def get_all_plans(self, limit: int | None = None) -> list[ActionPlan]:
         """Get all plans."""
         entries = await self.blackboard.query(
-            namespace=ScopeUtils.pattern_key(agent_id=None),  # Query all agent_id keys
+            namespace=PlanProtocol.plan_pattern(namespace="plan"),  # Query all agent_id keys
             limit=limit or 1000,  # Reasonable limit for plan discovery
         )
 
@@ -99,7 +100,7 @@ class PlanBlackboard:
         """Update plan using plan's key method."""
         plan.updated_at = time.time()
         await self.blackboard.write(
-            key=ScopeUtils.format_key(agent_id=plan.agent_id),
+            key=PlanProtocol.plan_key(plan.agent_id, namespace="plan"),
             value=plan.model_dump(),
             created_by=plan.agent_id,
             tags={"plan", plan.status.value},
@@ -125,7 +126,7 @@ class PlanBlackboard:
 
         # Store plan
         await self.blackboard.write(
-            key = ScopeUtils.format_key(agent_id=plan.agent_id),
+            key = PlanProtocol.plan_key(plan.agent_id, namespace="plan"),
             value=plan.model_dump(),
             created_by=requesting_agent_id,
             tags={"plan", plan.status.value},
@@ -140,7 +141,7 @@ class PlanBlackboard:
         if plan.approval_required and plan.parent_plan_id:
             # Notify parent (via blackboard events)
             await self.blackboard.write(
-                key=f"plan_approval_request:{plan.plan_id}",
+                key=PlanProtocol.approval_request_key(plan.plan_id, namespace="plan"),
                 value={
                     "plan_id": plan.plan_id,
                     "from_agent": requesting_agent_id,
@@ -159,7 +160,7 @@ class PlanBlackboard:
     async def detect_conflicts(self, plan: ActionPlan) -> list[dict]:
         """Detect conflicts."""
         entries = await self.blackboard.query(
-            namespace=ScopeUtils.pattern_key(agent_id=None),  # Query all agent_id keys
+            namespace=PlanProtocol.plan_pattern(namespace="plan"),  # Query all agent_id keys
             limit=1000,
         )
 
@@ -263,7 +264,7 @@ class PlanBlackboard:
         """
         # Query all plans with this parent
         entries = await self.blackboard.query(
-            namespace=ScopeUtils.pattern_key(agent_id=None),  # Query all agent_id keys
+            namespace=PlanProtocol.plan_pattern(namespace="plan"),  # Query all agent_id keys
             limit=1000,
         )
 
@@ -314,7 +315,7 @@ class PlanBlackboard:
 
         # Subscribe to plan updates via blackboard events
         # Store subscription mapping
-        subscription_key = f"plan_subscription:{plan_id}:{subscriber_agent_id}"
+        subscription_key = PlanProtocol.subscription_key(plan_id, subscriber_agent_id, namespace="plan")
         await self.blackboard.write(
             key=subscription_key,
             value={
@@ -339,7 +340,7 @@ class PlanBlackboard:
             event_type: Type of event
             data: Event data
         """
-        notification_key = f"agent_notification:{agent_id}:{time.time()}"
+        notification_key = PlanProtocol.notification_key(agent_id, time.time(), namespace="plan")
         await self.blackboard.write(
             key=notification_key,
             value={
@@ -364,7 +365,7 @@ class PlanBlackboard:
         """
         # Find all subscribers
         entries = await self.blackboard.query(
-            namespace=f"plan_subscription:{plan_id}:*",
+            namespace=PlanProtocol.subscription_key(plan_id, "*", namespace="plan"),
             limit=1000,
         )
 

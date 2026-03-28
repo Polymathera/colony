@@ -17,6 +17,7 @@ from ...models import (
     PlanningContext,
 )
 from ...blackboard import EnhancedBlackboard
+from ...blackboard.protocol import PlanLearningProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class ExecutionHistoryStore:
             await self.initialize()
 
         # Store record with searchable tags
-        key = f"execution:{record.plan_id}"
+        key = PlanLearningProtocol.execution_key(record.plan_id, namespace="plan_learning")
         await self.blackboard.write(
             key=key,
             value=record.model_dump(),

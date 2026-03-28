@@ -17,7 +17,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..scope import ScopeAwareResult
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import RelationshipProtocol
 
 
 class Relationship(BaseModel):
@@ -95,7 +95,7 @@ class Relationship(BaseModel):
         Returns:
             Unique relationship key
         """
-        return f"relationship:{self.source_id}:{self.target_id}:{self.relationship_type}"
+        return RelationshipProtocol.relationship_key(self.source_id, self.target_id, self.relationship_type, namespace="relationships")
 
     @staticmethod
     def get_key_pattern(
@@ -114,7 +114,10 @@ class Relationship(BaseModel):
             Key pattern for querying relationships
         """
         # Build query pattern
-        return ScopeUtils.pattern_key(relationship=True, source_id=source_id, target_id=target_id, relationship_type=relationship_type)
+        src = source_id or "*"
+        tgt = target_id or "*"
+        rel = relationship_type or "*"
+        return RelationshipProtocol.relationship_key(src, tgt, rel, namespace="relationships")
 
 
 class RelationshipGraph(BaseModel):

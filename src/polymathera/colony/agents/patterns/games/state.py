@@ -870,11 +870,11 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
 
     def get_blackboard_namespace(self, scope: BlackboardScope, game_id: str) -> str:
         # Make namespace depend on game_id to allow multiple games of the same type to coexist.
-        return f"{get_scope_prefix(scope, self.agent)}:{ScopeUtils.format_key(namespace='games', game_type=self.game_type, game=game_id)}"
+        return get_scope_prefix(scope, self.agent, namespace='games', game_type=self.game_type, game=game_id)
 
     def _get_result_key(self) -> str:
         """Get blackboard key for game result."""
-        return ScopeUtils.format_key(result=True)
+        return GameStateProtocol.result_key(namespace="game")
 
     @override
     async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
@@ -897,7 +897,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             event_queue,
             CombinationFilter(
                 event_types={"write"},  # All game events are write events
-                pattern=ScopeUtils.pattern_key(state=None), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+                pattern=GameStateProtocol.state_pattern(namespace="game"), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
                 checker=lambda event: (
                     "game" in event.tags and
                     self.game_type in event.tags and
@@ -1368,7 +1368,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         Returns:
             Current game state or None if not found
         """
-        key = ScopeUtils.format_key(state=game_id) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+        key = GameStateProtocol.state_key(game_id, namespace="game") # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
         # Prefer explicit transactional read when an ambient transaction is active.
         # Fallback to non-transactional read if not in a transaction.
         try:
@@ -1425,7 +1425,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         # Fallback to non-transactional write if not in a transaction.
         try:
             await self.blackboard.write_tx(
-                key=ScopeUtils.format_key(state=game_state.game_id), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+                key=GameStateProtocol.state_key(game_state.game_id, namespace="game"), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
                 value=game_event.game_state.to_blackboard_entry(),
                 created_by=game_event.agent_id,
                 tags=game_event.tags,
@@ -1433,7 +1433,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             )
         except RuntimeError:
             await self.blackboard.write(
-                key=ScopeUtils.format_key(state=game_state.game_id), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+                key=GameStateProtocol.state_key(game_state.game_id, namespace="game"), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
                 value=game_event.game_state.to_blackboard_entry(),
                 tags=game_event.tags,
                 created_by=game_event.agent_id,
@@ -1451,7 +1451,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             List of active games
         """
         entries = await self.blackboard.query(
-            namespace=ScopeUtils.pattern_key(state=None), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+            namespace=GameStateProtocol.state_pattern(namespace="game"), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
             tags={"game", "active", game_type} if game_type else {"game", "active"}
         )
         return [ GameState(**entry.value) for entry in entries ]
@@ -1487,7 +1487,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         # With ambient transactions, we can use blackboard.read_tx/write_tx inside the block
         # while still allowing advanced callers to use the yielded txn if needed.
         async with self.blackboard.transaction() as txn:
-            key = ScopeUtils.format_key(state=game_id) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+            key = GameStateProtocol.state_key(game_id, namespace="game") # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
             state_data = await self.blackboard.read_tx(key, agent_id=self.agent.agent_id)
 
             if not state_data:

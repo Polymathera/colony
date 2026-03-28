@@ -48,7 +48,8 @@ from overrides import override
 
 from ...models import AgentSuspensionState
 from ...base import AgentCapability, AgentMetadata
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import VCMAnalysisProtocol
+from ...scopes import BlackboardScope, get_scope_prefix
 from ..actions.policies import action_executor
 from ..scope import ScopeAwareResult, AnalysisScope
 
@@ -214,19 +215,19 @@ class VCMAnalysisCapability(AgentCapability, ABC):
 
     def _get_result_key(self, page_id: str) -> str:
         """Get blackboard key for a page result."""
-        return ScopeUtils.format_key(result=page_id)
+        return VCMAnalysisProtocol.result_key(page_id, namespace="vcm_analysis")
 
     def _get_revisit_queue_key(self) -> str:
         """Get blackboard key for revisit queue."""
-        return ScopeUtils.format_key(revisit_queue=True)
+        return VCMAnalysisProtocol.revisit_queue_key(namespace="vcm_analysis")
 
     def _get_outstanding_queries_key(self) -> str:
         """Get blackboard key for outstanding queries."""
-        return ScopeUtils.format_key(outstanding_queries=True)
+        return VCMAnalysisProtocol.outstanding_queries_key(namespace="vcm_analysis")
 
     def _get_state_key(self) -> str:
         """Get blackboard key for capability state."""
-        return ScopeUtils.format_key(state=True)
+        return VCMAnalysisProtocol.state_key(namespace="vcm_analysis")
 
     async def _persist_state(self) -> None:
         """Persist internal state to blackboard."""

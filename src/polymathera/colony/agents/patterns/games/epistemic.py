@@ -37,7 +37,8 @@ from pydantic import BaseModel, Field
 
 from ...base import Agent
 from ...blackboard.blackboard import EnhancedBlackboard
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import EpistemicProtocol
+from ...scopes import BlackboardScope, get_scope_prefix
 
 class BeliefStrength(str, Enum):
     """Strength of belief in a proposition."""
@@ -380,13 +381,13 @@ class EpistemicLayer:
         )
 
     def _get_proposition_key(self, proposition_id: str) -> str:
-        return ScopeUtils.format_key(proposition=proposition_id)
+        return EpistemicProtocol.proposition_key(proposition_id, namespace="epistemic")
 
     def _get_intention_key(self, intention_id: str) -> str:
-        return ScopeUtils.format_key(intention=intention_id)
+        return EpistemicProtocol.intention_key(intention_id, namespace="epistemic")
 
     def _get_joint_intention_key(self, intention_id: str) -> str:
-        return ScopeUtils.format_key(joint_intention=intention_id)
+        return EpistemicProtocol.joint_intention_key(intention_id, namespace="epistemic")
 
     async def record_proposition(
         self,

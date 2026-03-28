@@ -20,6 +20,7 @@ from polymathera.colony.cluster.models import InferenceResponse
 from polymathera.colony.agents.patterns.scope import ScopeAwareResult
 from polymathera.colony.agents.patterns.actions.policies import action_executor
 from polymathera.colony.agents.scopes import ScopeUtils
+from polymathera.colony.agents.blackboard.protocol import BasicAnalysisProtocol
 
 
 logger = logging.getLogger(__name__)
@@ -229,7 +230,7 @@ Be concise. Focus on facts, not speculation."""
 
         # Write page summary to blackboard
         await blackboard.write(
-            ScopeUtils.format_key(page_summary=self.page_id),
+            BasicAnalysisProtocol.page_summary_key(self.page_id, namespace="basic"),
             self.summary
         )
 

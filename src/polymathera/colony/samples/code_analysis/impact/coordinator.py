@@ -10,7 +10,7 @@ from overrides import override
 import itertools
 
 
-from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -32,7 +32,7 @@ from polymathera.colony.agents.patterns.games.negotiation.capabilities import Ne
 from polymathera.colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
 from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
-from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, ErrorSignalProtocol
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, ErrorSignalProtocol, ImpactAnalysisProtocol
 from polymathera.colony.agents.patterns.capabilities import WorkingSetCapability, AgentPoolCapability
 from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraphCapability
 from polymathera.colony.agents.patterns.capabilities.batching import (
@@ -650,7 +650,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         retry_count = error_data.get("context", {}).get("retry_count", 0)
         if retry_count < 1:
             logger.info(f"Retrying child {agent_id}")
-            await self.blackboard.delete(ScopeUtils.format_key(error=agent_id))
+            await self.blackboard.delete(ErrorSignalProtocol.error_key(agent_id, namespace="impact"))
         else:
             # Max retries exceeded - remove from tracking
             logger.error(f"Child {agent_id} ({page_id}) failed after {retry_count} retries, skipping")
@@ -1051,7 +1051,7 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
             # Check blackboard for pre-computed dependency graph
             dep_graph_key = f"dependency_graph:{':'.join(sorted(page_ids[:10]))}"  # TODO: Add DependencyGraphResult.get_key(page_ids, tenant_id) method?
             dep_data = await self.blackboard.read(
-                key=ScopeUtils.format_key(dependency_graph=dep_graph_key),
+                key=ImpactAnalysisProtocol.dependency_graph_key(dep_graph_key, namespace="impact"),
             )
 
             if dep_data and isinstance(dep_data, dict):

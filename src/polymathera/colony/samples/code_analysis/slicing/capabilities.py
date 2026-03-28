@@ -21,8 +21,8 @@ import logging
 from typing import Any
 from overrides import override
 
-from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
-from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol
+from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, SlicingAnalysisProtocol
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -645,7 +645,7 @@ class SlicingAnalysisCapability(VCMAnalysisCapability):
         # Store resolutions in blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=ScopeUtils.format_key(interprocedural_resolutions=True),
+            key=SlicingAnalysisProtocol.interprocedural_resolutions_key(namespace="slicing"),
             value={
                 "resolutions": resolutions,
                 "unresolved": unresolved,

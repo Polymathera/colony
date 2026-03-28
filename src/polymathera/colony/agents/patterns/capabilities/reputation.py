@@ -74,7 +74,7 @@ from ...base import (
     CapabilityResultFuture,
 )
 from ...blackboard.protocol import ReputationProtocol
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...scopes import BlackboardScope, get_scope_prefix
 from ..actions.policies import (
     action_executor,
     ActionPolicyExecutionState,
@@ -322,7 +322,7 @@ class ReputationTracker:
         Returns:
             Agent reputation (creates new if doesn't exist)
         """
-        key = f"{self.namespace}:agent:{agent_id}"
+        key = ReputationProtocol.agent_reputation_key(agent_id, namespace="reputation")
         data = await self.blackboard.read(key)
 
         if data is None:
@@ -470,7 +470,7 @@ class ReputationTracker:
         Args:
             reputation: Reputation to store
         """
-        key = f"{self.namespace}:agent:{reputation.agent_id}"
+        key = ReputationProtocol.agent_reputation_key(reputation.agent_id, namespace="reputation")
 
         await self.blackboard.write(
             key=key,
@@ -841,11 +841,11 @@ class ReputationCapability(AgentCapability):
 
     def _get_result_key(self) -> str:
         """Get blackboard key for this capability's result."""
-        return ScopeUtils.format_key(reputation="result")
+        return ReputationProtocol.result_key(namespace="reputation")
 
     def _get_event_pattern(self) -> str:
         """Get pattern for reputation events."""
-        return ScopeUtils.pattern_key(reputation=None)
+        return ReputationProtocol.update_request_pattern(namespace="reputation")
 
     async def ensure_tracker(self) -> ReputationTracker:
         """Ensure reputation tracker is initialized."""

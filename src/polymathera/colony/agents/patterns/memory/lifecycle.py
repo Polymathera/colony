@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from ...base import AgentCapability, CapabilityResultFuture, Agent
 from ...models import AgentSuspensionState
-from ...scopes import MemoryScope, ScopeUtils, BlackboardScope, get_scope_prefix
+from ...scopes import MemoryScope, BlackboardScope, get_scope_prefix
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ....distributed.ray_utils import serving
 from ..hooks.types import HookContext, HookType
@@ -258,7 +258,7 @@ class MemoryLifecycleHooks(AgentCapability):
         )
 
         await blackboard.write(
-            key=ScopeUtils.format_key(scope="agent_created", agent_id=agent_id),
+            key=LifecycleSignalProtocol.created_key(agent_id, namespace="lifecycle"),
             value=creation_data.model_dump(),
             agent_id=agent_id,
             tags={"agent_created", "memory_init_pending"},
@@ -304,7 +304,7 @@ class MemoryLifecycleHooks(AgentCapability):
         )
 
         await blackboard.write(
-            key=ScopeUtils.format_key(scope="agent_terminated", agent_id=agent_id),
+            key=LifecycleSignalProtocol.terminated_key(agent_id, namespace="lifecycle"),
             value=termination_data.model_dump(),
             agent_id=agent_id,
             tags={"agent_terminated", "memory_recycle_pending"},

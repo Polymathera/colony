@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from ....base import AgentCapability
 from ....models import AgentSuspensionState
-from ....scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ....scopes import BlackboardScope, get_scope_prefix
 from ...actions.policies import action_executor
 from .types import (
     HypothesisFilter,
@@ -97,11 +97,13 @@ class HypothesisTrackingCapability(AgentCapability):
 
     def _get_hypotheses_key(self) -> str:
         """Get blackboard key for tracked hypotheses."""
-        return ScopeUtils.format_key(tracked_hypotheses=True)
+        from ....blackboard.protocol import HypothesisTrackingProtocol
+        return HypothesisTrackingProtocol.hypotheses_key(namespace="hypothesis_tracking")
 
     def _get_games_key(self) -> str:
         """Get blackboard key for game mappings."""
-        return ScopeUtils.format_key(hypothesis_games=True)
+        from ....blackboard.protocol import HypothesisTrackingProtocol
+        return HypothesisTrackingProtocol.games_key(namespace="hypothesis_tracking")
 
     async def _load_from_blackboard(self) -> None:
         """Load cached data from blackboard."""

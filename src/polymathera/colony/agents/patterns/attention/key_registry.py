@@ -14,7 +14,7 @@ from .attention import PageKey
 from ...base import Agent
 from ....vcm.page_storage import PageStorage
 from ...blackboard import EnhancedBlackboard
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import KeyRegistryProtocol
 
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             await self.page_keys_blackboard.write(
-                ScopeUtils.format_key(page_id=page_id),
+                KeyRegistryProtocol.page_key(page_id, namespace="key_registry"),
                 {
                     "key": key.model_dump(),
                     "cluster_id": cluster_id,
@@ -104,7 +104,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             data = await self.page_keys_blackboard.read(
-                ScopeUtils.format_key(page_id=page_id)
+                KeyRegistryProtocol.page_key(page_id, namespace="key_registry")
             )
             if data:
                 return (page_id, PageKey(**data["key"]), data.get("cluster_id", "unknown"))
@@ -134,7 +134,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             await self.cluster_summaries_blackboard.write(
-                ScopeUtils.format_key(cluster_id=cluster_id),
+                KeyRegistryProtocol.cluster_key(cluster_id, namespace="key_registry"),
                 {
                     "summary": summary,
                     "representative_key": representative_key.model_dump(),
@@ -260,7 +260,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             data = await self.cluster_summaries_blackboard.read(
-                ScopeUtils.format_key(cluster_id=cluster_id),
+                KeyRegistryProtocol.cluster_key(cluster_id, namespace="key_registry"),
             )
             if data:
                 summary = data.get("summary", {})

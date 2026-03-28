@@ -348,19 +348,19 @@ class CriticCapability(AgentCapability):
 
     def _get_request_from_peer_key(self, requester_id: str) -> str:
         """Get blackboard key for peer critique request."""
-        return ScopeUtils.format_key(requester_id=requester_id, critique_request_from_peer=True)
+        return CritiqueProtocol.peer_request_key(requester_id, namespace="critique")
 
     def _get_request_from_parent_key(self, child_id: str) -> str:
         """Get blackboard key for parent critique request."""
-        return ScopeUtils.format_key(child_id=child_id, critique_request_from_parent=True)
+        return CritiqueProtocol.parent_to_child_request_key(child_id, namespace="critique")
 
     def _get_request_from_child_key(self, parent_id: str) -> str:
         """Get blackboard key for child critique request."""
-        return ScopeUtils.format_key(parent_id=parent_id, critique_request_from_child=True)
+        return CritiqueProtocol.child_to_parent_request_key(parent_id, namespace="critique")
 
     def _get_response_from_agent_key(self, responder_id: str, requester_id: str) -> str:
         """Get blackboard key for critique response."""
-        return ScopeUtils.format_key(requester_id=requester_id, critique_response_from=responder_id)
+        return CritiqueProtocol.response_key(requester_id, responder_id, namespace="critique")
 
     async def _send_critique_request(
         self,

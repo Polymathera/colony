@@ -38,10 +38,11 @@ Example:
 from __future__ import annotations
 
 import time
-from abc import abstractmethod
 from typing import Any, Literal, Protocol, TYPE_CHECKING
 
 from pydantic import BaseModel, Field, field_validator
+
+from ...blackboard.protocol import ActionPolicyProtocol
 
 if TYPE_CHECKING:
     from ...base import Agent
@@ -217,7 +218,7 @@ class BlackboardBackingStore:
 
     def generate_key(self, agent_id: str, var_name: str) -> str:
         """Generate unique key for blackboard storage."""
-        return f"repl:{agent_id}:{var_name}:{time.time_ns()}"
+        return ActionPolicyProtocol.repl_key(agent_id, var_name, time.time_ns(), namespace="repl")
 
 
 class StorageHint(BaseModel):

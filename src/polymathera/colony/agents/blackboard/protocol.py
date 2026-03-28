@@ -760,6 +760,21 @@ class GoalAlignmentProtocol(BlackboardProtocol):
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("goal_alignment_request", "")
 
+    @staticmethod
+    def result_key(request_id: str, namespace: str) -> str:
+        """Key for a goal alignment result."""
+        return BlackboardProtocol._ns(namespace, f"goal_alignment_result:{request_id}")
+
+    @staticmethod
+    def result_pattern(namespace: str) -> str:
+        """Pattern matching goal alignment results."""
+        return BlackboardProtocol._ns_pattern(namespace, "goal_alignment_result:*")
+
+    @staticmethod
+    def joint_goal_state_key(goal_id: str, namespace: str) -> str:
+        """Key for a joint goal state entry."""
+        return BlackboardProtocol._ns(namespace, f"joint_goal:{goal_id}")
+
 
 class PlanProtocol(BlackboardProtocol):
     """Protocol for plan publication on colony-wide plan blackboard.
@@ -900,6 +915,11 @@ class ReputationProtocol(BlackboardProtocol):
         key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         return ScopeUtils.parse_key("", key)
 
+    @staticmethod
+    def agent_reputation_key(agent_id: str, namespace: str) -> str:
+        """Key for a specific agent's reputation record."""
+        return BlackboardProtocol._ns(namespace, f"agent:{agent_id}")
+
 
 class ConsciousnessProtocol(BlackboardProtocol):
     """Protocol for consciousness state publication.
@@ -955,6 +975,11 @@ class ReflectionProtocol(BlackboardProtocol):
         key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("reflection_request", "")
+
+    @staticmethod
+    def response_key(request_id: str, namespace: str) -> str:
+        """Key for a reflection response."""
+        return BlackboardProtocol._ns(namespace, f"reflection_response:{request_id}")
 
 
 class AnalysisResultProtocol(BlackboardProtocol):
@@ -1048,3 +1073,237 @@ class MultiHopSearchProtocol(BlackboardProtocol):
         key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("multi_hop_search_request", "")
+
+
+# ---------------------------------------------------------------------------
+# Epistemic / game-theoretic protocols
+# ---------------------------------------------------------------------------
+
+class EpistemicProtocol(BlackboardProtocol):
+    """Protocol for epistemic state (propositions, intentions) in multi-agent games."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    @staticmethod
+    def proposition_key(proposition_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"proposition:{proposition_id}")
+
+    @staticmethod
+    def intention_key(intention_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"intention:{intention_id}")
+
+    @staticmethod
+    def joint_intention_key(intention_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"joint_intention:{intention_id}")
+
+
+# ---------------------------------------------------------------------------
+# Memory / record protocols
+# ---------------------------------------------------------------------------
+
+class MemoryRecordProtocol(BlackboardProtocol):
+    """Protocol for memory record storage."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    @staticmethod
+    def record_key(record_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"memory_record:{record_id}")
+
+    @staticmethod
+    def consolidated_key(timestamp: int, count: int, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"consolidated:{timestamp}:{count}")
+
+
+class KeyRegistryProtocol(BlackboardProtocol):
+    """Protocol for attention key registry entries."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    @staticmethod
+    def page_key(page_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"page_id:{page_id}")
+
+    @staticmethod
+    def cluster_key(cluster_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"cluster_id:{cluster_id}")
+
+
+# ---------------------------------------------------------------------------
+# VCM / result protocols
+# ---------------------------------------------------------------------------
+
+class VCMAnalysisProtocol(BlackboardProtocol):
+    """Protocol for VCM analysis capability keys."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    @staticmethod
+    def result_key(page_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"vcm_result:{page_id}")
+
+    @staticmethod
+    def revisit_queue_key(namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, "vcm_revisit_queue")
+
+    @staticmethod
+    def outstanding_queries_key(namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, "vcm_outstanding_queries")
+
+    @staticmethod
+    def state_key(namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, "vcm_state")
+
+
+class ResultStorageProtocol(BlackboardProtocol):
+    """Protocol for ResultCapability storage."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    @staticmethod
+    def partial_key(result_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"results:partial:{result_id}")
+
+    @staticmethod
+    def index_key(namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, "results:index")
+
+
+# ---------------------------------------------------------------------------
+# Relationship / graph protocols
+# ---------------------------------------------------------------------------
+
+class RelationshipProtocol(BlackboardProtocol):
+    """Protocol for relationship/page graph entries."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    @staticmethod
+    def relationship_key(source: str, target: str, rel_type: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"relationship:{source}:{target}:{rel_type}")
+
+    @staticmethod
+    def relationship_pattern(namespace: str) -> str:
+        return BlackboardProtocol._ns_pattern(namespace, "relationship:*")
+
+
+# ---------------------------------------------------------------------------
+# Plan learning / action policy protocols
+# ---------------------------------------------------------------------------
+
+class PlanLearningProtocol(BlackboardProtocol):
+    """Protocol for plan execution learning records."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    @staticmethod
+    def execution_key(plan_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"execution:{plan_id}")
+
+
+class ActionPolicyProtocol(BlackboardProtocol):
+    """Protocol for action policy internal state."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    @staticmethod
+    def iteration_key(namespace_prefix: str, iteration_count: int, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"{namespace_prefix}:action_policy_iteration:{iteration_count}")
+
+    @staticmethod
+    def repl_key(agent_id: str, var_name: str, timestamp_ns: int, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"repl:{agent_id}:{var_name}:{timestamp_ns}")
+
+
+# ---------------------------------------------------------------------------
+# Sample analysis protocols
+# ---------------------------------------------------------------------------
+
+class BasicAnalysisProtocol(BlackboardProtocol):
+    """Protocol for basic code analysis sample keys."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    @staticmethod
+    def page_summary_key(page_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"page_summary:{page_id}")
+
+    @staticmethod
+    def cluster_analysis_complete_key(agent_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"cluster_analysis_complete:{agent_id}")
+
+    @staticmethod
+    def critique_key(agent_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"critique:{agent_id}")
+
+    @staticmethod
+    def revision_request_key(agent_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"revision_request:{agent_id}")
+
+
+class ImpactAnalysisProtocol(BlackboardProtocol):
+    """Protocol for impact analysis sample keys."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    @staticmethod
+    def impact_key(page_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"impact:{page_id}")
+
+    @staticmethod
+    def test_coverage_key(page_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"test_coverage:{page_id}")
+
+    @staticmethod
+    def dependency_graph_key(dep_key: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"dependency_graph:{dep_key}")
+
+
+class IntentAnalysisProtocol(BlackboardProtocol):
+    """Protocol for intent analysis sample keys."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    @staticmethod
+    def intent_hierarchy_key(category: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"intent_hierarchy:{category}")
+
+    @staticmethod
+    def intent_misalignments_key(namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, "intent_misalignments")
+
+
+class HypothesisTrackingProtocol(BlackboardProtocol):
+    """Protocol for hypothesis tracking state."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    @staticmethod
+    def hypotheses_key(namespace: str) -> str:
+        """Key for the bulk tracked hypotheses dict."""
+        return BlackboardProtocol._ns(namespace, "tracked_hypotheses")
+
+    @staticmethod
+    def games_key(namespace: str) -> str:
+        """Key for the hypothesis-to-game mappings dict."""
+        return BlackboardProtocol._ns(namespace, "hypothesis_games")
+
+
+class ComplianceAnalysisProtocol(BlackboardProtocol):
+    """Protocol for compliance analysis sample keys."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    @staticmethod
+    def obligation_key(obligation_id: str, namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, f"obligation:{obligation_id}")
+
+
+class SlicingAnalysisProtocol(BlackboardProtocol):
+    """Protocol for slicing analysis sample keys."""
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    @staticmethod
+    def interprocedural_resolutions_key(namespace: str) -> str:
+        return BlackboardProtocol._ns(namespace, "interprocedural_resolutions")

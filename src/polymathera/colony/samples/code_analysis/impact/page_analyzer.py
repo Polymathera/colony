@@ -56,8 +56,8 @@ from polymathera.colony.agents.patterns import (
 from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
 from polymathera.colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
 from polymathera.colony.agents.base import Agent, AgentCapability
-from polymathera.colony.agents.blackboard.protocol import DependencyQueryProtocol
-from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from polymathera.colony.agents.blackboard.protocol import DependencyQueryProtocol, ImpactAnalysisProtocol
+from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.patterns.actions.policies import action_executor
 from polymathera.colony.agents.patterns.capabilities.reflection import ReflectionCapability
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
@@ -769,7 +769,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         # Store in blackboard
         if self.blackboard:
             await self.blackboard.write(
-                key=ScopeUtils.format_key(impact=self.page_id),
+                key=ImpactAnalysisProtocol.impact_key(self.page_id, namespace="impact"),
                 value=result.model_dump(),
                 tags={"impact", self.agent.agent_id}
             )
@@ -963,7 +963,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         try:
             # Query blackboard for test coverage results
             coverage_data = await self.blackboard.read(
-                key=ScopeUtils.format_key(test_coverage=self.page_id),
+                key=ImpactAnalysisProtocol.test_coverage_key(self.page_id, namespace="impact"),
                 agent_id=self.agent.agent_id
             )
             return coverage_data
