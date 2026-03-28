@@ -32,6 +32,7 @@ from polymathera.colony.agents.patterns.games.negotiation.capabilities import Ne
 from polymathera.colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
 from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, ErrorSignalProtocol
 from polymathera.colony.agents.patterns.capabilities import WorkingSetCapability, AgentPoolCapability
 from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraphCapability
 from polymathera.colony.agents.patterns.capabilities.batching import (
@@ -347,6 +348,9 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     5. Produces unified impact report with recommendations
     """
 
+    protocols = [AgentRunProtocol, ErrorSignalProtocol]
+    input_patterns = [AgentRunProtocol.result_pattern(namespace="impact"), ErrorSignalProtocol.error_pattern(namespace="impact")]
+
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize coordinator.
 
@@ -568,7 +572,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     # EVENT HANDLERS - Replace manual blackboard subscriptions
     # ============================================================================
 
-    @event_handler(pattern="*:analysis_complete") # TODO: Use a more specific pattern to avoid conflicts (e.g., include scope_id or use a structured event type)
+    @event_handler(pattern=AgentRunProtocol.result_pattern(namespace="impact"))
     async def on_child_complete(
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:
@@ -620,7 +624,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             )
         return None
 
-    @event_handler(pattern="error:*") # TODO: Use a more specific pattern to avoid conflicts (e.g., include scope_id or use a structured event type)
+    @event_handler(pattern=ErrorSignalProtocol.error_pattern(namespace="impact"))
     async def on_child_error(
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:

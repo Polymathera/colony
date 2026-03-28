@@ -129,7 +129,7 @@ class BlackboardStorageBackend:
             List of matching entries
         """
         # Use scope pattern if no pattern provided
-        effective_pattern = pattern or f"{self._scope_id}:*"
+        effective_pattern = pattern or "*"
 
         entries = await self.blackboard.query(
             namespace=effective_pattern,

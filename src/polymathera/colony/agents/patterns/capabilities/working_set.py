@@ -46,6 +46,7 @@ from ...cache_coordination import (
     CompositePageScorer,
 )
 from ..actions.policies import action_executor
+from ...blackboard.protocol import WorkingSetStateProtocol
 
 if TYPE_CHECKING:
     from ...base import Agent
@@ -152,6 +153,9 @@ class WorkingSetCapability(AgentCapability):
     provides the primitives without assuming batching, clustering, or
     any specific cache strategy.
     """
+
+    protocols = [WorkingSetStateProtocol]
+    input_patterns = [WorkingSetStateProtocol.state_pattern(namespace="working_set")]
 
     def __init__(
         self,

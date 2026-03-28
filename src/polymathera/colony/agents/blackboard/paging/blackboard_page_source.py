@@ -777,7 +777,7 @@ class BlackboardContextPageSource(ContextPageSource):
             self.ingestion_policy._page_graph = self._page_graph
 
         # Backfill: query all existing entries in the scope
-        existing = await self.blackboard.query(namespace=f"{self.scope_id}:*")
+        existing = await self.blackboard.query(namespace="*")
         for entry in existing:
             record = PendingRecord(
                 key=entry.key,
@@ -815,7 +815,7 @@ class BlackboardContextPageSource(ContextPageSource):
         else:
             await self.blackboard.stream_events_to_queue(
                 self._event_queue,
-                pattern=f"{self.scope_id}:*",
+                pattern="*",
             )
 
         self._event_loop_task = asyncio.create_task(self._event_loop())

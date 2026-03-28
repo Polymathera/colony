@@ -7,6 +7,7 @@ from typing import Any
 from overrides import override
 
 from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -61,6 +62,9 @@ class ComplianceAnalysisCapability(AgentCapability):
     - Event-driven via @event_handler and @action_executor decorators
     """
 
+    protocols = [AgentRunProtocol]
+    input_patterns = [AgentRunProtocol.request_pattern(namespace="compliance")]
+
     def __init__(
         self,
         agent: Agent,
@@ -113,7 +117,7 @@ class ComplianceAnalysisCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for ComplianceAnalysisCapability")
         pass
 
-    @event_handler(pattern=ScopeUtils.pattern_key(request=None))
+    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="compliance"))
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -247,7 +251,7 @@ class ComplianceAnalysisCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=ScopeUtils.format_key(result=request_id),
+                key=AgentRunProtocol.result_key(request_id, namespace="compliance"),
                 value=merged.model_dump(),
             )
 
@@ -1411,6 +1415,9 @@ class ComplianceCoordinatorCapability(AgentCapability):
     Uses event-driven architecture via @event_handler and @action_executor.
     """
 
+    protocols = [AgentRunProtocol]
+    input_patterns = [AgentRunProtocol.request_pattern(namespace="compliance"), AgentRunProtocol.result_pattern(namespace="compliance")]
+
     def __init__(
         self,
         agent: Agent,
@@ -1502,7 +1509,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for ComplianceCoordinatorCapability")
         pass
 
-    @event_handler(pattern="{scope_id}:request:*")
+    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="compliance"))
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -1528,7 +1535,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern="analysis:compliance:result:*")  # TODO: Use a more specific pattern or namespace for worker results (e.g., include scope_id and agent_id)
+    @event_handler(pattern=AgentRunProtocol.result_pattern(namespace="compliance"))
     async def handle_worker_result(
         self,
         event: BlackboardEvent,
@@ -1658,7 +1665,8 @@ class ComplianceCoordinatorCapability(AgentCapability):
             # use asyncio.gather with handle.run() calls or rely on event handlers.
             run = await handle.run(
                 {"page_ids": [page_id], "compliance_types": [ct.value for ct in (compliance_types or [])]},
-                timeout=60
+                timeout=60,
+                namespace="compliance",
             )
 
             # Store result via ResultCapability for cluster-wide visibility
@@ -1712,7 +1720,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
         # Write result to blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=ScopeUtils.format_key(result=request_id),  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+            key=AgentRunProtocol.result_key(request_id, namespace="compliance"),
             value=merged_result.model_dump(),
         )
 

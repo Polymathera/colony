@@ -35,6 +35,7 @@ from ...base import AgentCapability, AgentHandle
 from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentMetadata, AgentResourceRequirements, AgentSuspensionState
 from ..actions.policies import action_executor
+from ...blackboard.protocol import WorkAssignmentProtocol
 
 if TYPE_CHECKING:
     from ...base import Agent
@@ -57,6 +58,9 @@ class AgentPoolCapability(AgentCapability):
 
     The ActionPolicy decides when to create/assign/suspend/terminate agents.
     """
+
+    protocols = [WorkAssignmentProtocol]
+    input_patterns = [WorkAssignmentProtocol.result_pattern(namespace="pool")]
 
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize agent pool capability.
@@ -443,10 +447,9 @@ class AgentPoolCapability(AgentCapability):
     ) -> dict[str, Any]:
         """Resume a suspended agent.
 
-        Uses SoftPageAffinityRouter to route to replica with agent's
-        working set already loaded for optimal cache locality.
-
-        Wraps: AgentManagerBase.resume_agent()
+        Routes through AgentSystemDeployment.resume_agent() which loads
+        suspension state, builds a blueprint, and spawns the agent with
+        soft page affinity for optimal cache locality.
 
         Args:
             agent_id: Agent to resume (uses suspension state key)
@@ -457,15 +460,9 @@ class AgentPoolCapability(AgentCapability):
             - new_agent_id: New agent ID (may differ from original)
         """
         try:
-            manager = self.agent._manager
-            if manager is None:
-                return {
-                    "resumed": False,
-                    "agent_id": agent_id,
-                    "error": "no_manager",
-                }
-
-            new_agent_id = await manager.resume_agent(agent_id)
+            from ....system import get_agent_system
+            agent_system = get_agent_system()
+            new_agent_id = await agent_system.resume_agent(agent_id)
 
             if new_agent_id:
                 # Create new handle for resumed agent

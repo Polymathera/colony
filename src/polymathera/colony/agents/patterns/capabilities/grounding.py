@@ -70,8 +70,9 @@ from ..attention import PageQuery
 from .validation import ValidationResult, ValidationIssue
 from ..actions.policies import action_executor
 from ...models import Action, PolicyREPL, AgentSuspensionState
-from ... import KeyPatternFilter, BlackboardEvent
+from ... import BlackboardEvent
 from ..events import event_handler, EventProcessingResult
+from ...blackboard.protocol import GroundingProtocol
 
 
 logger = logging.getLogger(__name__)
@@ -192,6 +193,9 @@ class GroundingCapability(AgentCapability):
     - ValidationPolicy for grounding checks
     """
 
+    protocols = [GroundingProtocol]
+    input_patterns = [GroundingProtocol.request_pattern(namespace="grounding")]
+
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize grounding capability.
 
@@ -232,29 +236,6 @@ class GroundingCapability(AgentCapability):
     # -------------------------------------------------------------------------
 
     @override
-    async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
-        """Stream grounding events to the given queue.
-
-        In local mode: Streams incoming grounding requests
-        In remote mode: Streams results and progress from child
-
-        Args:
-            event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
-        """
-        # TODO: We can get either explicit grounding requests or we can snoop
-        # on published analysis results to convert them into grounding requests in the action policy.
-        # TODO: Code analyzers even better separate their output results into different categories (e.g.,
-        # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
-        # grounding can focus on specific categories.
-        blackboard = await self.get_blackboard()
-
-        # Stream grounding-related events from this scope
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(pattern=ScopeUtils.pattern_key(grounding_request=None))
-        )
-
-    @override
     async def get_result_future(self) -> CapabilityResultFuture:
         """Get future for grounding result.
 
@@ -274,7 +255,7 @@ class GroundingCapability(AgentCapability):
     # Capability-Specific Request Methods
     # -------------------------------------------------------------------------
 
-    @event_handler(pattern=ScopeUtils.pattern_key(grounding_request=None))
+    @event_handler(pattern=GroundingProtocol.request_pattern(namespace="grounding"))
     async def handle_grounding_request(
         self,
         event: BlackboardEvent,

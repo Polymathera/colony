@@ -17,10 +17,10 @@ from typing import Any
 from overrides import override
 from pydantic import BaseModel, Field
 
-from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ...models import AgentSuspensionState, QueryContext, ActionPolicyIO
 from ...base import Agent, AgentCapability
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import MultiHopSearchProtocol
+from ...scopes import BlackboardScope, get_scope_prefix
 from ....utils import setup_logger
 from ..actions.policies import CacheAwareActionPolicy, action_executor
 from .attention import PageQuery, AttentionScore
@@ -72,6 +72,9 @@ class MultiHopSearchCapability(AgentCapability):
     - Deductive reasoning: Chain inferences across knowledge
     """
 
+    protocols = [MultiHopSearchProtocol]
+    input_patterns = [MultiHopSearchProtocol.request_pattern(namespace="multi_hop")]
+
     def __init__(
         self,
         agent: Agent,
@@ -114,27 +117,6 @@ class MultiHopSearchCapability(AgentCapability):
         # TODO: Implement
         logger.warning("deserialize_suspension_state not implemented for MultiHopSearchCapability")
         pass
-
-    @override
-    async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
-        """Stream capability-specific events to the given queue.
-
-        Args:
-            event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
-        """
-        # TODO: We can get either explicit multi-hop search requests or we can snoop
-        # on published analysis results to convert them into multi-hop search requests in the action policy.
-        # TODO: Code analyzers even better separate their output results into different categories (e.g.,
-        # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
-        # multi-hop search requests can focus on specific categories.
-        # TODO: Make scope configurable because agents that send multi-hop search requests need not know the agent_id of the multi-hop search agent (decoupling).
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(
-                pattern=ScopeUtils.pattern_key(multi_hop_search_request=None)
-            )
-        )
 
     @action_executor()
     async def initialize_search(

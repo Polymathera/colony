@@ -24,9 +24,9 @@ from ....distributed.ray_utils import serving
 from ....distributed.state_management import SharedState, StateManager
 from ...self_concept import AgentSelfConcept
 from ...base import AgentCapability, CapabilityResultFuture
+from ...blackboard.protocol import ConsciousnessProtocol
 from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
-from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ..actions.policies import action_executor
 
 if TYPE_CHECKING:
@@ -113,6 +113,9 @@ class ConsciousnessCapability(AgentCapability):
         self_concept = await consciousness.get_self_concept()
         ```
     """
+
+    protocols = [ConsciousnessProtocol]
+    input_patterns = [ConsciousnessProtocol.state_pattern(namespace="consciousness")]
 
     def __init__(
         self,
@@ -301,24 +304,6 @@ class ConsciousnessCapability(AgentCapability):
     # =========================================================================
     # AgentCapability Abstract Method Implementations
     # =========================================================================
-
-    @override
-    async def stream_events_to_queue(
-        self,
-        event_queue: asyncio.Queue[BlackboardEvent],
-    ) -> None:
-        """Stream consciousness-related events to the given queue.
-
-        Streams events from the agent's consciousness scope (self-concept updates, etc.).
-
-        Args:
-            event_queue: Queue to stream events to
-        """
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(pattern=ScopeUtils.pattern_key(consciousness=None)),
-        )
 
     @override
     async def get_result_future(self) -> CapabilityResultFuture:

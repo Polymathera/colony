@@ -487,7 +487,7 @@ class Session(BaseModel):
             ```python
             async with session.context():
                 # All agent work here uses session's branch
-                await agent_handle.run({"query": "analyze code"})
+                await agent_handle.run({"query": "analyze code"}, namespace="analysis")
                 # Results are on session's branch
             ```
 

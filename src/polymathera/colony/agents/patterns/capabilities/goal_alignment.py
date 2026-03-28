@@ -58,6 +58,7 @@ from ..actions.policies import action_executor
 from ... import KeyPatternFilter, BlackboardEvent
 from ...models import Action, PolicyREPL, AgentSuspensionState
 from ..events import event_handler, EventProcessingResult
+from ...blackboard.protocol import GoalAlignmentProtocol
 
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,9 @@ class ObjectiveGuardCapability(AgentCapability):
     - register_goal: Register a new goal to monitor
     """
 
+    protocols = [GoalAlignmentProtocol]
+    input_patterns = [GoalAlignmentProtocol.request_pattern(namespace="goal_alignment"), GoalAlignmentProtocol.joint_goal_pattern(namespace="goal_alignment")]
+
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize objective guard capability.
 
@@ -238,33 +242,6 @@ class ObjectiveGuardCapability(AgentCapability):
     # -------------------------------------------------------------------------
 
     @override
-    async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
-        """Stream goal alignment events to the given queue.
-
-        Args:
-            event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
-        """
-        # TODO: We can get either explicit goal alignment check requests or we can snoop
-        # on published analysis results to convert them into goal alignment check requests in the action policy.
-        # TODO: Code analyzers even better separate their output results into different categories (e.g.,
-        # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
-        # consistency check can focus on specific categories.
-        # TODO: Make scope configurable because agents that register goals need not know the agent_id of the objective guard (decoupling).
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(
-                pattern=ScopeUtils.pattern_key(goal_alignment_request=None)
-            )
-        )
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(
-                pattern=ScopeUtils.pattern_key(joint_goal_registration=None)
-            )
-        )
-
-    @override
     async def get_result_future(self) -> CapabilityResultFuture:
         """Get future for goal alignment result.
 
@@ -282,7 +259,7 @@ class ObjectiveGuardCapability(AgentCapability):
     # -------------------------------------------------------------------------
 
     @event_handler(
-        pattern=ScopeUtils.pattern_key(goal_alignment_request=None)
+        pattern=GoalAlignmentProtocol.request_pattern(namespace="goal_alignment")
     )
     async def handle_goal_alignment_request(
         self,
@@ -303,7 +280,7 @@ class ObjectiveGuardCapability(AgentCapability):
         )
 
     @event_handler(
-        pattern=ScopeUtils.pattern_key(joint_goal_registration=None)
+        pattern=GoalAlignmentProtocol.joint_goal_pattern(namespace="goal_alignment")
     )
     async def handle_joint_goal_registration(
         self,

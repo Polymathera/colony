@@ -1715,6 +1715,7 @@ async def run_integration_test(
                 timeout=float(config.timeout_seconds),
                 session_id=config.session_id,
                 run_id=config.run_id,
+                namespace=analysis_cfg.type,
             ):
                 event_count += 1
                 last_event_type = event.event_type

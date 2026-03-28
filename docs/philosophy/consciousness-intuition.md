@@ -1,4 +1,4 @@
-# The Consciousness-Intuition Interface
+# The Consciousness-Intuition Interaction
 
 <!--
 Colony draws a specific, architecturally consequential analogy between its multi-agent system and cognitive science.
@@ -90,19 +90,9 @@ Most agent frameworks treat the LLM as the complete behavior: prompt in, actions
 </svg>
 </div>
 
+!!! info "Colony's Approach: *Intuition is a cross-cutting ingredient infused into all cognitive processes*"
+    The LLM provides raw reasoning power -- remarkable **leaps of insight**, but also confabulation, laziness, and drift. By design, Colony provides structure -- sequencing, verification, and correction of those intuitions into reliable behavior. Colony enforces the most useful cognitive processes, general reasoning tasks and multi-agent collaboration patterns by factoring them out into `AgentCapabilities` and treating the LLM as the source of **intuition** to be infused in all those capabilities. Colony then uses an LLM-powered `ActionPolicy` to compose (or *weave*) all these deliberative, reflective, and meta-cognitive processes that the LLM alone cannot sustain over long reasoning chains.
 
-!!! info "Two Layers of Cognition"
-    The LLM provides raw reasoning power -- remarkable **leaps of insight**, but also confabulation, laziness, and drift. By design, Colony provides structure -- sequencing, verification, and correction of those intuitions into reliable behavior. Colony enforces the most useful cognitive processes, general reasoning tasks and multi-agent collaboration patterns by factoring them out into `AgentCapabilities` and treating the LLM as the source of **intuition** to be infused in all those capabilities. Colony then uses an `ActionPolicy` to compose all these deliberative, reflective, and meta-cognitive processes that the LLM alone cannot sustain over long reasoning chains.
-
-
-
-| Layer | Cognitive Analogy | Colony Implementation | Properties |
-|-------|------------------|-----------------------|------------|
-| **Intuition** | Fast, associative, pattern-matching | The LLM itself | Parallel, immediate, capable of remarkable leaps but also prone to hallucination and overconfidence |
-| **Consciousness** | Slow, deliberate, sequential | Cognitive policies + action policy | Planning, reflection, error correction, goal tracking |
-
-
-Any cognitive process in Colony is a pluggable `AgentCapability` with a well-defined interface and a default implementation. Planning, reflection, conflict resolution, memory consolidation, hypothesis evaluation, confidence tracking -- each is an `AgentCapability` that can be swapped, customized, or composed. The LLM provides the "**intuition**" that drives each `AgentCapability` as well as the agent's `ActionPolicy` composing them, while the `ActionPolicy` structure provides the "consciousness" that sequences and governs those intuitions.
 
 
 <div style="margin:1.5rem 0;">
@@ -122,7 +112,7 @@ Any cognitive process in Colony is a pluggable `AgentCapability` with a well-def
   <text class="t-llm-label" x="762" y="120" text-anchor="middle">L</text>
   <text class="t-llm-label" x="762" y="140" text-anchor="middle">M</text>
   <text class="t-llm-sub" x="762" y="175" text-anchor="middle">intuition</text>
-  <text class="t-llm-sub" x="762" y="188" text-anchor="middle">layer</text>
+  <text class="t-llm-sub" x="762" y="188" text-anchor="middle">aspect</text>
 
   <!-- Infusion arrows from LLM to each capability group -->
   <line class="arrow-infuse" x1="720" y1="80"  x2="688" y2="120"/>
@@ -226,6 +216,18 @@ Any cognitive process in Colony is a pluggable `AgentCapability` with a well-def
 </svg>
 </div>
 
+
+!!! bug "Thinking Fast and Slow"
+    Should we relate this to Daniel Kahneman's "Thinking, Fast and Slow"? The LLM provides the "fast" intuitive thinking, while the `ActionPolicy` and `AgentCapabilities` provide the "slow" deliberate thinking? Is this a useful analogy or just a superficial one? Are there important aspects of human cognition that this analogy misses? For example, does it capture the role of working memory, attention, or emotion in human thought? Does it oversimplify the relationship between **intuition** and **deliberation**?
+
+
+| Layer | Cognitive Analogy | Colony Implementation | Properties |
+|-------|------------------|-----------------------|------------|
+| **Intuition** | Fast, associative, pattern-matching | The LLM itself | Parallel, immediate, capable of remarkable leaps but also prone to hallucination and overconfidence |
+| **Consciousness** | Slow, deliberate, sequential | Cognitive policies + action policy | Planning, reflection, error correction, goal tracking |
+
+
+Any cognitive process in Colony is a pluggable `AgentCapability` with a well-defined interface and a default implementation. Planning, reflection, conflict resolution, memory consolidation, hypothesis evaluation, confidence tracking -- each is an `AgentCapability` that can be swapped, customized, or composed. The LLM provides the "**intuition**" that drives each `AgentCapability` as well as the agent's `ActionPolicy` composing them, while the `ActionPolicy` structure provides the "consciousness" that sequences and governs those intuitions.
 
 ## Conscious vs. Subconscious Processes
 

@@ -56,6 +56,7 @@ from polymathera.colony.agents.patterns import (
 from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
 from polymathera.colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
 from polymathera.colony.agents.base import Agent, AgentCapability
+from polymathera.colony.agents.blackboard.protocol import DependencyQueryProtocol
 from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.patterns.actions.policies import action_executor
 from polymathera.colony.agents.patterns.capabilities.reflection import ReflectionCapability
@@ -673,6 +674,9 @@ class ChangeImpactAnalysisCapability(AgentCapability):
     Also uses FeedbackLoopPredictor for cache-aware prefetching.
     """
 
+    protocols = [DependencyQueryProtocol]
+    input_patterns = [DependencyQueryProtocol.query_pattern(namespace="impact")]
+
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.AGENT):
         super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:change_impact_analysis:{agent.agent_id}")
 
@@ -971,7 +975,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
     # EVENT HANDLERS
     # ============================================================================
 
-    @event_handler(pattern="*:dependency_query") # TODO: Use a more specific pattern or namespace for impact analysis events
+    @event_handler(pattern=DependencyQueryProtocol.query_pattern(namespace="impact"))
     async def on_dependency_query(
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:

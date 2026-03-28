@@ -7,11 +7,11 @@ from typing import Any, TypeVar
 import asyncio
 from overrides import override
 
-from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ..scope import ScopeAwareResult
 from ...models import AgentSuspensionState, QueryContext, ActionPolicyIO
 from ...base import Agent, AgentCapability
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import AnalysisResultProtocol
+from ...scopes import BlackboardScope, get_scope_prefix
 from ....utils import setup_logger
 from .attention import PageQuery
 from ..actions.policies import (
@@ -82,6 +82,9 @@ class AdaptiveQueryGenerator(AgentCapability):
     - Generating next queries based on history
     """
 
+    protocols = [AnalysisResultProtocol]
+    input_patterns = [AnalysisResultProtocol.result_pattern(namespace="adaptive_query")]
+
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize strategy."""
         super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
@@ -108,27 +111,6 @@ class AdaptiveQueryGenerator(AgentCapability):
         # TODO: Implement
         logger.warning("deserialize_suspension_state not implemented for AdaptiveQueryGenerator")
         pass
-
-    @override
-    async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
-        """Stream capability-specific events to the given queue.
-
-        Args:
-            event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
-        """
-        # TODO: We can get either explicit adaptive query requests or we can snoop
-        # on published analysis results to convert them into adaptive queries in the action policy.
-        # TODO: Code analyzers even better separate their output results into different categories (e.g.,
-        # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
-        # adaptive queries can focus on specific categories.
-        # TODO: Make scope configurable because agents that send adaptive queries need not know the agent_id of the adaptive query agents (decoupling).
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(
-                pattern=ScopeUtils.pattern_key(analysis_result=None),  # Listen for analysis results to trigger adaptive queries
-            )
-        )
 
     # TODO: This method should be removed in favor of adding `writes=["query_history"]` to
     # the `@action_executor` decorators.

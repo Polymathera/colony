@@ -48,6 +48,8 @@ from ...models import (
     PlanStatus,
     ActionSharedDataDependency,
     LifecycleMode,
+    ResumptionCondition,
+    ResumptionConditionType,
 )
 from ...base import Agent, ActionPolicy, ActionPolicyIterationResult, AgentCapability
 from ...blackboard import BlackboardEvent
@@ -2530,7 +2532,21 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
                     if last_result.blocked_reason:
                         logger.info(f"Agent {self.agent.agent_id} blocked: {last_result.blocked_reason}")
                         await self.plan_blackboard.update_plan(state.current_plan)
-                        await self.agent.suspend(reason=f"Blocked: {last_result.blocked_reason}")
+
+                        # Build structured resumption condition from action result
+                        if last_result.blocking_agent_ids:
+                            condition = ResumptionCondition(
+                                condition_type=ResumptionConditionType.CHILDREN_COMPLETED,
+                                blocking_agent_ids=last_result.blocking_agent_ids,
+                            )
+                        else:
+                            condition = ResumptionCondition(
+                                condition_type=ResumptionConditionType.IMMEDIATE,
+                            )
+                        await self.agent.suspend(
+                            reason=f"Blocked: {last_result.blocked_reason}",
+                            resumption_condition=condition,
+                        )
                         # Return None but don't set complete - we're suspended
                         return None
 

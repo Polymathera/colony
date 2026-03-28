@@ -28,6 +28,7 @@ from overrides import override
 from pydantic import BaseModel, Field
 
 from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -326,6 +327,9 @@ class SpecificationComplianceCapability(AgentCapability):
     - Event-driven via @event_handler and @action_executor decorators
     """
 
+    protocols = [AgentRunProtocol]
+    input_patterns = [AgentRunProtocol.request_pattern(namespace="spec_compliance")]
+
     def __init__(
         self,
         agent: Agent,
@@ -396,7 +400,7 @@ class SpecificationComplianceCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for SpecificationComplianceCapability")
         pass
 
-    @event_handler(pattern="{scope_id}:request:*")
+    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="spec_compliance"))
     async def handle_compliance_request(
         self,
         event: BlackboardEvent,
@@ -529,7 +533,7 @@ class SpecificationComplianceCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=ScopeUtils.format_key(result=request_id),
+                key=AgentRunProtocol.result_key(request_id, namespace="spec_compliance"),
                 value=result.model_dump(),
             )
 

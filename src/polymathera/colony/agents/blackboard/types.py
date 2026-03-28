@@ -149,6 +149,19 @@ class AgentFilter(EventFilter):
 
 
 @dataclass
+class TagFilter(EventFilter):
+    """Filter events by tags.
+
+    Matches events that contain ALL required tags (subset check).
+    """
+
+    required_tags: set[str]
+
+    def matches(self, event: BlackboardEvent) -> bool:
+        return bool(event.tags) and self.required_tags.issubset(event.tags)
+
+
+@dataclass
 class CombinationFilter(EventFilter):
     """Filter events by key pattern (glob-style) and event type."""
 
@@ -160,8 +173,8 @@ class CombinationFilter(EventFilter):
         import fnmatch
 
         ret = event.key and fnmatch.fnmatch(event.key, self.pattern) and event.event_type in self.event_types
-        if ret and self.checker and self.checker(event) is False:
-            raise ValueError("CombinationFilter checker returned False for matching event")
+        if ret and self.checker and not self.checker(event):
+            return False
         return ret
 
 

@@ -386,7 +386,11 @@ class EnhancedBlackboard:
         Raises:
             PermissionError: If access policy denies write
             ValidationError: If validation policy rejects value
+            KeyValidationError: If key is not scope-relative or contains wildcards
         """
+        from .protocol import validate_key
+        validate_key(key, scope_id=self.scope_id)
+
         await self.initialize()
 
         # Ambient transaction routing: buffer writes and commit atomically on __aexit__.
@@ -477,7 +481,11 @@ class EnhancedBlackboard:
 
         Raises:
             PermissionError: If access policy denies read
+            KeyValidationError: If key is not scope-relative or contains wildcards
         """
+        from .protocol import validate_key
+        validate_key(key, scope_id=self.scope_id)
+
         await self.initialize()
 
         # Ambient transaction routing: read from transaction buffers when active.
@@ -546,7 +554,11 @@ class EnhancedBlackboard:
 
         Raises:
             PermissionError: If access policy denies delete
+            KeyValidationError: If key is not scope-relative
         """
+        from .protocol import validate_key
+        validate_key(key, scope_id=self.scope_id)
+
         await self.initialize()
 
         # Ambient transaction routing: buffer delete and commit atomically on __aexit__.
@@ -980,9 +992,15 @@ class EnhancedBlackboard:
         Args:
             `event_queue`: Queue to stream events into
             `filter`: Optional event filter
-            `pattern`: Key pattern to match events (glob-style)
-            `event_types`: Set of event types to filter (e.g., {"write", "delete
+            `pattern`: Key pattern to match events (glob-style, scope-relative)
+            `event_types`: Set of event types to filter (e.g., {"write", "delete"})
+
+        Raises:
+            KeyValidationError: If pattern contains scope-absolute prefixes
         """
+        from .protocol import validate_pattern
+        validate_pattern(pattern, scope_id=self.scope_id)
+
         if event_queue is None:
             event_queue = asyncio.Queue()
 

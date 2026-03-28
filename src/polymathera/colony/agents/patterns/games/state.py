@@ -76,6 +76,7 @@ import logging
 
 from ...base import Agent, AgentCapability, CapabilityResultFuture
 from ...blackboard import EnhancedBlackboard, BlackboardEvent, CombinationFilter
+from ...blackboard.protocol import GameStateProtocol
 from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions.policies import action_executor
 from ..hooks import hookable
@@ -806,6 +807,9 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
     4. Implement action creators for each game move type
     """
 
+    protocols = [GameStateProtocol]
+    input_patterns = [GameStateProtocol.state_pattern(namespace="game")]
+
     # Override in subclasses to define role-based permissions
     role_permissions: RolePermissions = RolePermissions()
 
@@ -924,7 +928,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             raise RuntimeError("GameProtocolCapability not initialized. Call initialize() first.")
         return self._blackboard
 
-    @event_handler(pattern=ScopeUtils.pattern_key(state=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=GameStateProtocol.state_pattern(namespace="game")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def handle_game_event(
         self,
         event: BlackboardEvent,
@@ -1038,7 +1042,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         """
         return {}
 
-    @event_handler(pattern=ScopeUtils.pattern_key(state=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=GameStateProtocol.state_pattern(namespace="game")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def _get_rule_based_action(
         self,
         event: BlackboardEvent,

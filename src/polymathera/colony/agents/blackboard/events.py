@@ -80,6 +80,7 @@ class EventBus:
                             timestamp=update.data.get("timestamp"),
                             agent_id=update.data.get("agent_id"),
                             metadata=update.data.get("metadata", {}),
+                            tags=set(update.data.get("tags", [])),
                         )
                         # Non-blocking enqueue (will drop if full)
                         try:
@@ -152,6 +153,7 @@ class EventBus:
                     "timestamp": event.timestamp,
                     "agent_id": event.agent_id,
                     "metadata": event.metadata,
+                    "tags": list(event.tags) if event.tags else [],
                 }
 
                 await self.redis_om.update_state_topic(

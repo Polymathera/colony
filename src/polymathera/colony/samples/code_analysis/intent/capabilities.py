@@ -26,6 +26,7 @@ from typing import Any
 from overrides import override
 
 from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -96,6 +97,9 @@ class IntentInferenceCapability(AgentCapability):
     - analyze_page: Analyze a single page for intent
     """
 
+    protocols = [AgentRunProtocol]
+    input_patterns = [AgentRunProtocol.request_pattern(namespace="intent")]
+
     def __init__(
         self,
         agent: Agent,
@@ -143,7 +147,7 @@ class IntentInferenceCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for IntentInferenceCapability")
         pass
 
-    @event_handler(pattern="{scope_id}:request:*")
+    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="intent"))
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -252,7 +256,7 @@ class IntentInferenceCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=ScopeUtils.format_key(result=request_id),
+                key=AgentRunProtocol.result_key(request_id, namespace="intent"),
                 value=final_result.model_dump(),
                 agent_id=self.agent.agent_id,
             )
@@ -288,7 +292,7 @@ class IntentInferenceCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=ScopeUtils.format_key(result=request_id),
+                key=AgentRunProtocol.result_key(request_id, namespace="intent"),
                 value=result.model_dump(),
                 agent_id=self.agent.agent_id,
             )
@@ -1134,6 +1138,9 @@ class IntentCoordinatorCapability(AgentCapability):
     for standardized graph operations.
     """
 
+    protocols = [AgentRunProtocol]
+    input_patterns = [AgentRunProtocol.request_pattern(namespace="intent"), AgentRunProtocol.result_pattern(namespace="intent")]
+
     def __init__(
         self,
         agent: Agent,
@@ -1216,7 +1223,7 @@ class IntentCoordinatorCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for IntentCoordinatorCapability")
         pass
 
-    @event_handler(pattern="{scope_id}:request:*")
+    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="intent"))
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -1245,7 +1252,7 @@ class IntentCoordinatorCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern="*:result:*") # TODO: Use more specific pattern to target worker results
+    @event_handler(pattern=AgentRunProtocol.result_pattern(namespace="intent"))
     async def handle_worker_result(
         self,
         event: BlackboardEvent,
@@ -1320,7 +1327,7 @@ class IntentCoordinatorCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=ScopeUtils.format_key(result=request_id),
+                key=AgentRunProtocol.result_key(request_id, namespace="intent"),
                 value=final_result.model_dump(),
                 agent_id=self.agent.agent_id,
             )
@@ -1370,7 +1377,8 @@ class IntentCoordinatorCapability(AgentCapability):
         for page_id, handle in self._worker_handles.items():
             run = await handle.run(
                 {"page_ids": [page_id], "granularity": granularity},
-                timeout=timeout
+                timeout=timeout,
+                namespace="intent",
             )
             if run.result:
                 result = IntentInferenceResult(**run.result)

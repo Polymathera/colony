@@ -35,12 +35,14 @@ from overrides import override
 
 from ....distributed.ray_utils import serving
 from ...base import Agent, AgentCapability, AgentState, CapabilityResultFuture
-from ...models import AgentSuspensionState
+from ...models import AgentSuspensionState, PolicyREPL
 from ...blackboard.types import BlackboardEntry, BlackboardEvent, KeyPatternFilter
 from ...scopes import MemoryScope, ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions.policies import action_executor
+from ..events import event_handler, EventProcessingResult
 from .lifecycle import AgentTerminationEvent, AgentCreationEvent
 from ..hooks.decorator import hookable
+from ...blackboard.protocol import LifecycleSignalProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +60,12 @@ class AgentMemoryRecycler(AgentCapability):
     2. Transforms and merges into collective memory for that agent_type
     3. Deletes the agent's private memory scopes
 
-    The recycling is triggered by AgentTerminationEvent on the control plane.
+    The recycling is triggered by AgentTerminationEvent on the control plane,
+    delivered via the standard event handler pattern.
     """
+
+    protocols = [LifecycleSignalProtocol]
+    input_patterns = [LifecycleSignalProtocol.terminated_pattern(namespace="memory_recycler")]
 
     def __init__(
         self,
@@ -75,8 +81,6 @@ class AgentMemoryRecycler(AgentCapability):
             namespace: Namespace for this capability (appended to scope prefix for blackboard keys)
         """
         super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
-        self._monitor_task: asyncio.Task | None = None
-        self._initialized = False
 
     def get_action_group_description(self) -> str:
         return (
@@ -85,41 +89,23 @@ class AgentMemoryRecycler(AgentCapability):
             "Reads agent's private LTM scopes, transforms/merges into collective, deletes private scopes."
         )
 
-    async def initialize(self) -> None:
-        """Initialize the recycler and start monitoring lifecycle events."""
-        if self._initialized:
-            return
-
-        # Start monitoring task - it will handle subscription via async for
-        self._monitor_task = asyncio.create_task(self._monitor_lifecycle_events())
-        self._initialized = True
-
-        logger.info(
-            f"AgentMemoryRecycler initialized for syscontext={self.agent.syscontext.to_dict()}"
-        )
-
-    async def shutdown(self) -> None:
-        """Shutdown the recycler."""
-        if self._monitor_task:
-            self._monitor_task.cancel()
-            try:
-                await self._monitor_task
-            except asyncio.CancelledError:
-                pass
-            self._monitor_task = None
-        self._initialized = False
-
+    @override
     async def stream_events_to_queue(
         self,
         event_queue: asyncio.Queue[BlackboardEvent],
     ) -> None:
-        """Stream recycling events to queue."""
-        # TODO: This only streams events from the lifecycle scope.
-        # So, the agent owning this capability won't see events from the monitored scopes.
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
+        """Subscribe to termination events on the colony control plane.
+
+        Lifecycle events are emitted to a separate blackboard scope
+        (colony control plane), not this capability's own scope.
+        """
+        lifecycle_bb = await self.agent.get_blackboard(
+            scope_id=MemoryScope.colony_control_plane("lifecycle")
+        )
+        lifecycle_bb.stream_events_to_queue(
             event_queue,
-            KeyPatternFilter(pattern=ScopeUtils.pattern_key()),
+            pattern=LifecycleSignalProtocol.terminated_pattern(namespace="memory_recycler"),
+            event_types={"write"},
         )
 
     async def get_result_future(self) -> CapabilityResultFuture:
@@ -141,39 +127,12 @@ class AgentMemoryRecycler(AgentCapability):
         pass
 
     # -------------------------------------------------------------------------
-    # Lifecycle Event Monitoring
+    # Lifecycle Event Handlers
     # -------------------------------------------------------------------------
 
-    async def _monitor_lifecycle_events(self) -> None:
-        """Background task to monitor and process lifecycle events.
-        
-        Uses async for to stream events from the lifecycle scope. The iterator
-        automatically handles subscription/unsubscription lifecycle.
-        """
-        lifecycle_scope = MemoryScope.colony_control_plane("lifecycle")
-
-        blackboard = await self.agent.get_blackboard(
-            scope_id=lifecycle_scope,
-        )
-
-        # Stream termination events using async for
-        pattern = ScopeUtils.pattern_key(scope="agent_terminated", agent_id=None)
-        try:
-            async for event in blackboard.stream_events(
-                filter=KeyPatternFilter(pattern=pattern)
-            ):
-                if event.event_type != "write":
-                    continue
-
-                await self._handle_termination(event)
-
-        except asyncio.CancelledError:
-            logger.debug("Lifecycle event monitoring cancelled")
-        except Exception as e:
-            logger.error(f"Error processing lifecycle event: {e}", exc_info=True)
-
-    async def _handle_termination(self, event: BlackboardEvent) -> None:
-        """Handle agent termination event."""
+    @event_handler(pattern=LifecycleSignalProtocol.terminated_pattern(namespace="memory_recycler"))
+    async def handle_agent_terminated(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult:
+        """Handle agent termination event — recycle memories to collective."""
         try:
             termination = AgentTerminationEvent(**event.value)
             logger.info(
@@ -192,11 +151,12 @@ class AgentMemoryRecycler(AgentCapability):
                 f"Recycled memories for {termination.agent_id}: {result}"
             )
 
-            # Mark event as processed
-            await self._mark_event_processed(event.key, result)
-
+            return EventProcessingResult(
+                context=f"Recycled memories for {termination.agent_id}: {result}",
+            )
         except Exception as e:
             logger.error(f"Failed to recycle memories for event {event.key}: {e}")
+            return EventProcessingResult(context=f"Failed to recycle: {e}")
 
     # -------------------------------------------------------------------------
     # Memory Recycling
@@ -371,36 +331,6 @@ class AgentMemoryRecycler(AgentCapability):
 
         logger.debug(f"Cleaned up scope {scope_id}: {len(entries)} entries deleted")
 
-    async def _mark_event_processed(
-        self,
-        event_key: str,
-        result: dict[str, int],
-    ) -> None:
-        """Mark a termination event as processed."""
-        # Update the event with processing result
-        lifecycle_scope = MemoryScope.colony_control_plane("lifecycle")
-
-        blackboard = await self.agent.get_blackboard(
-            scope_id=lifecycle_scope,
-        )
-
-        # Read current event
-        entry = await blackboard.read_entry(event_key)
-        if entry:
-            # Update metadata
-            entry.metadata["processed_at"] = time.time()
-            entry.metadata["recycle_result"] = result
-            entry.tags.add("processed")
-            entry.tags.discard("memory_recycle_pending")
-
-            await blackboard.write(
-                key=event_key,
-                value=entry.value,
-                agent_id=self.agent.agent_id,
-                tags=entry.tags,
-                metadata=entry.metadata,
-                expected_version=entry.version,
-            )
 
 
 # =============================================================================
@@ -417,7 +347,12 @@ class CollectiveMemoryInitializer(AgentCapability):
     3. Optionally samples episodic/semantic memories
 
     This enables transfer learning from terminated agents to new ones.
+    Triggered by AgentCreationEvent on the colony control plane via
+    ``@event_handler``.
     """
+
+    protocols = [LifecycleSignalProtocol]
+    input_patterns = [LifecycleSignalProtocol.created_pattern(namespace="memory_initializer")]
 
     def __init__(
         self,
@@ -433,8 +368,6 @@ class CollectiveMemoryInitializer(AgentCapability):
             namespace: Namespace for this capability (appended to scope prefix for blackboard keys)
         """
         super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
-        self._monitor_task: asyncio.Task | None = None
-        self._initialized = False
 
     def get_action_group_description(self) -> str:
         return (
@@ -443,39 +376,23 @@ class CollectiveMemoryInitializer(AgentCapability):
             "terminated agents' knowledge flows to new agents of the same type."
         )
 
-    async def initialize(self) -> None:
-        """Initialize and start monitoring for new agent events."""
-        if self._initialized:
-            return
-
-        # Start monitoring task - it will handle subscription via async for
-        self._monitor_task = asyncio.create_task(self._monitor_creation_events())
-        self._initialized = True
-
-        logger.info(
-            f"CollectiveMemoryInitializer initialized for syscontext={self.agent.syscontext.to_dict()}"
-        )
-
-    async def shutdown(self) -> None:
-        """Shutdown the initializer."""
-        if self._monitor_task:
-            self._monitor_task.cancel()
-            try:
-                await self._monitor_task
-            except asyncio.CancelledError:
-                pass
-            self._monitor_task = None
-        self._initialized = False
-
+    @override
     async def stream_events_to_queue(
         self,
         event_queue: asyncio.Queue[BlackboardEvent],
     ) -> None:
-        """Stream initialization events to queue."""
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
+        """Subscribe to creation events on the colony control plane.
+
+        Lifecycle events are emitted to a separate blackboard scope
+        (colony control plane), not this capability's own scope.
+        """
+        lifecycle_bb = await self.agent.get_blackboard(
+            scope_id=MemoryScope.colony_control_plane("lifecycle")
+        )
+        lifecycle_bb.stream_events_to_queue(
             event_queue,
-            KeyPatternFilter(pattern=ScopeUtils.pattern_key()),  # TODO: Do we need to filter by scope or does the blackboard handle this based on the scope_id of the blackboard itself?
+            pattern=LifecycleSignalProtocol.created_pattern(namespace="memory_initializer"),
+            event_types={"write"},
         )
 
     async def get_result_future(self) -> CapabilityResultFuture:
@@ -497,39 +414,12 @@ class CollectiveMemoryInitializer(AgentCapability):
         pass
 
     # -------------------------------------------------------------------------
-    # Creation Event Monitoring
+    # Creation Event Handlers
     # -------------------------------------------------------------------------
 
-    async def _monitor_creation_events(self) -> None:
-        """Background task to monitor and process creation events.
-        
-        Uses async for to stream events from the lifecycle scope. The iterator
-        automatically handles subscription/unsubscription lifecycle.
-        """
-        lifecycle_scope = MemoryScope.colony_control_plane("lifecycle")
-
-        blackboard = await self.agent.get_blackboard(
-            scope_id=lifecycle_scope,
-        )
-
-        # Stream creation events using async for
-        pattern = ScopeUtils.pattern_key(scope="agent_created", agent_id=None)
-        try:
-            async for event in blackboard.stream_events(
-                filter=KeyPatternFilter(pattern=pattern)
-            ):
-                if event.event_type != "write":
-                    continue
-
-                await self._handle_creation(event)
-
-        except asyncio.CancelledError:
-            logger.debug("Creation event monitoring cancelled")
-        except Exception as e:
-            logger.error(f"Error processing creation event: {e}", exc_info=True)
-
-    async def _handle_creation(self, event: BlackboardEvent) -> None:
-        """Handle agent creation event."""
+    @event_handler(pattern=LifecycleSignalProtocol.created_pattern(namespace="memory_initializer"))
+    async def handle_agent_created(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult:
+        """Handle agent creation event — seed LTM from collective memory."""
         try:
             creation = AgentCreationEvent(**event.value)
             logger.info(
@@ -547,8 +437,12 @@ class CollectiveMemoryInitializer(AgentCapability):
                 f"Initialized {count} memories for new agent {creation.agent_id}"
             )
 
+            return EventProcessingResult(
+                context=f"Initialized {count} memories for {creation.agent_id}",
+            )
         except Exception as e:
             logger.error(f"Failed to initialize memories for event {event.key}: {e}")
+            return EventProcessingResult(context=f"Failed to initialize: {e}")
 
     # -------------------------------------------------------------------------
     # Memory Initialization
@@ -700,6 +594,8 @@ class CollectiveMemoryMaintainer(AgentCapability):
     TODO: Implement maintenance tasks
     """
 
+    input_patterns: list[str] = []  # Action-executor-only; no event monitoring needed
+
     def __init__(
         self,
         agent: Agent,
@@ -720,17 +616,6 @@ class CollectiveMemoryMaintainer(AgentCapability):
         # TODO: Start periodic maintenance task
         logger.info(
             f"CollectiveMemoryMaintainer initialized for syscontext={self.agent.syscontext.to_dict()}"
-        )
-
-    async def stream_events_to_queue(
-        self,
-        event_queue: asyncio.Queue[BlackboardEvent],
-    ) -> None:
-        """Stream maintenance events."""
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(pattern=ScopeUtils.pattern_key()),  # TODO: Do we need to filter by scope or does the blackboard handle this based on the scope_id of the blackboard itself?
         )
 
     @override

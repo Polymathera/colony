@@ -17,10 +17,10 @@ from typing import Any, Generic, TypeVar
 from overrides import override
 from pydantic import BaseModel, Field
 
-from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ...models import AgentSuspensionState, QueryContext, ActionPolicyIO
 from ...base import Agent, AgentCapability
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import ExplorationProtocol
+from ...scopes import BlackboardScope, get_scope_prefix
 from ....utils import setup_logger
 from ..actions.policies import CacheAwareActionPolicy, action_executor
 from .incremental import PageQuery
@@ -86,6 +86,9 @@ class QueryDrivenExplorationCapability(AgentCapability):
     The planner decides when to call each and when to stop.
     """
 
+    protocols = [ExplorationProtocol]
+    input_patterns = [ExplorationProtocol.request_pattern(namespace="exploration")]
+
     def __init__(
         self,
         agent: Agent,
@@ -128,27 +131,6 @@ class QueryDrivenExplorationCapability(AgentCapability):
         # TODO: Implement
         logger.warning("deserialize_suspension_state not implemented for QueryDrivenExplorationCapability")
         pass
-
-    @override
-    async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
-        """Stream capability-specific events to the given queue.
-
-        Args:
-            event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
-        """
-        # TODO: We can get either explicit exploration requests or we can snoop
-        # on published analysis results to convert them into exploration requests in the action policy.
-        # TODO: Code analyzers even better separate their output results into different categories (e.g.,
-        # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
-        # exploration requests can focus on specific categories.
-        # TODO: Make scope configurable because agents that send exploration requests need not know the agent_id of the exploration agent (decoupling).
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(
-                pattern=ScopeUtils.pattern_key(exploration_request=None)
-            )
-        )
 
     @action_executor(writes=["queries"])
     async def generate_queries_from_findings(

@@ -54,11 +54,12 @@ from ..scope import ScopeAwareResult, AnalysisScope
 from ..actions.policies import (
     action_executor,
 )
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...scopes import BlackboardScope, get_scope_prefix
 from ...models import Action, PolicyREPL, AgentSuspensionState
-from ... import KeyPatternFilter, BlackboardEvent
+from ... import BlackboardEvent
 from ..games.epistemic import EpistemicLayer
 from ..events import event_handler, EventProcessingResult
+from ...blackboard.protocol import ConsistencyCheckProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,9 @@ class ConsistencyCapability(AgentCapability):
     - resolve_contradictions: Attempt to resolve detected contradictions
     """
 
+    protocols = [ConsistencyCheckProtocol]
+    input_patterns = [ConsistencyCheckProtocol.request_pattern(namespace="consistency")]
+
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize consistency capability.
 
@@ -179,10 +183,6 @@ class ConsistencyCapability(AgentCapability):
             ValidationCapability or None if not configured
         """
         return self.agent.get_capability_by_type(ValidationCapability)
-
-    def _get_event_pattern(self) -> str:
-        """Get pattern for consistency events."""
-        return f"{self.scope_id}:consistency:*"
 
     def get_action_group_description(self) -> str:
         return (
@@ -208,32 +208,19 @@ class ConsistencyCapability(AgentCapability):
     # -------------------------------------------------------------------------
 
     @override
-    async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
-        """Stream consistency events to the given queue.
-
-        Args:
-            event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
-        """
-        # TODO: We can get either explicit consistency check requests or we can snoop
-        # on published analysis results to convert them into consistency check requests in the action policy.
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(
-                pattern=ScopeUtils.pattern_key(consistency_check_request=None)
-            )
-        )
-
-    @override
     async def get_result_future(self) -> CapabilityResultFuture:
         """Get future for consistency check result.
+
+        Uses exact result key (not wildcard) to avoid resolving futures
+        from unrelated concurrent consistency checks.
 
         Returns:
             Future that resolves with ConsistencyCheck result
         """
+        request_id = self._pending_request_id or "default"
         blackboard = await self.get_blackboard()
         return CapabilityResultFuture(
-            result_key=ScopeUtils.pattern_key(consistency_check_result=None),
+            result_key=ConsistencyCheckProtocol.result_key(request_id, namespace="consistency"),
             blackboard=blackboard,
         )
 
@@ -315,13 +302,9 @@ class ConsistencyCapability(AgentCapability):
         """
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=ScopeUtils.format_key(
-                scope="consistency_check_result",
-                requesting_agent_id=result.requesting_agent_id,
-                result_id=result.result_id
-            ),
+            key=ConsistencyCheckProtocol.result_key(result.result_id, namespace="consistency"),
             value=result.model_dump(),
-            agent_id=self.agent.agent_id,
+            created_by=self.agent.agent_id,
         )
 
     def _get_relevant_results(
@@ -347,7 +330,7 @@ class ConsistencyCapability(AgentCapability):
 
         return relevant_results
 
-    @event_handler(pattern="{scope_id}:*")
+    @event_handler(pattern=ConsistencyCheckProtocol.request_pattern(namespace="consistency"))
     async def handle_consistency_check_event(
         self,
         event: BlackboardEvent,

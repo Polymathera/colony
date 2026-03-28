@@ -14,7 +14,7 @@ Usage:
     # Option 1: Use session.context() method (preferred)
     async with session.context():
         # All agent work here uses session's branch
-        result = await agent_handle.run({"query": "analyze code"})
+        result = await agent_handle.run({"query": "analyze code"}, namespace="analysis")
 
     # Option 2: Use session_context function
     async with session_context(session):
@@ -174,11 +174,11 @@ class SessionContextManager:
         ```python
         # Using Session.context() method (preferred)
         async with session.context():
-            await agent_handle.run({"query": "analyze code"})
+            await agent_handle.run({"query": "analyze code"}, namespace="analysis")
 
         # Or using this class directly
         async with SessionContextManager(session):
-            await agent_handle.run({"query": "analyze code"})
+            await agent_handle.run({"query": "analyze code"}, namespace="analysis")
         ```
     """
 
@@ -224,7 +224,7 @@ async def session_context(session: "Session") -> AsyncIterator["Session"]:
         ```python
         async with session_context(session):
             # All agent work here uses session's branch
-            await agent_handle.run({"query": "analyze code"})
+            await agent_handle.run({"query": "analyze code"}, namespace="analysis")
             # Results are on session's branch
         ```
 

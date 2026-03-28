@@ -18,14 +18,14 @@ from typing import Any
 from overrides import override
 from pydantic import BaseModel, Field
 
-from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ..scope import ScopeAwareResult, AnalysisScope
 from .attention import PageQuery, AttentionScore
 from .query_routing import PageQueryRoutingPolicy
 from ...models import AgentSuspensionState, QueryContext, ActionPolicyIO
 from ..models import QueryAnswer
 from ...base import Agent, AgentCapability
-from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from ...blackboard.protocol import IncrementalQueryProtocol
+from ...scopes import BlackboardScope, get_scope_prefix
 from ..actions.policies import CacheAwareActionPolicy, action_executor
 from ....utils import setup_logger
 
@@ -74,6 +74,9 @@ class IncrementalQueryCapability(AgentCapability):
     The planner decides when to call each action and when to stop.
     """
 
+    protocols = [IncrementalQueryProtocol]
+    input_patterns = [IncrementalQueryProtocol.request_pattern(namespace="incremental_query")]
+
     def __init__(
         self,
         agent: Agent,
@@ -113,27 +116,6 @@ class IncrementalQueryCapability(AgentCapability):
         # TODO: Implement
         logger.warning("deserialize_suspension_state not implemented for IncrementalQueryCapability")
         pass
-
-    @override
-    async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
-        """Stream capability-specific events to the given queue.
-
-        Args:
-            event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
-        """
-        # TODO: We can get either explicit incremental query requests or we can snoop
-        # on published analysis results to convert them into incremental query requests in the action policy.
-        # TODO: Code analyzers even better separate their output results into different categories (e.g.,
-        # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
-        # incremental query requests can focus on specific categories.
-        # TODO: Make scope configurable because agents that send incremental query requests need not know the agent_id of the incremental query agent (decoupling).
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(
-                pattern=ScopeUtils.pattern_key(incremental_query_request=None)
-            )
-        )
 
     @action_executor(writes=["answer"])
     async def get_answer(

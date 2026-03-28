@@ -29,6 +29,7 @@ from overrides import override
 from pydantic import BaseModel, Field
 
 from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -85,6 +86,9 @@ class ContractInferenceCapability(AgentCapability):
     - Integrates with symbolic execution results
     """
 
+    protocols = [AgentRunProtocol]
+    input_patterns = [AgentRunProtocol.request_pattern(namespace="contracts")]
+
     def __init__(
         self,
         agent: Agent,
@@ -133,7 +137,7 @@ class ContractInferenceCapability(AgentCapability):
     # Event Handlers
     # -------------------------------------------------------------------------
 
-    @event_handler(pattern="{scope_id}:request:*")
+    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="contracts"))
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -141,7 +145,7 @@ class ContractInferenceCapability(AgentCapability):
     ) -> EventProcessingResult | None:
         """Handle analysis request events from AgentHandle.run().
 
-        Listens for {scope_id}:request:{request_id} events and returns
+        Listens for request:{request_id} events and returns
         an immediate action to execute the analysis.
         """
         # Extract request data
@@ -234,7 +238,7 @@ class ContractInferenceCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=ScopeUtils.format_key(result=request_id),  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+                key=AgentRunProtocol.result_key(request_id, namespace="contracts"),
                 value=final_result.model_dump(),
                 created_by=self.agent.agent_id,
             )
@@ -1165,6 +1169,9 @@ class ContractCoordinatorCapability(AgentCapability):
     - Merges final results
     """
 
+    protocols = [AgentRunProtocol]
+    input_patterns = [AgentRunProtocol.request_pattern(namespace="contracts"), AgentRunProtocol.result_pattern(namespace="contracts")]
+
     def __init__(
         self,
         agent: Agent,
@@ -1269,7 +1276,7 @@ class ContractCoordinatorCapability(AgentCapability):
     # Event Handlers
     # -------------------------------------------------------------------------
 
-    @event_handler(pattern="{scope_id}:request:*")
+    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="contracts"))
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -1302,7 +1309,7 @@ class ContractCoordinatorCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern="*:result:*") # TODO: Use a more specific pattern to only listen to worker results
+    @event_handler(pattern=AgentRunProtocol.result_pattern(namespace="contracts"))
     async def handle_worker_result(
         self,
         event: BlackboardEvent,
@@ -1453,7 +1460,7 @@ class ContractCoordinatorCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=ScopeUtils.format_key(result=request_id),  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+                key=AgentRunProtocol.result_key(request_id, namespace="contracts"),
                 value=final_result.model_dump(),
                 created_by=self.agent.agent_id,
             )
@@ -1497,7 +1504,7 @@ class ContractCoordinatorCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=ScopeUtils.format_key(result=request_id),  # TODO: Is scope_id needed? Blackboard already takes care of namespacing.
+                key=AgentRunProtocol.result_key(request_id, namespace="contracts"),
                 value=final_result.model_dump(),
                 created_by=self.agent.agent_id,
             )
@@ -1563,6 +1570,7 @@ class ContractCoordinatorCapability(AgentCapability):
                         "function_names": function_names,
                     },
                     timeout=timeout,
+                    namespace="contracts",
                 )
                 if run.output_data:
                     result = ScopeAwareResult[list[FunctionContract]](**run.output_data)

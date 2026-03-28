@@ -133,13 +133,14 @@ class ResultCapability(AgentCapability):
         key = self._get_partial_key(result_id)
         await blackboard.write(key, result_entry, created_by=self.agent.agent_id)
 
-        # Update index
+        # Update index atomically (multiple workers may store_partial concurrently)
         index_key = self._get_index_key()
-        index = await blackboard.read(index_key) or {"result_ids": [], "count": 0}
-        if result_id not in index["result_ids"]:
-            index["result_ids"].append(result_id)
-            index["count"] = len(index["result_ids"])
-        await blackboard.write(index_key, index, created_by=self.agent.agent_id)
+        async with blackboard.transaction() as txn:
+            index = await txn.read(index_key) or {"result_ids": [], "count": 0}
+            if result_id not in index["result_ids"]:
+                index["result_ids"].append(result_id)
+                index["count"] = len(index["result_ids"])
+            await txn.write(index_key, index, created_by=self.agent.agent_id)
 
         logger.debug(
             f"ResultCapability: stored partial result {result_id} "

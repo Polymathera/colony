@@ -94,6 +94,7 @@ from ....models import (
 )
 from ...actions.policies import action_executor
 from ....blackboard import BlackboardEvent
+from ....blackboard.protocol import GameStateProtocol
 
 # Import strategy protocols and types
 from .types import (
@@ -261,6 +262,9 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
         )
         ```
     """
+
+    protocols = [GameStateProtocol]
+    input_patterns = [GameStateProtocol.state_pattern(namespace="hypothesis")]
 
     # Define role-based permissions for hypothesis game
     role_permissions = RolePermissions({
@@ -866,7 +870,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
     # Event Handler Overrides
     # =========================================================================
 
-    @event_handler(pattern=ScopeUtils.pattern_key(state=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=GameStateProtocol.state_pattern(namespace="hypothesis")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def _get_additional_context(
         self,
         event: BlackboardEvent,

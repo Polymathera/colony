@@ -85,6 +85,7 @@ from ....models import (
 from ....scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...actions.policies import action_executor
 from ....blackboard import BlackboardEvent
+from ....blackboard.protocol import GameStateProtocol
 
 logger = getLogger(__name__)
 
@@ -354,6 +355,9 @@ class NegotiationGameProtocol(GameProtocolCapability):
             )
             return state
     """
+
+    protocols = [GameStateProtocol]
+    input_patterns = [GameStateProtocol.state_pattern(namespace="negotiation")]
 
     # Define role-based permissions for negotiation game
     role_permissions = RolePermissions({
@@ -778,7 +782,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
                 summary=f"Negotiation failed after {data.deadlock_count} deadlocks"
             )
 
-    @event_handler(pattern=ScopeUtils.pattern_key(state=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=GameStateProtocol.state_pattern(namespace="negotiation")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def _populate_game_specific_scope(
         self,
         event: BlackboardEvent,
@@ -950,7 +954,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
     # Event Handler Overrides
     # =========================================================================
 
-    @event_handler(pattern=ScopeUtils.pattern_key(state=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=GameStateProtocol.state_pattern(namespace="negotiation")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def _get_additional_context(
         self,
         event: BlackboardEvent,

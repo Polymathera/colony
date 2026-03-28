@@ -136,6 +136,13 @@ class ActionResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     blocked: bool = False  # If action is blocked waiting on dependencies
     blocked_reason: str | None = None
+    blocking_agent_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Agent IDs that this action is blocked on. Used to construct a "
+            "CHILDREN_COMPLETED resumption condition when the agent is suspended."
+        )
+    )
     completed: bool = Field(
         default=False,
         description="If action fully completed (vs. partial result). Used mostly by ActionPolicies. If True, action is done. If False, more iterations needed."
@@ -2190,6 +2197,68 @@ class ActionPolicyExecutionState(BaseModel):
 # ============================================================================
 
 
+class ResumptionConditionType(str, Enum):
+    """What must happen before a suspended agent can resume.
+
+    Each suspension reason maps to a condition type that the system
+    evaluates before attempting resumption.
+    """
+    RESOURCE_AVAILABLE = "resource_available"
+    """Resources (CPU/memory/GPU) freed by another agent stopping."""
+
+    CHILDREN_COMPLETED = "children_completed"
+    """Specific child agents must reach a terminal state (STOPPED/FAILED)."""
+
+    PAGES_AVAILABLE = "pages_available"
+    """Required VCM pages must be loaded on some replica (future)."""
+
+    IMMEDIATE = "immediate"
+    """Resume as soon as possible (explicit suspension lifted by LLM plan)."""
+
+    CUSTOM = "custom"
+    """Agent-defined condition evaluated by a custom hook."""
+
+
+class ResumptionCondition(BaseModel):
+    """Structured condition for resuming a suspended agent.
+
+    Stored in ``AgentSuspensionState`` and evaluated by the system's
+    resource monitor loop before attempting resumption. This replaces
+    text-based reason parsing with machine-readable conditions.
+
+    Example::
+
+        # Agent blocked waiting for children
+        condition = ResumptionCondition(
+            condition_type=ResumptionConditionType.CHILDREN_COMPLETED,
+            blocking_agent_ids=["agent-abc", "agent-def"],
+        )
+
+        # Agent evicted for resource pressure
+        condition = ResumptionCondition(
+            condition_type=ResumptionConditionType.RESOURCE_AVAILABLE,
+            min_cpu_cores=0.5,
+            min_memory_mb=1024,
+        )
+    """
+    condition_type: ResumptionConditionType = ResumptionConditionType.IMMEDIATE
+
+    # For CHILDREN_COMPLETED: which child agent IDs must finish
+    blocking_agent_ids: list[str] = Field(default_factory=list)
+
+    # For PAGES_AVAILABLE: which page IDs must be loaded (future)
+    blocking_page_ids: list[str] = Field(default_factory=list)
+
+    # For RESOURCE_AVAILABLE: minimum resources needed
+    min_cpu_cores: float = 0
+    min_memory_mb: float = 0
+    min_gpu_cores: float = 0
+    min_gpu_memory_mb: float = 0
+
+    # For CUSTOM: opaque metadata
+    custom_data: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentSuspensionState(SharedState):
     """Persistent state for suspended agents.
 
@@ -2406,6 +2475,15 @@ class AgentSuspensionState(SharedState):
     # ========================================================================
     # Resumption Metadata
     # ========================================================================
+
+    resumption_condition: ResumptionCondition = Field(
+        default_factory=ResumptionCondition,
+        description=(
+            "Structured condition that must be met before this agent can resume. "
+            "Evaluated by AgentSystemDeployment._resource_monitor_loop(). "
+            "Replaces text-based reason parsing for determining when to resume."
+        )
+    )
 
     resumption_priority: int = Field(
         default=0,

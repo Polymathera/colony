@@ -536,7 +536,7 @@ class MemoryCapability(AgentCapability):
         Args:
             event_queue: Queue to stream events to
         """
-        await self.storage.stream_events_to_queue(event_queue, f"{self.scope_id}:*")
+        await self.storage.stream_events_to_queue(event_queue, "*")
 
     @override
     async def get_result_future(self) -> CapabilityResultFuture:

@@ -33,6 +33,8 @@ from .models import (
     AgentSuspensionState,
     ResourceExhaustedConfig,
     ResourceExhaustedStrategy,
+    ResumptionCondition,
+    ResumptionConditionType,
 )
 if TYPE_CHECKING:
     from ..cluster import LLMClientRequirements
@@ -1461,17 +1463,21 @@ class AgentSystemDeployment:
                         reverse=True
                     )
 
-                    # Try to resume agents one at a time
+                    # Try to resume agents whose conditions are met
                     for suspension_state in sorted_agents:
                         agent_id = suspension_state.agent_id
+                        condition = suspension_state.resumption_condition
+
+                        # Check if the resumption condition is met
+                        if not await self._is_resumption_condition_met(condition):
+                            continue
+
                         try:
-                            # Attempt to resume the agent
-                            # This will call spawn_agents() with suspend_agents=True
-                            # which allows suspension of other agents to make room
                             new_agent_id = await self.resume_agent(agent_id)
                             logger.info(
                                 f"Resource monitor: Resumed agent {agent_id} as {new_agent_id} "
-                                f"(priority={suspension_state.resumption_priority}, "
+                                f"(condition={condition.condition_type.value}, "
+                                f"priority={suspension_state.resumption_priority}, "
                                 f"suspensions={suspension_state.suspension_count})"
                             )
                         except ResourceExhausted as e:
@@ -1495,6 +1501,61 @@ class AgentSystemDeployment:
                     exc_info=True
                 )
                 await asyncio.sleep(10)
+
+    async def _is_resumption_condition_met(self, condition: "ResumptionCondition") -> bool:
+        """Evaluate whether a suspended agent's resumption condition is met.
+
+        Args:
+            condition: The structured resumption condition from suspension state.
+
+        Returns:
+            True if the condition is met and the agent should be resumed.
+        """
+        if condition.condition_type == ResumptionConditionType.IMMEDIATE:
+            return True
+
+        if condition.condition_type == ResumptionConditionType.CHILDREN_COMPLETED:
+            return await self._all_children_completed(condition.blocking_agent_ids)
+
+        if condition.condition_type == ResumptionConditionType.RESOURCE_AVAILABLE:
+            # Let resume_agent() handle the resource check — if resources
+            # aren't available it raises ResourceExhausted which the caller catches.
+            return True
+
+        if condition.condition_type == ResumptionConditionType.PAGES_AVAILABLE:
+            # Future: check VCM for loaded pages
+            return True
+
+        if condition.condition_type == ResumptionConditionType.CUSTOM:
+            # Custom conditions are not evaluated by the system — they require
+            # an external trigger (e.g., an API call to resume_agent).
+            return False
+
+        return True
+
+    async def _all_children_completed(self, child_ids: list[str]) -> bool:
+        """Check if all blocking children have reached a terminal state.
+
+        A child is considered "completed" if it is in STOPPED or FAILED state,
+        or if it no longer exists in the agent registry (already cleaned up).
+
+        Args:
+            child_ids: List of child agent IDs to check.
+
+        Returns:
+            True if ALL children are completed or absent.
+        """
+        if not child_ids:
+            return True
+
+        async for state in self.state_manager.read_transaction():
+            for child_id in child_ids:
+                child_info = state.agents.get(child_id)
+                if child_info is None:
+                    continue  # Agent no longer tracked — assume completed
+                if child_info.state not in (AgentState.STOPPED, AgentState.FAILED):
+                    return False  # Still running or suspended
+        return True
 
     async def _list_all_suspended_agents(self) -> list[AgentSuspensionState]:
         """List all suspended agents from StateManager.

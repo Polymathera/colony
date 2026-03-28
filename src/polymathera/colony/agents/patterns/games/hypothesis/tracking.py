@@ -62,6 +62,8 @@ class HypothesisTrackingCapability(AgentCapability):
     Stores hypothesis data on blackboard for persistence and sharing.
     """
 
+    input_patterns: list[str] = []
+
     def __init__(
         self,
         agent: Agent,

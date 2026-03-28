@@ -65,6 +65,7 @@ from .types import (
     KeyPatternFilter,
     EventTypeFilter,
     AgentFilter,
+    TagFilter,
     CombinationFilter,
     # Policy implementations
     NoOpAccessPolicy,
@@ -92,6 +93,34 @@ from .backends import (
     RedisBackend,
 )
 
+# Protocols
+from .protocol import (
+    BlackboardProtocol,
+    AgentRunProtocol,
+    WorkAssignmentProtocol,
+    LifecycleSignalProtocol,
+    GameStateProtocol,
+    CritiqueProtocol,
+    WorkingSetStateProtocol,
+    ConsistencyCheckProtocol,
+    GroundingProtocol,
+    GoalAlignmentProtocol,
+    PlanProtocol,
+    ErrorSignalProtocol,
+    DependencyQueryProtocol,
+    ReputationProtocol,
+    ConsciousnessProtocol,
+    ReflectionProtocol,
+    AnalysisResultProtocol,
+    ExplorationProtocol,
+    IncrementalQueryProtocol,
+    MultiHopSearchProtocol,
+    # Key validation
+    validate_key,
+    validate_pattern,
+    KeyValidationError,
+)
+
 # Event bus
 from .events import EventBus
 from .paging import BlackboardContextPageSource
@@ -117,6 +146,7 @@ __all__ = [
     "KeyPatternFilter",
     "EventTypeFilter",
     "AgentFilter",
+    "TagFilter",
     "CombinationFilter",
     # Task graph (lazy)
     "TaskGraph",
@@ -141,6 +171,30 @@ __all__ = [
     "InMemoryBackend",
     "DistributedBackend",
     "RedisBackend",
+    # Protocols
+    "BlackboardProtocol",
+    "AgentRunProtocol",
+    "WorkAssignmentProtocol",
+    "LifecycleSignalProtocol",
+    "GameStateProtocol",
+    "CritiqueProtocol",
+    "WorkingSetStateProtocol",
+    "ConsistencyCheckProtocol",
+    "GroundingProtocol",
+    "GoalAlignmentProtocol",
+    "PlanProtocol",
+    "ErrorSignalProtocol",
+    "DependencyQueryProtocol",
+    "ReputationProtocol",
+    "ConsciousnessProtocol",
+    "ReflectionProtocol",
+    "AnalysisResultProtocol",
+    "ExplorationProtocol",
+    "IncrementalQueryProtocol",
+    "MultiHopSearchProtocol",
+    "validate_key",
+    "validate_pattern",
+    "KeyValidationError",
     # Event bus
     "EventBus",
     # Context page sources

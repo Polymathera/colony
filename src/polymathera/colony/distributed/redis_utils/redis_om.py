@@ -1433,11 +1433,12 @@ class RedisOM:
 
         return objects
 
-    async def get_all_item_ids(self, model_cls: type[T]) -> set[str]:
+    async def get_all_item_ids(self, model_cls: type[T]) -> list[str]:
         """Get IDs of all items of a particular model type."""
         async with self.redis_client.get_pipeline() as (_, redis):
+            prefix = self._build_key(model_cls, "")
             all_keys = await redis.keys(self._build_key(model_cls, "*"))
-            return [key.decode().split(":")[-1] for key in all_keys]
+            return [key.decode()[len(prefix):] for key in all_keys]
 
     @track_operation("find")
     async def find(self, model_cls: type[T], query: QueryExpr) -> list[tuple[T, str]]:
@@ -2298,8 +2299,9 @@ class RedisOM:
             async with self.redis_client.get_redis_connection() as redis:
                 # Scan all sets for this index
                 pattern = self._build_index_all_sets_pattern(model_cls, index)
+                idx_prefix = self._build_index_key(model_cls, index) + ":"
                 async for key in redis.scan_iter(pattern):
-                    value = key.decode().split(":")[-1]  # Extract value from key
+                    value = key.decode()[len(idx_prefix):]  # Strip index prefix to get value
                     members = await redis.smembers(key)
                     for member in members:
                         current_state[member.decode()] = value

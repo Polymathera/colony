@@ -98,11 +98,15 @@ def _resolve_pattern(pattern: str | Callable, capability: Any) -> str:
     """Resolve pattern template variables from capability instance.
 
     Supports:
-    - {scope_id} - replaced with capability.scope_id
     - {agent_id} - replaced with capability.agent.agent_id
 
+    Blackboard keys are scope-relative — do NOT include scope_id in
+    patterns. The blackboard partition already provides scope isolation.
+
     Args:
-        pattern: Pattern template string or callable that returns a pattern string. If callable, it will be called with the capability instance to get the pattern.
+        pattern: Pattern template string or callable that returns a pattern
+            string. If callable, it will be called with the capability
+            instance to get the pattern.
         capability: Capability instance (self)
 
     Returns:
@@ -113,11 +117,12 @@ def _resolve_pattern(pattern: str | Callable, capability: Any) -> str:
     else:
         resolved = pattern
 
-    # Resolve {scope_id}
     if "{scope_id}" in resolved:
-        scope_id = getattr(capability, "scope_id", None)
-        if scope_id:
-            resolved = resolved.replace("{scope_id}", scope_id)
+        raise ValueError(
+            f"@event_handler pattern must not contain {{scope_id}}. "
+            f"Blackboard keys are scope-relative — the scope is already "
+            f"set on the blackboard. Got pattern: {pattern!r}"
+        )
 
     # Resolve {agent_id}
     if "{agent_id}" in resolved:
@@ -150,11 +155,11 @@ def event_handler(
     Args:
         pattern: Optional event key pattern to filter events before calling handler.
             Supports glob-style wildcards (*) and template variables:
-            - {scope_id}: Resolved to self.scope_id
+            - {agent_id}: Resolved to self.agent.agent_id
             - {agent_id}: Resolved to self.agent.agent_id
 
             Example patterns:
-            - "{scope_id}:request:*" - matches any request for this capability
+            - "request:*" - matches any request for this capability
             - "{agent_id}:result:*" - matches any result for this agent
             - "game:*:move" - matches any game move event
 
@@ -185,8 +190,8 @@ def event_handler(
                     return None
                 ...
 
-            # With pattern - automatic filtering
-            @event_handler(pattern="{scope_id}:request:*")
+            # With pattern - automatic filtering (use protocol references)
+            @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="my_namespace"))
             async def handle_analysis_request(
                 self,
                 event: BlackboardEvent,

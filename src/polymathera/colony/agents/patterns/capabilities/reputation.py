@@ -73,6 +73,7 @@ from ...base import (
     AgentHandle,
     CapabilityResultFuture,
 )
+from ...blackboard.protocol import ReputationProtocol
 from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions.policies import (
     action_executor,
@@ -816,6 +817,9 @@ class ReputationCapability(AgentCapability):
     - Detect reputation trends
     """
 
+    protocols = [ReputationProtocol]
+    input_patterns = ReputationProtocol.all_input_patterns(namespace="reputation")
+
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize reputation capability.
 
@@ -866,26 +870,7 @@ class ReputationCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for ReputationCapability")
         pass
 
-    @override
-    async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
-        """Stream reputation events to the given queue.
-
-        Args:
-            event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
-        """
-        blackboard = await self.get_blackboard()
-        ### blackboard.stream_events_to_queue(
-        ###     event_queue,
-        ###     KeyPatternFilter(
-        ###         pattern=ScopeUtils.pattern_key(task_outcome=None)
-        ###     )
-        ### )
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(pattern=self._get_event_pattern())
-        )
-
-    @event_handler(pattern=ScopeUtils.pattern_key(reputation="update", requesting_agent_id=None))
+    @event_handler(pattern=ReputationProtocol.update_request_pattern(namespace="reputation"))
     async def handle_reputation_update_request(
         self,
         event: BlackboardEvent,
@@ -907,7 +892,7 @@ class ReputationCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern=ScopeUtils.pattern_key(state=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=ReputationProtocol.state_pattern(namespace="reputation")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def handle_game_completion(
         self,
         event: BlackboardEvent,
@@ -930,7 +915,7 @@ class ReputationCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern=ScopeUtils.pattern_key(task_outcome=None)) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=ReputationProtocol.task_outcome_pattern(namespace="reputation")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def handle_task_outcome(
         self,
         event: BlackboardEvent,

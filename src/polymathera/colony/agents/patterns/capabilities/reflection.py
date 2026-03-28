@@ -14,6 +14,7 @@ from .consciousness import SystemDocumentation
 from ..models import Reflection
 from ...models import Action, ActionResult, ActionPlan, AgentSuspensionState
 from ...base import Agent, AgentCapability
+from ...blackboard.protocol import ReflectionProtocol
 from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ....distributed import get_polymathera
 from ..actions.policies import action_executor
@@ -132,6 +133,9 @@ class ReflectionCapability(AgentCapability):
         ```
     """
 
+    protocols = [ReflectionProtocol]
+    input_patterns = [ReflectionProtocol.request_pattern(namespace="reflection")]
+
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
         """Initialize reflection capability.
 
@@ -162,29 +166,6 @@ class ReflectionCapability(AgentCapability):
         # TODO: Implement
         logger.warning("deserialize_suspension_state not implemented for ReflectionCapability")
         pass
-
-    @override
-    async def stream_events_to_queue(
-        self, event_queue: asyncio.Queue[BlackboardEvent]
-    ) -> None:
-        """Stream reflection-related events to the given queue.
-
-        Listens for explicit reflection requests from other agents.
-
-        Args:
-            event_queue: Queue to stream events to
-        """
-        # TODO: We can get either explicit reflection requests or we can snoop
-        # on published analysis results to convert them into reflection updates in the action policy.
-        # TODO: Code analyzers even better separate their output results into different categories (e.g.,
-        # tentative findings vs. confirmed findings, partial findings vs. rejected findings) so that
-        # reflection updates can focus on specific categories.
-        # TODO: Make scope configurable because agents that request reflection need not know the agent_id of the reflection agent (decoupling).
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(pattern=ScopeUtils.pattern_key(reflection_request=None)),  # Listen for reflection requests to trigger reflection actions
-        )
 
     async def get_system_documentation(self) -> SystemDocumentation:
         """Get system documentation for self-awareness.

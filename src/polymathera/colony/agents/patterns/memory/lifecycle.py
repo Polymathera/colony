@@ -41,6 +41,7 @@ from ..hooks.pointcuts import Pointcut
 from ..hooks.decorator import register_hook
 from .context import AgentContextEngine
 from .working import WorkingMemoryCapability
+from ...blackboard.protocol import LifecycleSignalProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,12 @@ class MemoryLifecycleHooks(AgentCapability):
     The hooks use the declarative `@register_hook` decorator which
     auto-registers during `initialize()`.
     """
+
+    protocols = [LifecycleSignalProtocol]
+    input_patterns = [
+        LifecycleSignalProtocol.created_pattern(namespace="lifecycle"),
+        LifecycleSignalProtocol.terminated_pattern(namespace="lifecycle"),
+    ]
 
     def __init__(
         self,
@@ -97,14 +104,24 @@ class MemoryLifecycleHooks(AgentCapability):
         self,
         event_queue: asyncio.Queue[BlackboardEvent]
     ) -> None:
-        """Stream lifecycle events to queue.
+        """Stream lifecycle events from colony control plane.
 
-        Streams termination events emitted by this capability.
+        Lifecycle events (creation, termination) are emitted to the colony
+        control plane scope, not the agent-local scope. Subscribe there
+        to actually receive them.
         """
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
+        lifecycle_bb = await self.agent.get_blackboard(
+            scope_id=MemoryScope.colony_control_plane("lifecycle")
+        )
+        lifecycle_bb.stream_events_to_queue(
             event_queue,
-            KeyPatternFilter(pattern=ScopeUtils.pattern_key())
+            pattern=LifecycleSignalProtocol.created_pattern(namespace="lifecycle"),
+            event_types={"write"},
+        )
+        lifecycle_bb.stream_events_to_queue(
+            event_queue,
+            pattern=LifecycleSignalProtocol.terminated_pattern(namespace="lifecycle"),
+            event_types={"write"},
         )
 
     @override

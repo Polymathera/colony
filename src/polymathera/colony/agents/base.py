@@ -21,7 +21,7 @@ import logging
 import time
 import uuid
 import functools
-from typing import Any, Callable, AsyncIterator, TYPE_CHECKING
+from typing import Any, Callable, AsyncIterator, ClassVar, TYPE_CHECKING
 from abc import ABC, abstractmethod
 from pydantic import BaseModel, Field, PrivateAttr
 import networkx as nx
@@ -35,7 +35,9 @@ from .models import (
     AgentRegistrationInfo,
     AgentResourceRequirements,
     AgentSuspensionState,
-    AgentMetadata
+    AgentMetadata,
+    ResumptionCondition,
+    ResumptionConditionType,
 )
 from .blueprint import (
     AgentCapabilityBlueprint,
@@ -57,6 +59,7 @@ from .patterns.hooks import AgentHookRegistry, Pointcut, HookType, ErrorMode, au
 if TYPE_CHECKING:
     from .patterns.memory.types import CapabilityMemoryRequirements
     from ..cluster import LLMClientRequirements
+    from .blackboard.protocol import BlackboardProtocol
 
 
 
@@ -203,8 +206,38 @@ class AgentCapability(ABC):
     - `game_id` or `task_id`: Shared scope for group coordination
 
     Subclasses can override:
-    - `stream_events_to_queue()`: Stream capability events to action policy (default streams {scope_id}:* writes)
-    - `get_result_future()`: Get future for capability's task result (default uses {scope_id}:result:{request_id})
+    - `stream_events_to_queue()`: Stream capability events to action policy (default uses ``input_patterns``)
+    - `get_result_future()`: Get future for capability's task result
+
+    Subclasses should declare:
+    - ``input_patterns``: Glob patterns this capability monitors (used by default ``stream_events_to_queue``).
+    - ``protocols``: ``BlackboardProtocol`` subclasses this capability supports.
+    """
+
+    input_patterns: ClassVar[list[str]] = []
+    """Glob patterns this capability monitors for incoming events.
+
+    Used by the default ``stream_events_to_queue()`` to subscribe only to
+    relevant events instead of ``"*"``. If empty, falls back to ``"*"``
+    (legacy behavior, logs a warning).
+
+    Example::
+
+        class GroundingCapability(AgentCapability):
+            input_patterns = [GroundingProtocol.request_pattern(namespace="grounding")]
+    """
+
+    protocols: ClassVar[list[type]] = []
+    """BlackboardProtocol subclasses this capability supports.
+
+    Declares which communication protocols this capability participates in.
+    Used for documentation and for deriving ``input_patterns`` when not
+    explicitly set.
+
+    Example::
+
+        class GroundingCapability(AgentCapability):
+            protocols = [GroundingProtocol]
     """
 
     def __init__(
@@ -370,26 +403,32 @@ class AgentCapability(ABC):
     async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
         """Stream capability-specific events to the given queue.
 
-        Default implementation streams all "write" events matching {scope_id}:*.
-        This includes all events within the capability's blackboard scope (e.g.,
-        requests, results from child agents, status updates, etc.).
-        Subclasses can override to customize the event filter.
+        Default implementation subscribes to all patterns declared in
+        ``input_patterns``. If ``input_patterns`` is empty, falls back to
+        ``"*"`` (all writes within the capability's blackboard scope) with
+        a deprecation warning.
 
-        Other event patterns/filters can be encapsulated within the capability itself.
-        Subclasses can define what events are relevant to their protocol.
-
-        Event handlers can use more specific event patterns if needed.
+        Subclasses can override to customize the event filter or subscribe
+        to multiple blackboards.
 
         Args:
             event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
         """
-        from .scopes import ScopeUtils
         blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
-            event_queue,
-            pattern=ScopeUtils.pattern_key(),
-            event_types={"write"},
-        )
+        patterns = self.input_patterns
+        if not patterns:
+            logger.warning(
+                f"{self.__class__.__name__} has no input_patterns declared — "
+                f"streaming all events (\"*\"). Declare input_patterns to "
+                f"filter events and reduce noise."
+            )
+            patterns = ["*"]
+        for pattern in patterns:
+            blackboard.stream_events_to_queue(
+                event_queue,
+                pattern=pattern,
+                event_types={"write"},
+            )
 
     async def stream_events(
         self,
@@ -462,24 +501,27 @@ class AgentCapability(ABC):
                 except Exception:
                     pass
 
-    async def get_result_future(self) -> CapabilityResultFuture:
+    async def get_result_future(self, namespace: str = "") -> CapabilityResultFuture:
         """Get future for this capability's task result.
 
         Default implementation returns a future that resolves when
-        {scope_id}:result:{request_id} is written to the blackboard.
-        Subclasses can override to customize the result key pattern.
+        ``result:run:{namespace}:{request_id}`` is written to the blackboard
+        (using ``AgentRunProtocol``). Subclasses can override to use
+        a different protocol.
 
-        Each capability instance represents ONE task (which can be hierarchical
-        and long-running). This returns a future that resolves when that task
-        completes.
+        Args:
+            namespace: Protocol namespace. Must match the namespace used by
+                the writer. Capabilities that operate within the same scope_id
+                should pass their specific namespace to avoid cross-capability
+                interference.
 
         Returns:
             Future that resolves with the task result
         """
+        from .blackboard.protocol import AgentRunProtocol
         blackboard = await self.get_blackboard()
-        # TODO: Should we listen to all request_ids?
-        from .scopes import ScopeUtils
-        result_key = ScopeUtils.format_key(result=self._pending_request_id or 'default')
+        request_id = self._pending_request_id or "default"
+        result_key = AgentRunProtocol.result_key(request_id, namespace=namespace)
         return CapabilityResultFuture(
             result_key=result_key,
             blackboard=blackboard,
@@ -490,11 +532,15 @@ class AgentCapability(ABC):
         request_type: str,
         request_data: dict[str, Any],
         request_id: str | None = None,
+        namespace: str = "",
     ) -> str:
         """Send a request to trigger/control the capability.
 
-        Generic method for sending requests via blackboard. Subclasses may
-        provide more specific methods (e.g., `abort()`, `ground_claim()`).
+        Generic method for sending requests via blackboard. Uses
+        ``AgentRunProtocol`` key format with the specified namespace.
+
+        Subclasses may provide more specific methods (e.g., ``abort()``,
+        ``ground_claim()``) that use capability-specific protocols.
 
         Works in both attached and detached modes.
 
@@ -502,19 +548,20 @@ class AgentCapability(ABC):
             request_type: Type of request (e.g., "abort", "ground_claim")
             request_data: Request payload
             request_id: Optional request ID (generated if None)
+            namespace: Protocol namespace for disambiguation.
 
         Returns:
             Request ID for tracking
         """
+        from .blackboard.protocol import AgentRunProtocol
         blackboard = await self.get_blackboard()
         request_id = request_id or f"req_{uuid.uuid4().hex[:8]}"
 
         # Determine sender ID based on mode
         sender_id = self._agent.agent_id if self._agent else "detached"
 
-        # session_id auto-added by blackboard.write from context
-        from .scopes import ScopeUtils
-        key = ScopeUtils.format_key(sender=sender_id, request_type=request_type, request_id=request_id)
+        # Key is scope-relative — no scope_id prefix
+        key = AgentRunProtocol.request_key(request_id, namespace=namespace)
         await blackboard.write(
             key=key,
             value={
@@ -660,7 +707,7 @@ class AgentHandle:
     2. **Detached mode** (NEW): Any code creates handle to interact with agent by ID
        ```python
        handle = await AgentHandle.from_agent_id("agent_123")
-       result = await handle.run({"query": "analyze code"})
+       result = await handle.run({"query": "analyze code"}, protocol=AgentRunProtocol, namespace="analysis")
        ```
 
     Detached mode enables:
@@ -696,13 +743,13 @@ class AgentHandle:
     4. **Run task** (NEW) - Execute a task and wait for result:
        ```python
        handle = await AgentHandle.from_agent_id("agent_123")
-       result = await handle.run({"query": "analyze code"}, timeout=60)
+       result = await handle.run({"query": "analyze code"}, protocol=AgentRunProtocol, namespace="analysis", timeout=60)
        ```
 
     5. **Stream task** (NEW) - Execute with streaming intermediate results:
        ```python
        handle = await AgentHandle.from_agent_id("agent_123")
-       async for event in handle.run_streamed({"query": "analyze code"}):
+       async for event in handle.run_streamed({"query": "analyze code"}, protocol=AgentRunProtocol, namespace="analysis"):
            print(event)
        ```
     """
@@ -778,7 +825,7 @@ class AgentHandle:
             ```python
             # Get handle to system administrator agent
             handle = await AgentHandle.from_agent_id("system_admin_agent")
-            result = await handle.run({"task": "check_health"})
+            result = await handle.run({"task": "check_health"}, protocol=AgentRunProtocol, namespace="admin")
             ```
         """
         handle = cls(
@@ -865,19 +912,29 @@ class AgentHandle:
 
     async def _get_child_blackboard(
         self,
+        scope_id: str | None = None,
         backend_type: str | None = None,
         enable_events: bool = True,
     ) -> EnhancedBlackboard:
-        """Get blackboard for detached mode communication."""
-        if self._blackboard is not None:
+        """Get blackboard for communicating with the child agent.
+
+        Args:
+            scope_id: Override the blackboard scope. If None, uses the child's
+                agent-level scope. Pass a colony/session scope when the target
+                capability operates at a shared scope level.
+            backend_type: Backend type override.
+            enable_events: Whether to enable event notifications.
+        """
+        # Only cache when using default scope (agent-level)
+        if scope_id is None and self._blackboard is not None:
             return self._blackboard
 
         from .scopes import ScopeUtils
-        child_scope_id = ScopeUtils.get_agent_level_scope(self.child_agent_id)
+        effective_scope_id = scope_id or ScopeUtils.get_agent_level_scope(self.child_agent_id)
 
         if self._owner is not None:
             return await self._owner.get_blackboard(
-                scope_id=child_scope_id,
+                scope_id=effective_scope_id,
                 backend_type=backend_type,
                 enable_events=enable_events,
             )
@@ -885,14 +942,19 @@ class AgentHandle:
         # Detached mode: create blackboard
         app_name = self._app_name or serving.get_my_app_name()
 
-        self._blackboard = EnhancedBlackboard(
+        bb = EnhancedBlackboard(
             app_name=app_name,
-            scope_id=child_scope_id,
+            scope_id=effective_scope_id,
             backend_type=backend_type,
             enable_events=enable_events,
         )
-        await self._blackboard.initialize()
-        return self._blackboard
+        await bb.initialize()
+
+        # Cache only the default (agent-level) blackboard
+        if scope_id is None:
+            self._blackboard = bb
+
+        return bb
 
     # =========================================================================
     # Capability Access
@@ -965,6 +1027,8 @@ class AgentHandle:
         config: "AgentRunConfig | None" = None,
         track_events: bool = False,
         run_id: str | None = None,
+        protocol: "type[BlackboardProtocol] | None" = None,
+        namespace: str = "",
     ) -> "AgentRun":
         """Run a task on the agent and wait for result.
 
@@ -979,6 +1043,12 @@ class AgentHandle:
             config: Run configuration (uses session defaults if None)
             track_events: Whether to record intermediate events
             run_id: Explicit run ID (matches agent's metadata.run_id to avoid mismatch)
+            protocol: BlackboardProtocol subclass defining key format for
+                request/result exchange. Defaults to AgentRunProtocol.
+            namespace: Protocol namespace for disambiguation when the child
+                agent has multiple capabilities using the same protocol.
+                Must match the namespace the target capability declares in
+                its ``input_patterns``.
 
         Returns:
             AgentRun with status, output_data, and resource_usage
@@ -987,11 +1057,22 @@ class AgentHandle:
             ```python
             async with session.context():
                 handle = await AgentHandle.from_agent_id("agent_123")
-                run = await handle.run({"query": "analyze code"}, timeout=60)
+                run = await handle.run({"query": "analyze code"}, namespace="analysis", timeout=60)
                 print(run.output_data)
             ```
         """
-        blackboard = await self._get_child_blackboard()
+        from .blackboard.protocol import AgentRunProtocol
+        from .scopes import BlackboardScope, get_scope_prefix
+        proto = protocol or AgentRunProtocol
+
+        # Determine the blackboard scope from the protocol.
+        # Agent-scoped protocols write to the child's agent-level scope.
+        # Colony/session-scoped protocols write to the shared scope.
+        scope_override = None
+        if hasattr(proto, 'scope') and proto.scope != BlackboardScope.AGENT:
+            scope_override = get_scope_prefix(proto.scope, self.child_agent_id)
+
+        blackboard = await self._get_child_blackboard(scope_id=scope_override)
 
         # Get session context if available
         from .sessions.context import get_current_session_id
@@ -1044,11 +1125,11 @@ class AgentHandle:
         sender_id = self._owner.agent_id if self._owner else "detached_handle"
 
         # Result tracking
-        result_key = f"{self.child_agent_id}:result:{request_id}"
+        result_key = proto.result_key(request_id, namespace=namespace)
         result_value: dict[str, Any] | None = None
 
         # Send request (session_id auto-added by blackboard.write from context)
-        request_key = f"{self.child_agent_id}:request:{request_id}"
+        request_key = proto.request_key(request_id, namespace=namespace)
         await blackboard.write(
             key=request_key,
             value={
@@ -1136,6 +1217,8 @@ class AgentHandle:
         event_types: set[str] | None = None,
         track_events: bool = True,
         run_id: str | None = None,
+        protocol: type[BlackboardProtocol] | None = None,
+        namespace: str = "",
     ) -> AsyncIterator[AgentRunEvent]:
         """Run a task with streaming events.
 
@@ -1150,6 +1233,10 @@ class AgentHandle:
             event_types: Filter for specific event types (if None, all write events)
             track_events: If True, events are persisted to the AgentRun
             run_id: Explicit run ID (matches agent's metadata.run_id to avoid mismatch)
+            protocol: BlackboardProtocol subclass defining key format. Defaults to AgentRunProtocol.
+            namespace: Protocol namespace for disambiguation within the same
+                blackboard scope. Must match the namespace the target capability
+                declares in its ``input_patterns``.
 
         Yields:
             AgentRunEvent for each event during execution
@@ -1158,7 +1245,7 @@ class AgentHandle:
             ```python
             async with session.context():
                 handle = await AgentHandle.from_agent_id("agent_123")
-                async for event in handle.run_streamed({"query": "analyze"}):
+                async for event in handle.run_streamed({"query": "analyze"}, namespace="analysis"):
                     print(f"{event.event_type}: {event.data}")
                     if event.event_type == "completed":
                         break
@@ -1166,8 +1253,17 @@ class AgentHandle:
         """
         from .sessions.context import get_current_session_id
         from ..system import get_session_manager
+        from .blackboard.protocol import AgentRunProtocol
+        from .scopes import BlackboardScope, get_scope_prefix
 
-        blackboard = await self._get_child_blackboard()
+        proto = protocol or AgentRunProtocol
+
+        # Determine the blackboard scope from the protocol.
+        scope_override = None
+        if hasattr(proto, 'scope') and proto.scope != BlackboardScope.AGENT:
+            scope_override = get_scope_prefix(proto.scope, self.child_agent_id)
+
+        blackboard = await self._get_child_blackboard(scope_id=scope_override)
 
         # Get session context if available
         effective_session_id = session_id or get_current_session_id()
@@ -1223,7 +1319,7 @@ class AgentHandle:
         sender_id = self._owner.agent_id if self._owner else "detached_handle"
 
         # Send request with streaming flag (session_id auto-added by blackboard.write)
-        request_key = f"{self.child_agent_id}:request:{request_id}"
+        request_key = proto.request_key(request_id, namespace=namespace)
         await blackboard.write(
             key=request_key,
             value={
@@ -1239,7 +1335,7 @@ class AgentHandle:
 
         # Stream events
         start_time = time.time()
-        event_pattern = f"{self.child_agent_id}:event:{request_id}:*"
+        event_pattern = proto.event_pattern(request_id, namespace=namespace)
         is_complete = False
         final_status = RunStatus.COMPLETED
         error_msg: str | None = None
@@ -1618,6 +1714,7 @@ class Agent(BaseModel):
     _stop_requested: bool = PrivateAttr(default=False)
     _suspend_requested: bool = PrivateAttr(default=False)
     _suspend_reason: str | None = PrivateAttr(default=None)
+    _resumption_condition: ResumptionCondition | None = PrivateAttr(default=None)
     _manager: AgentManagerBase | None = PrivateAttr(default=None)
     _hook_registry: AgentHookRegistry | None = PrivateAttr(default=None)
 
@@ -2352,7 +2449,11 @@ class Agent(BaseModel):
         # TODO: Should notify parent agent if any?
 
     @hookable
-    async def suspend(self, reason: str = "") -> None:
+    async def suspend(
+        self,
+        reason: str = "",
+        resumption_condition: ResumptionCondition | None = None,
+    ) -> None:
         """Request suspension by setting _suspend_requested flag.
 
         The manager loop will detect this flag and call AgentManagerBase.suspend_agent()
@@ -2368,8 +2469,11 @@ class Agent(BaseModel):
         AFTER hooks to run additional cleanup logic or integrity checks, etc.
 
         Args:
-            reason: Reason for suspension (e.g., "Blocked: waiting for children",
-                   "resource_exhaustion", "cache_pressure")
+            reason: Human-readable reason for suspension.
+            resumption_condition: Structured condition that must be met before
+                the agent can resume. If None, defaults to IMMEDIATE (resume ASAP).
+                The system's resource monitor loop evaluates this condition
+                before attempting resumption.
 
         Override in subclasses to save additional state (e.g., domain-specific
         checkpoints), but ALWAYS call super().suspend(reason) first.
@@ -2386,9 +2490,13 @@ class Agent(BaseModel):
             ```
 
         """
+        from .models import ResumptionCondition, ResumptionConditionType
         # Set flag for manager to detect
         self._suspend_requested = True
         self._suspend_reason = reason
+        self._resumption_condition = resumption_condition or ResumptionCondition(
+            condition_type=ResumptionConditionType.IMMEDIATE
+        )
 
         logger.info(f"Agent {self.agent_id} requested suspension: {reason}")
 
@@ -2469,11 +2577,6 @@ class Agent(BaseModel):
                 # Policy returned work while we were IDLE — wake up
                 self.state = AgentState.RUNNING
                 self._idle_since = None
-
-            if self.state == AgentState.SUSPENDED:
-                logger.info(f"Agent {self.agent_id} has entered SUSPENDED state")
-                # Suspend agent until dependencies resolved
-                await self.suspend(reason=f"Blocked: {iteration_result.blocked_reason}")
 
             if self.state == AgentState.STOPPED:
                 logger.info(f"Agent {self.agent_id} has entered STOPPED state")
@@ -3528,6 +3631,20 @@ class AgentManagerBase:
                 suspension_state = await agent.serialize_suspension_state()
                 suspension_state.suspension_count = suspension_count
 
+                # Set resumption condition: use agent's own condition (from
+                # self-suspension) or derive from reason (manager-initiated)
+                if agent._resumption_condition is not None:
+                    suspension_state.resumption_condition = agent._resumption_condition
+                else:
+                    # Manager-initiated suspension (resource pressure, capacity)
+                    suspension_state.resumption_condition = ResumptionCondition(
+                        condition_type=ResumptionConditionType.RESOURCE_AVAILABLE,
+                        min_cpu_cores=agent.resource_requirements.cpu_cores,
+                        min_memory_mb=agent.resource_requirements.memory_mb,
+                        min_gpu_cores=agent.resource_requirements.gpu_cores,
+                        min_gpu_memory_mb=agent.resource_requirements.gpu_memory_mb,
+                    )
+
                 # Persist to StateManager
                 async for state in state_manager.write_transaction():
                     # Copy suspension_state into persisted state
@@ -3573,80 +3690,10 @@ class AgentManagerBase:
                 f"mem={agent.resource_requirements.memory_mb}MB). Reason: {reason}"
             )
 
-        # 7. Setup event-driven resumption if blocked on dependency (outside lock)
-        if reason.startswith("Blocked:"):
-            await self._setup_resumption_trigger(agent_id, reason)
+        # Resumption is handled by AgentSystemDeployment._resource_monitor_loop()
+        # which evaluates the ResumptionCondition stored in the suspension state.
 
         return True
-
-    async def _setup_resumption_trigger(self, agent_id: str, reason: str) -> None:
-        """Setup event listener to resume agent when dependency is satisfied.
-
-        Args:
-            agent_id: Suspended agent ID
-            reason: Suspension reason (contains dependency info)
-        """
-        try:
-            # Parse reason to extract child agent IDs
-            # Format: "Blocked: Waiting for children: child1,child2,child3"
-            # TODO: Use structured metadata instead of parsing text
-            child_agent_ids = []
-            if "Waiting for children:" in reason:
-                children_part = reason.split("Waiting for children:")[-1].strip()
-                child_agent_ids = [cid.strip() for cid in children_part.split(",") if cid.strip()]
-
-            if not child_agent_ids:
-                logger.warning(
-                    f"Could not parse child agent IDs from reason: {reason}. "
-                    f"Agent {agent_id} will not auto-resume."
-                )
-                return
-
-            # Get shared blackboard for plan coordination
-            blackboard = await self.get_blackboard(
-                scope_id="plan_coordination"  # TODO: Use actual plan ID if available instead of generic "plan_coordination"
-            )
-
-            # Subscribe to specific child plan completions
-            from .blackboard.types import KeyPatternFilter
-
-            # Build pattern for child agent plan keys
-            # Plan keys are like: "plan:<agent_id>"
-            for child_id in child_agent_ids:
-                plan_key_pattern = f"plan:{child_id}"
-
-                async def on_child_completed(event):
-                    """Resume parent when child completes."""
-                    # Check if child plan is actually completed
-                    if event.value and isinstance(event.value, dict):
-                        status = event.value.get("status")
-                        if status in ["completed", "failed"]:
-                            logger.info(
-                                f"Child {event.key} completed with status {status}, "
-                                f"attempting to resume parent {agent_id}"
-                            )
-                            try:
-                                # Resume via AgentSystem (not local manager)
-                                await self._agent_system_handle.resume_agent(agent_id)
-                            except Exception as e:
-                                logger.debug(
-                                    f"Failed to resume agent {agent_id}: {e}"
-                                )
-
-                blackboard.subscribe(
-                    on_child_completed,
-                    filter=KeyPatternFilter(plan_key_pattern)
-                )
-
-            logger.info(
-                f"Setup resumption triggers for agent {agent_id} "
-                f"watching {len(child_agent_ids)} children: {child_agent_ids}"
-            )
-
-        except Exception as e:
-            logger.warning(
-                f"Failed to setup resumption trigger for agent {agent_id}: {e}"
-            )
 
     async def _select_agent_for_suspension(
         self,

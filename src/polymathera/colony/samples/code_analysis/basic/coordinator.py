@@ -37,6 +37,7 @@ from polymathera.colony.agents.blackboard import KeyPatternFilter, BlackboardEve
 from polymathera.colony.agents.patterns.attention import HierarchicalAttentionRouting
 from polymathera.colony.agents.patterns.actions.policies import action_executor
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, ErrorSignalProtocol
 from polymathera.colony.agents.patterns.capabilities.working_set import WorkingSetCapability
 from polymathera.colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
 from polymathera.colony.agents.patterns.capabilities.result import ResultCapability
@@ -58,6 +59,9 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
     Keeps Agent subclasses thin by providing @action_executor methods for
     spawning, monitoring, and synthesis.
     """
+
+    protocols = [AgentRunProtocol, ErrorSignalProtocol]
+    input_patterns = [AgentRunProtocol.result_pattern(namespace="basic"), ErrorSignalProtocol.error_pattern(namespace="basic")]
 
     def __init__(self, agent: Agent):
         super().__init__(agent=agent)
@@ -91,7 +95,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         """Spawn ClusterAnalyzer agents (strategy-specific)."""
         raise NotImplementedError
 
-    @event_handler(pattern="*:cluster_analysis_complete")  # TODO: Use a more specific pattern to avoid conflicts (e.g., include scope_id or use a structured event type)
+    @event_handler(pattern=AgentRunProtocol.result_pattern(namespace="basic"))
     async def on_child_complete(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult | None:
         agent_id = event.key.split(":")[0]
         role = None
@@ -164,7 +168,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
             )
         return None
 
-    @event_handler(pattern=ScopeUtils.pattern_key(error=None)) # TODO: Use a more specific pattern to avoid conflicts (e.g., include scope_id or use a structured event type)
+    @event_handler(pattern=ErrorSignalProtocol.error_pattern(namespace="basic"))
     async def on_child_error(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult | None:
         agent_id = event.key.split(":")[1]
         role = None

@@ -211,6 +211,93 @@ class Agent:
         """Retrieve a capability by name."""
 ```
 
+## `AgentHandle` — Parent-Child Communication
+
+`AgentHandle` is the interface for sending work to an agent and receiving results. It works in both **owned mode** (parent agent communicating with a child) and **detached mode** (external code like CLI communicating with an agent).
+
+### `run()` — Request/Result
+
+```python
+handle = AgentHandle(child_agent_id="agent-xyz", owner=parent_agent)
+
+# namespace identifies which capability should handle the request
+# protocol defines the key format (defaults to AgentRunProtocol)
+run = await handle.run(
+    {"query": "analyze this code"},
+    protocol=AgentRunProtocol,  # default
+    namespace="compliance",
+    timeout=60,
+)
+print(run.output_data)
+```
+
+The `protocol` parameter (default `AgentRunProtocol`) defines the key format for request/result exchange on the child's blackboard. The `namespace` parameter is **required** — it identifies which capability on the child agent should handle the request. This prevents interference when an agent has multiple capabilities using the same protocol.
+
+The `protocol` parameter (default `AgentRunProtocol`) defines the key format:
+
+- Parent writes: `AgentRunProtocol.request_key(request_id, namespace="compliance")` → `compliance:request:run:compliance:{request_id}`
+- Parent listens for: `AgentRunProtocol.result_key(request_id, namespace="compliance")`
+- Child detects requests via `@event_handler(pattern=AgentRunProtocol.request_pattern(namespace="compliance"))`
+- Child writes result using `AgentRunProtocol.result_key(request_id, namespace="compliance")`
+
+The blackboard scope is determined by the protocol's `scope` attribute — agent-scoped protocols write to the child's agent-level blackboard, colony-scoped protocols write to the shared colony blackboard.
+
+See [Blackboard Protocols](blackboard.md#communication-protocols) for the full protocol design.
+
+### `run_streamed()` — Streaming Events
+
+```python
+async for event in handle.run_streamed(
+    {"query": "analyze"},
+    protocol=AgentRunProtocol,
+    namespace="compliance",
+    timeout=300,
+):
+    print(f"{event.event_type}: {event.data}")
+    if event.event_type == "completed":
+        break
+```
+
+Uses `AgentRunProtocol.event_pattern(request_id, namespace="compliance")` to subscribe to incremental events. The child emits events via `AgentRunProtocol.event_key(request_id, event_name, namespace="compliance")`.
+
+### Custom Protocols
+
+For specialized communication patterns, pass a different protocol:
+
+```python
+from polymathera.colony.agents.blackboard.protocol import WorkAssignmentProtocol
+
+# Use a colony-scoped protocol instead of agent-scoped
+run = await handle.run(work_unit, protocol=WorkAssignmentProtocol)
+```
+
+## Suspension and Resumption
+
+When an agent cannot proceed — blocked on children, out of resources, or by explicit request — it is **suspended**. Suspension persists the agent's full state (plan progress, working set, page access patterns) to Redis and frees its resources. The agent is deleted from the replica.
+
+Resumption is handled by `AgentSystemDeployment._resource_monitor_loop()`, which evaluates structured `ResumptionCondition`s:
+
+| Condition | When met | Example |
+|-----------|----------|---------|
+| `CHILDREN_COMPLETED` | All blocking child agents reach STOPPED/FAILED | Agent waiting for workers to finish |
+| `RESOURCE_AVAILABLE` | Resources freed (checked by attempting spawn) | Agent evicted for capacity |
+| `PAGES_AVAILABLE` | Required VCM pages loaded on some replica | Cache-aware resumption (future) |
+| `IMMEDIATE` | Always — resume ASAP | Explicit suspension lifted |
+| `CUSTOM` | Never (requires external trigger) | Application-specific logic |
+
+Action executors signal blocking with structured metadata:
+
+```python
+return ActionResult(
+    success=False,
+    blocked=True,
+    blocked_reason="Waiting for worker agents",
+    blocking_agent_ids=["agent-abc", "agent-def"],  # structured, not text
+)
+```
+
+The system constructs a `CHILDREN_COMPLETED` condition from `blocking_agent_ids` and stores it in the suspension state. The monitor loop checks `AgentSystemState` for child completion before attempting resume.
+
 ## `ResourceExhausted` Handling
 
 When a replica has insufficient resources for a new agent, the system follows an ordered strategy:

@@ -25,6 +25,7 @@ from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions import action_executor
 from ..events import event_handler, EventProcessingResult, PROCESSED
 from ...blackboard import KeyPatternFilter, BlackboardEvent
+from ...blackboard.protocol import CritiqueProtocol
 
 
 logger = logging.getLogger(__name__)
@@ -313,6 +314,9 @@ class CriticCapability(AgentCapability):
     - Event-driven handling of incoming CritiqueRequest events via @event_handler
     - Plannable actions for requesting critique from peers/parents via @action_executor
     """
+
+    input_patterns = CritiqueProtocol.all_request_patterns(namespace="critique")
+
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY, namespace: str = "critique"):
         super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
         # Injected critique policies for different relationships
@@ -341,28 +345,6 @@ class CriticCapability(AgentCapability):
         # TODO: Implement
         logger.warning("deserialize_suspension_state not implemented for CriticCapability")
         pass
-
-    @override
-    async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
-        """Stream CritiqueRequest events to the ActionPolicy queue.
-
-        When a CritiqueRequest arrives, EventDrivenActionPolicy will call
-        handle_critique_request() to process it reactively.
-
-        Args:
-            event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
-        """
-        # TODO: We can also snoop on published analysis results to convert them into
-        # reputation updates in the action policy.
-        # TODO: Make scope configurable because agents that request critiques need not
-        # know the agent_id of the critic agent (decoupling).
-        blackboard = await self.get_blackboard()
-        blackboard.stream_events_to_queue(
-            event_queue,
-            KeyPatternFilter(
-                pattern=ScopeUtils.pattern_key(critique_request=None)
-            )
-        )
 
     def _get_request_from_peer_key(self, requester_id: str) -> str:
         """Get blackboard key for peer critique request."""
@@ -396,8 +378,8 @@ class CriticCapability(AgentCapability):
         elif relation == "parent2child":
             request_key = self._get_request_from_parent_key(to_agent)
 
-        # TODO: What the fuck is this get_agent method do? It does not exist.
-        to_blackboard = await self.agent.get_agent(scope_id=ScopeUtils.get_agent_level_scope(to_agent))
+        # TODO: Who said the request should be sent to the agent-level scope?
+        to_blackboard = await self.agent.get_blackboard(scope_id=ScopeUtils.get_agent_level_scope(to_agent))
         await to_blackboard.write(
             request_key,
             request,
@@ -425,7 +407,7 @@ class CriticCapability(AgentCapability):
             return None
         return policy_map.get(relationship)
 
-    @event_handler(pattern="{scope_id}:critique_request:*")
+    @event_handler(pattern=CritiqueProtocol.all_requests_pattern(namespace="critique"))
     async def handle_critique_request(
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:

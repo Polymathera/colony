@@ -212,7 +212,7 @@ LLMs learn vast amounts of knowledge during training, but this knowledge is *imp
 
 ## The Unifying Idea: Deep Research as a Game
 
-Colony reconceptualizes deep research as a **game** with a large number of possible moves available to agents at every step. One class of moves is combinations of currently known facts that offer the smallest leap to new insights. Because the narrowest leap across the **discovery front** is often unpredictable, the entire context must remain live -- not filtered through retrieval -- because breakthroughs emerge from unpredictable connections between distant pieces of information.
+Colony reconceptualizes deep research as a **game** with a large number of possible moves available to agents at every step. One class of moves is combinations of currently known facts that offer the smallest leap to new useful insights. Because the narrowest leap across the **discovery front** is often unpredictable, the entire context must remain live -- not filtered through retrieval -- because breakthroughs emerge from unpredictable connections between distant pieces of information.
 
 A dynamic group of agents iteratively walks a page graph, accumulating state, communicating findings, and coordinating their traversal to maximize KV cache reuse. The page graph itself is built and refined as agents explore, creating a self-improving map of how context relates to itself.
 

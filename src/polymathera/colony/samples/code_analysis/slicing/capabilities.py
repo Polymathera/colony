@@ -22,6 +22,7 @@ from typing import Any
 from overrides import override
 
 from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
+from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol
 from polymathera.colony.agents.patterns import (
     AnalysisScope,
     ScopeAwareResult,
@@ -84,6 +85,9 @@ class ProgramSlicingCapability(AgentCapability):
     - trace_dependencies: Trace dependencies for a variable
     """
 
+    protocols = [AgentRunProtocol]
+    input_patterns = [AgentRunProtocol.request_pattern(namespace="slicing")]
+
     def __init__(
         self,
         agent: Agent,
@@ -128,7 +132,7 @@ class ProgramSlicingCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for ProgramSlicingCapability")
         pass
 
-    @event_handler(pattern="{scope_id}:request:*")
+    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="slicing"))
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -222,7 +226,7 @@ class ProgramSlicingCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=ScopeUtils.format_key(result=request_id),
+                key=AgentRunProtocol.result_key(request_id, namespace="slicing"),
                 value=result.model_dump(),
                 agent_id=self.agent.agent_id,
             )
@@ -809,6 +813,9 @@ class SlicingCoordinatorCapability(AgentCapability):
     5. Builds complete program slice
     """
 
+    protocols = [AgentRunProtocol]
+    input_patterns = [AgentRunProtocol.request_pattern(namespace="slicing")]
+
     def __init__(
         self,
         agent: Agent,
@@ -892,7 +899,7 @@ class SlicingCoordinatorCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for ProgramCoordinatorCapability")
         pass
 
-    @event_handler(pattern="{scope_id}:request:*")
+    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="slicing"))
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -977,7 +984,7 @@ class SlicingCoordinatorCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=ScopeUtils.format_key(result=request_id),
+                key=AgentRunProtocol.result_key(request_id, namespace="slicing"),
                 value=final_result.model_dump(),
                 agent_id=self.agent.agent_id,
             )
@@ -1023,7 +1030,8 @@ class SlicingCoordinatorCapability(AgentCapability):
         for page_id, handle in self._worker_handles.items():
             run: AgentRun = await handle.run(
                 {"criterion": criterion.model_dump(), "page_ids": [page_id]},
-                timeout=timeout
+                timeout=timeout,
+                namespace="slicing",
             )
             if run.output_data:
                 result = SlicingResult(**run.output_data)
