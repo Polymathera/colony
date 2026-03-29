@@ -64,7 +64,6 @@ class AgentMemoryRecycler(AgentCapability):
     delivered via the standard event handler pattern.
     """
 
-    protocols = [LifecycleSignalProtocol]
     input_patterns = [LifecycleSignalProtocol.terminated_pattern(namespace="memory_recycler")]
 
     def __init__(
@@ -349,7 +348,6 @@ class CollectiveMemoryInitializer(AgentCapability):
     ``@event_handler``.
     """
 
-    protocols = [LifecycleSignalProtocol]
     input_patterns = [LifecycleSignalProtocol.created_pattern(namespace="memory_initializer")]
 
     def __init__(

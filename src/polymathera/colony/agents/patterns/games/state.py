@@ -807,7 +807,6 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
     4. Implement action creators for each game move type
     """
 
-    protocols = [GameStateProtocol]
     input_patterns = [GameStateProtocol.state_pattern(namespace="game")]
 
     # Override in subclasses to define role-based permissions

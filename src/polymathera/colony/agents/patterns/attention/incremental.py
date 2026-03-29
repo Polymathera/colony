@@ -74,7 +74,6 @@ class IncrementalQueryCapability(AgentCapability):
     The planner decides when to call each action and when to stop.
     """
 
-    protocols = [IncrementalQueryProtocol]
     input_patterns = [IncrementalQueryProtocol.request_pattern(namespace="incremental_query")]
 
     def __init__(

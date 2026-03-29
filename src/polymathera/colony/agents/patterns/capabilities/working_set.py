@@ -154,7 +154,6 @@ class WorkingSetCapability(AgentCapability):
     any specific cache strategy.
     """
 
-    protocols = [WorkingSetStateProtocol]
     input_patterns = [WorkingSetStateProtocol.state_pattern(namespace="working_set")]
 
     def __init__(

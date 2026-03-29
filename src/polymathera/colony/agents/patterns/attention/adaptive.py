@@ -82,7 +82,6 @@ class AdaptiveQueryGenerator(AgentCapability):
     - Generating next queries based on history
     """
 
-    protocols = [AnalysisResultProtocol]
     input_patterns = [AnalysisResultProtocol.result_pattern(namespace="adaptive_query")]
 
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):

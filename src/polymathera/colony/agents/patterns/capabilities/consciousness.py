@@ -114,7 +114,6 @@ class ConsciousnessCapability(AgentCapability):
         ```
     """
 
-    protocols = [ConsciousnessProtocol]
     input_patterns = [ConsciousnessProtocol.state_pattern(namespace="consciousness")]
 
     def __init__(

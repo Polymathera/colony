@@ -72,7 +72,6 @@ class MultiHopSearchCapability(AgentCapability):
     - Deductive reasoning: Chain inferences across knowledge
     """
 
-    protocols = [MultiHopSearchProtocol]
     input_patterns = [MultiHopSearchProtocol.request_pattern(namespace="multi_hop")]
 
     def __init__(

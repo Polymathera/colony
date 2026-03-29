@@ -356,7 +356,6 @@ class NegotiationGameProtocol(GameProtocolCapability):
             return state
     """
 
-    protocols = [GameStateProtocol]
     input_patterns = [GameStateProtocol.state_pattern(namespace="negotiation")]
 
     # Define role-based permissions for negotiation game

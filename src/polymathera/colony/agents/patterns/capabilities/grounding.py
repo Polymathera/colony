@@ -193,7 +193,6 @@ class GroundingCapability(AgentCapability):
     - ValidationPolicy for grounding checks
     """
 
-    protocols = [GroundingProtocol]
     input_patterns = [GroundingProtocol.request_pattern(namespace="grounding")]
 
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):

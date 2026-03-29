@@ -62,7 +62,6 @@ class ComplianceAnalysisCapability(AgentCapability):
     - Event-driven via @event_handler and @action_executor decorators
     """
 
-    protocols = [AgentRunProtocol]
     input_patterns = [AgentRunProtocol.request_pattern(namespace="compliance")]
 
     def __init__(
@@ -1415,7 +1414,6 @@ class ComplianceCoordinatorCapability(AgentCapability):
     Uses event-driven architecture via @event_handler and @action_executor.
     """
 
-    protocols = [AgentRunProtocol]
     input_patterns = [AgentRunProtocol.request_pattern(namespace="compliance"), AgentRunProtocol.result_pattern(namespace="compliance")]
 
     def __init__(

@@ -263,7 +263,6 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
         ```
     """
 
-    protocols = [GameStateProtocol]
     input_patterns = [GameStateProtocol.state_pattern(namespace="hypothesis")]
 
     # Define role-based permissions for hypothesis game

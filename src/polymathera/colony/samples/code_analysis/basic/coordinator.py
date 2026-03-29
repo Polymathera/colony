@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 import time
 
 from polymathera.colony.agents.base import Agent, AgentState, AgentCapability
-from polymathera.colony.agents.scopes import BlackboardScope
+from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.models import (
     Action,
     ActionResult,
@@ -60,11 +60,15 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
     spawning, monitoring, and synthesis.
     """
 
-    protocols = [AgentRunProtocol, ErrorSignalProtocol]
     input_patterns = [AgentRunProtocol.result_pattern(namespace="basic"), ErrorSignalProtocol.error_pattern(namespace="basic")]
 
-    def __init__(self, agent: Agent):
-        super().__init__(agent=agent)
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "basic_code_analysis_coordinator",
+    ):
+        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
 
     def get_action_group_description(self) -> str:
         return (

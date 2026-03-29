@@ -97,7 +97,6 @@ class IntentInferenceCapability(AgentCapability):
     - analyze_page: Analyze a single page for intent
     """
 
-    protocols = [AgentRunProtocol]
     input_patterns = [AgentRunProtocol.request_pattern(namespace="intent")]
 
     def __init__(
@@ -1138,7 +1137,6 @@ class IntentCoordinatorCapability(AgentCapability):
     for standardized graph operations.
     """
 
-    protocols = [AgentRunProtocol]
     input_patterns = [AgentRunProtocol.request_pattern(namespace="intent"), AgentRunProtocol.result_pattern(namespace="intent")]
 
     def __init__(

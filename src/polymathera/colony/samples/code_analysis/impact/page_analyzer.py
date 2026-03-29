@@ -674,7 +674,6 @@ class ChangeImpactAnalysisCapability(AgentCapability):
     Also uses FeedbackLoopPredictor for cache-aware prefetching.
     """
 
-    protocols = [DependencyQueryProtocol]
     input_patterns = [DependencyQueryProtocol.query_pattern(namespace="impact")]
 
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.AGENT):

@@ -60,7 +60,6 @@ class AgentPoolCapability(AgentCapability):
     The ActionPolicy decides when to create/assign/suspend/terminate agents.
     """
 
-    protocols = [WorkAssignmentProtocol]
     input_patterns = [WorkAssignmentProtocol.result_pattern(namespace="pool")]
 
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):

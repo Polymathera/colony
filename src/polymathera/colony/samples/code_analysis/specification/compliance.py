@@ -327,7 +327,6 @@ class SpecificationComplianceCapability(AgentCapability):
     - Event-driven via @event_handler and @action_executor decorators
     """
 
-    protocols = [AgentRunProtocol]
     input_patterns = [AgentRunProtocol.request_pattern(namespace="spec_compliance")]
 
     def __init__(

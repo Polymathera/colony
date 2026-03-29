@@ -204,7 +204,6 @@ class ObjectiveGuardCapability(AgentCapability):
     - register_goal: Register a new goal to monitor
     """
 
-    protocols = [GoalAlignmentProtocol]
     input_patterns = [GoalAlignmentProtocol.request_pattern(namespace="goal_alignment"), GoalAlignmentProtocol.joint_goal_pattern(namespace="goal_alignment")]
 
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):

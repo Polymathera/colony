@@ -162,7 +162,6 @@ class ConsistencyCapability(AgentCapability):
     - resolve_contradictions: Attempt to resolve detected contradictions
     """
 
-    protocols = [ConsistencyCheckProtocol]
     input_patterns = [ConsistencyCheckProtocol.request_pattern(namespace="consistency")]
 
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):

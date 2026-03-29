@@ -58,7 +58,6 @@ class MemoryLifecycleHooks(AgentCapability):
     auto-registers during `initialize()`.
     """
 
-    protocols = [LifecycleSignalProtocol]
     input_patterns = [
         LifecycleSignalProtocol.created_pattern(namespace="lifecycle"),
         LifecycleSignalProtocol.terminated_pattern(namespace="lifecycle"),

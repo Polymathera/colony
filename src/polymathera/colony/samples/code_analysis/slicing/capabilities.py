@@ -85,7 +85,6 @@ class ProgramSlicingCapability(AgentCapability):
     - trace_dependencies: Trace dependencies for a variable
     """
 
-    protocols = [AgentRunProtocol]
     input_patterns = [AgentRunProtocol.request_pattern(namespace="slicing")]
 
     def __init__(
@@ -813,7 +812,6 @@ class SlicingCoordinatorCapability(AgentCapability):
     5. Builds complete program slice
     """
 
-    protocols = [AgentRunProtocol]
     input_patterns = [AgentRunProtocol.request_pattern(namespace="slicing")]
 
     def __init__(

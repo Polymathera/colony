@@ -348,7 +348,6 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     5. Produces unified impact report with recommendations
     """
 
-    protocols = [AgentRunProtocol, ErrorSignalProtocol]
     input_patterns = [AgentRunProtocol.result_pattern(namespace="impact"), ErrorSignalProtocol.error_pattern(namespace="impact")]
 
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):

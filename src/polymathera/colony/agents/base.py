@@ -227,19 +227,6 @@ class AgentCapability(ABC):
             input_patterns = [GroundingProtocol.request_pattern(namespace="grounding")]
     """
 
-    protocols: ClassVar[list[type]] = []
-    """BlackboardProtocol subclasses this capability supports.
-
-    Declares which communication protocols this capability participates in.
-    Used for documentation and for deriving ``input_patterns`` when not
-    explicitly set.
-
-    Example::
-
-        class GroundingCapability(AgentCapability):
-            protocols = [GroundingProtocol]
-    """
-
     def __init__(
         self,
         agent: Agent | None = None,
@@ -254,10 +241,6 @@ class AgentCapability(ABC):
             agent: Agent using this capability (None for detached mode)
             scope_id: Blackboard scope ID. Defaults to {ScopeUtils.get_agent_level_scope(agent)}.
                 Required if agent is None (detached mode).
-                Can be set to:
-                - {ScopeUtils.get_agent_level_scope(agent)}: For parent-child communication
-                - game_id: For game participants sharing a namespace
-                - task_id: For agents collaborating on a shared task
             blackboard: Pre-configured blackboard (for detached mode)
             capability_key: Instance-level key for the agent's _capabilities dict.
                 Defaults to f"{cls.__name__}:{self.scope_id}" via get_capability_name().

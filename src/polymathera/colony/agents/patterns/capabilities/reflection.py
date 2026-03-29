@@ -133,7 +133,6 @@ class ReflectionCapability(AgentCapability):
         ```
     """
 
-    protocols = [ReflectionProtocol]
     input_patterns = [ReflectionProtocol.request_pattern(namespace="reflection")]
 
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):

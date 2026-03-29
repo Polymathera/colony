@@ -817,7 +817,6 @@ class ReputationCapability(AgentCapability):
     - Detect reputation trends
     """
 
-    protocols = [ReputationProtocol]
     input_patterns = ReputationProtocol.all_input_patterns(namespace="reputation")
 
     def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):

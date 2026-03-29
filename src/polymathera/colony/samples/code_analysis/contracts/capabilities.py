@@ -86,7 +86,6 @@ class ContractInferenceCapability(AgentCapability):
     - Integrates with symbolic execution results
     """
 
-    protocols = [AgentRunProtocol]
     input_patterns = [AgentRunProtocol.request_pattern(namespace="contracts")]
 
     def __init__(
@@ -1169,7 +1168,6 @@ class ContractCoordinatorCapability(AgentCapability):
     - Merges final results
     """
 
-    protocols = [AgentRunProtocol]
     input_patterns = [AgentRunProtocol.request_pattern(namespace="contracts"), AgentRunProtocol.result_pattern(namespace="contracts")]
 
     def __init__(

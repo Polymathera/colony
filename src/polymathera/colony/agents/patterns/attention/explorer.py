@@ -86,7 +86,6 @@ class QueryDrivenExplorationCapability(AgentCapability):
     The planner decides when to call each and when to stop.
     """
 
-    protocols = [ExplorationProtocol]
     input_patterns = [ExplorationProtocol.request_pattern(namespace="exploration")]
 
     def __init__(
