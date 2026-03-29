@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Column, DateTime
 import sqlmodel as sqlm
 
@@ -1597,8 +1597,7 @@ class PageTableEntry(BaseModel):
     total_access_count: int = 0
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    class Config:
-        arbitrary_types_allowed = True  # Allow PageLocation dataclass
+    model_config = ConfigDict(arbitrary_types_allowed=True)  # Allow PageLocation dataclass
 
     def add_location(self, location: PageLocation) -> None:
         """Add a physical location for this page.
@@ -1714,8 +1713,7 @@ class PageAllocationResponse(BaseModel):
     evicted_pages: list[tuple[str, str, str]] = Field(default_factory=list)
     allocation_time_ms: float = 0.0
 
-    class Config:
-        arbitrary_types_allowed = True  # Allow PageLocation dataclass
+    model_config = ConfigDict(arbitrary_types_allowed=True)  # Allow PageLocation dataclass
 
 
 class PageEvictionRequest(BaseModel):

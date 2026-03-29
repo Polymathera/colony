@@ -32,9 +32,12 @@ Example:
 from __future__ import annotations
 
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from ..distributed.ray_utils import serving
-from .base import Agent
+
+if TYPE_CHECKING:
+    from .base import Agent
 
 
 class BlackboardScope(Enum):
