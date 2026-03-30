@@ -133,16 +133,24 @@ class ReflectionCapability(AgentCapability):
         ```
     """
 
-    input_patterns = [ReflectionProtocol.request_pattern(namespace="reflection")]
-
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "reflection",
+        input_patterns: list[str] = [ReflectionProtocol.request_pattern()],
+        capability_key: str = "reflection",
+    ):
         """Initialize reflection capability.
 
         Args:
             agent: The owning agent
             scope: Blackboard scope. Defaults to BlackboardScope.COLONY.
+            namespace: Namespace for the capability within the scope (default "reflection")
+            input_patterns: List of input patterns for the capability (default listens for reflection requests)
+            capability_key: Unique key for this capability (default "reflection")
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self._state_managers: dict[str, Any] = {}
 
     def get_action_group_description(self) -> str:
@@ -455,7 +463,7 @@ Respond with a structured analysis."""
             scope_id=ScopeUtils.get_agent_level_scope(peer_id)
         )
         await peer_blackboard.write(
-            key=ReflectionProtocol.request_key(request.request_id, namespace="reflection"),
+            key=ReflectionProtocol.request_key(request.request_id),
             value=request.model_dump(),
             created_by=self.agent.agent_id,
             tags={"reflection_request", f"from:{self.agent.agent_id}"},
@@ -465,7 +473,7 @@ Respond with a structured analysis."""
         response_event = asyncio.Event()
         response_data: dict[str, Any] = {}
 
-        response_key = ReflectionProtocol.response_key(request.request_id, namespace="reflection")
+        response_key = ReflectionProtocol.response_key(request.request_id)
 
         async def on_response(event: BlackboardEvent) -> None:
             if event.key == response_key:

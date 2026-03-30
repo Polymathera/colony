@@ -252,9 +252,8 @@ class GitRepoShardCache:
 
     async def initialize(self):
         self.config = await CacheConfig.check_or_get_component(self.config)
-        syscontext = serving.require_execution_context()
         self.cache = await get_polymathera().create_distributed_simple_cache(
-            namespace=f"{syscontext.tenant_id}:{syscontext.colony_id}:shards",
+            namespace="shards",
             config=self.config,
         )
 

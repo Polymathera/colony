@@ -101,7 +101,10 @@ class ComplianceAnalysisCoordinator(Agent):
     async def initialize(self) -> None:
         """Initialize coordinator and configure capabilities."""
         self.add_capability_blueprints([
-            ComplianceVCMCapability.bind(),
+            ComplianceVCMCapability.bind(
+                scope=BlackboardScope.AGENT,
+                namespace="compliance_analysis_vcm",
+            ),
             MergeCapability.bind(
                 scope=BlackboardScope.COLONY,
                 namespace="compliance_analysis_merge",

@@ -421,7 +421,8 @@ class TaskGraph:
             if await self._would_create_cycle(task.task_id, task.depends_on):
                 raise ValueError(f"Adding task {task.task_id} would create a dependency cycle")
 
-        key = f"{self.namespace}:{task.task_id}"
+        from ..scopes import ScopeUtils
+        key = ScopeUtils.format_key(namespace=self.namespace, task_id=task.task_id)
 
         await self.blackboard.write(
             key=key,
@@ -455,7 +456,7 @@ class TaskGraph:
         await self.blackboard.emit_event(
             BlackboardEvent(
                 event_type="task_created",
-                key=f"{self.namespace}:{task.task_id}",
+                key=key,
                 value=task.to_blackboard_entry(),
                 metadata={"task_type": task.task_type}
             )
@@ -472,7 +473,8 @@ class TaskGraph:
         Returns:
             Task or None if not found
         """
-        key = f"{self.namespace}:{task_id}"
+        from ..scopes import ScopeUtils
+        key = ScopeUtils.format_key(namespace=self.namespace, task_id=task_id)
         entry = await self.blackboard.read(key)
 
         if entry is None:
@@ -548,7 +550,8 @@ class TaskGraph:
         """
         # Use transaction for atomic claim
         async with self.blackboard.transaction() as txn:
-            key = f"{self.namespace}:{task_id}"
+            from ..scopes import ScopeUtils
+            key = ScopeUtils.format_key(namespace=self.namespace, task_id=task_id)
             entry = await txn.read(key)
 
             if not entry:
@@ -632,11 +635,14 @@ class TaskGraph:
         task.mark_completed(result)
         await self.update_task(task)
 
+        from ..scopes import ScopeUtils
+        key = ScopeUtils.format_key(namespace=self.namespace, task_id=task_id)
+
         # Emit completion event
         await self.blackboard.emit_event(
             BlackboardEvent(
                 event_type="task_completed",
-                key=f"{self.namespace}:{task_id}",
+                key=key,
                 value=task.to_blackboard_entry(),
                 metadata={"task_type": task.task_type}
             )
@@ -676,11 +682,14 @@ class TaskGraph:
         task.mark_failed(error, error_details)
         await self.update_task(task)
 
+        from ..scopes import ScopeUtils
+        key = ScopeUtils.format_key(namespace=self.namespace, task_id=task_id)
+
         # Emit failure event
         await self.blackboard.emit_event(
             BlackboardEvent(
                 event_type="task_failed",
-                key=f"{self.namespace}:{task_id}",
+                key=key,
                 value=task.to_blackboard_entry(),
                 metadata={"error": error}
             )
@@ -694,7 +703,8 @@ class TaskGraph:
         Args:
             task: Task with updates
         """
-        key = f"{self.namespace}:{task.task_id}"
+        from ..scopes import ScopeUtils
+        key = ScopeUtils.format_key(namespace=self.namespace, task_id=task.task_id)
 
         await self.blackboard.write(
             key=key,

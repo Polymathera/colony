@@ -506,18 +506,43 @@ Capabilities declare which protocols they support via `input_patterns`:
 ```python
 from polymathera.colony.agents.base import AgentCapability
 from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol
+from polymathera.colony.agents.scopes import BlackboardScope
 
-class MyWorkerCapability(AgentCapability):
-    """Handles incoming compliance requests."""
+class ComplianceWorkerCapability(AgentCapability):
+    """Handles incoming compliance requests.
 
-    input_patterns = [AgentRunProtocol.request_pattern(namespace="compliance")]
-    # -> ["request:run:compliance:*"]
+    The namespace "compliance" is part of the scope_id (set in __init__),
+    not passed to protocol methods. This gives the capability its own
+    isolated blackboard partition within the colony scope.
+    """
 
-    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="compliance"))
+    def __init__(self, agent, scope=BlackboardScope.COLONY, namespace="compliance"):
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+        )
+        # input_patterns auto-inferred from @event_handler methods below
+
+    @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_request(self, event, repl):
-        request_id = AgentRunProtocol.parse_request_key(event.key, namespace="compliance")
+        request_id = AgentRunProtocol.parse_request_key(event.key)
         # ... process ...
-        await blackboard.write(AgentRunProtocol.result_key(request_id, namespace="compliance"), result)
+        blackboard = await self.get_blackboard()
+        await blackboard.write(AgentRunProtocol.result_key(request_id), result)
+```
+
+`input_patterns` is **auto-inferred** from `@event_handler`-decorated methods. The base class inspects all methods with `_is_event_handler = True`, extracts their patterns, and deduplicates. Capabilities with event handlers don't need to declare `input_patterns` manually.
+
+For capabilities that subscribe to events but don't have `@event_handler` methods (*pure subscription for the agent's `ActionPolicy` context*), pass `input_patterns` explicitly in `__init__`:
+
+```python
+class WorkingSetCapability(AgentCapability):
+    def __init__(self, agent, scope=BlackboardScope.COLONY, namespace="working_set"):
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=[WorkingSetStateProtocol.state_pattern()],
+        )
 ```
 
 The default `stream_events_to_queue()` uses `input_patterns` to subscribe only to relevant events instead of `"*"`. This prevents colony-scoped capabilities from flooding the action policy queue with every event from every agent.

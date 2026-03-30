@@ -807,7 +807,6 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
     4. Implement action creators for each game move type
     """
 
-    input_patterns = [GameStateProtocol.state_pattern(namespace="game")]
 
     # Override in subclasses to define role-based permissions
     role_permissions: RolePermissions = RolePermissions()
@@ -816,19 +815,24 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         self,
         *,
         agent: Agent,
-        scope: BlackboardScope = BlackboardScope.COLONY,
-        game_id: str | None = None,
         game_type: str,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "games",
+        input_patterns: list[str] = [GameStateProtocol.state_pattern()],
+        game_id: str | None = None,
         role: str | None = None,
         use_llm_reasoning: bool = False,
         llm_temperature: float = 0.3,
         llm_max_tokens: int = 500,
+        capability_key: str = "game_protocol",
     ):
         """Initialize game protocol capability.
 
         Args:
             agent: Owning agent
-            game_type: Type of game (e.g., "negotiation", "hypothesis")
+            scope: Blackboard scope for game state (default: Colony-level)
+            namespace: Blackboard namespace prefix (default: "game")
+            input_patterns: Patterns to subscribe to for game events (default: all game state changes)
             game_id: Game instance ID. All participants should use the same game_id
                 to share the same blackboard namespace for coordination.
             game_type: Type of game (e.g., "negotiation", "hypothesis")
@@ -838,12 +842,11 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             llm_temperature: Temperature for LLM inference
             llm_max_tokens: Max tokens for LLM response
         """
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace, game_type=game_type, game=game_id), input_patterns=input_patterns, capability_key=capability_key)
         # Use game_id as scope_id so all participants share the namespace
         self.game_id = game_id
-        self.namespace = self.get_blackboard_namespace(scope, game_id)
         self.game_type = game_type
         self.role: TRole = TRole(role)
-        super().__init__(agent, scope_id=self.namespace)
 
         # LLM reasoning configuration
         self.llm_config = LLMReasoningConfig(
@@ -867,13 +870,9 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             return  # Already initialized
         self._blackboard = await self.get_blackboard()
 
-    def get_blackboard_namespace(self, scope: BlackboardScope, game_id: str) -> str:
-        # Make namespace depend on game_id to allow multiple games of the same type to coexist.
-        return get_scope_prefix(scope, self.agent, namespace='games', game_type=self.game_type, game=game_id)
-
     def _get_result_key(self) -> str:
         """Get blackboard key for game result."""
-        return GameStateProtocol.result_key(namespace="game")
+        return GameStateProtocol.result_key()
 
     @override
     async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
@@ -896,7 +895,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             event_queue,
             CombinationFilter(
                 event_types={"write"},  # All game events are write events
-                pattern=GameStateProtocol.state_pattern(namespace="game"), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+                pattern=GameStateProtocol.state_pattern(), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
                 checker=lambda event: (
                     "game" in event.tags and
                     self.game_type in event.tags and
@@ -927,7 +926,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             raise RuntimeError("GameProtocolCapability not initialized. Call initialize() first.")
         return self._blackboard
 
-    @event_handler(pattern=GameStateProtocol.state_pattern(namespace="game")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=GameStateProtocol.state_pattern()) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def handle_game_event(
         self,
         event: BlackboardEvent,
@@ -1041,7 +1040,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         """
         return {}
 
-    @event_handler(pattern=GameStateProtocol.state_pattern(namespace="game")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=GameStateProtocol.state_pattern()) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def _get_rule_based_action(
         self,
         event: BlackboardEvent,
@@ -1367,7 +1366,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         Returns:
             Current game state or None if not found
         """
-        key = GameStateProtocol.state_key(game_id, namespace="game") # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+        key = GameStateProtocol.state_key(game_id) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
         # Prefer explicit transactional read when an ambient transaction is active.
         # Fallback to non-transactional read if not in a transaction.
         try:
@@ -1424,7 +1423,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         # Fallback to non-transactional write if not in a transaction.
         try:
             await self.blackboard.write_tx(
-                key=GameStateProtocol.state_key(game_state.game_id, namespace="game"), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+                key=GameStateProtocol.state_key(game_state.game_id), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
                 value=game_event.game_state.to_blackboard_entry(),
                 created_by=game_event.agent_id,
                 tags=game_event.tags,
@@ -1432,7 +1431,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             )
         except RuntimeError:
             await self.blackboard.write(
-                key=GameStateProtocol.state_key(game_state.game_id, namespace="game"), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+                key=GameStateProtocol.state_key(game_state.game_id), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
                 value=game_event.game_state.to_blackboard_entry(),
                 tags=game_event.tags,
                 created_by=game_event.agent_id,
@@ -1450,7 +1449,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             List of active games
         """
         entries = await self.blackboard.query(
-            namespace=GameStateProtocol.state_pattern(namespace="game"), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+            namespace=GameStateProtocol.state_pattern(), # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
             tags={"game", "active", game_type} if game_type else {"game", "active"}
         )
         return [ GameState(**entry.value) for entry in entries ]
@@ -1486,7 +1485,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         # With ambient transactions, we can use blackboard.read_tx/write_tx inside the block
         # while still allowing advanced callers to use the yielded txn if needed.
         async with self.blackboard.transaction() as txn:
-            key = GameStateProtocol.state_key(game_id, namespace="game") # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+            key = GameStateProtocol.state_key(game_id) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
             state_data = await self.blackboard.read_tx(key, agent_id=self.agent.agent_id)
 
             if not state_data:

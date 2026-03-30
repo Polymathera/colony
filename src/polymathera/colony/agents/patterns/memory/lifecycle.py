@@ -58,27 +58,24 @@ class MemoryLifecycleHooks(AgentCapability):
     auto-registers during `initialize()`.
     """
 
-    input_patterns = [
-        LifecycleSignalProtocol.created_pattern(namespace="lifecycle"),
-        LifecycleSignalProtocol.terminated_pattern(namespace="lifecycle"),
-    ]
 
     def __init__(
         self,
         agent: Agent,
-        scope: BlackboardScope = BlackboardScope.AGENT,
         stm_scope_id: str | None = None,
+        capability_key: str = "memory_lifecycle_hooks",
     ):
         """Initialize memory lifecycle hooks.
 
         Args:
             agent: Agent that owns this capability
-            scope: Blackboard scope for this capability
             stm_scope_id: Target STM scope (defaults to agent's STM)
         """
         super().__init__(
             agent=agent,
-            scope_id=f"{get_scope_prefix(scope, agent)}:memory_lifecycle",
+            scope_id=get_scope_prefix(BlackboardScope.AGENT, agent, namespace="memory_lifecycle"),
+            input_patterns=[], # This capability to the colony control plane lifecycle scope to receive agent creation/termination events.
+            capability_key=capability_key,
         )
         self._stm_scope_id = stm_scope_id or MemoryScope.agent_stm(agent)
 
@@ -114,12 +111,12 @@ class MemoryLifecycleHooks(AgentCapability):
         )
         lifecycle_bb.stream_events_to_queue(
             event_queue,
-            pattern=LifecycleSignalProtocol.created_pattern(namespace="lifecycle"),
+            pattern=LifecycleSignalProtocol.created_pattern(),
             event_types={"write"},
         )
         lifecycle_bb.stream_events_to_queue(
             event_queue,
-            pattern=LifecycleSignalProtocol.terminated_pattern(namespace="lifecycle"),
+            pattern=LifecycleSignalProtocol.terminated_pattern(),
             event_types={"write"},
         )
 
@@ -257,7 +254,7 @@ class MemoryLifecycleHooks(AgentCapability):
         )
 
         await blackboard.write(
-            key=LifecycleSignalProtocol.created_key(agent_id, namespace="lifecycle"),
+            key=LifecycleSignalProtocol.created_key(agent_id),
             value=creation_data.model_dump(),
             agent_id=agent_id,
             tags={"agent_created", "memory_init_pending"},
@@ -303,7 +300,7 @@ class MemoryLifecycleHooks(AgentCapability):
         )
 
         await blackboard.write(
-            key=LifecycleSignalProtocol.terminated_key(agent_id, namespace="lifecycle"),
+            key=LifecycleSignalProtocol.terminated_key(agent_id),
             value=termination_data.model_dump(),
             agent_id=agent_id,
             tags={"agent_terminated", "memory_recycle_pending"},

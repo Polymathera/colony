@@ -95,7 +95,7 @@ class Relationship(BaseModel):
         Returns:
             Unique relationship key
         """
-        return RelationshipProtocol.relationship_key(self.source_id, self.target_id, self.relationship_type, namespace="relationships")
+        return RelationshipProtocol.relationship_key(self.source_id, self.target_id, self.relationship_type)
 
     @staticmethod
     def get_key_pattern(
@@ -117,7 +117,7 @@ class Relationship(BaseModel):
         src = source_id or "*"
         tgt = target_id or "*"
         rel = relationship_type or "*"
-        return RelationshipProtocol.relationship_key(src, tgt, rel, namespace="relationships")
+        return RelationshipProtocol.relationship_key(src, tgt, rel)
 
 
 class RelationshipGraph(BaseModel):

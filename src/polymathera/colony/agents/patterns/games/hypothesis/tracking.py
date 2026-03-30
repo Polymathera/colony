@@ -62,20 +62,23 @@ class HypothesisTrackingCapability(AgentCapability):
     Stores hypothesis data on blackboard for persistence and sharing.
     """
 
-    input_patterns: list[str] = []
 
     def __init__(
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "hypothesis_tracking",
+        capability_key: str = "hypothesis_tracking",
     ):
         """Initialize tracking capability.
 
         Args:
             agent: Owning agent
             scope: Scope for sharing (defaults to BlackboardScope.AGENT)
+            namespace: Namespace prefix for blackboard keys (default: "hypothesis_tracking")
+            capability_key: Key to identify this capability within the agent (default: "hypothesis_tracking")
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)
 
         # Local cache (authoritative data is on blackboard)
         self._cache: dict[str, TrackedHypothesis] = {}
@@ -98,12 +101,12 @@ class HypothesisTrackingCapability(AgentCapability):
     def _get_hypotheses_key(self) -> str:
         """Get blackboard key for tracked hypotheses."""
         from ....blackboard.protocol import HypothesisTrackingProtocol
-        return HypothesisTrackingProtocol.hypotheses_key(namespace="hypothesis_tracking")
+        return HypothesisTrackingProtocol.hypotheses_key()
 
     def _get_games_key(self) -> str:
         """Get blackboard key for game mappings."""
         from ....blackboard.protocol import HypothesisTrackingProtocol
-        return HypothesisTrackingProtocol.games_key(namespace="hypothesis_tracking")
+        return HypothesisTrackingProtocol.games_key()
 
     async def _load_from_blackboard(self) -> None:
         """Load cached data from blackboard."""

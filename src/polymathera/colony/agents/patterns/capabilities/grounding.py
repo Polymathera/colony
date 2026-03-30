@@ -193,9 +193,14 @@ class GroundingCapability(AgentCapability):
     - ValidationPolicy for grounding checks
     """
 
-    input_patterns = [GroundingProtocol.request_pattern(namespace="grounding")]
-
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "grounding",
+        input_patterns: list[str] = [GroundingProtocol.request_pattern()],
+        capability_key: str = "grounding",
+    ):
         """Initialize grounding capability.
 
         Args:
@@ -203,8 +208,11 @@ class GroundingCapability(AgentCapability):
             scope: Blackboard scope. Defaults to BlackboardScope.COLONY.
                 Parent agents set this to child_agent_id to communicate
                 with the child's grounding capability.
+            namespace: Namespace for the capability within the scope (default "grounding")
+            input_patterns: List of input patterns for the capability (default listens for grounding requests)
+            capability_key: Unique key for this capability (default "grounding")
         """
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
 
     def get_action_group_description(self) -> str:
         return (
@@ -216,18 +224,18 @@ class GroundingCapability(AgentCapability):
 
     def _get_result_key(self) -> str:
         """Get blackboard key for this capability's result."""
-        return GroundingProtocol.result_key("default", namespace="grounding")
+        return GroundingProtocol.result_key("default")
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement
-        logger.warning("serialize_suspension_state not implemented for MultiHopSearchCapability")
+        logger.warning("serialize_suspension_state not implemented for GroundingCapability")
         return state
 
     @override
     async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
         # TODO: Implement
-        logger.warning("deserialize_suspension_state not implemented for MultiHopSearchCapability")
+        logger.warning("deserialize_suspension_state not implemented for GroundingCapability")
         pass
 
     # -------------------------------------------------------------------------
@@ -254,7 +262,7 @@ class GroundingCapability(AgentCapability):
     # Capability-Specific Request Methods
     # -------------------------------------------------------------------------
 
-    @event_handler(pattern=GroundingProtocol.request_pattern(namespace="grounding"))
+    @event_handler(pattern=GroundingProtocol.request_pattern())
     async def handle_grounding_request(
         self,
         event: BlackboardEvent,

@@ -1019,6 +1019,7 @@ class REPLCapability(AgentCapability):
         self,
         agent: "Agent",
         scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "repl",
         capability_key: str = "repl",
         backing_stores: dict[str, BackingStore] | None = None,
         allowed_imports: list[str] | None = None,
@@ -1029,6 +1030,8 @@ class REPLCapability(AgentCapability):
 
         Args:
             agent: Agent that owns this capability
+            scope: BlackboardScope for variable storage (default: AGENT)
+            namespace: Namespace prefix for this capability (default: "repl")
             capability_key: Unique key for this capability within the agent (default: "repl")
             backing_stores: Map of store name -> BackingStore implementation
             allowed_imports: List of allowed import module names
@@ -1037,7 +1040,8 @@ class REPLCapability(AgentCapability):
         """
         super().__init__(
             agent=agent,
-            scope_id=f"{get_scope_prefix(scope, agent)}:repl",
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=None,
             capability_key=capability_key
         )
 

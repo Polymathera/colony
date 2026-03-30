@@ -74,6 +74,8 @@ class QueryAttentionCapability(AgentCapability):
         routing_policy: PageQueryRoutingPolicy | None = None,
         attention_mechanism: AttentionScoringMechanism | None = None,
         scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "query_attention",
+        capability_key: str = "query_attention",
     ):
         """Initialize query attention capability.
 
@@ -83,8 +85,10 @@ class QueryAttentionCapability(AgentCapability):
             routing_policy: Policy for routing queries to pages
             attention_mechanism: Mechanism for scoring query-key attention
             scope: Blackboard scope (defaults to AGENT)
+            namespace: Namespace for the capability within the scope (default "query_attention")
+            capability_key: Unique key for this capability (default "query_attention")
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)
         self.query_generator = query_generator
         self.routing_policy = routing_policy
         self.attention_mechanism = attention_mechanism

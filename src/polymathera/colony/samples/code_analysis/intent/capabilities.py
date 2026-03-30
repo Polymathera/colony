@@ -97,26 +97,31 @@ class IntentInferenceCapability(AgentCapability):
     - analyze_page: Analyze a single page for intent
     """
 
-    input_patterns = [AgentRunProtocol.request_pattern(namespace="intent")]
 
     def __init__(
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "intent_inference",
+        input_patterns: list[str] = [AgentRunProtocol.request_pattern()],
         use_context: bool = True,
         detect_misalignment: bool = True,
         granularity: str = "function",
+        capability_key: str = "intent_inference_capability"
     ):
         """Initialize intent inference capability.
 
         Args:
             agent: Agent using this capability
             scope: Blackboard scope for this capability (default: AGENT)
+            namespace: Namespace for event patterns
+            input_patterns: List of event patterns to subscribe to
             use_context: Whether to use surrounding context
             detect_misalignment: Whether to detect code-intent misalignment
             granularity: Analysis granularity (function/class/module)
+            capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:intent_inference:{agent.agent_id}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.use_context = use_context
         self.detect_misalignment = detect_misalignment
         self.granularity = granularity
@@ -146,7 +151,7 @@ class IntentInferenceCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for IntentInferenceCapability")
         pass
 
-    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="intent"))
+    @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -255,7 +260,7 @@ class IntentInferenceCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id, namespace="intent"),
+                key=AgentRunProtocol.result_key(request_id),
                 value=final_result.model_dump(),
                 agent_id=self.agent.agent_id,
             )
@@ -291,7 +296,7 @@ class IntentInferenceCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id, namespace="intent"),
+                key=AgentRunProtocol.result_key(request_id),
                 value=result.model_dump(),
                 agent_id=self.agent.agent_id,
             )
@@ -889,14 +894,18 @@ class IntentAnalysisCapability(VCMAnalysisCapability):
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "intent_analysis",
+        capability_key: str = "intent_analysis_capability"
     ):
         """Initialize intent analysis capability.
 
         Args:
             agent: Agent using this capability (coordinator agent)
             scope: Blackboard scope
+            namespace: Namespace for event patterns
+            capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope=scope)
+        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=None, capability_key=capability_key)
 
     # =========================================================================
     # Abstract Hook Implementations
@@ -988,7 +997,7 @@ class IntentAnalysisCapability(VCMAnalysisCapability):
                 # Store hierarchy in blackboard for access
                 blackboard = await self.get_blackboard()
                 await blackboard.write(
-                    key=IntentAnalysisProtocol.intent_hierarchy_key(category, namespace="intent"),
+                    key=IntentAnalysisProtocol.intent_hierarchy_key(category),
                     value={
                         "category": category,
                         "parent_id": f"category_{category}",
@@ -1077,7 +1086,7 @@ class IntentAnalysisCapability(VCMAnalysisCapability):
             # Store in blackboard for tracking
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=IntentAnalysisProtocol.intent_misalignments_key(namespace="intent"),
+                key=IntentAnalysisProtocol.intent_misalignments_key(),
                 value={
                     "misalignments": misalignments,
                     "count": len(misalignments),
@@ -1137,22 +1146,31 @@ class IntentCoordinatorCapability(AgentCapability):
     for standardized graph operations.
     """
 
-    input_patterns = [AgentRunProtocol.request_pattern(namespace="intent"), AgentRunProtocol.result_pattern(namespace="intent")]
 
     def __init__(
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "intent_inference",
+        input_patterns: list[str] = [
+            AgentRunProtocol.request_pattern(),
+            AgentRunProtocol.result_pattern()
+        ],
         batching_policy: BatchingPolicy | None = None,
+        capability_key: str = "intent_coordinator",
     ):
         """Initialize coordinator capability.
 
         Args:
             agent: Agent using this capability
             scope: Blackboard scope for this capability (default: COLONY)
+            namespace: Namespace for this capability (default: "intent_inference")
+            input_patterns: List of input patterns for this capability
             batching_policy: Policy for cache-aware batch selection
+            capability_key: Unique key for this capability within the agent (default: "intent_coordinator")
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:intent_inference:{agent.agent_id}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        self.namespace = namespace
         self._worker_handles: dict[str, AgentHandle] = {}
         self._collected_results: list[ScopeAwareResult[IntentGraph]] = []
         self.max_agents: int = 10
@@ -1221,7 +1239,7 @@ class IntentCoordinatorCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for IntentCoordinatorCapability")
         pass
 
-    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="intent"))
+    @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -1250,7 +1268,7 @@ class IntentCoordinatorCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern=AgentRunProtocol.result_pattern(namespace="intent"))
+    @event_handler(pattern=AgentRunProtocol.result_pattern())
     async def handle_worker_result(
         self,
         event: BlackboardEvent,
@@ -1325,7 +1343,7 @@ class IntentCoordinatorCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id, namespace="intent"),
+                key=AgentRunProtocol.result_key(request_id),
                 value=final_result.model_dump(),
                 agent_id=self.agent.agent_id,
             )
@@ -1373,10 +1391,15 @@ class IntentCoordinatorCapability(AgentCapability):
         # TODO: This still sequentializes worker runs. For true parallelization,
         # use asyncio.gather with handle.run() calls or rely on event handlers.
         for page_id, handle in self._worker_handles.items():
+            # protocol=AgentRunProtocol: worker's IntentInferenceCapability uses AgentRunProtocol
+            # scope=AGENT: worker's IntentInferenceCapability uses AGENT scope
+            # namespace="intent_inference": must match worker's IntentInferenceCapability namespace
             run = await handle.run(
                 {"page_ids": [page_id], "granularity": granularity},
                 timeout=timeout,
-                namespace="intent",
+                protocol=AgentRunProtocol,
+                scope=BlackboardScope.AGENT,
+                namespace=self.namespace,  # "intent_inference" — matches worker
             )
             if run.result:
                 result = IntentInferenceResult(**run.result)
@@ -1538,13 +1561,12 @@ class IntentCoordinatorCapability(AgentCapability):
             logger.warning(f"Detected {len(misalignments)} code-intent misalignments")
 
             # Store in blackboard for further analysis
-            if self.blackboard:
-                await self.blackboard.write(
-                    key="intent_misalignments",
-                    value=misalignments,
-                    namespace="analysis",
-                    tags={"misalignment", "intent"}
-                )
+            blackboard = await self.get_blackboard()
+            await blackboard.write(
+                key=IntentAnalysisProtocol.intent_misalignments_key(),
+                value=misalignments,
+                tags={"misalignment", "intent"}
+            )
 
     def _compute_scope(
         self,

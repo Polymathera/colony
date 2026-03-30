@@ -2179,7 +2179,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             working_memory = self.agent.get_working_memory()
             if working_memory:
                 await working_memory.store(
-                    key=ActionPolicyProtocol.iteration_key(namespace, state.iteration_count, namespace="action_policy"),
+                    key=ActionPolicyProtocol.iteration_key(namespace, state.iteration_count),
                     value=context,
                     tags={namespace, "planning_context"},
                     ttl_seconds=3600,  # 1 hour - TODO: Make configurable

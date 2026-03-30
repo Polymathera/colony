@@ -60,16 +60,25 @@ class AgentPoolCapability(AgentCapability):
     The ActionPolicy decides when to create/assign/suspend/terminate agents.
     """
 
-    input_patterns = [WorkAssignmentProtocol.result_pattern(namespace="pool")]
 
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "agent_pool",
+        input_patterns: list[str] = [WorkAssignmentProtocol.result_pattern()],
+        capability_key: str = "agent_pool",
+    ):
         """Initialize agent pool capability.
 
         Args:
             agent: Owning agent (coordinator)
             scope: Blackboard scope (defaults to COLONY)
+            namespace: Namespace for the capability within the scope (default "agent_pool")
+            input_patterns: List of input patterns for the capability
+            capability_key: Key to identify this capability (default "agent_pool")
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
 
         # Track created agents
         self._agent_handles: dict[str, AgentHandle] = {}
@@ -303,7 +312,7 @@ class AgentPoolCapability(AgentCapability):
         # Send work assignment via blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            WorkAssignmentProtocol.assignment_key(namespace="pool", agent_id=agent_id, request_id=str(uuid.uuid4())),
+            WorkAssignmentProtocol.assignment_key(agent_id=agent_id, request_id=str(uuid.uuid4())),
             {
                 "work_unit": work_unit,
                 "priority": priority,
@@ -354,7 +363,7 @@ class AgentPoolCapability(AgentCapability):
                 if result_type != "all" and result_type != rtype:
                     continue
 
-                key = WorkAssignmentProtocol.result_key(namespace="pool", agent_id=agent_id, result_type=rtype)
+                key = WorkAssignmentProtocol.result_key(agent_id=agent_id, result_type=rtype)
                 data = await blackboard.read(key)
                 if data:
                     results.append({
@@ -614,7 +623,7 @@ class AgentPoolCapability(AgentCapability):
 
         for agent_id in agent_ids:
             await blackboard.write(
-                WorkAssignmentProtocol.broadcast_key(namespace="pool", agent_id=agent_id),
+                WorkAssignmentProtocol.broadcast_key(agent_id=agent_id),
                 {
                     "message": message,
                     "from": self.agent.agent_id,

@@ -1,4 +1,4 @@
-"""Epistemic layer for knowledge and belief tracking.
+"""Epistemic capability for knowledge and belief tracking.
 
 Based on epistemic logic from Shoham & Leyton-Brown (Ch 13-14):
 "Representing 'Who Knows What' on the Blackboard"
@@ -9,7 +9,7 @@ This module implements:
 - Belief propagation and updates
 - Intention tracking (BDI architecture)
 
-The epistemic layer enables:
+The epistemic capability enables:
 - Tracking which propositions are "common knowledge"
 - Prioritizing validation of commonly believed but unvalidated claims
 - Detecting belief conflicts between agents
@@ -35,7 +35,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ...base import Agent
+from ...base import Agent, AgentCapability
+from ...models import AgentSuspensionState
+from ..actions.policies import action_executor
 from ...blackboard.blackboard import EnhancedBlackboard
 from ...blackboard.protocol import EpistemicProtocol
 from ...scopes import BlackboardScope, get_scope_prefix
@@ -348,47 +350,69 @@ class JointIntention(BaseModel):
     )
 
 
-class EpistemicLayer:
+class EpistemicCapability(AgentCapability):
     """Manages epistemic state (beliefs, knowledge, intentions).
-
-    TODO: This class is not yet fully implemented. Missing methods are:
-    - GameProtocolCapability.start_game
-    - GameProtocolCapability.validate_move
-    - GameProtocolCapability.apply_move
-    It is not even derived from GameProtocolCapability yet.
 
     Provides:
     - Proposition tracking
     - Belief updates
     - Common knowledge detection
     - Intention management
+
+    Colony-scoped by default — epistemic state is shared across all agents
+    in the colony so they can track shared beliefs and joint intentions.
     """
 
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
-        """Initialize epistemic layer.
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "epistemic",
+        input_patterns: list[str] | None = None,
+        capability_key: str = "epistemic_capability",
+    ):
+        """Initialize epistemic capability.
 
         Args:
             agent: Owning agent
             scope: Blackboard scope (defaults to COLONY)
+            namespace: Namespace for this capability's blackboard entries
+            input_patterns: Event patterns to subscribe to
+            capability_key: Capability key
         """
-        self.agent = agent
-        self.scope = scope
-        self.blackboard: EnhancedBlackboard | None = None
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+        )
 
-    async def initialize(self) -> None:
-        self.blackboard = await self.agent.get_blackboard(
-            scope_id = f"{get_scope_prefix(self.scope, self.agent)}:epistemic"
+    def get_action_group_description(self) -> str:
+        return (
+            "Epistemic Capability — manages shared beliefs, knowledge, and intentions. "
+            "Records propositions, tracks which agents believe what, detects common knowledge, "
+            "and manages individual and joint intentions."
         )
 
     def _get_proposition_key(self, proposition_id: str) -> str:
-        return EpistemicProtocol.proposition_key(proposition_id, namespace="epistemic")
+        return EpistemicProtocol.proposition_key(proposition_id)
 
     def _get_intention_key(self, intention_id: str) -> str:
-        return EpistemicProtocol.intention_key(intention_id, namespace="epistemic")
+        return EpistemicProtocol.intention_key(intention_id)
 
     def _get_joint_intention_key(self, intention_id: str) -> str:
-        return EpistemicProtocol.joint_intention_key(intention_id, namespace="epistemic")
+        return EpistemicProtocol.joint_intention_key(intention_id)
 
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        return state
+
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        pass
+
+    @action_executor(
+        action_key="record_proposition",
+        planning_summary="Record a new proposition for epistemic tracking (belief/knowledge).",
+    )
     async def record_proposition(
         self,
         proposition: str,
@@ -411,6 +435,10 @@ class EpistemicLayer:
         await self._store_status(status)
         return status
 
+    @action_executor(
+        action_key="update_belief",
+        planning_summary="Update an agent's belief about a proposition (believes/disbelieves with confidence).",
+    )
     async def update_belief(
         self,
         proposition_id: str,
@@ -441,6 +469,10 @@ class EpistemicLayer:
         await self._store_status(status)
         return status
 
+    @action_executor(
+        action_key="get_epistemic_status",
+        planning_summary="Get epistemic status of a proposition (who believes/disbelieves, common knowledge).",
+    )
     async def get_status(self, proposition_id: str) -> EpistemicStatus | None:
         """Get epistemic status.
 
@@ -451,13 +483,18 @@ class EpistemicLayer:
             Epistemic status or None
         """
         key = self._get_proposition_key(proposition_id)
-        data = await self.blackboard.read(key)
+        blackboard = await self.get_blackboard()
+        data = await blackboard.read(key)
 
         if data is None:
             return None
 
         return EpistemicStatus(**data)
 
+    @action_executor(
+        action_key="get_common_knowledge",
+        planning_summary="Get all propositions that are common knowledge among agents.",
+    )
     async def get_common_knowledge(self) -> list[EpistemicStatus]:
         """Get all common knowledge propositions.
 
@@ -467,6 +504,10 @@ class EpistemicLayer:
         # TODO: Query all propositions marked as common knowledge
         return []
 
+    @action_executor(
+        action_key="add_intention",
+        planning_summary="Add an intention (goal + plan) for an agent to the shared epistemic state.",
+    )
     async def add_intention(
         self,
         agent_id: str,
@@ -493,7 +534,8 @@ class EpistemicLayer:
         )
 
         key = self._get_intention_key(intention.intention_id)
-        await self.blackboard.write(
+        blackboard = await self.get_blackboard()
+        await blackboard.write(
             key=key,
             value=intention.model_dump(),
             tags={"intention", agent_id, intention.status}
@@ -501,6 +543,10 @@ class EpistemicLayer:
 
         return intention
 
+    @action_executor(
+        action_key="add_joint_intention",
+        planning_summary="Create a joint intention shared by multiple agents with commitment/termination conditions.",
+    )
     async def add_joint_intention(
         self,
         members: list[str],
@@ -527,7 +573,8 @@ class EpistemicLayer:
         )
 
         key = self._get_joint_intention_key(joint.intention_id)
-        await self.blackboard.write(
+        blackboard = await self.get_blackboard()
+        await blackboard.write(
             key=key,
             value=joint.model_dump(),
             tags={"joint_intention", *members}
@@ -543,7 +590,8 @@ class EpistemicLayer:
         """
         key = self._get_proposition_key(status.proposition_id)
 
-        await self.blackboard.write(
+        blackboard = await self.get_blackboard()
+        await blackboard.write(
             key=key,
             value=status.model_dump(),
             tags={
@@ -559,7 +607,7 @@ class EpistemicLayer:
 async def check_goal_alignment(
     agent_id: str,
     proposed_action: Any,
-    blackboard: Any
+    agent: Agent,
 ) -> tuple[bool, str]:
     """Check if proposed action aligns with agent's intentions.
 
@@ -568,12 +616,12 @@ async def check_goal_alignment(
     Args:
         agent_id: Agent ID
         proposed_action: Action being proposed
-        blackboard: Blackboard instance
+        agent: Agent instance (EpistemicCapability is created from agent)
 
     Returns:
         (is_aligned, reason) tuple
     """
-    epistemic = EpistemicLayer(blackboard)
+    epistemic = EpistemicCapability(agent)
 
     # Get agent's intentions
     # Placeholder - would query blackboard
@@ -586,20 +634,20 @@ async def check_goal_alignment(
 
 async def update_common_knowledge(
     proposition_id: str,
-    blackboard: Any,
+    agent: Agent,
     reputation_tracker: Any
 ) -> bool:
     """Update common knowledge status based on current beliefs.
 
     Args:
         proposition_id: Proposition to check
-        blackboard: Blackboard instance
+        agent: Agent instance (EpistemicCapability is created from agent)
         reputation_tracker: Reputation tracker for agent scores
 
     Returns:
         True if now common knowledge
     """
-    epistemic = EpistemicLayer(blackboard)
+    epistemic = EpistemicCapability(agent)
     status = await epistemic.get_status(proposition_id)
 
     if not status:

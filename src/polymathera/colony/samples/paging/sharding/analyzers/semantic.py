@@ -300,10 +300,9 @@ class SemanticAnalyzer(BaseAnalyzer):
 
     async def _ensure_caches_initialized(self) -> None:
         """Initialize caches if not already done."""
-        # TODO: Add cache namespaces
         if self.semantic_cache is None:
             self.semantic_cache = await get_polymathera().create_distributed_simple_cache(
-                namespace="semantic_file_embeddings",  # TODO: Does this need to be VMR-specific?
+                namespace="semantic_file_embeddings",
                 config=self.config.semantic_cache_config,
             )
 

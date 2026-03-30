@@ -348,16 +348,28 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     5. Produces unified impact report with recommendations
     """
 
-    input_patterns = [AgentRunProtocol.result_pattern(namespace="impact"), ErrorSignalProtocol.error_pattern(namespace="impact")]
 
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "change_impact_analysis",
+        input_patterns: list[str] = [
+            AgentRunProtocol.result_pattern(),
+            ErrorSignalProtocol.error_pattern()
+        ],
+        capability_key: str = "change_impact_analysis_coordinator",
+    ):
         """Initialize coordinator.
 
         Args:
             agent: Coordinator agent
             scope: Blackboard scope for coordination (default: COLONY)
+            namespace: Namespace for event patterns
+            input_patterns: List of event patterns to subscribe to
+            capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:impact_coordinator:{agent.agent_id}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
 
         self.page_agents: dict[str, str] = {}  # page_id -> agent_id
         self.blackboard: EnhancedBlackboard | None = None
@@ -571,7 +583,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     # EVENT HANDLERS - Replace manual blackboard subscriptions
     # ============================================================================
 
-    @event_handler(pattern=AgentRunProtocol.result_pattern(namespace="impact"))
+    @event_handler(pattern=AgentRunProtocol.result_pattern())
     async def on_child_complete(
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:
@@ -623,7 +635,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             )
         return None
 
-    @event_handler(pattern=ErrorSignalProtocol.error_pattern(namespace="impact"))
+    @event_handler(pattern=ErrorSignalProtocol.error_pattern())
     async def on_child_error(
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:
@@ -649,7 +661,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         retry_count = error_data.get("context", {}).get("retry_count", 0)
         if retry_count < 1:
             logger.info(f"Retrying child {agent_id}")
-            await self.blackboard.delete(ErrorSignalProtocol.error_key(agent_id, namespace="impact"))
+            await self.blackboard.delete(ErrorSignalProtocol.error_key(agent_id))
         else:
             # Max retries exceeded - remove from tracking
             logger.error(f"Child {agent_id} ({page_id}) failed after {retry_count} retries, skipping")
@@ -1050,7 +1062,7 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
             # Check blackboard for pre-computed dependency graph
             dep_graph_key = f"dependency_graph:{':'.join(sorted(page_ids[:10]))}"  # TODO: Add DependencyGraphResult.get_key(page_ids, tenant_id) method?
             dep_data = await self.blackboard.read(
-                key=ImpactAnalysisProtocol.dependency_graph_key(dep_graph_key, namespace="impact"),
+                key=ImpactAnalysisProtocol.dependency_graph_key(dep_graph_key),
             )
 
             if dep_data and isinstance(dep_data, dict):

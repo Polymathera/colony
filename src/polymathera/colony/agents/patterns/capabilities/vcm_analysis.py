@@ -82,14 +82,20 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "vcm_analysis",
+        capability_key: str = "vcm_analysis",
+        input_patterns: list[str] = [],
     ):
         """Initialize VCM analysis capability.
 
         Args:
             agent: Owning agent (coordinator)
             scope: Blackboard scope (defaults to COLONY)
+            namespace: Namespace for this capability's blackboard entries (defaults to "vcm_analysis")
+            capability_key: Unique key for this capability within the agent (default "vcm_analysis")
+            input_patterns: Optional list of input patterns this capability responds to (default empty)
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.blackboard_scope = scope
 
         # Internal tracking (backed by blackboard for persistence)
@@ -215,19 +221,19 @@ class VCMAnalysisCapability(AgentCapability, ABC):
 
     def _get_result_key(self, page_id: str) -> str:
         """Get blackboard key for a page result."""
-        return VCMAnalysisProtocol.result_key(page_id, namespace="vcm_analysis")
+        return VCMAnalysisProtocol.result_key(page_id)
 
     def _get_revisit_queue_key(self) -> str:
         """Get blackboard key for revisit queue."""
-        return VCMAnalysisProtocol.revisit_queue_key(namespace="vcm_analysis")
+        return VCMAnalysisProtocol.revisit_queue_key()
 
     def _get_outstanding_queries_key(self) -> str:
         """Get blackboard key for outstanding queries."""
-        return VCMAnalysisProtocol.outstanding_queries_key(namespace="vcm_analysis")
+        return VCMAnalysisProtocol.outstanding_queries_key()
 
     def _get_state_key(self) -> str:
         """Get blackboard key for capability state."""
-        return VCMAnalysisProtocol.state_key(namespace="vcm_analysis")
+        return VCMAnalysisProtocol.state_key()
 
     async def _persist_state(self) -> None:
         """Persist internal state to blackboard."""

@@ -72,14 +72,15 @@ class MultiHopSearchCapability(AgentCapability):
     - Deductive reasoning: Chain inferences across knowledge
     """
 
-    input_patterns = [MultiHopSearchProtocol.request_pattern(namespace="multi_hop")]
-
     def __init__(
         self,
         agent: Agent,
         base_router: PageQueryRoutingPolicy,  # Base query routing policy
         max_hops: int = 2,
-        scope: BlackboardScope = BlackboardScope.COLONY
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "multi_hop",
+        input_patterns: list[str] = [MultiHopSearchProtocol.request_pattern()],
+        capability_key: str = "multi_hop_search",
     ):
         """Initialize multi-hop search capability.
 
@@ -88,8 +89,10 @@ class MultiHopSearchCapability(AgentCapability):
             base_router: Base query routing policy (single-hop)
             max_hops: Maximum number of hops to explore
             scope: Scope for the capability
+            namespace: Namespace for the capability within the scope (default "multi_hop")
+            input_patterns: List of input patterns for the capability
         """
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.base_router = base_router
         self.max_hops = max_hops
         self._visited: set[str] = set()

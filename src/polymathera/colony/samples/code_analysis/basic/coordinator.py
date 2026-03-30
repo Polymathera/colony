@@ -60,15 +60,18 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
     spawning, monitoring, and synthesis.
     """
 
-    input_patterns = [AgentRunProtocol.result_pattern(namespace="basic"), ErrorSignalProtocol.error_pattern(namespace="basic")]
-
     def __init__(
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.COLONY,
-        namespace: str = "basic_code_analysis_coordinator",
+        namespace: str = "basic_code_analysis",
+        input_patterns: list[str] = [
+            AgentRunProtocol.result_pattern(),
+            ErrorSignalProtocol.error_pattern()
+        ],
+        capability_key: str = "code_analysis_coordinator_protocol"
     ):
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
 
     def get_action_group_description(self) -> str:
         return (
@@ -99,7 +102,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         """Spawn ClusterAnalyzer agents (strategy-specific)."""
         raise NotImplementedError
 
-    @event_handler(pattern=AgentRunProtocol.result_pattern(namespace="basic"))
+    @event_handler(pattern=AgentRunProtocol.result_pattern())
     async def on_child_complete(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult | None:
         agent_id = event.key.split(":")[0]
         role = None
@@ -130,14 +133,14 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         # Write critique to blackboard for child to see
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            BasicAnalysisProtocol.critique_key(agent_id, namespace="basic"),
+            BasicAnalysisProtocol.critique_key(agent_id),
             critique.model_dump(),
             created_by=self.agent.agent_id
         )
 
         if critique.requires_revision:
             await blackboard.write(
-                BasicAnalysisProtocol.revision_request_key(agent_id, namespace="basic"),
+                BasicAnalysisProtocol.revision_request_key(agent_id),
                 {
                     "critique": critique.model_dump(),
                     "timestamp": time.time()
@@ -172,7 +175,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
             )
         return None
 
-    @event_handler(pattern=ErrorSignalProtocol.error_pattern(namespace="basic"))
+    @event_handler(pattern=ErrorSignalProtocol.error_pattern())
     async def on_child_error(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult | None:
         agent_id = event.key.split(":")[1]
         role = None
@@ -198,7 +201,7 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         if retry_count < 1:
             logger.info(f"Retrying child {agent_id}")
             blackboard = await self.get_blackboard()
-            await blackboard.delete(ErrorSignalProtocol.error_key(agent_id, namespace="basic"))
+            await blackboard.delete(ErrorSignalProtocol.error_key(agent_id))
 
             # TODO: In future, use LLM inference to decide best retry strategy
             # For now, just log and let the child continue

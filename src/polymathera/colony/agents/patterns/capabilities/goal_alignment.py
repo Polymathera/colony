@@ -172,7 +172,7 @@ class JointGoal(BaseModel):
 
     def generate_goal_key(self) -> str:
         """Generate a unique goal key for blackboard storage."""
-        return GoalAlignmentProtocol.joint_goal_state_key(self.goal_id, namespace="goal_alignment")
+        return GoalAlignmentProtocol.joint_goal_state_key(self.goal_id)
 
 
 # ============================================================================
@@ -204,16 +204,25 @@ class ObjectiveGuardCapability(AgentCapability):
     - register_goal: Register a new goal to monitor
     """
 
-    input_patterns = [GoalAlignmentProtocol.request_pattern(namespace="goal_alignment"), GoalAlignmentProtocol.joint_goal_pattern(namespace="goal_alignment")]
 
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "goal_alignment",
+        input_patterns: list[str] = [GoalAlignmentProtocol.request_pattern(), GoalAlignmentProtocol.joint_goal_pattern()],
+        capability_key: str = "goal_alignment",
+    ):
         """Initialize objective guard capability.
 
         Args:
             agent: Agent using this capability
             scope: Blackboard scope. Defaults to BlackboardScope.COLONY.
+            namespace: Namespace for the capability within the scope (default "goal_alignment")
+            input_patterns: List of input patterns for the capability (default listens for goal alignment requests and joint goal registrations)
+            capability_key: Unique key for this capability (default "goal_alignment")
         """
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.active_goals: dict[str, JointGoal] = {}
 
     def get_action_group_description(self) -> str:
@@ -249,7 +258,7 @@ class ObjectiveGuardCapability(AgentCapability):
         """
         blackboard = await self.get_blackboard()
         return CapabilityResultFuture(
-            result_key=GoalAlignmentProtocol.result_pattern(namespace="goal_alignment"),
+            result_key=GoalAlignmentProtocol.result_pattern(),
             blackboard=blackboard,
         )
 
@@ -258,7 +267,7 @@ class ObjectiveGuardCapability(AgentCapability):
     # -------------------------------------------------------------------------
 
     @event_handler(
-        pattern=GoalAlignmentProtocol.request_pattern(namespace="goal_alignment")
+        pattern=GoalAlignmentProtocol.request_pattern()
     )
     async def handle_goal_alignment_request(
         self,
@@ -279,7 +288,7 @@ class ObjectiveGuardCapability(AgentCapability):
         )
 
     @event_handler(
-        pattern=GoalAlignmentProtocol.joint_goal_pattern(namespace="goal_alignment")
+        pattern=GoalAlignmentProtocol.joint_goal_pattern()
     )
     async def handle_joint_goal_registration(
         self,
@@ -332,7 +341,7 @@ class ObjectiveGuardCapability(AgentCapability):
         # Write goal to this capability's scope
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=GoalAlignmentProtocol.joint_goal_key(goal.goal_id, namespace="goal_alignment"),
+            key=GoalAlignmentProtocol.joint_goal_key(goal.goal_id),
             value=goal.model_dump(),
             agent_id=self.agent.agent_id,
         )
@@ -394,7 +403,7 @@ class ObjectiveGuardCapability(AgentCapability):
         """
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=GoalAlignmentProtocol.request_key(f"{result.goal_id}:{result.requesting_agent_id}", namespace="goal_alignment"),
+            key=GoalAlignmentProtocol.request_key(f"{result.goal_id}:{result.requesting_agent_id}"),
             value=result.model_dump(),
             agent_id=self.agent.agent_id,
         )

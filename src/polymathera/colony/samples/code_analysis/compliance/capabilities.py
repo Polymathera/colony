@@ -62,26 +62,31 @@ class ComplianceAnalysisCapability(AgentCapability):
     - Event-driven via @event_handler and @action_executor decorators
     """
 
-    input_patterns = [AgentRunProtocol.request_pattern(namespace="compliance")]
 
     def __init__(
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "compliance_analysis",
+        input_patterns: list[str] = [AgentRunProtocol.request_pattern()],
         requirements: list[ComplianceRequirement] | None = None,
         check_licenses: bool = True,
-        check_security: bool = True
+        check_security: bool = True,
+        capability_key: str = "compliance_analysis_capability"
     ):
         """Initialize compliance analysis capability.
 
         Args:
             agent: Agent instance for LLM inference via VCM
             scope: Scope identifier for this capability
+            namespace: Namespace for blackboard keys related to this capability
+            input_patterns: Event patterns this capability subscribes to.
             requirements: Specific requirements to check
             check_licenses: Whether to check license compliance
             check_security: Whether to check security compliance
+            capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:compliance_analysis:{agent.agent_id}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.requirements = requirements or self._default_requirements()
         self.check_licenses = check_licenses
         self.check_security = check_security
@@ -116,7 +121,7 @@ class ComplianceAnalysisCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for ComplianceAnalysisCapability")
         pass
 
-    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="compliance"))
+    @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -250,7 +255,7 @@ class ComplianceAnalysisCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id, namespace="compliance"),
+                key=AgentRunProtocol.result_key(request_id),
                 value=merged.model_dump(),
             )
 
@@ -1111,14 +1116,18 @@ class ComplianceVCMCapability(VCMAnalysisCapability):
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "ComplianceVCMCapability",
+        capability_key: str = "compliance_vcm_analysis",
     ):
         """Initialize compliance VCM capability.
 
         Args:
             agent: Agent using this capability (coordinator agent)
-            scope: BlackboardScope = BlackboardScope.COLONY,
+            scope: BlackboardScope = BlackboardScope.COLONY
+            namespace: Namespace for blackboard keys
+            capability_key: Unique key for this capability within the agent (default "compliance_vcm_analysis")
         """
-        super().__init__(agent=agent, scope=scope)
+        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=None, capability_key=capability_key)
         self._obligation_graph: ObligationGraph | None = None
 
     async def initialize(self) -> None:
@@ -1212,7 +1221,7 @@ class ComplianceVCMCapability(VCMAnalysisCapability):
                 obligation_id = f"fix_{violation.get('location', page_id)}"
                 blackboard = await self.get_blackboard()
                 await blackboard.write(
-                    ComplianceAnalysisProtocol.obligation_key(obligation_id, namespace="compliance"),
+                    ComplianceAnalysisProtocol.obligation_key(obligation_id),
                     {
                         "obligation_id": obligation_id,
                         "description": f"Fix {violation.get('type', 'compliance')} violation: {violation.get('description', '')}",
@@ -1414,24 +1423,33 @@ class ComplianceCoordinatorCapability(AgentCapability):
     Uses event-driven architecture via @event_handler and @action_executor.
     """
 
-    input_patterns = [AgentRunProtocol.request_pattern(namespace="compliance"), AgentRunProtocol.result_pattern(namespace="compliance")]
 
     def __init__(
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "compliance_coordinator",
+        input_patterns: list[str] = [
+            AgentRunProtocol.request_pattern(),
+            AgentRunProtocol.result_pattern()
+        ],
         max_agents: int = 10,
         batching_policy: BatchingPolicy | None = None,
+        capability_key: str = "compliance_coordinator",
     ):
         """Initialize coordinator capability.
 
         Args:
             agent: Agent instance
             scope: Scope identifier
+            namespace: Namespace for event patterns
+            input_patterns: Event patterns to subscribe to
             max_agents: Maximum page agents
             batching_policy: Policy for cache-aware batch selection
+            capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:compliance_coordinator:{agent.agent_id}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace, agent_id=agent.agent_id), input_patterns=input_patterns, capability_key=capability_key)
+        self.namespace = namespace
         self.max_agents = max_agents
         self._page_agents: dict[str, str] = {}  # page_id -> agent_id
         self._worker_handles: dict[str, Any] = {}  # page_id -> AgentHandle
@@ -1507,7 +1525,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for ComplianceCoordinatorCapability")
         pass
 
-    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="compliance"))
+    @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -1533,7 +1551,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern=AgentRunProtocol.result_pattern(namespace="compliance"))
+    @event_handler(pattern=AgentRunProtocol.result_pattern())
     async def handle_worker_result(
         self,
         event: BlackboardEvent,
@@ -1661,10 +1679,15 @@ class ComplianceCoordinatorCapability(AgentCapability):
             # Run worker and store result via ResultCapability
             # TODO: This still sequentializes worker runs. For true parallelization,
             # use asyncio.gather with handle.run() calls or rely on event handlers.
+            # protocol=AgentRunProtocol: worker's ComplianceAnalysisCapability uses AgentRunProtocol
+            # scope=AGENT: worker's ComplianceAnalysisCapability uses AGENT scope
+            # namespace="compliance_analysis": must match worker's ComplianceAnalysisCapability namespace
             run = await handle.run(
                 {"page_ids": [page_id], "compliance_types": [ct.value for ct in (compliance_types or [])]},
                 timeout=60,
-                namespace="compliance",
+                protocol=AgentRunProtocol,
+                scope=BlackboardScope.AGENT,
+                namespace="compliance_analysis",  # matches worker (NOT self.namespace)
             )
 
             # Store result via ResultCapability for cluster-wide visibility
@@ -1718,7 +1741,7 @@ class ComplianceCoordinatorCapability(AgentCapability):
         # Write result to blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=AgentRunProtocol.result_key(request_id, namespace="compliance"),
+            key=AgentRunProtocol.result_key(request_id),
             value=merged_result.model_dump(),
         )
 

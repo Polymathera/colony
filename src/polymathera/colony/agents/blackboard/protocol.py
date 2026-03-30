@@ -25,15 +25,15 @@ Usage::
     from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol
 
     # Writer
-    key = AgentRunProtocol.request_key(request_id="req_abc123", namespace="compliance")
+    key = AgentRunProtocol.request_key(request_id="req_abc123")
     await blackboard.write(key, payload)
 
     # Subscriber
-    pattern = AgentRunProtocol.request_pattern(namespace="compliance")
+    pattern = AgentRunProtocol.request_pattern()
     blackboard.stream_events_to_queue(queue, pattern=pattern)
 
     # Parser (in event handler)
-    request_id = AgentRunProtocol.parse_request_key(event.key, namespace="compliance")
+    request_id = AgentRunProtocol.parse_request_key(event.key)
 
     # AgentHandle.run() uses the protocol and namespace
     result = await handle.run(input_data, protocol=AgentRunProtocol, namespace="compliance")
@@ -96,9 +96,9 @@ def validate_key(key: str, scope_id: str = "") -> None:
             f"(*, ?, [, ]): {key!r}. Use patterns for subscriptions."
         )
 
-    # Check for scope_id leak — the key should never contain the
+    # Check for scope_id leak — the key should never start with the
     # blackboard's own scope_id since that's the partition, not the key.
-    if scope_id and scope_id in key:
+    if scope_id and key.startswith(f"{scope_id}:"):
         raise KeyValidationError(
             f"Blackboard key must be scope-relative — it must not contain "
             f"the blackboard's scope_id. Key {key!r} contains "
@@ -133,7 +133,7 @@ def validate_pattern(pattern: str, scope_id: str = "") -> None:
         raise KeyValidationError("Pattern must not be empty")
 
     # Check for scope_id leak
-    if scope_id and scope_id in pattern:
+    if scope_id and pattern.startswith(f"{scope_id}:"):
         raise KeyValidationError(
             f"Event pattern must be scope-relative — it must not contain "
             f"the blackboard's scope_id. Pattern {pattern!r} contains "
@@ -160,11 +160,6 @@ class BlackboardProtocol:
     capabilities can share the same protocol. One capability can support
     multiple protocols for different actions.
 
-    All protocol methods accept a ``namespace`` parameter for
-    disambiguation when multiple capabilities share the same scope.
-    The namespace is prepended to keys:
-    ``{namespace}:{key}`` for keys, ``{namespace}:*`` prefix for patterns.
-
     Each protocol subclass provides three kinds of static methods:
 
     - **Key construction** (e.g., ``request_key``, ``result_key``):
@@ -185,16 +180,6 @@ class BlackboardProtocol:
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
     """The scope level this protocol operates at."""
 
-    @staticmethod
-    def _ns(namespace: str, key: str) -> str:
-        """Prepend namespace to a key."""
-        return f"{namespace}:{key}"
-
-    @staticmethod
-    def _ns_pattern(namespace: str, pattern: str) -> str:
-        """Prepend namespace to a pattern."""
-        return f"{namespace}:{pattern}"
-
 
 # ---------------------------------------------------------------------------
 # Concrete protocols
@@ -203,33 +188,22 @@ class BlackboardProtocol:
 class AgentRunProtocol(BlackboardProtocol):
     """Protocol for ``AgentHandle.run()`` <-> child agent communication.
 
-    All methods accept a ``namespace`` parameter to scope keys
-    within a shared blackboard partition. This prevents interference when
-    multiple capabilities share a colony-level scope.
-
     Key formats:
 
-    - Without namespace: ``request:run:{request_id}`` (agent-scoped, only one agent)
-    - With namespace: ``request:run:compliance:{request_id}`` (colony-scoped, disambiguated)
+    - ``request:run:{request_id}``
 
     Example::
 
-        # Agent-scoped (namespace still required for key construction)
-        key = AgentRunProtocol.request_key("req_abc", namespace="analysis")
-        # -> "request:run:analysis:req_abc"
+        key = AgentRunProtocol.request_key("req_abc")
+        # -> "request:run:req_abc"
 
-        # Colony-scoped (namespace prevents cross-capability interference)
-        key = AgentRunProtocol.request_key("req_abc", namespace="compliance")
-        # -> "request:run:compliance:req_abc"
-
-        # Capability declares its namespace
         class ComplianceCapability(AgentCapability):
-            input_patterns = [AgentRunProtocol.request_pattern(namespace="compliance")]
-            # -> ["request:run:compliance:*"]
+            input_patterns = [AgentRunProtocol.request_pattern()]
+            # -> ["request:run:*"]
 
-            @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="compliance"))
+            @event_handler(pattern=AgentRunProtocol.request_pattern())
             async def handle_request(self, event, repl):
-                request_id = AgentRunProtocol.parse_request_key(event.key, namespace="compliance")
+                request_id = AgentRunProtocol.parse_request_key(event.key)
                 ...
     """
 
@@ -238,88 +212,73 @@ class AgentRunProtocol(BlackboardProtocol):
     # --- Key construction ---
 
     @staticmethod
-    def request_key(request_id: str, namespace: str) -> str:
+    def request_key(request_id: str) -> str:
         """Key for a request.
 
         Args:
             request_id: Unique request identifier.
-            namespace: Namespace for disambiguation in shared scopes
-                (e.g., ``"compliance"``, ``"contracts"``).
         """
-        ns = f"{namespace}:"
-        return f"request:run:{ns}{request_id}"
+        return f"request:run:{request_id}"
 
     @staticmethod
-    def result_key(request_id: str, namespace: str) -> str:
+    def result_key(request_id: str) -> str:
         """Key for a result."""
-        ns = f"{namespace}:"
-        return f"result:run:{ns}{request_id}"
+        return f"result:run:{request_id}"
 
     @staticmethod
-    def event_key(request_id: str, event_name: str, namespace: str) -> str:
+    def event_key(request_id: str, event_name: str) -> str:
         """Key for a streaming event."""
-        ns = f"{namespace}:"
-        return f"event:run:{ns}{request_id}:{event_name}"
+        return f"event:run:{request_id}:{event_name}"
 
     # --- Pattern construction ---
 
     @staticmethod
-    def request_pattern(namespace: str) -> str:
+    def request_pattern() -> str:
         """Pattern matching run requests.
-
-        Args:
-            namespace: Namespace to match requests for.
         """
-        ns = f"{namespace}:"
-        return f"request:run:{ns}*"
+        return "request:run:*"
 
     @staticmethod
-    def result_pattern(namespace: str) -> str:
+    def result_pattern() -> str:
         """Pattern matching run results."""
-        ns = f"{namespace}:"
-        return f"result:run:{ns}*"
+        return "result:run:*"
 
     @staticmethod
-    def event_pattern(request_id: str, namespace: str) -> str:
+    def event_pattern(request_id: str) -> str:
         """Pattern matching streaming events for a specific request."""
-        ns = f"{namespace}:"
-        return f"event:run:{ns}{request_id}:*"
+        return f"event:run:{request_id}:*"
 
     # --- Key parsing ---
 
     @staticmethod
-    def parse_request_key(key: str, namespace: str) -> str:
+    def parse_request_key(key: str) -> str:
         """Extract request_id from a request key.
 
         Args:
-            key: Key like ``"request:run:req_abc"`` or ``"request:run:compliance:req_abc"``
-            namespace: Expected namespace (must match what was used to write).
+            key: Key like ``"request:run:req_abc"``
 
         Returns:
             The request_id.
         """
-        ns = f"{namespace}:"
-        prefix = f"request:run:{ns}"
+        prefix = "request:run:"
         if not key.startswith(prefix):
-            raise ValueError(f"Not an AgentRunProtocol request key (namespace={namespace!r}): {key!r}")
+            raise ValueError(f"Not an AgentRunProtocol request key: {key!r}")
         return key[len(prefix):]
 
     @staticmethod
-    def parse_result_key(key: str, namespace: str) -> str:
+    def parse_result_key(key: str) -> str:
         """Extract request_id from a result key."""
-        ns = f"{namespace}:"
-        prefix = f"result:run:{ns}"
+        prefix = "result:run:"
         if not key.startswith(prefix):
-            raise ValueError(f"Not an AgentRunProtocol result key (namespace={namespace!r}): {key!r}")
+            raise ValueError(f"Not an AgentRunProtocol result key: {key!r}")
         return key[len(prefix):]
 
     @staticmethod
-    def parse_event_key(key: str, namespace: str) -> tuple[str, str]:
+    def parse_event_key(key: str) -> tuple[str, str]:
         """Extract (request_id, event_name) from an event key."""
-        ns = f"{namespace}:"
-        prefix = f"event:run:{ns}"
+        prefix = "event:run:"
         if not key.startswith(prefix):
-            raise ValueError(f"Not an AgentRunProtocol event key (namespace={namespace!r}): {key!r}")
+            raise ValueError(f"Not an AgentRunProtocol event key: {key!r}")
         rest = key[len(prefix):]
         parts = rest.split(":", 1)
         if len(parts) != 2:
@@ -342,11 +301,11 @@ class WorkAssignmentProtocol(BlackboardProtocol):
     Example::
 
         # Coordinator assigns work
-        key = WorkAssignmentProtocol.assignment_key(agent_id=worker_id, request_id=req_id, namespace="pool")
+        key = WorkAssignmentProtocol.assignment_key(agent_id=worker_id, request_id=req_id)
         await colony_blackboard.write(key, work_unit)
 
         # Worker writes result
-        key = WorkAssignmentProtocol.result_key(agent_id=self.agent.agent_id, namespace="pool", result_type="final")
+        key = WorkAssignmentProtocol.result_key(agent_id=self.agent.agent_id, result_type="final")
         await colony_blackboard.write(key, result)
     """
 
@@ -355,57 +314,55 @@ class WorkAssignmentProtocol(BlackboardProtocol):
     # --- Key construction ---
 
     @staticmethod
-    def assignment_key(agent_id: str, request_id: str, namespace: str) -> str:
+    def assignment_key(agent_id: str, request_id: str) -> str:
         """Key for a work assignment targeting a specific worker."""
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(agent_id=agent_id, work_assignment=request_id))
+        return ScopeUtils.format_key(agent_id=agent_id, work_assignment=request_id)
 
     @staticmethod
-    def result_key(agent_id: str, namespace: str, result_type: str = "final") -> str:
+    def result_key(agent_id: str, result_type: str = "final") -> str:
         """Key for a worker's result."""
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(agent_id=agent_id, result_type=result_type))
+        return ScopeUtils.format_key(agent_id=agent_id, result_type=result_type)
 
     @staticmethod
-    def broadcast_key(agent_id: str, namespace: str) -> str:
+    def broadcast_key(agent_id: str) -> str:
         """Key for a broadcast to a specific worker."""
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(agent_id=agent_id, broadcast=True))
+        return ScopeUtils.format_key(agent_id=agent_id, broadcast=True)
 
     # --- Pattern construction ---
 
     @staticmethod
-    def assignment_pattern(namespace: str, agent_id: str | None = None) -> str:
+    def assignment_pattern(agent_id: str | None = None) -> str:
         """Pattern matching work assignments (optionally for a specific worker)."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(agent_id=agent_id, work_assignment=None))
+        return ScopeUtils.pattern_key(agent_id=agent_id, work_assignment=None)
 
     @staticmethod
-    def result_pattern(namespace: str, agent_id: str | None = None) -> str:
+    def result_pattern(agent_id: str | None = None) -> str:
         """Pattern matching worker results (optionally from a specific worker)."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(agent_id=agent_id, result_type=None))
+        return ScopeUtils.pattern_key(agent_id=agent_id, result_type=None)
 
     @staticmethod
-    def broadcast_pattern(namespace: str, agent_id: str | None = None) -> str:
+    def broadcast_pattern(agent_id: str | None = None) -> str:
         """Pattern matching broadcasts."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(agent_id=agent_id, broadcast=None))
+        return ScopeUtils.pattern_key(agent_id=agent_id, broadcast=None)
 
     # --- Key parsing ---
 
     @staticmethod
-    def parse_assignment_key(key: str, namespace: str) -> dict[str, str]:
+    def parse_assignment_key(key: str) -> dict[str, str]:
         """Extract fields from an assignment key.
 
         Returns:
             Dict with ``agent_id`` and ``work_assignment`` fields.
         """
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         return ScopeUtils.parse_key("", key)
 
     @staticmethod
-    def parse_result_key(key: str, namespace: str) -> dict[str, str]:
+    def parse_result_key(key: str) -> dict[str, str]:
         """Extract fields from a result key.
 
         Returns:
             Dict with ``agent_id`` and ``result_type`` fields.
         """
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         return ScopeUtils.parse_key("", key)
 
 
@@ -431,37 +388,36 @@ class LifecycleSignalProtocol(BlackboardProtocol):
     # --- Key construction ---
 
     @staticmethod
-    def created_key(agent_id: str, namespace: str) -> str:
+    def created_key(agent_id: str) -> str:
         """Key for an agent creation signal."""
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(scope="agent_created", agent_id=agent_id))
+        return ScopeUtils.format_key(scope="agent_created", agent_id=agent_id)
 
     @staticmethod
-    def terminated_key(agent_id: str, namespace: str) -> str:
+    def terminated_key(agent_id: str) -> str:
         """Key for an agent termination signal."""
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(scope="agent_terminated", agent_id=agent_id))
+        return ScopeUtils.format_key(scope="agent_terminated", agent_id=agent_id)
 
     # --- Pattern construction ---
 
     @staticmethod
-    def created_pattern(namespace: str) -> str:
+    def created_pattern() -> str:
         """Pattern matching all agent creation signals."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(scope="agent_created", agent_id=None))
+        return ScopeUtils.pattern_key(scope="agent_created", agent_id=None)
 
     @staticmethod
-    def terminated_pattern(namespace: str) -> str:
+    def terminated_pattern() -> str:
         """Pattern matching all agent termination signals."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(scope="agent_terminated", agent_id=None))
+        return ScopeUtils.pattern_key(scope="agent_terminated", agent_id=None)
 
     # --- Key parsing ---
 
     @staticmethod
-    def parse_key(key: str, namespace: str) -> dict[str, str]:
+    def parse_key(key: str) -> dict[str, str]:
         """Extract fields from a lifecycle signal key.
 
         Returns:
             Dict with ``agent_id`` and ``scope`` (event type) fields.
         """
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         return ScopeUtils.parse_key("", key)
 
 
@@ -483,32 +439,31 @@ class GameStateProtocol(BlackboardProtocol):
     # --- Key construction ---
 
     @staticmethod
-    def state_key(game_id: str, namespace: str) -> str:
+    def state_key(game_id: str) -> str:
         """Key for the canonical game state."""
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(state=game_id))
+        return ScopeUtils.format_key(state=game_id)
 
     @staticmethod
-    def result_key(namespace: str) -> str:
+    def result_key() -> str:
         """Key for the game result."""
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(result="game_complete"))
+        return ScopeUtils.format_key(result="game_complete")
 
     # --- Pattern construction ---
 
     @staticmethod
-    def state_pattern(namespace: str) -> str:
+    def state_pattern() -> str:
         """Pattern matching game state updates."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(state=None))
+        return ScopeUtils.pattern_key(state=None)
 
     # --- Key parsing ---
 
     @staticmethod
-    def parse_state_key(key: str, namespace: str) -> str:
+    def parse_state_key(key: str) -> str:
         """Extract game_id from a state key.
 
         Returns:
             The game_id.
         """
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("state", "")
 
@@ -516,7 +471,6 @@ class GameStateProtocol(BlackboardProtocol):
 class CritiqueProtocol(BlackboardProtocol):
     """Protocol for critique request/response exchange.
 
-    Colony-scoped with namespace suffix (e.g., ``{colony_scope}:critique``).
     Requester/responder IDs in keys for disambiguation.
 
     Key types (note: ``ScopeUtils.format_key`` sorts kwargs alphabetically):
@@ -536,70 +490,64 @@ class CritiqueProtocol(BlackboardProtocol):
     # --- Key construction ---
 
     @staticmethod
-    def peer_request_key(requester_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(requester_id=requester_id, critique_request_from_peer=True))
+    def peer_request_key(requester_id: str) -> str:
+        return ScopeUtils.format_key(requester_id=requester_id, critique_request_from_peer=True)
 
     @staticmethod
-    def parent_to_child_request_key(child_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(child_id=child_id, critique_request_from_parent=True))
+    def parent_to_child_request_key(child_id: str) -> str:
+        return ScopeUtils.format_key(child_id=child_id, critique_request_from_parent=True)
 
     @staticmethod
-    def child_to_parent_request_key(parent_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(parent_id=parent_id, critique_request_from_child=True))
+    def child_to_parent_request_key(parent_id: str) -> str:
+        return ScopeUtils.format_key(parent_id=parent_id, critique_request_from_child=True)
 
     @staticmethod
-    def response_key(requester_id: str, responder_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(requester_id=requester_id, critique_response_from=responder_id))
+    def response_key(requester_id: str, responder_id: str) -> str:
+        return ScopeUtils.format_key(requester_id=requester_id, critique_response_from=responder_id)
 
     # --- Pattern construction ---
 
     @staticmethod
-    def peer_request_pattern(namespace: str) -> str:
+    def peer_request_pattern() -> str:
         """Pattern matching peer critique requests."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(requester_id=None, critique_request_from_peer=True))
+        return ScopeUtils.pattern_key(requester_id=None, critique_request_from_peer=True)
 
     @staticmethod
-    def parent_to_child_request_pattern(namespace: str) -> str:
+    def parent_to_child_request_pattern() -> str:
         """Pattern matching parent-to-child critique requests."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(child_id=None, critique_request_from_parent=True))
+        return ScopeUtils.pattern_key(child_id=None, critique_request_from_parent=True)
 
     @staticmethod
-    def child_to_parent_request_pattern(namespace: str) -> str:
+    def child_to_parent_request_pattern() -> str:
         """Pattern matching child-to-parent critique requests."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(parent_id=None, critique_request_from_child=True))
+        return ScopeUtils.pattern_key(parent_id=None, critique_request_from_child=True)
 
     @staticmethod
-    def all_requests_pattern(namespace: str) -> str:
-        """Pattern matching all critique requests."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key())
-
-    @staticmethod
-    def all_request_patterns(namespace: str) -> list[str]:
+    def all_request_patterns() -> list[str]:
         """All three request patterns (peer, parent-to-child, child-to-parent).
 
         Use this when subscribing to all critique requests regardless of direction.
         """
         return [
-            CritiqueProtocol.peer_request_pattern(namespace=namespace),
-            CritiqueProtocol.parent_to_child_request_pattern(namespace=namespace),
-            CritiqueProtocol.child_to_parent_request_pattern(namespace=namespace),
+            CritiqueProtocol.peer_request_pattern(),
+            CritiqueProtocol.parent_to_child_request_pattern(),
+            CritiqueProtocol.child_to_parent_request_pattern(),
         ]
 
     @staticmethod
-    def response_pattern(namespace: str, requester_id: str | None = None) -> str:
+    def response_pattern(requester_id: str | None = None) -> str:
         """Pattern matching critique responses (optionally for a specific requester)."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(requester_id=requester_id, critique_response_from=None))
+        return ScopeUtils.pattern_key(requester_id=requester_id, critique_response_from=None)
 
     # --- Key parsing ---
 
     @staticmethod
-    def parse_key(key: str, namespace: str) -> dict[str, str]:
+    def parse_key(key: str) -> dict[str, str]:
         """Extract fields from any critique key.
 
         Returns:
             Dict of field names to values (e.g., ``{"requester_id": "...", "critique_request_from_peer": "True"}``).
         """
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         return ScopeUtils.parse_key("", key)
 
 
@@ -620,19 +568,19 @@ class WorkingSetStateProtocol(BlackboardProtocol):
     _PREFIX = "state:working_set:"
 
     @staticmethod
-    def cluster_state_key(namespace: str) -> str:
+    def cluster_state_key() -> str:
         """Key for cluster-wide working set state."""
-        return BlackboardProtocol._ns(namespace, f"{WorkingSetStateProtocol._PREFIX}cluster")
+        return f"{WorkingSetStateProtocol._PREFIX}cluster"
 
     @staticmethod
-    def page_status_key(namespace: str) -> str:
+    def page_status_key() -> str:
         """Key for per-page status."""
-        return BlackboardProtocol._ns(namespace, f"{WorkingSetStateProtocol._PREFIX}page_status")
+        return f"{WorkingSetStateProtocol._PREFIX}page_status"
 
     @staticmethod
-    def state_pattern(namespace: str) -> str:
+    def state_pattern() -> str:
         """Pattern matching all working set state updates."""
-        return BlackboardProtocol._ns_pattern(namespace, f"{WorkingSetStateProtocol._PREFIX}*")
+        return f"{WorkingSetStateProtocol._PREFIX}*"
 
 
 class ConsistencyCheckProtocol(BlackboardProtocol):
@@ -654,37 +602,35 @@ class ConsistencyCheckProtocol(BlackboardProtocol):
     # --- Key construction ---
 
     @staticmethod
-    def request_key(request_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"{ConsistencyCheckProtocol._REQUEST_PREFIX}{request_id}")
+    def request_key(request_id: str) -> str:
+        return f"{ConsistencyCheckProtocol._REQUEST_PREFIX}{request_id}"
 
     @staticmethod
-    def result_key(request_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"{ConsistencyCheckProtocol._RESULT_PREFIX}{request_id}")
+    def result_key(request_id: str) -> str:
+        return f"{ConsistencyCheckProtocol._RESULT_PREFIX}{request_id}"
 
     # --- Pattern construction ---
 
     @staticmethod
-    def request_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, f"{ConsistencyCheckProtocol._REQUEST_PREFIX}*")
+    def request_pattern() -> str:
+        return f"{ConsistencyCheckProtocol._REQUEST_PREFIX}*"
 
     @staticmethod
-    def result_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, f"{ConsistencyCheckProtocol._RESULT_PREFIX}*")
+    def result_pattern() -> str:
+        return f"{ConsistencyCheckProtocol._RESULT_PREFIX}*"
 
     # --- Key parsing ---
 
     @staticmethod
-    def parse_request_key(key: str, namespace: str) -> str:
+    def parse_request_key(key: str) -> str:
         """Extract request_id from a request key."""
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         if not key.startswith(ConsistencyCheckProtocol._REQUEST_PREFIX):
             raise ValueError(f"Not a ConsistencyCheckProtocol request key: {key!r}")
         return key[len(ConsistencyCheckProtocol._REQUEST_PREFIX):]
 
     @staticmethod
-    def parse_result_key(key: str, namespace: str) -> str:
+    def parse_result_key(key: str) -> str:
         """Extract request_id from a result key."""
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         if not key.startswith(ConsistencyCheckProtocol._RESULT_PREFIX):
             raise ValueError(f"Not a ConsistencyCheckProtocol result key: {key!r}")
         return key[len(ConsistencyCheckProtocol._RESULT_PREFIX):]
@@ -699,32 +645,30 @@ class GroundingProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def request_key(request_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(grounding_request=request_id))
+    def request_key(request_id: str) -> str:
+        return ScopeUtils.format_key(grounding_request=request_id)
 
     @staticmethod
-    def result_key(request_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(grounding_result=request_id))
+    def result_key(request_id: str) -> str:
+        return ScopeUtils.format_key(grounding_result=request_id)
 
     @staticmethod
-    def request_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(grounding_request=None))
+    def request_pattern() -> str:
+        return ScopeUtils.pattern_key(grounding_request=None)
 
     @staticmethod
-    def result_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(grounding_result=None))
+    def result_pattern() -> str:
+        return ScopeUtils.pattern_key(grounding_result=None)
 
     @staticmethod
-    def parse_request_key(key: str, namespace: str) -> str:
+    def parse_request_key(key: str) -> str:
         """Extract request_id from a grounding request key."""
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("grounding_request", "")
 
     @staticmethod
-    def parse_result_key(key: str, namespace: str) -> str:
+    def parse_result_key(key: str) -> str:
         """Extract request_id from a grounding result key."""
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("grounding_result", "")
 
@@ -738,42 +682,41 @@ class GoalAlignmentProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
 
     @staticmethod
-    def request_key(request_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(goal_alignment_request=request_id))
+    def request_key(request_id: str) -> str:
+        return ScopeUtils.format_key(goal_alignment_request=request_id)
 
     @staticmethod
-    def joint_goal_key(goal_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(joint_goal_registration=goal_id))
+    def joint_goal_key(goal_id: str) -> str:
+        return ScopeUtils.format_key(joint_goal_registration=goal_id)
 
     @staticmethod
-    def request_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(goal_alignment_request=None))
+    def request_pattern() -> str:
+        return ScopeUtils.pattern_key(goal_alignment_request=None)
 
     @staticmethod
-    def joint_goal_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(joint_goal_registration=None))
+    def joint_goal_pattern() -> str:
+        return ScopeUtils.pattern_key(joint_goal_registration=None)
 
     @staticmethod
-    def parse_request_key(key: str, namespace: str) -> str:
+    def parse_request_key(key: str) -> str:
         """Extract request_id from a goal alignment request key."""
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("goal_alignment_request", "")
 
     @staticmethod
-    def result_key(request_id: str, namespace: str) -> str:
+    def result_key(request_id: str) -> str:
         """Key for a goal alignment result."""
-        return BlackboardProtocol._ns(namespace, f"goal_alignment_result:{request_id}")
+        return f"goal_alignment_result:{request_id}"
 
     @staticmethod
-    def result_pattern(namespace: str) -> str:
+    def result_pattern() -> str:
         """Pattern matching goal alignment results."""
-        return BlackboardProtocol._ns_pattern(namespace, "goal_alignment_result:*")
+        return "goal_alignment_result:*"
 
     @staticmethod
-    def joint_goal_state_key(goal_id: str, namespace: str) -> str:
+    def joint_goal_state_key(goal_id: str) -> str:
         """Key for a joint goal state entry."""
-        return BlackboardProtocol._ns(namespace, f"joint_goal:{goal_id}")
+        return f"joint_goal:{goal_id}"
 
 
 class PlanProtocol(BlackboardProtocol):
@@ -790,31 +733,30 @@ class PlanProtocol(BlackboardProtocol):
     _SUBSCRIPTION_PREFIX = "plan_subscription:"
 
     @staticmethod
-    def plan_key(agent_id: str, namespace: str) -> str:
+    def plan_key(agent_id: str) -> str:
         """Key for an agent's current plan."""
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(agent_id=agent_id))
+        return ScopeUtils.format_key(agent_id=agent_id)
 
     @staticmethod
-    def plan_pattern(namespace: str, agent_id: str | None = None) -> str:
+    def plan_pattern(agent_id: str | None = None) -> str:
         """Pattern matching plans (optionally for a specific agent)."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(agent_id=agent_id))
+        return ScopeUtils.pattern_key(agent_id=agent_id)
 
     @staticmethod
-    def approval_request_key(plan_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"{PlanProtocol._APPROVAL_PREFIX}{plan_id}")
+    def approval_request_key(plan_id: str) -> str:
+        return f"{PlanProtocol._APPROVAL_PREFIX}{plan_id}"
 
     @staticmethod
-    def notification_key(agent_id: str, timestamp: float, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"{PlanProtocol._NOTIFICATION_PREFIX}{agent_id}:{timestamp}")
+    def notification_key(agent_id: str, timestamp: float) -> str:
+        return f"{PlanProtocol._NOTIFICATION_PREFIX}{agent_id}:{timestamp}"
 
     @staticmethod
-    def subscription_key(plan_id: str, subscriber_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"{PlanProtocol._SUBSCRIPTION_PREFIX}{plan_id}:{subscriber_id}")
+    def subscription_key(plan_id: str, subscriber_id: str) -> str:
+        return f"{PlanProtocol._SUBSCRIPTION_PREFIX}{plan_id}:{subscriber_id}"
 
     @staticmethod
-    def parse_plan_key(key: str, namespace: str) -> str:
+    def parse_plan_key(key: str) -> str:
         """Extract agent_id from a plan key."""
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("agent_id", "")
 
@@ -831,17 +773,16 @@ class ErrorSignalProtocol(BlackboardProtocol):
     _PREFIX = "error:"
 
     @staticmethod
-    def error_key(error_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"{ErrorSignalProtocol._PREFIX}{error_id}")
+    def error_key(error_id: str) -> str:
+        return f"{ErrorSignalProtocol._PREFIX}{error_id}"
 
     @staticmethod
-    def error_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, f"{ErrorSignalProtocol._PREFIX}*")
+    def error_pattern() -> str:
+        return f"{ErrorSignalProtocol._PREFIX}*"
 
     @staticmethod
-    def parse_error_key(key: str, namespace: str) -> str:
+    def parse_error_key(key: str) -> str:
         """Extract error_id from an error key."""
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         if not key.startswith(ErrorSignalProtocol._PREFIX):
             raise ValueError(f"Not an ErrorSignalProtocol key: {key!r}")
         return key[len(ErrorSignalProtocol._PREFIX):]
@@ -857,16 +798,19 @@ class DependencyQueryProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
 
     @staticmethod
-    def query_key(agent_id: str, query_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(agent_id=agent_id, dependency_query=query_id))
+    def query_key(agent_id: str, query_id: str) -> str:
+        return ScopeUtils.format_key(agent_id=agent_id, dependency_query=query_id)
 
     @staticmethod
-    def query_pattern(namespace: str, agent_id: str | None = None) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(agent_id=agent_id, dependency_query=None))
+    def query_pattern(agent_id: str | None = None) -> str:
+        return ScopeUtils.pattern_key(agent_id=agent_id, dependency_query=None)
 
     @staticmethod
-    def parse_query_key(key: str, namespace: str) -> dict[str, str]:
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
+    def result_key(agent_id: str, query_id: str) -> str:
+        return ScopeUtils.format_key(agent_id=agent_id, dependency_result=query_id)
+
+    @staticmethod
+    def parse_query_key(key: str) -> dict[str, str]:
         return ScopeUtils.parse_key("", key)
 
 
@@ -880,45 +824,44 @@ class ReputationProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
 
     @staticmethod
-    def update_request_key(requesting_agent_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(reputation="update", requesting_agent_id=requesting_agent_id))
+    def update_request_key(requesting_agent_id: str) -> str:
+        return ScopeUtils.format_key(reputation="update", requesting_agent_id=requesting_agent_id)
 
     @staticmethod
-    def result_key(namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(reputation="result"))
+    def result_key() -> str:
+        return ScopeUtils.format_key(reputation="result")
 
     @staticmethod
-    def update_request_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(reputation="update", requesting_agent_id=None))
+    def update_request_pattern() -> str:
+        return ScopeUtils.pattern_key(reputation="update", requesting_agent_id=None)
 
     @staticmethod
-    def state_pattern(namespace: str) -> str:
+    def state_pattern() -> str:
         """Pattern for game state changes that trigger reputation updates."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(state=None))
+        return ScopeUtils.pattern_key(state=None)
 
     @staticmethod
-    def task_outcome_pattern(namespace: str) -> str:
+    def task_outcome_pattern() -> str:
         """Pattern for task outcomes that affect reputation."""
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(task_outcome=None))
+        return ScopeUtils.pattern_key(task_outcome=None)
 
     @staticmethod
-    def all_input_patterns(namespace: str) -> list[str]:
+    def all_input_patterns() -> list[str]:
         """All patterns this protocol monitors."""
         return [
-            ReputationProtocol.update_request_pattern(namespace=namespace),
-            ReputationProtocol.state_pattern(namespace=namespace),
-            ReputationProtocol.task_outcome_pattern(namespace=namespace),
+            ReputationProtocol.update_request_pattern(),
+            ReputationProtocol.state_pattern(),
+            ReputationProtocol.task_outcome_pattern(),
         ]
 
     @staticmethod
-    def parse_update_request_key(key: str, namespace: str) -> dict[str, str]:
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
+    def parse_update_request_key(key: str) -> dict[str, str]:
         return ScopeUtils.parse_key("", key)
 
     @staticmethod
-    def agent_reputation_key(agent_id: str, namespace: str) -> str:
+    def agent_reputation_key(agent_id: str) -> str:
         """Key for a specific agent's reputation record."""
-        return BlackboardProtocol._ns(namespace, f"agent:{agent_id}")
+        return f"agent:{agent_id}"
 
 
 class ConsciousnessProtocol(BlackboardProtocol):
@@ -931,17 +874,16 @@ class ConsciousnessProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def state_key(state_type: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(consciousness=state_type))
+    def state_key(state_type: str) -> str:
+        return ScopeUtils.format_key(consciousness=state_type)
 
     @staticmethod
-    def state_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(consciousness=None))
+    def state_pattern() -> str:
+        return ScopeUtils.pattern_key(consciousness=None)
 
     @staticmethod
-    def parse_state_key(key: str, namespace: str) -> str:
+    def parse_state_key(key: str) -> str:
         """Extract state_type from a consciousness key."""
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("consciousness", "")
 
@@ -955,31 +897,30 @@ class ReflectionProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def request_key(request_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(reflection_request=request_id))
+    def request_key(request_id: str) -> str:
+        return ScopeUtils.format_key(reflection_request=request_id)
 
     @staticmethod
-    def result_key(request_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(reflection_result=request_id))
+    def result_key(request_id: str) -> str:
+        return ScopeUtils.format_key(reflection_result=request_id)
 
     @staticmethod
-    def request_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(reflection_request=None))
+    def request_pattern() -> str:
+        return ScopeUtils.pattern_key(reflection_request=None)
 
     @staticmethod
-    def result_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(reflection_result=None))
+    def result_pattern() -> str:
+        return ScopeUtils.pattern_key(reflection_result=None)
 
     @staticmethod
-    def parse_request_key(key: str, namespace: str) -> str:
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
+    def parse_request_key(key: str) -> str:
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("reflection_request", "")
 
     @staticmethod
-    def response_key(request_id: str, namespace: str) -> str:
+    def response_key(request_id: str) -> str:
         """Key for a reflection response."""
-        return BlackboardProtocol._ns(namespace, f"reflection_response:{request_id}")
+        return f"reflection_response:{request_id}"
 
 
 class AnalysisResultProtocol(BlackboardProtocol):
@@ -992,16 +933,15 @@ class AnalysisResultProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def result_key(result_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(analysis_result=result_id))
+    def result_key(result_id: str) -> str:
+        return ScopeUtils.format_key(analysis_result=result_id)
 
     @staticmethod
-    def result_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(analysis_result=None))
+    def result_pattern() -> str:
+        return ScopeUtils.pattern_key(analysis_result=None)
 
     @staticmethod
-    def parse_result_key(key: str, namespace: str) -> str:
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
+    def parse_result_key(key: str) -> str:
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("analysis_result", "")
 
@@ -1015,16 +955,15 @@ class ExplorationProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def request_key(request_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(exploration_request=request_id))
+    def request_key(request_id: str) -> str:
+        return ScopeUtils.format_key(exploration_request=request_id)
 
     @staticmethod
-    def request_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(exploration_request=None))
+    def request_pattern() -> str:
+        return ScopeUtils.pattern_key(exploration_request=None)
 
     @staticmethod
-    def parse_request_key(key: str, namespace: str) -> str:
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
+    def parse_request_key(key: str) -> str:
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("exploration_request", "")
 
@@ -1038,16 +977,15 @@ class IncrementalQueryProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def request_key(request_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(incremental_query_request=request_id))
+    def request_key(request_id: str) -> str:
+        return ScopeUtils.format_key(incremental_query_request=request_id)
 
     @staticmethod
-    def request_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(incremental_query_request=None))
+    def request_pattern() -> str:
+        return ScopeUtils.pattern_key(incremental_query_request=None)
 
     @staticmethod
-    def parse_request_key(key: str, namespace: str) -> str:
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
+    def parse_request_key(key: str) -> str:
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("incremental_query_request", "")
 
@@ -1061,16 +999,15 @@ class MultiHopSearchProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def request_key(request_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, ScopeUtils.format_key(multi_hop_search_request=request_id))
+    def request_key(request_id: str) -> str:
+        return ScopeUtils.format_key(multi_hop_search_request=request_id)
 
     @staticmethod
-    def request_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, ScopeUtils.pattern_key(multi_hop_search_request=None))
+    def request_pattern() -> str:
+        return ScopeUtils.pattern_key(multi_hop_search_request=None)
 
     @staticmethod
-    def parse_request_key(key: str, namespace: str) -> str:
-        key = key[len(namespace) + 1:]  # Strip "{namespace}:" prefix
+    def parse_request_key(key: str) -> str:
         parsed = ScopeUtils.parse_key("", key)
         return parsed.get("multi_hop_search_request", "")
 
@@ -1085,16 +1022,16 @@ class EpistemicProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
 
     @staticmethod
-    def proposition_key(proposition_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"proposition:{proposition_id}")
+    def proposition_key(proposition_id: str) -> str:
+        return f"proposition:{proposition_id}"
 
     @staticmethod
-    def intention_key(intention_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"intention:{intention_id}")
+    def intention_key(intention_id: str) -> str:
+        return f"intention:{intention_id}"
 
     @staticmethod
-    def joint_intention_key(intention_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"joint_intention:{intention_id}")
+    def joint_intention_key(intention_id: str) -> str:
+        return f"joint_intention:{intention_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -1107,12 +1044,12 @@ class MemoryRecordProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def record_key(record_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"memory_record:{record_id}")
+    def record_key(record_id: str) -> str:
+        return f"memory_record:{record_id}"
 
     @staticmethod
-    def consolidated_key(timestamp: int, count: int, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"consolidated:{timestamp}:{count}")
+    def consolidated_key(timestamp: int, count: int) -> str:
+        return f"consolidated:{timestamp}:{count}"
 
 
 class KeyRegistryProtocol(BlackboardProtocol):
@@ -1121,12 +1058,12 @@ class KeyRegistryProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def page_key(page_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"page_id:{page_id}")
+    def page_key(page_id: str) -> str:
+        return f"page_id:{page_id}"
 
     @staticmethod
-    def cluster_key(cluster_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"cluster_id:{cluster_id}")
+    def cluster_key(cluster_id: str) -> str:
+        return f"cluster_id:{cluster_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -1139,20 +1076,20 @@ class VCMAnalysisProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
 
     @staticmethod
-    def result_key(page_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"vcm_result:{page_id}")
+    def result_key(page_id: str) -> str:
+        return f"vcm_result:{page_id}"
 
     @staticmethod
-    def revisit_queue_key(namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, "vcm_revisit_queue")
+    def revisit_queue_key() -> str:
+        return "vcm_revisit_queue"
 
     @staticmethod
-    def outstanding_queries_key(namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, "vcm_outstanding_queries")
+    def outstanding_queries_key() -> str:
+        return "vcm_outstanding_queries"
 
     @staticmethod
-    def state_key(namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, "vcm_state")
+    def state_key() -> str:
+        return "vcm_state"
 
 
 class ResultStorageProtocol(BlackboardProtocol):
@@ -1161,12 +1098,12 @@ class ResultStorageProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
 
     @staticmethod
-    def partial_key(result_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"results:partial:{result_id}")
+    def partial_key(result_id: str) -> str:
+        return f"results:partial:{result_id}"
 
     @staticmethod
-    def index_key(namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, "results:index")
+    def index_key() -> str:
+        return "results:index"
 
 
 # ---------------------------------------------------------------------------
@@ -1179,12 +1116,12 @@ class RelationshipProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def relationship_key(source: str, target: str, rel_type: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"relationship:{source}:{target}:{rel_type}")
+    def relationship_key(source: str, target: str, rel_type: str) -> str:
+        return f"relationship:{source}:{target}:{rel_type}"
 
     @staticmethod
-    def relationship_pattern(namespace: str) -> str:
-        return BlackboardProtocol._ns_pattern(namespace, "relationship:*")
+    def relationship_pattern() -> str:
+        return "relationship:*"
 
 
 # ---------------------------------------------------------------------------
@@ -1197,8 +1134,12 @@ class PlanLearningProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def execution_key(plan_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"execution:{plan_id}")
+    def execution_key(plan_id: str) -> str:
+        return f"execution:{plan_id}"
+
+    @staticmethod
+    def execution_pattern() -> str:
+        return "execution:*"
 
 
 class ActionPolicyProtocol(BlackboardProtocol):
@@ -1207,12 +1148,12 @@ class ActionPolicyProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def iteration_key(namespace_prefix: str, iteration_count: int, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"{namespace_prefix}:action_policy_iteration:{iteration_count}")
+    def iteration_key(namespace_prefix: str, iteration_count: int) -> str:
+        return f"{namespace_prefix}:action_policy_iteration:{iteration_count}"
 
     @staticmethod
-    def repl_key(agent_id: str, var_name: str, timestamp_ns: int, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"repl:{agent_id}:{var_name}:{timestamp_ns}")
+    def repl_key(agent_id: str, var_name: str, timestamp_ns: int) -> str:
+        return f"repl:{agent_id}:{var_name}:{timestamp_ns}"
 
 
 # ---------------------------------------------------------------------------
@@ -1225,20 +1166,20 @@ class BasicAnalysisProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def page_summary_key(page_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"page_summary:{page_id}")
+    def page_summary_key(page_id: str) -> str:
+        return f"page_summary:{page_id}"
 
     @staticmethod
-    def cluster_analysis_complete_key(agent_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"cluster_analysis_complete:{agent_id}")
+    def cluster_analysis_complete_key(agent_id: str) -> str:
+        return f"cluster_analysis_complete:{agent_id}"
 
     @staticmethod
-    def critique_key(agent_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"critique:{agent_id}")
+    def critique_key(agent_id: str) -> str:
+        return f"critique:{agent_id}"
 
     @staticmethod
-    def revision_request_key(agent_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"revision_request:{agent_id}")
+    def revision_request_key(agent_id: str) -> str:
+        return f"revision_request:{agent_id}"
 
 
 class ImpactAnalysisProtocol(BlackboardProtocol):
@@ -1247,16 +1188,16 @@ class ImpactAnalysisProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def impact_key(page_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"impact:{page_id}")
+    def impact_key(page_id: str) -> str:
+        return f"impact:{page_id}"
 
     @staticmethod
-    def test_coverage_key(page_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"test_coverage:{page_id}")
+    def test_coverage_key(page_id: str) -> str:
+        return f"test_coverage:{page_id}"
 
     @staticmethod
-    def dependency_graph_key(dep_key: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"dependency_graph:{dep_key}")
+    def dependency_graph_key(dep_key: str) -> str:
+        return f"dependency_graph:{dep_key}"
 
 
 class IntentAnalysisProtocol(BlackboardProtocol):
@@ -1265,12 +1206,12 @@ class IntentAnalysisProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def intent_hierarchy_key(category: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"intent_hierarchy:{category}")
+    def intent_hierarchy_key(category: str) -> str:
+        return f"intent_hierarchy:{category}"
 
     @staticmethod
-    def intent_misalignments_key(namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, "intent_misalignments")
+    def intent_misalignments_key() -> str:
+        return "intent_misalignments"
 
 
 class HypothesisTrackingProtocol(BlackboardProtocol):
@@ -1279,14 +1220,14 @@ class HypothesisTrackingProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def hypotheses_key(namespace: str) -> str:
+    def hypotheses_key() -> str:
         """Key for the bulk tracked hypotheses dict."""
-        return BlackboardProtocol._ns(namespace, "tracked_hypotheses")
+        return "tracked_hypotheses"
 
     @staticmethod
-    def games_key(namespace: str) -> str:
+    def games_key() -> str:
         """Key for the hypothesis-to-game mappings dict."""
-        return BlackboardProtocol._ns(namespace, "hypothesis_games")
+        return "hypothesis_games"
 
 
 class ComplianceAnalysisProtocol(BlackboardProtocol):
@@ -1295,8 +1236,8 @@ class ComplianceAnalysisProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def obligation_key(obligation_id: str, namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, f"obligation:{obligation_id}")
+    def obligation_key(obligation_id: str) -> str:
+        return f"obligation:{obligation_id}"
 
 
 class SlicingAnalysisProtocol(BlackboardProtocol):
@@ -1305,5 +1246,5 @@ class SlicingAnalysisProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def interprocedural_resolutions_key(namespace: str) -> str:
-        return BlackboardProtocol._ns(namespace, "interprocedural_resolutions")
+    def interprocedural_resolutions_key() -> str:
+        return "interprocedural_resolutions"

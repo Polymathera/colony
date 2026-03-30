@@ -82,11 +82,16 @@ class AdaptiveQueryGenerator(AgentCapability):
     - Generating next queries based on history
     """
 
-    input_patterns = [AnalysisResultProtocol.result_pattern(namespace="adaptive_query")]
-
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "adaptive_query",
+        input_patterns: list[str] = [AnalysisResultProtocol.result_pattern()],
+        capability_key: str = "adaptive_query_generator",
+    ):
         """Initialize strategy."""
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.query_history: list[dict[str, Any]] = []
         self.successful_patterns: list[dict[str, Any]] = []
         self.failed_patterns: list[dict[str, Any]] = []

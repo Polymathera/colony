@@ -86,14 +86,16 @@ class QueryDrivenExplorationCapability(AgentCapability):
     The planner decides when to call each and when to stop.
     """
 
-    input_patterns = [ExplorationProtocol.request_pattern(namespace="exploration")]
 
     def __init__(
         self,
         agent: Agent,
         query_generator: QueryGenerator,  # Generates queries from findings
         query_router: PageQueryRoutingPolicy,     # Routes queries to contexts
-        scope: BlackboardScope = BlackboardScope.COLONY
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "query_driven_exploration",
+        input_patterns: list[str] = [ExplorationProtocol.request_pattern()],
+        capability_key: str = "query_driven_exploration",
     ):
         """Initialize explorer.
 
@@ -101,8 +103,11 @@ class QueryDrivenExplorationCapability(AgentCapability):
             agent: Agent using this capability
             query_generator: Component that generates queries from findings
             query_router: Component that routes queries to relevant contexts
+            scope: Scope for the capability
+            namespace: Namespace for the capability within the scope (default "query_driven_exploration")
+            input_patterns: List of input patterns for the capability
         """
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.query_generator = query_generator
         self.query_router = query_router
         self._all_findings: list[Any] = []

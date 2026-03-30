@@ -56,8 +56,14 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
     """Capability providing cluster analysis action executors.
     """
 
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY, *, blackboard = None):
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent), blackboard=blackboard)
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "cluster_analyzer_v2",
+        capability_key: str = "cluster_analyzer_v2_capability",
+    ):
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)  # TODO: Replace some of the actions below with event handlers and input patterns BasicAnalysisProtocol
         self.blackboard_scope = scope
         self.key_registry: GlobalPageKeyRegistry | None = None
         self.key_generator: HybridKeyGenerator | None = None
@@ -509,7 +515,7 @@ Output format (JSON):
                     scope_id=ScopeUtils.get_agent_level_scope(parent_id)
                 )
                 await parent_blackboard.write(
-                    BasicAnalysisProtocol.cluster_analysis_complete_key(self.agent.agent_id, namespace="basic"),
+                    BasicAnalysisProtocol.cluster_analysis_complete_key(self.agent.agent_id),
                     {
                         "summary": summary,
                         "cluster_id": self.cluster.cluster_id,

@@ -270,7 +270,7 @@ class BaseAnalyzer(ABC):
             self.results_cache = LocalResultsCache()
         else:
             self.results_cache = await get_polymathera().create_distributed_simple_cache(
-                namespace=f"llms:sharding:analyzers:{self.analyzer_type}",  # TODO: Does this need to be VMR-specific?
+                namespace=f"llms:sharding:analyzers:{self.analyzer_type}",
                 config=self.config.results_cache_config,
             )
 

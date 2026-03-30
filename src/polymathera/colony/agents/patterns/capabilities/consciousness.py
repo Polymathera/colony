@@ -114,20 +114,25 @@ class ConsciousnessCapability(AgentCapability):
         ```
     """
 
-    input_patterns = [ConsciousnessProtocol.state_pattern(namespace="consciousness")]
 
     def __init__(
         self,
         agent: "Agent | None" = None,
         scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "consciousness",
+        input_patterns: list[str] = [ConsciousnessProtocol.state_pattern()],
+        capability_key: str = "consciousness",
     ):
         """Initialize consciousness capability.
 
         Args:
             agent: Owning agent (None for detached mode)
             scope: Blackboard scope (defaults to COLONY)
+            namespace: Namespace for the capability within the scope (default "consciousness")
+            input_patterns: List of input patterns for the capability
+            capability_key: Unique key for the capability (default "consciousness")
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
 
         # Cached self-concept (loaded lazily)
         self._self_concept: AgentSelfConcept | None = None
@@ -377,7 +382,7 @@ class ConsciousnessCapability(AgentCapability):
 
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=ConsciousnessProtocol.state_key(f"metrics:{int(time.time() * 1000)}", namespace="consciousness"),
+            key=ConsciousnessProtocol.state_key(f"metrics:{int(time.time() * 1000)}"),
             value=metrics_entry,
             created_by=self.scope_id,
             tags={"consciousness", "metrics"},
@@ -441,7 +446,7 @@ class ConsciousnessCapability(AgentCapability):
         # Write update event to blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=ConsciousnessProtocol.state_key(f"self_concept_update:{int(time.time() * 1000)}", namespace="consciousness"),
+            key=ConsciousnessProtocol.state_key(f"self_concept_update:{int(time.time() * 1000)}"),
             value={"updated_fields": list(updates.keys()), "timestamp": time.time()},
             created_by=self.scope_id,
             tags={"consciousness", "self_concept"},

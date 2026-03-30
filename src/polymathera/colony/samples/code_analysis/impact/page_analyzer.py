@@ -119,6 +119,7 @@ class ChangeImpactAnalysisPolicy:
         self,
         agent: Agent,
         blackboard: EnhancedBlackboard,
+        namespace: str = "impact_analysis",
         max_depth: int = 5,
         include_tests: bool = True,
         include_docs: bool = True
@@ -128,12 +129,14 @@ class ChangeImpactAnalysisPolicy:
         Args:
             agent: Agent instance for LLM inference via VCM
             blackboard: Blackboard for storing results
+            namespace: Namespace for scoping keys in the blackboard
             max_depth: Maximum depth for impact propagation
             include_tests: Whether to analyze test impact
             include_docs: Whether to analyze documentation impact
         """
         self.agent = agent
         self.blackboard = blackboard
+        self.namespace = namespace
         self.max_depth = max_depth
         self.include_tests = include_tests
         self.include_docs = include_docs
@@ -141,7 +144,7 @@ class ChangeImpactAnalysisPolicy:
         # Initialize causality timeline for temporal analysis
         self.timeline = CausalityTimeline(
             blackboard=blackboard,
-            namespace="impact_analysis"
+            namespace=namespace
         )
 
     # NOTE: Multi-page analysis is handled by ChangeImpactAnalysisCoordinator
@@ -674,10 +677,16 @@ class ChangeImpactAnalysisCapability(AgentCapability):
     Also uses FeedbackLoopPredictor for cache-aware prefetching.
     """
 
-    input_patterns = [DependencyQueryProtocol.query_pattern(namespace="impact")]
 
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.AGENT):
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:change_impact_analysis:{agent.agent_id}")
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "change_impact_analysis",
+        input_patterns: list[str] = [DependencyQueryProtocol.query_pattern()],
+        capability_key: str = "change_impact_analysis_capability"
+    ):
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
 
         # Analysis state
         self.page_id: str | None = None
@@ -768,7 +777,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         # Store in blackboard
         if self.blackboard:
             await self.blackboard.write(
-                key=ImpactAnalysisProtocol.impact_key(self.page_id, namespace="impact"),
+                key=ImpactAnalysisProtocol.impact_key(self.page_id),
                 value=result.model_dump(),
                 tags={"impact", self.agent.agent_id}
             )
@@ -962,7 +971,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         try:
             # Query blackboard for test coverage results
             coverage_data = await self.blackboard.read(
-                key=ImpactAnalysisProtocol.test_coverage_key(self.page_id, namespace="impact"),
+                key=ImpactAnalysisProtocol.test_coverage_key(self.page_id),
                 agent_id=self.agent.agent_id
             )
             return coverage_data
@@ -974,16 +983,17 @@ class ChangeImpactAnalysisCapability(AgentCapability):
     # EVENT HANDLERS
     # ============================================================================
 
-    @event_handler(pattern=DependencyQueryProtocol.query_pattern(namespace="impact"))
+    @event_handler(pattern=DependencyQueryProtocol.query_pattern())
     async def on_dependency_query(
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:
         """Handle dependency query from another agent."""
+        # TODO: Turn event.value into a structured query object with validation
         query_component = event.value.get("component_id")
         from_agent = event.value.get("from_agent_id")
 
         impact_data = await self.blackboard.read(
-            key=f"impact:{self.page_id}",  # TODO: Add ImpactAnalysisResult.get_key(page_id, tenant_id) method?
+            key=ImpactAnalysisProtocol.impact_key(self.page_id),
             agent_id=self.agent.agent_id
         )
 
@@ -994,9 +1004,14 @@ class ChangeImpactAnalysisCapability(AgentCapability):
                     dependencies.append(component)
 
             if from_agent:
-                await self.agent.send_message(  # TODO: What the fuck is this? This is not how we respond to requests
-                    target_agent_id=from_agent,
-                    message={
+                # Parse query_id from the event key (colony-scoped protocol)
+                parsed = DependencyQueryProtocol.parse_query_key(event.key)
+                query_id = parsed.get("dependency_query", "")
+
+                colony_blackboard = await self.agent.get_colony_level_blackboard()
+                await colony_blackboard.write(
+                    key=DependencyQueryProtocol.result_key(from_agent, query_id),
+                    value={
                         "type": "dependency_response",
                         "query_component": query_component,
                         "dependencies": dependencies

@@ -220,27 +220,28 @@ class Agent:
 ```python
 handle = AgentHandle(child_agent_id="agent-xyz", owner=parent_agent)
 
-# namespace identifies which capability should handle the request
+# namespace scopes the blackboard partition (baked into scope_id)
 # protocol defines the key format (defaults to AgentRunProtocol)
 run = await handle.run(
     {"query": "analyze this code"},
-    protocol=AgentRunProtocol,  # default
-    namespace="compliance",
+    protocol=AgentRunProtocol,  # default — defines key format
+    namespace="compliance",     # scopes the blackboard partition
     timeout=60,
 )
 print(run.output_data)
 ```
 
-The `protocol` parameter (default `AgentRunProtocol`) defines the key format for request/result exchange on the child's blackboard. The `namespace` parameter is **required** — it identifies which capability on the child agent should handle the request. This prevents interference when an agent has multiple capabilities using the same protocol.
+The `namespace` parameter is **required** — it identifies which capability on the child agent should handle the request. This prevents interference when an agent has multiple capabilities using the same protocol. The namespace is appended to the `scope_id`, giving each capability its own blackboard partition (e.g., `...colony:C:namespace:compliance`).
 
-The `protocol` parameter (default `AgentRunProtocol`) defines the key format:
+The `protocol` parameter (default `AgentRunProtocol`) defines the key format for request/result exchange within that partition:
 
-- Parent writes: `AgentRunProtocol.request_key(request_id, namespace="compliance")` → `compliance:request:run:compliance:{request_id}`
-- Parent listens for: `AgentRunProtocol.result_key(request_id, namespace="compliance")`
-- Child detects requests via `@event_handler(pattern=AgentRunProtocol.request_pattern(namespace="compliance"))`
-- Child writes result using `AgentRunProtocol.result_key(request_id, namespace="compliance")`
+- Parent writes to scope `...colony:C:namespace:compliance` with key `request:run:{request_id}`
+- Child's `ComplianceCapability` has the same scope (set in its `__init__` via the same namespace)
+- Child detects requests via `@event_handler(pattern=AgentRunProtocol.request_pattern())`
+- Child writes result with key `result:run:{request_id}` on the same scope
+- Parent listens for `result:run:{request_id}` on the same scope
 
-The blackboard scope is determined by the protocol's `scope` attribute — agent-scoped protocols write to the child's agent-level blackboard, colony-scoped protocols write to the shared colony blackboard.
+The blackboard `scope` parameter (default `BlackboardScope.AGENT`) determines the scope level. `AGENT`-scoped protocols write to the child's agent-level blackboard. `COLONY`-scoped capabilities pass `scope=BlackboardScope.COLONY` to write to the shared colony blackboard.
 
 See [Blackboard Protocols](blackboard.md#communication-protocols) for the full protocol design.
 
@@ -258,7 +259,7 @@ async for event in handle.run_streamed(
         break
 ```
 
-Uses `AgentRunProtocol.event_pattern(request_id, namespace="compliance")` to subscribe to incremental events. The child emits events via `AgentRunProtocol.event_key(request_id, event_name, namespace="compliance")`.
+Uses `AgentRunProtocol.event_pattern(request_id)` to subscribe to incremental events on the namespace-scoped blackboard. The child emits events via `AgentRunProtocol.event_key(request_id, event_name)`.
 
 ### Custom Protocols
 
@@ -266,9 +267,15 @@ For specialized communication patterns, pass a different protocol:
 
 ```python
 from polymathera.colony.agents.blackboard.protocol import WorkAssignmentProtocol
+from polymathera.colony.agents.scopes import BlackboardScope
 
-# Use a colony-scoped protocol instead of agent-scoped
-run = await handle.run(work_unit, protocol=WorkAssignmentProtocol)
+# Use a colony-scoped protocol for coordinator→worker communication
+run = await handle.run(
+    work_unit,
+    protocol=WorkAssignmentProtocol,
+    scope=BlackboardScope.COLONY,
+    namespace="pool",
+)
 ```
 
 ## Suspension and Resumption

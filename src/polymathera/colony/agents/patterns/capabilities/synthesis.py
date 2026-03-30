@@ -260,11 +260,11 @@ class SynthesisCapability(AgentCapability):
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.AGENT,
-        namespace: str = "synthesis_final"
+        namespace: str = "synthesis_final",
+        capability_key: str = "synthesis"
     ):
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)
         # Internal state only - no capability references stored
-        self.namespace = namespace
         self.partial_results: dict[str, ScopeAwareResult] = {}
         self.synthesis_history: list[SynthesisUpdate] = []
 

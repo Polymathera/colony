@@ -2024,7 +2024,7 @@ class VirtualContextManager:
 
         for deployment_name in deployment_names:
             try:
-                event_namespace = f"vllm_events:{deployment_name}"
+                event_namespace = f"vllm_events:{deployment_name}"  # TODO: Does this need to be nested within colony/app namespace for multi-colony support?
 
                 # Create RedisOM for this deployment's event channel
                 redis_om = RedisOM(

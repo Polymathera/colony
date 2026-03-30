@@ -57,8 +57,15 @@ class PageAnalyzerCapability(AgentCapability):
     3. Stop
     """
 
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.AGENT):
-        super().__init__(agent, scope_id=f"{get_scope_prefix(scope, agent)}:page_analyzer:{agent.agent_id}")
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "page_analysis",
+        capability_key: str = "page_analyzer_capability",
+
+    ):
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace, page_analyzer=agent.agent_id), input_patterns=None, capability_key=capability_key)  # TODO: Replace some of the actions below with event handlers and input patterns BasicAnalysisProtocol
 
     def get_action_group_description(self) -> str:
         return (
@@ -225,12 +232,12 @@ Be concise. Focus on facts, not speculation."""
 
         # Get shared blackboard with parent
         blackboard = await self.agent.get_blackboard(
-            scope_id=ScopeUtils.get_agent_level_scope(parent_id)
+            scope_id=ScopeUtils.get_agent_level_scope(parent_id)  # TODO: Should we specify the parent scope ID as a parameter?
         )
 
         # Write page summary to blackboard
         await blackboard.write(
-            BasicAnalysisProtocol.page_summary_key(self.page_id, namespace="basic"),
+            BasicAnalysisProtocol.page_summary_key(self.page_id),
             self.summary
         )
 

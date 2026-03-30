@@ -263,8 +263,6 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
         ```
     """
 
-    input_patterns = [GameStateProtocol.state_pattern(namespace="hypothesis")]
-
     # Define role-based permissions for hypothesis game
     role_permissions = RolePermissions({
         # Proposer: can propose in PROPOSE phase, defend/revise in DEFEND phase
@@ -308,6 +306,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
         formation_strategy: HypothesisFormationStrategy | None = None,
         evidence_strategy: EvidenceGatheringStrategy | None = None,
         evaluation_strategy: HypothesisEvaluationStrategy | None = None,
+        capability_key: str = "hypothesis_game_protocol"
     ):
         """Initialize hypothesis game protocol.
 
@@ -332,6 +331,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
             use_llm_reasoning=use_llm_reasoning,
             llm_temperature=llm_temperature,
             llm_max_tokens=llm_max_tokens,
+            capability_key=capability_key
         )
 
         # Hypothesis-specific tracking
@@ -341,6 +341,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
         # Pluggable strategies (can be set/changed dynamically)
         self._formation_strategy = formation_strategy
         self._evidence_strategy = evidence_strategy
+        self._evaluation_strategy = evaluation_strategy
 
     def get_action_group_description(self) -> str:
         return (
@@ -351,7 +352,6 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
             "Multi-hypothesis support: processes hypotheses sequentially. "
             "Pluggable strategies for formation, evidence gathering, and evaluation."
         )
-        self._evaluation_strategy = evaluation_strategy
 
     # =========================================================================
     # Strategy Accessors (dynamic selection supported)
@@ -869,7 +869,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
     # Event Handler Overrides
     # =========================================================================
 
-    @event_handler(pattern=GameStateProtocol.state_pattern(namespace="hypothesis")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=GameStateProtocol.state_pattern()) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def _get_additional_context(
         self,
         event: BlackboardEvent,

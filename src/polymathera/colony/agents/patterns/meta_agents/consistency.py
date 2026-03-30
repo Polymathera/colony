@@ -47,6 +47,7 @@ from ...base import (
 )
 from ..capabilities.validation import ValidationCapability
 from ..capabilities.consistency import ConsistencyCapability, ConsistencyCheck
+from ..games.epistemic import EpistemicCapability
 from ..scope import ScopeAwareResult
 
 
@@ -65,13 +66,13 @@ class ConsistencyAgent(Agent):
 
     Uses:
     - ContradictionResolver for detection
-    - EpistemicLayer for belief tracking
+    - EpistemicCapability for belief tracking
     - Blackboard events for monitoring
     """
 
     def __init__(self, *args, **kwargs):
         capability_blueprints: list = kwargs.pop("capability_blueprints", [])
-        for cap in [ConsistencyCapability, ValidationCapability]:
+        for cap in [ConsistencyCapability, ValidationCapability, EpistemicCapability]:
             bp = cap.bind()
             if not any(b.key == bp.key for b in capability_blueprints):
                 capability_blueprints.append(bp)
@@ -131,7 +132,7 @@ async def spawn_consistency_agent(
         blueprints=[ConsistencyAgent.bind(
             agent_id=agent_id,
             bound_pages=[],  # Consistency agent doesn't need pages
-            capability_blueprints=[ConsistencyCapability.bind(), ValidationCapability.bind()],
+            capability_blueprints=[ConsistencyCapability.bind(), ValidationCapability.bind(), EpistemicCapability.bind()],
             metadata=metadata,
         )],
         soft_affinity=True,

@@ -179,16 +179,15 @@ class TokenManager:
 
         # Use DistributedSimpleCache with "tokens" type for persistence
         # Separate caches for tokens and counts
-        syscontext = serving.require_execution_context()
         self.token_cache = (
             await get_polymathera().create_distributed_simple_cache(
-                namespace=f"{syscontext.tenant_id}:{syscontext.colony_id}:tokens",
+                namespace="tokens",
                 config=self.config.token_cache_config,
             )
         )
         self.count_cache = (
             await get_polymathera().create_distributed_simple_cache(
-                namespace=f"{syscontext.tenant_id}:{syscontext.colony_id}:token_counts",
+                namespace="token_counts",
                 config=self.config.count_cache_config,
             )
         )

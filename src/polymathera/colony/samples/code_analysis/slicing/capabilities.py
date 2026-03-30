@@ -85,24 +85,28 @@ class ProgramSlicingCapability(AgentCapability):
     - trace_dependencies: Trace dependencies for a variable
     """
 
-    input_patterns = [AgentRunProtocol.request_pattern(namespace="slicing")]
-
     def __init__(
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "program_slicing",
+        input_patterns: list[str] = [AgentRunProtocol.request_pattern()],
         interprocedural: bool = True,
         max_depth: int = 5,
+        capability_key: str = "program_slicing_capability"
     ):
         """Initialize slicing capability.
 
         Args:
             agent: Agent using this capability
             scope: Blackboard scope for this capability (default: AGENT)
+            namespace: Namespace for event patterns (default: "program_slicing")
+            input_patterns: List of event patterns to subscribe to
             interprocedural: Whether to follow function calls
             max_depth: Maximum call depth for interprocedural
+            capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:program_slicing:{agent.agent_id}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.interprocedural = interprocedural
         self.max_depth = max_depth
 
@@ -131,7 +135,7 @@ class ProgramSlicingCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for ProgramSlicingCapability")
         pass
 
-    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="slicing"))
+    @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -225,7 +229,7 @@ class ProgramSlicingCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id, namespace="slicing"),
+                key=AgentRunProtocol.result_key(request_id),
                 value=result.model_dump(),
                 agent_id=self.agent.agent_id,
             )
@@ -529,14 +533,18 @@ class SlicingAnalysisCapability(VCMAnalysisCapability):
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "slicing_analysis",
+        capability_key: str = "slicing_analysis_capability"
     ):
         """Initialize slicing analysis capability.
 
         Args:
             agent: Agent using this capability (coordinator agent)
             scope: Blackboard scope
+            namespace: Namespace for blackboard events
+            capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope=scope)
+        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=None, capability_key=capability_key)
         self._dependency_graph: dict[str, list[str]] = {}  # location -> dependent pages
 
     # =========================================================================
@@ -644,7 +652,7 @@ class SlicingAnalysisCapability(VCMAnalysisCapability):
         # Store resolutions in blackboard
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=SlicingAnalysisProtocol.interprocedural_resolutions_key(namespace="slicing"),
+            key=SlicingAnalysisProtocol.interprocedural_resolutions_key(),
             value={
                 "resolutions": resolutions,
                 "unresolved": unresolved,
@@ -812,22 +820,28 @@ class SlicingCoordinatorCapability(AgentCapability):
     5. Builds complete program slice
     """
 
-    input_patterns = [AgentRunProtocol.request_pattern(namespace="slicing")]
 
     def __init__(
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "program_slicing",
+        input_patterns: list[str] = [AgentRunProtocol.request_pattern()],
         batching_policy: BatchingPolicy | None = None,
+        capability_key: str = "slicing_coordinator_capability"
     ):
         """Initialize coordinator capability.
 
         Args:
             agent: Agent using this capability
             scope: Blackboard scope for this capability (default: AGENT)
+            namespace: Namespace for event patterns (default: "program_slicing")
+            input_patterns: List of event patterns to subscribe to
             batching_policy: Policy for cache-aware batch selection
+            capability_key: Unique key for this capability within the agent (default: "slicing_coordinator_capability")
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:program_slicing:{agent.agent_id}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        self.namespace = namespace
         self._worker_handles: dict[str, AgentHandle] = {}
         self._collected_results: list[ScopeAwareResult[ProgramSlice]] = []
         self.max_agents: int = 10
@@ -897,7 +911,7 @@ class SlicingCoordinatorCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for ProgramCoordinatorCapability")
         pass
 
-    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="slicing"))
+    @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -982,7 +996,7 @@ class SlicingCoordinatorCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id, namespace="slicing"),
+                key=AgentRunProtocol.result_key(request_id),
                 value=final_result.model_dump(),
                 agent_id=self.agent.agent_id,
             )
@@ -1026,10 +1040,15 @@ class SlicingCoordinatorCapability(AgentCapability):
         # TODO: This still sequentializes worker runs. For true parallelization,
         # use asyncio.gather with handle.run() calls or rely on event handlers.
         for page_id, handle in self._worker_handles.items():
+            # protocol=AgentRunProtocol: worker's ProgramSlicingCapability uses AgentRunProtocol
+            # scope=AGENT: worker's ProgramSlicingCapability uses AGENT scope
+            # namespace="program_slicing": must match worker's ProgramSlicingCapability namespace
             run: AgentRun = await handle.run(
                 {"criterion": criterion.model_dump(), "page_ids": [page_id]},
                 timeout=timeout,
-                namespace="slicing",
+                protocol=AgentRunProtocol,
+                scope=BlackboardScope.AGENT,
+                namespace=self.namespace,  # "program_slicing" — matches worker
             )
             if run.output_data:
                 result = SlicingResult(**run.output_data)

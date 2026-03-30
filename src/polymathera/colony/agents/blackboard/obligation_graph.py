@@ -602,7 +602,8 @@ class ObligationGraph:
         Args:
             node: Node to store
         """
-        key = f"{self.node_namespace}:{node.node_type.value}:{node.node_id}"
+        from ..scopes import ScopeUtils
+        key = ScopeUtils.format_key(node_namespace=self.node_namespace, node_type=node.node_type.value, node_id=node.node_id)
 
         await self.blackboard.write(
             key=key,
@@ -617,7 +618,8 @@ class ObligationGraph:
         Args:
             edge: Edge to store
         """
-        key = f"{self.edge_namespace}:{edge.source_id}:{edge.target_id}"
+        from ..scopes import ScopeUtils
+        key = ScopeUtils.format_key(edge_namespace=self.edge_namespace, source_id=edge.source_id, target_id=edge.target_id)
 
         await self.blackboard.write(
             key=key,
@@ -642,7 +644,8 @@ class ObligationGraph:
         """
         # Build namespace pattern
         if node_type:
-            namespace = f"{self.node_namespace}:{node_type.value}"
+            from ..scopes import ScopeUtils
+            namespace = ScopeUtils.format_key(node_namespace=self.node_namespace, node_type=node_type.value)
         else:
             namespace = self.node_namespace
 
@@ -815,9 +818,12 @@ class ObligationGraph:
         Returns:
             Traceability information
         """
+        from ..scopes import ScopeUtils
+
         req_node = self._node_cache.get(requirement_id)
         if not req_node:
-            key = f"{self.node_namespace}:{NodeType.REQUIREMENT.value}:{requirement_id}"
+            key = ScopeUtils.format_key(node_namespace=self.node_namespace, node_type=NodeType.REQUIREMENT.value, node_id=requirement_id)
+
             data = await self.blackboard.read(key)
             if data:
                 req_node = ObligationNode(**data)
@@ -847,7 +853,8 @@ class ObligationGraph:
         edges = await self.get_requirement_edges(requirement_id)
 
         for edge in edges:
-            artifact_key = f"{self.node_namespace}:{NodeType.ARTIFACT.value}:{edge.target_id}"
+            artifact_key = ScopeUtils.format_key(node_namespace=self.node_namespace, node_type=NodeType.ARTIFACT.value, node_id=edge.target_id)
+
             artifact_data = await self.blackboard.read(artifact_key)
 
             if artifact_data:
@@ -891,6 +898,7 @@ class ObligationGraph:
     async def update_node_version(
         self,
         node_id: str,
+        node_type: NodeType,
         changes: dict[str, Any],
         agent_id: str,
         change_reason: str | None = None
@@ -906,10 +914,11 @@ class ObligationGraph:
         Returns:
             Updated node
         """
+        from ..scopes import ScopeUtils
         # Get current node
         node = self._node_cache.get(node_id)
         if not node:
-            key = f"{self.node_namespace}:{node_id}"
+            key = ScopeUtils.format_key(node_namespace=self.node_namespace, node_type=node_type.value, node_id=node_id)
             data = await self.blackboard.read(key)
             if data:
                 node = ObligationNode(**data)
@@ -920,9 +929,11 @@ class ObligationGraph:
         # Create new version
         old_version_id = f"{node_id}_v{node.version}"
 
+        trace_key = ScopeUtils.format_key(node_namespace=self.trace_namespace, old_version_id=old_version_id)
+
         # Archive old version
         await self.blackboard.write(
-            key=f"{self.trace_namespace}:{old_version_id}",
+            key=trace_key,
             value=node.model_dump(),
             tags={"obligation_version", node.node_type.value, "archived"},
             created_by=agent_id

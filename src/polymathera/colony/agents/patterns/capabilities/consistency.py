@@ -57,7 +57,6 @@ from ..actions.policies import (
 from ...scopes import BlackboardScope, get_scope_prefix
 from ...models import Action, PolicyREPL, AgentSuspensionState
 from ... import BlackboardEvent
-from ..games.epistemic import EpistemicLayer
 from ..events import event_handler, EventProcessingResult
 from ...blackboard.protocol import ConsistencyCheckProtocol
 
@@ -162,17 +161,25 @@ class ConsistencyCapability(AgentCapability):
     - resolve_contradictions: Attempt to resolve detected contradictions
     """
 
-    input_patterns = [ConsistencyCheckProtocol.request_pattern(namespace="consistency")]
 
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "consistency",
+        input_patterns: list[str] = [ConsistencyCheckProtocol.request_pattern()],
+        capability_key: str = "consistency",
+    ):
         """Initialize consistency capability.
 
         Args:
             agent: Agent using this capability
             scope: Scope for the capability
+            namespace: Namespace for the capability within the scope (default "consistency")
+            input_patterns: List of input patterns for the capability
+            capability_key: Key for the capability (default "consistency")
         """
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
-        self.epistemic_layer = EpistemicLayer(self.agent)  # TODO: Currently unused
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.checked_results: dict[str, ScopeAwareResult] = {}
 
     def _get_validation_capability(self) -> ValidationCapability | None:
@@ -219,7 +226,7 @@ class ConsistencyCapability(AgentCapability):
         request_id = self._pending_request_id or "default"
         blackboard = await self.get_blackboard()
         return CapabilityResultFuture(
-            result_key=ConsistencyCheckProtocol.result_key(request_id, namespace="consistency"),
+            result_key=ConsistencyCheckProtocol.result_key(request_id),
             blackboard=blackboard,
         )
 
@@ -301,7 +308,7 @@ class ConsistencyCapability(AgentCapability):
         """
         blackboard = await self.get_blackboard()
         await blackboard.write(
-            key=ConsistencyCheckProtocol.result_key(result.result_id, namespace="consistency"),
+            key=ConsistencyCheckProtocol.result_key(result.result_id),
             value=result.model_dump(),
             created_by=self.agent.agent_id,
         )
@@ -329,7 +336,7 @@ class ConsistencyCapability(AgentCapability):
 
         return relevant_results
 
-    @event_handler(pattern=ConsistencyCheckProtocol.request_pattern(namespace="consistency"))
+    @event_handler(pattern=ConsistencyCheckProtocol.request_pattern())
     async def handle_consistency_check_event(
         self,
         event: BlackboardEvent,

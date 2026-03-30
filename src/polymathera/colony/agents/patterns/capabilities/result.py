@@ -52,14 +52,22 @@ class ResultCapability(AgentCapability):
     capability implementations.
     """
 
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "result_store",
+        capability_key: str = "result_capability",
+    ):
         """Initialize result capability.
 
         Args:
             agent: Owning agent
             scope: Blackboard scope (defaults to COLONY)
+            namespace: Namespace for the result store (defaults to "result_store")
+            capability_key: Key to identify this capability within the agent (default "result_capability")
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)
 
     def get_action_group_description(self) -> str:
         return (
@@ -72,11 +80,11 @@ class ResultCapability(AgentCapability):
 
     def _get_partial_key(self, result_id: str) -> str:
         """Get blackboard key for a partial result."""
-        return ResultStorageProtocol.partial_key(result_id, namespace="result_store")
+        return ResultStorageProtocol.partial_key(result_id)
 
     def _get_index_key(self) -> str:
         """Get blackboard key for results index."""
-        return ResultStorageProtocol.index_key(namespace="result_store")
+        return ResultStorageProtocol.index_key()
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:

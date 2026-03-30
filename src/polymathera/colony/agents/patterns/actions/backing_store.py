@@ -143,7 +143,7 @@ class BlackboardBackingStore:
 
     Example:
         ```python
-        store = BlackboardBackingStore(agent, scope="repl_data")
+        store = BlackboardBackingStore(agent, namespace="repl_data")
         await store.store("my_key", {"large": "data"})
         value = await store.retrieve("my_key")
         ```
@@ -152,16 +152,16 @@ class BlackboardBackingStore:
     def __init__(
         self,
         agent: "Agent",
-        scope: str = "repl",
+        namespace: str = "repl",
     ):
         """Initialize BlackboardBackingStore.
 
         Args:
             agent: Agent whose blackboard to use
-            scope: Blackboard scope for REPL data (default: "repl")
+            namespace: Blackboard namespace for REPL data (default: "repl")
         """
         self._agent = agent
-        self._scope = scope
+        self._namespace = namespace
         self._blackboard = None  # Lazy initialization
 
     @property
@@ -172,9 +172,9 @@ class BlackboardBackingStore:
     async def _get_blackboard(self):
         """Get or create blackboard instance."""
         if self._blackboard is None:
-            from ...scopes import ScopeUtils
+            from ...scopes import BlackboardScope, get_scope_prefix
             self._blackboard = await self._agent.get_blackboard(
-                scope_id=f"{ScopeUtils.get_agent_level_scope(self._agent)}:{self._scope}",  # Namespaced by agent ID and scope
+                scope_id=get_scope_prefix(BlackboardScope.AGENT, self._agent, namespace=self._namespace),  # Namespaced by agent ID and namespace
             )
         return self._blackboard
 
@@ -218,7 +218,7 @@ class BlackboardBackingStore:
 
     def generate_key(self, agent_id: str, var_name: str) -> str:
         """Generate unique key for blackboard storage."""
-        return ActionPolicyProtocol.repl_key(agent_id, var_name, time.time_ns(), namespace="repl")
+        return ActionPolicyProtocol.repl_key(agent_id, var_name, time.time_ns())
 
 
 class StorageHint(BaseModel):

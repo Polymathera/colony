@@ -74,7 +74,6 @@ class IncrementalQueryCapability(AgentCapability):
     The planner decides when to call each action and when to stop.
     """
 
-    input_patterns = [IncrementalQueryProtocol.request_pattern(namespace="incremental_query")]
 
     def __init__(
         self,
@@ -86,9 +85,12 @@ class IncrementalQueryCapability(AgentCapability):
         attention_threshold: float = 0.5,
         attention_top_k: int = 5,
         max_iterations: int = 3,
-        scope: BlackboardScope = BlackboardScope.COLONY
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "incremental_query",
+        input_patterns: list[str] = [IncrementalQueryProtocol.request_pattern()],
+        capability_key: str = "incremental_query_processor",
     ):
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.answer_generator = answer_generator
         self.query_router = query_router
         self.confidence_threshold = confidence_threshold

@@ -315,10 +315,16 @@ class CriticCapability(AgentCapability):
     - Plannable actions for requesting critique from peers/parents via @action_executor
     """
 
-    input_patterns = CritiqueProtocol.all_request_patterns(namespace="critique")
 
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY, namespace: str = "critique"):
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "critique",
+        input_patterns: list[str] = CritiqueProtocol.all_request_patterns(),
+        capability_key: str = "critique",
+    ):
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         # Injected critique policies for different relationships
         self.critique_policy_self: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_self")  # FIXME: Get the policy instances properly
         self.critique_policy_child: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_child")  # FIXME: Get the policy instances properly
@@ -348,19 +354,19 @@ class CriticCapability(AgentCapability):
 
     def _get_request_from_peer_key(self, requester_id: str) -> str:
         """Get blackboard key for peer critique request."""
-        return CritiqueProtocol.peer_request_key(requester_id, namespace="critique")
+        return CritiqueProtocol.peer_request_key(requester_id)
 
     def _get_request_from_parent_key(self, child_id: str) -> str:
         """Get blackboard key for parent critique request."""
-        return CritiqueProtocol.parent_to_child_request_key(child_id, namespace="critique")
+        return CritiqueProtocol.parent_to_child_request_key(child_id)
 
     def _get_request_from_child_key(self, parent_id: str) -> str:
         """Get blackboard key for child critique request."""
-        return CritiqueProtocol.child_to_parent_request_key(parent_id, namespace="critique")
+        return CritiqueProtocol.child_to_parent_request_key(parent_id)
 
     def _get_response_from_agent_key(self, responder_id: str, requester_id: str) -> str:
         """Get blackboard key for critique response."""
-        return CritiqueProtocol.response_key(requester_id, responder_id, namespace="critique")
+        return CritiqueProtocol.response_key(requester_id, responder_id)
 
     async def _send_critique_request(
         self,
@@ -407,7 +413,7 @@ class CriticCapability(AgentCapability):
             return None
         return policy_map.get(relationship)
 
-    @event_handler(pattern=CritiqueProtocol.all_requests_pattern(namespace="critique"))
+    @event_handler
     async def handle_critique_request(
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:

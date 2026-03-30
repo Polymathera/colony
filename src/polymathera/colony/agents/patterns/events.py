@@ -191,7 +191,7 @@ def event_handler(
                 ...
 
             # With pattern - automatic filtering (use protocol references)
-            @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="my_namespace"))
+            @event_handler(pattern=AgentRunProtocol.request_pattern())
             async def handle_analysis_request(
                 self,
                 event: BlackboardEvent,

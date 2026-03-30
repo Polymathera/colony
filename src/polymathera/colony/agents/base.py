@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from .patterns.memory.types import CapabilityMemoryRequirements
     from ..cluster import LLMClientRequirements
     from .blackboard.protocol import BlackboardProtocol
+    from .scopes import BlackboardScope
 
 
 
@@ -208,23 +209,6 @@ class AgentCapability(ABC):
     Subclasses can override:
     - `stream_events_to_queue()`: Stream capability events to action policy (default uses ``input_patterns``)
     - `get_result_future()`: Get future for capability's task result
-
-    Subclasses should declare:
-    - ``input_patterns``: Glob patterns this capability monitors (used by default ``stream_events_to_queue``).
-    - ``protocols``: ``BlackboardProtocol`` subclasses this capability supports.
-    """
-
-    input_patterns: ClassVar[list[str]] = []
-    """Glob patterns this capability monitors for incoming events.
-
-    Used by the default ``stream_events_to_queue()`` to subscribe only to
-    relevant events instead of ``"*"``. If empty, falls back to ``"*"``
-    (legacy behavior, logs a warning).
-
-    Example::
-
-        class GroundingCapability(AgentCapability):
-            input_patterns = [GroundingProtocol.request_pattern(namespace="grounding")]
     """
 
     def __init__(
@@ -232,23 +216,35 @@ class AgentCapability(ABC):
         agent: Agent | None = None,
         scope_id: str | None = None,
         *,
+        input_patterns: list[str] | None = None,
         blackboard: EnhancedBlackboard | None = None,
         capability_key: str | None = None,
     ):
         """Initialize capability.
 
+        ``input_patterns`` is used by the default ``stream_events_to_queue()`` to subscribe only to
+        relevant events instead of ``"*"``. If empty, falls back to ``"*"``
+        (legacy behavior, logs a warning).
+
+        If ``input_patterns`` is not explicitly passed, it is inferred from methods
+        decorated with ``@event_handler`` on this class (including inherited methods).
+        Deduplicates across the MRO. Capabilities that subscribe to a different
+        blackboard than ``self.get_blackboard()`` (e.g., control plane lifecycle scope)
+        must explicitly pass ``input_patterns=[]`` to opt out of inference.
+
         Args:
             agent: Agent using this capability (None for detached mode)
-            scope_id: Blackboard scope ID. Defaults to {ScopeUtils.get_agent_level_scope(agent)}.
-                Required if agent is None (detached mode).
+            scope_id: Blackboard scope ID. Defaults to {ScopeUtils.get_agent_level_scope(agent)}. Required if agent is None (detached mode).
+            input_patterns: Glob patterns this capability monitors for incoming events (fed into ``stream_events_to_queue()`` which, among other things, is called by the agent's action policy).
             blackboard: Pre-configured blackboard (for detached mode)
-            capability_key: Instance-level key for the agent's _capabilities dict.
-                Defaults to f"{cls.__name__}:{self.scope_id}" via get_capability_name().
+            capability_key: Instance-level key for the agent's ``_capabilities`` dict.
+                Defaults to ``f"{cls.__name__}:{self.scope_id}"`` via ``get_capability_name()``.
 
         Raises:
             ValueError: If both agent and scope_id are None
         """
         self._agent = agent
+        self._input_patterns = input_patterns
         self._blackboard: EnhancedBlackboard | None = blackboard
         self._pending_request_id: str | None = None
         self._capability_key: str | None = capability_key
@@ -265,6 +261,35 @@ class AgentCapability(ABC):
                 "Either 'agent' or 'scope_id' must be provided. "
                 "For detached mode, provide scope_id explicitly."
             )
+
+    @property
+    def input_patterns(self) -> list[str]:
+        """Get input patterns this capability monitors.
+
+        If ``input_patterns`` was not explicitly passed to ``__init__``,
+        infers patterns from ``@event_handler``-decorated methods on this
+        class (including inherited methods). Deduplicates across the MRO.
+
+        Capabilities that subscribe to a different blackboard than
+        ``self.get_blackboard()`` (e.g., control plane lifecycle scope)
+        must explicitly pass ``input_patterns=[]`` to opt out of inference.
+        """
+        if self._input_patterns is not None:
+            return list(self._input_patterns)
+
+        # Auto-infer from @event_handler methods by inspecting the class
+        # hierarchy (MRO), not the instance — avoids infinite recursion from
+        # getattr triggering this property again.
+        patterns: list[str] = []
+        seen: set[str] = set()
+        for cls in type(self).__mro__:
+            for name, attr in vars(cls).items():
+                if callable(attr) and getattr(attr, '_is_event_handler', False):
+                    pattern = getattr(attr, '_event_pattern', None)
+                    if pattern is not None and isinstance(pattern, str) and pattern not in seen:
+                        seen.add(pattern)
+                        patterns.append(pattern)
+        return patterns
 
     @property
     def agent(self) -> Agent | None:
@@ -484,19 +509,13 @@ class AgentCapability(ABC):
                 except Exception:
                     pass
 
-    async def get_result_future(self, namespace: str = "") -> CapabilityResultFuture:
+    async def get_result_future(self) -> CapabilityResultFuture:
         """Get future for this capability's task result.
 
         Default implementation returns a future that resolves when
-        ``result:run:{namespace}:{request_id}`` is written to the blackboard
+        ``result:run:{request_id}`` is written to the blackboard
         (using ``AgentRunProtocol``). Subclasses can override to use
         a different protocol.
-
-        Args:
-            namespace: Protocol namespace. Must match the namespace used by
-                the writer. Capabilities that operate within the same scope_id
-                should pass their specific namespace to avoid cross-capability
-                interference.
 
         Returns:
             Future that resolves with the task result
@@ -504,7 +523,7 @@ class AgentCapability(ABC):
         from .blackboard.protocol import AgentRunProtocol
         blackboard = await self.get_blackboard()
         request_id = self._pending_request_id or "default"
-        result_key = AgentRunProtocol.result_key(request_id, namespace=namespace)
+        result_key = AgentRunProtocol.result_key(request_id)
         return CapabilityResultFuture(
             result_key=result_key,
             blackboard=blackboard,
@@ -515,12 +534,11 @@ class AgentCapability(ABC):
         request_type: str,
         request_data: dict[str, Any],
         request_id: str | None = None,
-        namespace: str = "",
     ) -> str:
         """Send a request to trigger/control the capability.
 
         Generic method for sending requests via blackboard. Uses
-        ``AgentRunProtocol`` key format with the specified namespace.
+        ``AgentRunProtocol`` key format.
 
         Subclasses may provide more specific methods (e.g., ``abort()``,
         ``ground_claim()``) that use capability-specific protocols.
@@ -531,7 +549,6 @@ class AgentCapability(ABC):
             request_type: Type of request (e.g., "abort", "ground_claim")
             request_data: Request payload
             request_id: Optional request ID (generated if None)
-            namespace: Protocol namespace for disambiguation.
 
         Returns:
             Request ID for tracking
@@ -544,7 +561,7 @@ class AgentCapability(ABC):
         sender_id = self._agent.agent_id if self._agent else "detached"
 
         # Key is scope-relative — no scope_id prefix
-        key = AgentRunProtocol.request_key(request_id, namespace=namespace)
+        key = AgentRunProtocol.request_key(request_id)
         await blackboard.write(
             key=key,
             value={
@@ -946,6 +963,7 @@ class AgentHandle:
     def get_capability(
         self,
         capability_type: type[AgentCapability],
+        capability_key: str | None = None,
         **kwargs,
     ) -> AgentCapability:
         """Get capability instance for communicating with agent.
@@ -958,6 +976,9 @@ class AgentHandle:
 
         Args:
             capability_type: Type of capability to instantiate
+            capability_key: Explicit cache key matching the key the target agent
+                registered this capability under.  When ``None``, falls back to
+                ``capability_type.get_capability_name()`` (the class name).
             **kwargs: Additional kwargs to pass to the capability constructor
 
         Returns:
@@ -971,22 +992,24 @@ class AgentHandle:
             result = await asyncio.wait_for(future, timeout=30.0)
             ```
         """
-        cap_name = capability_type.get_capability_name()
-        if cap_name not in self._capabilities:
+        cache_key = capability_key or capability_type.get_capability_name()
+        if cache_key not in self._capabilities:
+            cap_kwargs = dict(kwargs)
+            if capability_key is not None:
+                cap_kwargs["capability_key"] = capability_key
             if self.is_detached:
                 # Detached mode: create capability with scope_id only
-                self._capabilities[cap_name] = capability_type(
+                self._capabilities[cache_key] = capability_type(
                     agent=None,
-                    **kwargs,
+                    **cap_kwargs,
                 )
             else:
                 # Owned mode: existing behavior
-                self._capabilities[cap_name] = capability_type(
+                self._capabilities[cache_key] = capability_type(
                     agent=self._owner,
-                    **kwargs,
-
+                    **cap_kwargs,
                 )
-        return self._capabilities[cap_name]
+        return self._capabilities[cache_key]
 
     def get_default_capability(self) -> AgentCapability | None:
         """Get the agent's default interaction capability.
@@ -1011,6 +1034,7 @@ class AgentHandle:
         track_events: bool = False,
         run_id: str | None = None,
         protocol: "type[BlackboardProtocol] | None" = None,
+        scope: BlackboardScope | None = None,
         namespace: str = "",
     ) -> "AgentRun":
         """Run a task on the agent and wait for result.
@@ -1028,10 +1052,11 @@ class AgentHandle:
             run_id: Explicit run ID (matches agent's metadata.run_id to avoid mismatch)
             protocol: BlackboardProtocol subclass defining key format for
                 request/result exchange. Defaults to AgentRunProtocol.
+            scope: Optional BlackboardScope to determine communication scope. If None, defaults to ``protocol.scope`` and then ``BlackboardScope.AGENT``.
             namespace: Protocol namespace for disambiguation when the child
-                agent has multiple capabilities using the same protocol.
-                Must match the namespace the target capability declares in
-                its ``input_patterns``.
+                agent has multiple capabilities using the same scope.
+                Must match the namespace the target capability receives in
+                its ``__init__``.
 
         Returns:
             AgentRun with status, output_data, and resource_usage
@@ -1051,11 +1076,10 @@ class AgentHandle:
         # Determine the blackboard scope from the protocol.
         # Agent-scoped protocols write to the child's agent-level scope.
         # Colony/session-scoped protocols write to the shared scope.
-        scope_override = None
-        if hasattr(proto, 'scope') and proto.scope != BlackboardScope.AGENT:
-            scope_override = get_scope_prefix(proto.scope, self.child_agent_id)
+        scope = scope or proto.scope if hasattr(proto, 'scope') else BlackboardScope.AGENT
+        scope_id = get_scope_prefix(scope, self.child_agent_id, namespace=namespace)
 
-        blackboard = await self._get_child_blackboard(scope_id=scope_override)
+        blackboard = await self._get_child_blackboard(scope_id=scope_id)
 
         # Get session context if available
         from .sessions.context import get_current_session_id
@@ -1108,11 +1132,11 @@ class AgentHandle:
         sender_id = self._owner.agent_id if self._owner else "detached_handle"
 
         # Result tracking
-        result_key = proto.result_key(request_id, namespace=namespace)
+        result_key = proto.result_key(request_id)
         result_value: dict[str, Any] | None = None
 
         # Send request (session_id auto-added by blackboard.write from context)
-        request_key = proto.request_key(request_id, namespace=namespace)
+        request_key = proto.request_key(request_id)
         await blackboard.write(
             key=request_key,
             value={
@@ -1201,6 +1225,7 @@ class AgentHandle:
         track_events: bool = True,
         run_id: str | None = None,
         protocol: type[BlackboardProtocol] | None = None,
+        scope: BlackboardScope | None = None,
         namespace: str = "",
     ) -> AsyncIterator[AgentRunEvent]:
         """Run a task with streaming events.
@@ -1217,6 +1242,7 @@ class AgentHandle:
             track_events: If True, events are persisted to the AgentRun
             run_id: Explicit run ID (matches agent's metadata.run_id to avoid mismatch)
             protocol: BlackboardProtocol subclass defining key format. Defaults to AgentRunProtocol.
+            scope: Optional BlackboardScope to determine communication scope. If None, defaults to ``protocol.scope`` and then ``BlackboardScope.AGENT``.
             namespace: Protocol namespace for disambiguation within the same
                 blackboard scope. Must match the namespace the target capability
                 declares in its ``input_patterns``.
@@ -1242,11 +1268,10 @@ class AgentHandle:
         proto = protocol or AgentRunProtocol
 
         # Determine the blackboard scope from the protocol.
-        scope_override = None
-        if hasattr(proto, 'scope') and proto.scope != BlackboardScope.AGENT:
-            scope_override = get_scope_prefix(proto.scope, self.child_agent_id)
+        scope = scope or proto.scope if hasattr(proto, 'scope') else BlackboardScope.AGENT
+        scope_id = get_scope_prefix(scope, self.child_agent_id, namespace=namespace)
 
-        blackboard = await self._get_child_blackboard(scope_id=scope_override)
+        blackboard = await self._get_child_blackboard(scope_id=scope_id)
 
         # Get session context if available
         effective_session_id = session_id or get_current_session_id()
@@ -1302,7 +1327,7 @@ class AgentHandle:
         sender_id = self._owner.agent_id if self._owner else "detached_handle"
 
         # Send request with streaming flag (session_id auto-added by blackboard.write)
-        request_key = proto.request_key(request_id, namespace=namespace)
+        request_key = proto.request_key(request_id)
         await blackboard.write(
             key=request_key,
             value={
@@ -1318,7 +1343,7 @@ class AgentHandle:
 
         # Stream events
         start_time = time.time()
-        event_pattern = proto.event_pattern(request_id, namespace=namespace)
+        event_pattern = proto.event_pattern(request_id)
         is_complete = False
         final_status = RunStatus.COMPLETED
         error_msg: str | None = None
@@ -4228,10 +4253,8 @@ class AgentManagerBase:
         enable_events: bool = True,
     ) -> EnhancedBlackboard:
         """Get blackboard scoped to this agent for private state."""
-        from .scopes import ScopeUtils
-        scope_id = ScopeUtils.get_agent_level_scope(agent)
-        if namespace:
-            scope_id = f"{scope_id}:{namespace}"
+        from .scopes import BlackboardScope, get_scope_prefix
+        scope_id = get_scope_prefix(BlackboardScope.AGENT, agent, namespace=namespace)
 
         return await self.get_blackboard(
             scope_id=scope_id,
@@ -4247,10 +4270,8 @@ class AgentManagerBase:
         enable_events: bool = True,
     ) -> EnhancedBlackboard:
         """Get blackboard scoped to this session for state shared across agents in the same session."""
-        from .scopes import ScopeUtils
-        scope_id = ScopeUtils.get_session_level_scope()
-        if namespace:
-            scope_id = f"{scope_id}:{namespace}"
+        from .scopes import BlackboardScope, get_scope_prefix
+        scope_id = get_scope_prefix(BlackboardScope.SESSION, namespace=namespace)
 
         return await self.get_blackboard(
             scope_id=scope_id,
@@ -4266,10 +4287,8 @@ class AgentManagerBase:
         enable_events: bool = True,
     ) -> EnhancedBlackboard:
         """Get blackboard scoped to this colony for state shared across agents in the same colony."""
-        from .scopes import ScopeUtils
-        scope_id = ScopeUtils.get_colony_level_scope()
-        if namespace:
-            scope_id = f"{scope_id}:{namespace}"
+        from .scopes import BlackboardScope, get_scope_prefix
+        scope_id = get_scope_prefix(BlackboardScope.COLONY, namespace=namespace)
 
         return await self.get_blackboard(
             scope_id=scope_id,

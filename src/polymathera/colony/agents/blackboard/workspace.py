@@ -516,7 +516,8 @@ class WorkspaceManager:
         Returns:
             Workspace or None if not found
         """
-        key = f"{self.namespace}:{workspace_id}"
+        from ..scopes import ScopeUtils
+        key = ScopeUtils.format_key(namespace=self.namespace, workspace_id=workspace_id)
         data = await self.blackboard.read(key)
 
         if data is None:
@@ -999,7 +1000,8 @@ class WorkspaceManager:
         Args:
             workspace: Workspace to store
         """
-        key = f"{self.namespace}:{workspace.workspace_id}"
+        from ..scopes import ScopeUtils
+        key = ScopeUtils.format_key(namespace=self.namespace, workspace_id=workspace.workspace_id)
 
         # Tags for filtering
         tags = {"workspace", workspace.name}

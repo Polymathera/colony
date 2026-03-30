@@ -76,7 +76,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             await self.page_keys_blackboard.write(
-                KeyRegistryProtocol.page_key(page_id, namespace="key_registry"),
+                KeyRegistryProtocol.page_key(page_id),
                 {
                     "key": key.model_dump(),
                     "cluster_id": cluster_id,
@@ -104,7 +104,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             data = await self.page_keys_blackboard.read(
-                KeyRegistryProtocol.page_key(page_id, namespace="key_registry")
+                KeyRegistryProtocol.page_key(page_id)
             )
             if data:
                 return (page_id, PageKey(**data["key"]), data.get("cluster_id", "unknown"))
@@ -134,7 +134,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             await self.cluster_summaries_blackboard.write(
-                KeyRegistryProtocol.cluster_key(cluster_id, namespace="key_registry"),
+                KeyRegistryProtocol.cluster_key(cluster_id),
                 {
                     "summary": summary,
                     "representative_key": representative_key.model_dump(),
@@ -260,7 +260,7 @@ class GlobalPageKeyRegistry:
         """
         try:
             data = await self.cluster_summaries_blackboard.read(
-                KeyRegistryProtocol.cluster_key(cluster_id, namespace="key_registry"),
+                KeyRegistryProtocol.cluster_key(cluster_id),
             )
             if data:
                 summary = data.get("summary", {})

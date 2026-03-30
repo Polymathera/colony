@@ -102,9 +102,8 @@ class FileGraphCache:
 
         # Use existing TokenizedFileCache with "graphs" type
         polymathera = await get_initialized_polymathera()
-        syscontext = serving.require_execution_context()
         self.cache = await polymathera.create_distributed_simple_cache(
-            namespace=f"{syscontext.tenant_id}:{syscontext.colony_id}:file_graphs",
+            namespace="file_graphs",
             config=self.config,
         )
 
@@ -416,12 +415,12 @@ class FileGrouper:
         # TODO: Add cache namespaces
         if self.dependency_cache is None:
             self.dependency_cache = await polymathera.create_distributed_simple_cache(
-                namespace="dependency_graphs",  # TODO: Does this need to be VMR-specific?
+                namespace="dependency_graphs",
                 config=self.config.dependency_cache_config,
             )
         if self.imports_cache is None:
             self.imports_cache = await polymathera.create_distributed_simple_cache(
-                namespace="import_graphs",  # TODO: Does this need to be VMR-specific?
+                namespace="import_graphs",
                 config=self.config.imports_cache_config,
             )
 

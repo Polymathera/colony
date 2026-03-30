@@ -289,7 +289,7 @@ class MemoryCapability(AgentCapability):
             capability_key: Override for the capability dict key (allows multiple
                 instances of MemoryCapability with distinct keys).
         """
-        super().__init__(agent=agent, scope_id=scope_id, capability_key=capability_key)
+        super().__init__(agent=agent, scope_id=scope_id, capability_key=capability_key, input_patterns=[])  # MemoryCapability manages its own subscriptions, so no input patterns
 
         # Ingestion: sources and transformation
         self.producers = producers or []
@@ -589,7 +589,7 @@ class MemoryCapability(AgentCapability):
             from .types import MemoryRecord
             data = MemoryRecord(content=data, tags=tags or set())
 
-        key = MemoryRecordProtocol.record_key(data.record_id, namespace="memory")
+        key = MemoryRecordProtocol.record_key(data.record_id)
         effective_ttl = ttl_seconds if ttl_seconds is not None else self.ttl_seconds
 
         # Serialize to dict
@@ -1167,7 +1167,7 @@ class MemoryCapability(AgentCapability):
                     f"BlackboardEntry(value=<BaseModel with record_id>)."
                 )
 
-            key = MemoryRecordProtocol.record_key(data.record_id, namespace="memory")
+            key = MemoryRecordProtocol.record_key(data.record_id)
 
             value = data.model_dump() if hasattr(data, "model_dump") else data
 

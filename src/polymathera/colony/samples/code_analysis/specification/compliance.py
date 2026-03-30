@@ -327,26 +327,31 @@ class SpecificationComplianceCapability(AgentCapability):
     - Event-driven via @event_handler and @action_executor decorators
     """
 
-    input_patterns = [AgentRunProtocol.request_pattern(namespace="spec_compliance")]
 
     def __init__(
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "specification_compliance",
+        input_patterns: list[str] = [AgentRunProtocol.request_pattern()],
         infer_contracts: bool = True,
         check_invariants: bool = True,
-        trace_requirements: bool = True
+        trace_requirements: bool = True,
+        capability_key: str = "specification_compliance_capability",
     ):
         """Initialize specification compliance capability.
 
         Args:
             agent: Agent instance for LLM inference via VCM
             scope: Blackboard scope for this capability (default: AGENT)
+            namespace: Namespace for event patterns (default: "specification_compliance")
+            input_patterns: List of event patterns to subscribe to
             infer_contracts: Whether to infer contracts from code
             check_invariants: Whether to check invariants
             trace_requirements: Whether to trace requirements
+            capability_key: Unique key for this capability within the agent (default: "specification_compliance_capability")
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:specification_compliance:{agent.agent_id}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.infer_contracts = infer_contracts
         self.check_invariants = check_invariants
         self.trace_requirements = trace_requirements
@@ -399,7 +404,7 @@ class SpecificationComplianceCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for SpecificationComplianceCapability")
         pass
 
-    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="spec_compliance"))
+    @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_compliance_request(
         self,
         event: BlackboardEvent,
@@ -532,7 +537,7 @@ class SpecificationComplianceCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id, namespace="spec_compliance"),
+                key=AgentRunProtocol.result_key(request_id),
                 value=result.model_dump(),
             )
 

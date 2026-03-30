@@ -58,14 +58,22 @@ class PageGraphCapability(AgentCapability):
     The ActionPolicy decides how to use these primitives.
     """
 
-    def __init__(self, agent: Agent, scope: BlackboardScope = BlackboardScope.COLONY):
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "page_graph",
+        capability_key: str = "page_graph",
+    ):
         """Initialize page graph capability.
 
         Args:
             agent: Owning agent
             scope: Blackboard scope (defaults to COLONY)
+            namespace: Namespace for the page graph (defaults to "page_graph")
+            capability_key: Unique key for this capability (default "page_graph")
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent))
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)
         self._page_graph: nx.DiGraph | None = None
 
     def get_action_group_description(self) -> str:
@@ -725,7 +733,7 @@ class PageGraphCapability(AgentCapability):
             rel_type = rel_dict.get("relationship_type", "unknown")
             discovered_by = rel_dict.get("discovered_by")
 
-            key = RelationshipProtocol.relationship_key(source, target, rel_type, namespace="page_graph")
+            key = RelationshipProtocol.relationship_key(source, target, rel_type)
             await blackboard.write(
                 key=key,
                 value=rel_dict,

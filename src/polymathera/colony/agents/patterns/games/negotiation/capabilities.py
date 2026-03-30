@@ -356,8 +356,6 @@ class NegotiationGameProtocol(GameProtocolCapability):
             return state
     """
 
-    input_patterns = [GameStateProtocol.state_pattern(namespace="negotiation")]
-
     # Define role-based permissions for negotiation game
     role_permissions = RolePermissions({
         # Coordinator: cannot make offers, only manages game lifecycle
@@ -395,6 +393,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
         use_llm_reasoning: bool = False,
         llm_temperature: float = 0.3,
         llm_max_tokens: int = 500,
+        capability_key: str = "negotiation_game_protocol"
     ):
         """Initialize negotiation game protocol.
 
@@ -411,6 +410,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
             use_llm_reasoning: If True, use LLM for strategic decisions
             llm_temperature: Temperature for LLM inference
             llm_max_tokens: Max tokens for LLM response
+            capability_key: Unique key for this capability within the agent (default: "negotiation_game_protocol")
         """
         super().__init__(
             agent,
@@ -421,6 +421,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
             use_llm_reasoning=use_llm_reasoning,
             llm_temperature=llm_temperature,
             llm_max_tokens=llm_max_tokens,
+            capability_key=capability_key
         )
 
         # Strategy configuration
@@ -781,7 +782,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
                 summary=f"Negotiation failed after {data.deadlock_count} deadlocks"
             )
 
-    @event_handler(pattern=GameStateProtocol.state_pattern(namespace="negotiation")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=GameStateProtocol.state_pattern()) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def _populate_game_specific_scope(
         self,
         event: BlackboardEvent,
@@ -953,7 +954,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
     # Event Handler Overrides
     # =========================================================================
 
-    @event_handler(pattern=GameStateProtocol.state_pattern(namespace="negotiation")) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
+    @event_handler(pattern=GameStateProtocol.state_pattern()) # NOTE: The scope_id already contains game_id, so this will only trigger for events in this game's context
     async def _get_additional_context(
         self,
         event: BlackboardEvent,

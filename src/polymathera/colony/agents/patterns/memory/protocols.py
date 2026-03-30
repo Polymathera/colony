@@ -1260,7 +1260,7 @@ class ConsolidationMaintenancePolicy:
         written = 0
         for entry in consolidated:
             data = entry.value
-            key = MemoryRecordProtocol.consolidated_key(int(time.time()), written, namespace="memory")
+            key = MemoryRecordProtocol.consolidated_key(int(time.time()), written)
 
             value = data.model_dump() if hasattr(data, "model_dump") else data
 

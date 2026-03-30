@@ -86,24 +86,29 @@ class ContractInferenceCapability(AgentCapability):
     - Integrates with symbolic execution results
     """
 
-    input_patterns = [AgentRunProtocol.request_pattern(namespace="contracts")]
 
     def __init__(
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "contract_inference",
+        input_patterns: list[str] = [AgentRunProtocol.request_pattern()],
         formalism: FormalismLevel = FormalismLevel.SEMI_FORMAL,
         use_examples: bool = True,
+        capability_key: str = "contract_inference_capability",
     ):
         """Initialize contract inference capability.
 
         Args:
             agent: Agent using this capability
             scope: Blackboard scope ID (defaults to agent.agent_id)
+            namespace: Namespace for blackboard events
+            input_patterns: List of input patterns to listen for
             formalism: Target formalism level
             use_examples: Whether to use examples for learning
+            capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:contract_inference:{agent.agent_id}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.formalism = formalism
         self.use_examples = use_examples
 
@@ -136,7 +141,7 @@ class ContractInferenceCapability(AgentCapability):
     # Event Handlers
     # -------------------------------------------------------------------------
 
-    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="contracts"))
+    @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -237,7 +242,7 @@ class ContractInferenceCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id, namespace="contracts"),
+                key=AgentRunProtocol.result_key(request_id),
                 value=final_result.model_dump(),
                 created_by=self.agent.agent_id,
             )
@@ -907,14 +912,18 @@ class ContractAnalysisCapability(VCMAnalysisCapability):
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "contract_analysis",
+        capability_key: str = "contract_analysis_capability",
     ):
         """Initialize contract analysis capability.
 
         Args:
             agent: Agent using this capability (coordinator agent)
             scope: Blackboard scope
+            namespace: Namespace for blackboard events
+            capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope=scope)
+        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=None, capability_key=capability_key)
 
     async def initialize(self) -> None:
         """Initialize contract analysis capability."""
@@ -1168,24 +1177,32 @@ class ContractCoordinatorCapability(AgentCapability):
     - Merges final results
     """
 
-    input_patterns = [AgentRunProtocol.request_pattern(namespace="contracts"), AgentRunProtocol.result_pattern(namespace="contracts")]
 
     def __init__(
         self,
         agent: Agent,
         scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "contract_inference",
+        input_patterns: list[str] = [
+            AgentRunProtocol.request_pattern(),
+            AgentRunProtocol.result_pattern()
+        ],
         max_agents: int = 10,
         batching_policy: BatchingPolicy | None = None,
+        capability_key: str = "contract_coordinator"
     ):
         """Initialize coordinator capability.
 
         Args:
             agent: Agent using this capability
             scope_id: Blackboard scope ID
+            namespace: Namespace for event patterns
+            input_patterns: List of input patterns for the capability
             max_agents: Maximum worker agents to spawn
             batching_policy: Policy for cache-aware batch selection
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:contract_coordinator:{agent.agent_id}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        self.namespace = namespace
         self.max_agents = max_agents
         self._worker_handles: dict[str, Any] = {}  # page_id -> AgentHandle
         self._pending_results: dict[str, ScopeAwareResult] = {}
@@ -1219,7 +1236,7 @@ class ContractCoordinatorCapability(AgentCapability):
         blackboard = await self.get_blackboard()
         self._task_graph = TaskGraph(
             blackboard=blackboard,
-            namespace="contract_inference"
+            namespace=self.namespace
         )
         self._hypothesis_explorer = HypothesisDrivenExplorer(
             agent=self.agent,
@@ -1274,7 +1291,7 @@ class ContractCoordinatorCapability(AgentCapability):
     # Event Handlers
     # -------------------------------------------------------------------------
 
-    @event_handler(pattern=AgentRunProtocol.request_pattern(namespace="contracts"))
+    @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_analysis_request(
         self,
         event: BlackboardEvent,
@@ -1307,7 +1324,7 @@ class ContractCoordinatorCapability(AgentCapability):
             )
         )
 
-    @event_handler(pattern=AgentRunProtocol.result_pattern(namespace="contracts"))
+    @event_handler(pattern=AgentRunProtocol.result_pattern())
     async def handle_worker_result(
         self,
         event: BlackboardEvent,
@@ -1458,7 +1475,7 @@ class ContractCoordinatorCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id, namespace="contracts"),
+                key=AgentRunProtocol.result_key(request_id),
                 value=final_result.model_dump(),
                 created_by=self.agent.agent_id,
             )
@@ -1502,7 +1519,7 @@ class ContractCoordinatorCapability(AgentCapability):
         if request_id:
             blackboard = await self.get_blackboard()
             await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id, namespace="contracts"),
+                key=AgentRunProtocol.result_key(request_id),
                 value=final_result.model_dump(),
                 created_by=self.agent.agent_id,
             )
@@ -1562,13 +1579,18 @@ class ContractCoordinatorCapability(AgentCapability):
         # an event handler handle_worker_result.
         for page_id, handle in self._worker_handles.items():
             try:
+                # protocol=AgentRunProtocol: worker's ContractInferenceCapability uses AgentRunProtocol
+                # scope=AGENT: worker's ContractInferenceCapability uses AGENT scope
+                # namespace="contract_inference": must match worker's ContractInferenceCapability namespace
                 run = await handle.run(
                     input_data={
                         "page_ids": [page_id],
                         "function_names": function_names,
                     },
                     timeout=timeout,
-                    namespace="contracts",
+                    protocol=AgentRunProtocol,
+                    scope=BlackboardScope.AGENT,
+                    namespace=self.namespace,  # "contract_inference" — matches worker
                 )
                 if run.output_data:
                     result = ScopeAwareResult[list[FunctionContract]](**run.output_data)

@@ -81,18 +81,24 @@ class AgentContextEngine(AgentCapability):
 
     def __init__(
         self,
-        agent: "Agent",
+        agent: Agent,
         scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = f"context_engine:{uuid.uuid4()}",
+        capability_key: str = "context_engine",
     ):
         """Initialize context engine.
 
         Args:
             agent: Agent that owns this capability
             scope: Scope of the context engine (defaults to AGENT)
+            namespace: Namespace for the context engine (default unique per instance)
+            capability_key: Key to identify this capability within the agent (default "context_engine")
         """
         super().__init__(
             agent=agent,
-            scope_id=f"{get_scope_prefix(scope, agent)}:context:{uuid.uuid4()}"
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            capability_key=capability_key,
+            input_patterns=[],  # Context engine manages its own subscriptions to memory capabilities
         )
 
         # Discovered capabilities (populated during initialize)

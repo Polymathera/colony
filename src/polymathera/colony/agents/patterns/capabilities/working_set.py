@@ -154,7 +154,6 @@ class WorkingSetCapability(AgentCapability):
     any specific cache strategy.
     """
 
-    input_patterns = [WorkingSetStateProtocol.state_pattern(namespace="working_set")]
 
     def __init__(
         self,
@@ -164,6 +163,8 @@ class WorkingSetCapability(AgentCapability):
         working_set_size: int = 50,
         scope: BlackboardScope = BlackboardScope.COLONY,
         namespace: str = "working_set",
+        input_patterns: list[str] = [WorkingSetStateProtocol.state_pattern()],
+        capability_key: str = "working_set",
     ):
         """Initialize working set capability.
 
@@ -174,8 +175,9 @@ class WorkingSetCapability(AgentCapability):
             working_set_size: Maximum pages in working set (job quota)
             scope: Blackboard scope (defaults to COLONY)
             namespace: Namespace for the working set (defaults to "working_set")
+            input_patterns: List of input patterns to subscribe to (default listens for working set state updates)
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.eviction_policy = eviction_policy or LRUEvictionPolicy()
         self.coordination_policy = coordination_policy
         self.working_set_size: int = working_set_size
@@ -195,11 +197,11 @@ class WorkingSetCapability(AgentCapability):
 
     def _get_working_set_key(self) -> str:
         """Get blackboard key for working set state."""
-        return WorkingSetStateProtocol.cluster_state_key(namespace="working_set")
+        return WorkingSetStateProtocol.cluster_state_key()
 
     def _get_page_status_key(self) -> str:
         """Get blackboard key for page status."""
-        return WorkingSetStateProtocol.page_status_key(namespace="working_set")
+        return WorkingSetStateProtocol.page_status_key()
 
     async def _read_cluster_state(self) -> dict[str, Any]:
         """Read working set state from blackboard (cluster-wide)."""

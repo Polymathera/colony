@@ -208,10 +208,18 @@ class PolymatheraApp:
     async def create_distributed_simple_cache(
         self, namespace: str, config: CacheConfig | None = None
     ) -> DistributedSimpleCache:
-        """Create a distributed cache instance"""
+        """Create a distributed cache instance. The namespace is nested under tenant and colony to avoid collisions between different VMRs and tenants."""
+        from .ray_utils import serving
+        ctx = serving.get_execution_context()
+
+        # Infrastructure initialization (KERNEL context) may not have tenant/colony.
+        # Use context values when available, fall back to "shared" for infrastructure caches.
+        tenant_id = (ctx.tenant_id if ctx and ctx.tenant_id else "shared")
+        colony_id = (ctx.colony_id if ctx and ctx.colony_id else "shared")
+
         config = await CacheConfig.check_or_get_component(config)
         cache = DistributedSimpleCache(
-            namespace=namespace,
+            namespace=f"distributed_cache:tenant:{tenant_id}:colony:{colony_id}:{namespace}",
             redis_client=await self.get_redis_client(),
             config=config,
         )

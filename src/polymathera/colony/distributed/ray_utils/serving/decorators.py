@@ -192,8 +192,19 @@ def initialize_deployment(func: Callable) -> Callable:
                 self.model = await load_model(self.model_name)
         ```
     """
-    func.__initialize_deployment__ = True  # type: ignore
-    return func
+    @functools.wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        from .context import Ring, execution_context, get_execution_context
+        # Lifecycle hooks run outside the normal request path (no DeploymentHandle,
+        # no __handle_request__), so no ExecutionContext is set. Wrap in KERNEL
+        # context so infrastructure code that needs tenant/colony IDs can function.
+        if get_execution_context() is None:
+            with execution_context(ring=Ring.KERNEL, origin="initialize_deployment"):
+                return await func(self, *args, **kwargs)
+        return await func(self, *args, **kwargs)
+
+    wrapper.__initialize_deployment__ = True  # type: ignore
+    return wrapper
 
 
 def on_app_ready(func: Callable) -> Callable:
@@ -244,8 +255,16 @@ def on_app_ready(func: Callable) -> Callable:
                 )
         ```
     """
-    func.__on_app_ready__ = True  # type: ignore
-    return func
+    @functools.wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        from .context import Ring, execution_context, get_execution_context
+        if get_execution_context() is None:
+            with execution_context(ring=Ring.KERNEL, origin="on_app_ready"):
+                return await func(self, *args, **kwargs)
+        return await func(self, *args, **kwargs)
+
+    wrapper.__on_app_ready__ = True  # type: ignore
+    return wrapper
 
 
 def cleanup_deployment(func: Callable) -> Callable:
@@ -284,8 +303,16 @@ def cleanup_deployment(func: Callable) -> Callable:
                 await self.connection.close()
         ```
     """
-    func.__cleanup_deployment__ = True  # type: ignore
-    return func
+    @functools.wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        from .context import Ring, execution_context, get_execution_context
+        if get_execution_context() is None:
+            with execution_context(ring=Ring.KERNEL, origin="cleanup_deployment"):
+                return await func(self, *args, **kwargs)
+        return await func(self, *args, **kwargs)
+
+    wrapper.__cleanup_deployment__ = True  # type: ignore
+    return wrapper
 
 
 def periodic_health_check(interval_s: float = 30.0) -> Callable[[Callable], Callable]:

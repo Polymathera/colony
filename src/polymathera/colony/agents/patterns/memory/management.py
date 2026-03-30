@@ -64,22 +64,16 @@ class AgentMemoryRecycler(AgentCapability):
     delivered via the standard event handler pattern.
     """
 
-    input_patterns = [LifecycleSignalProtocol.terminated_pattern(namespace="memory_recycler")]
-
-    def __init__(
-        self,
-        agent: Agent,
-        scope: BlackboardScope = BlackboardScope.COLONY,
-        namespace: str = "memory_recycler",
-    ):
+    def __init__(self, agent: Agent, capability_key: str = "memory_recycler"):
         """Initialize memory recycler.
+
+        This capability to the colony control plane lifecycle scope to receive agent creation/termination events and writes recycled memories to collective memory.
 
         Args:
             agent: The MemoryManagementAgent that owns this capability
-            scope: Blackboard scope for this capability
-            namespace: Namespace for this capability (appended to scope prefix for blackboard keys)
+            capability_key: Key to identify this capability within the agent (default "memory_recycler")
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(BlackboardScope.AGENT, agent, namespace="memory_mgmt:recycler"), input_patterns=[], capability_key=capability_key)  # AgentMemoryRecycler manages its own subscriptions, so no input patterns
 
     def get_action_group_description(self) -> str:
         return (
@@ -103,7 +97,7 @@ class AgentMemoryRecycler(AgentCapability):
         )
         lifecycle_bb.stream_events_to_queue(
             event_queue,
-            pattern=LifecycleSignalProtocol.terminated_pattern(namespace="memory_recycler"),
+            pattern=LifecycleSignalProtocol.terminated_pattern(),
             event_types={"write"},
         )
 
@@ -129,7 +123,7 @@ class AgentMemoryRecycler(AgentCapability):
     # Lifecycle Event Handlers
     # -------------------------------------------------------------------------
 
-    @event_handler(pattern=LifecycleSignalProtocol.terminated_pattern(namespace="memory_recycler"))
+    @event_handler(pattern=LifecycleSignalProtocol.terminated_pattern())
     async def handle_agent_terminated(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult:
         """Handle agent termination event — recycle memories to collective."""
         try:
@@ -348,22 +342,16 @@ class CollectiveMemoryInitializer(AgentCapability):
     ``@event_handler``.
     """
 
-    input_patterns = [LifecycleSignalProtocol.created_pattern(namespace="memory_initializer")]
-
-    def __init__(
-        self,
-        agent: Agent,
-        scope: BlackboardScope = BlackboardScope.COLONY,
-        namespace: str = "collective_memory_initializer",
-    ):
+    def __init__(self, agent: Agent, capability_key: str = "memory_initializer"):
         """Initialize collective memory initializer.
+
+        This capability subscribes to the colony control plane lifecycle scope to receive agent creation events and initializes new agents' LTM from collective memory.
 
         Args:
             agent: The MemoryManagementAgent that owns this capability
-            scope: Blackboard scope for this capability
-            namespace: Namespace for this capability (appended to scope prefix for blackboard keys)
+            capability_key: Key to identify this capability within the agent (default "memory_initializer")
         """
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
+        super().__init__(agent=agent, scope_id=get_scope_prefix(BlackboardScope.AGENT, agent, namespace="memory_mgmt:initializer"), input_patterns=[], capability_key=capability_key)  # CollectiveMemoryInitializer manages its own subscriptions, so no input patterns
 
     def get_action_group_description(self) -> str:
         return (
@@ -387,7 +375,7 @@ class CollectiveMemoryInitializer(AgentCapability):
         )
         lifecycle_bb.stream_events_to_queue(
             event_queue,
-            pattern=LifecycleSignalProtocol.created_pattern(namespace="memory_initializer"),
+            pattern=LifecycleSignalProtocol.created_pattern(),
             event_types={"write"},
         )
 
@@ -413,7 +401,7 @@ class CollectiveMemoryInitializer(AgentCapability):
     # Creation Event Handlers
     # -------------------------------------------------------------------------
 
-    @event_handler(pattern=LifecycleSignalProtocol.created_pattern(namespace="memory_initializer"))
+    @event_handler(pattern=LifecycleSignalProtocol.created_pattern())
     async def handle_agent_created(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult:
         """Handle agent creation event — seed LTM from collective memory."""
         try:
@@ -592,13 +580,17 @@ class CollectiveMemoryMaintainer(AgentCapability):
 
     input_patterns: list[str] = []  # Action-executor-only; no event monitoring needed
 
-    def __init__(
-        self,
-        agent: Agent,
-        scope: BlackboardScope = BlackboardScope.COLONY,
-        namespace: str = "collective_memory_maintainer",
-    ):
-        super().__init__(agent=agent, scope_id=f"{get_scope_prefix(scope, agent)}:{namespace}")
+    def __init__(self, agent: Agent, capability_key: str = "memory_maintainer"):
+        """Initialize collective memory maintainer.
+
+        This capability provides action executors for maintaining collective memory health, but does not subscribe to any events. Maintenance can be triggered manually or set up as a periodic task by the MemoryManagementAgent.
+
+        Args:
+            agent: The MemoryManagementAgent that owns this capability
+            capability_key: Key to identify this capability within the agent (default "memory_maintainer")
+        """
+        
+        super().__init__(agent=agent, scope_id=get_scope_prefix(BlackboardScope.AGENT, agent, namespace="memory_mgmt:maintainer"), input_patterns=[], capability_key=capability_key)  # CollectiveMemoryMaintainer manages its own subscriptions, so no input patterns
 
     def get_action_group_description(self) -> str:
         return (
@@ -772,23 +764,9 @@ class MemoryManagementAgent(Agent):
         self.state = AgentState.INITIALIZED
 
         # Create capabilities
-        self._recycler = AgentMemoryRecycler(
-            agent=self,
-            scope=ScopeUtils.get_colony_level_scope(),
-            namespace="memory_mgmt:recycler",
-        )
-
-        self._initializer = CollectiveMemoryInitializer(
-            agent=self,
-            scope=ScopeUtils.get_colony_level_scope(),
-            namespace="memory_mgmt:initializer",
-        )
-
-        self._maintainer = CollectiveMemoryMaintainer(
-            agent=self,
-            scope=ScopeUtils.get_colony_level_scope(),
-            namespace="memory_mgmt:maintainer",
-        )
+        self._recycler = AgentMemoryRecycler(agent=self)
+        self._initializer = CollectiveMemoryInitializer(agent=self)
+        self._maintainer = CollectiveMemoryMaintainer(agent=self)
 
         # Add capabilities to agent
         self.add_capability(self._recycler)

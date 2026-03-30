@@ -52,7 +52,7 @@ class ExecutionHistoryStore:
             await self.initialize()
 
         # Store record with searchable tags
-        key = PlanLearningProtocol.execution_key(record.plan_id, namespace="plan_learning")
+        key = PlanLearningProtocol.execution_key(record.plan_id)  # TODO: Do not use a key-value store. Use a proper distributed queue or time-series database.
         await self.blackboard.write(
             key=key,
             value=record.model_dump(),
@@ -84,7 +84,7 @@ class ExecutionHistoryStore:
 
         # Query blackboard for execution records
         entries = await self.blackboard.query(
-            namespace="execution:*",
+            namespace=PlanLearningProtocol.execution_pattern(),
             limit=limit * 2,  # Get more to filter
         )
 
@@ -118,7 +118,7 @@ class ExecutionHistoryStore:
 
         # Query using outcome tag
         entries = await self.blackboard.query(
-            namespace="execution:*",
+            namespace=PlanLearningProtocol.execution_pattern(),
             limit=limit,
         )
 
@@ -142,7 +142,7 @@ class ExecutionHistoryStore:
 
         # Query all execution records
         entries = await self.blackboard.query(
-            namespace="execution:*",
+            namespace=PlanLearningProtocol.execution_pattern(),
             limit=1000,
         )
 
