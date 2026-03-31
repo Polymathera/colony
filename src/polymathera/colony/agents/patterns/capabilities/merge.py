@@ -856,7 +856,7 @@ class MergeCapability(AgentCapability):
         capability_key: str = "merge",
         merge_policy: MergePolicy | None = None,
     ):
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)
         self.merge_policy: MergePolicy | None = merge_policy
 
     def get_action_group_description(self) -> str:

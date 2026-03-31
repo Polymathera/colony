@@ -73,7 +73,7 @@ class PageGraphCapability(AgentCapability):
             namespace: Namespace for the page graph (defaults to "page_graph")
             capability_key: Unique key for this capability (default "page_graph")
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)
         self._page_graph: nx.DiGraph | None = None
 
     def get_action_group_description(self) -> str:

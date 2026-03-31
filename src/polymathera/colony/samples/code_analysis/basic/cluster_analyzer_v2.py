@@ -63,7 +63,7 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
         namespace: str = "cluster_analyzer_v2",
         capability_key: str = "cluster_analyzer_v2_capability",
     ):
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)  # TODO: Replace some of the actions below with event handlers and input patterns BasicAnalysisProtocol
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)  # TODO: Replace some of the actions below with event handlers and input patterns BasicAnalysisProtocol
         self.blackboard_scope = scope
         self.key_registry: GlobalPageKeyRegistry | None = None
         self.key_generator: HybridKeyGenerator | None = None

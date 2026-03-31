@@ -923,7 +923,7 @@ class ContractAnalysisCapability(VCMAnalysisCapability):
             namespace: Namespace for blackboard events
             capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=None, capability_key=capability_key)
+        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=[], capability_key=capability_key)
 
     async def initialize(self) -> None:
         """Initialize contract analysis capability."""

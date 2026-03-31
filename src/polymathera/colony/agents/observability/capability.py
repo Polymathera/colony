@@ -66,7 +66,7 @@ class TracingCapability(AgentCapability):
         namespace: str = "tracing",
         capability_key: str = "tracing",
     ):
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)
         self._config = config
         self._trace_id: str | None = None
         self._current_run_id: str | None = None

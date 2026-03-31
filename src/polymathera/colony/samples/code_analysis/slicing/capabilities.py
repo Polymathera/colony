@@ -544,7 +544,7 @@ class SlicingAnalysisCapability(VCMAnalysisCapability):
             namespace: Namespace for blackboard events
             capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=None, capability_key=capability_key)
+        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=[], capability_key=capability_key)
         self._dependency_graph: dict[str, list[str]] = {}  # location -> dependent pages
 
     # =========================================================================

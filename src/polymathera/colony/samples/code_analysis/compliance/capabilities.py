@@ -1127,7 +1127,7 @@ class ComplianceVCMCapability(VCMAnalysisCapability):
             namespace: Namespace for blackboard keys
             capability_key: Unique key for this capability within the agent (default "compliance_vcm_analysis")
         """
-        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=None, capability_key=capability_key)
+        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=[], capability_key=capability_key)
         self._obligation_graph: ObligationGraph | None = None
 
     async def initialize(self) -> None:

@@ -1795,7 +1795,7 @@ class BaseActionPolicy(ActionPolicy):
             await self._create_action_dispatcher()
 
             # Get next action from subclass (plan_step may update current_session_id)
-            logger.warning(
+            logger.info(
                 f"\n"
                 f"    ┌────────────────────────────────────────────┐\n"
                 f"    │  ⚙ EXEC_ITER: calling plan_step            │\n"
@@ -1804,7 +1804,7 @@ class BaseActionPolicy(ActionPolicy):
             )
             next_action = await self.plan_step(state)
             action_str, trunc = _model_to_str(next_action)
-            logger.warning(f"    ⚙ EXEC_ITER: plan_step returned → {type(next_action).__name__}: {action_str} ({trunc})")
+            logger.info(f"    ⚙ EXEC_ITER: plan_step returned → {type(next_action).__name__}: {action_str} ({trunc})")
 
             # Re-check session_id in case plan_step updated it from a new event
             updated_session_id = state.custom.get("current_session_id")
@@ -2625,7 +2625,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         self.current_plan_id = state.current_plan.plan_id
         self.current_action_index = state.current_plan.current_action_index
 
-        logger.warning(
+        logger.info(
             f"      📋 PLAN_STEP: returning action → id={next_action.action_id} type={next_action.action_type}"
         )
         return next_action

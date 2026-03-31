@@ -263,7 +263,7 @@ class SynthesisCapability(AgentCapability):
         namespace: str = "synthesis_final",
         capability_key: str = "synthesis"
     ):
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)
         # Internal state only - no capability references stored
         self.partial_results: dict[str, ScopeAwareResult] = {}
         self.synthesis_history: list[SynthesisUpdate] = []

@@ -47,7 +47,7 @@ class ClusterAnalyzerCapability(AgentCapability):
         namespace: str = f"cluster_analyzer:{uuid.uuid4()}",
         capability_key: str = "cluster_analyzer_capability",
     ):
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=None, capability_key=capability_key)
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)
         self.query_router: PageQueryRoutingPolicy | None = None
 
     def get_action_group_description(self) -> str:
