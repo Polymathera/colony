@@ -1,19 +1,32 @@
-"""Multi-agent coordination mechanisms.
+"""Pluggable multi-agent coordination mechanisms.
 
-This module provides coordination mechanisms for multi-agent planning:
+This module provides coordination mechanisms for multi-agent planning that customize planning behavior:
 - PartialGlobalPlanning: Coordinate local plans with global context
 - NegotiationProtocol: Protocol for conflict negotiation
 - MarketBasedNegotiation: Market-based resource allocation
 - ConsensusNegotiation: Consensus-based conflict resolution
+- ActionPlanCoordinationPolicy: Multi-agent coordination
+
+Per Architecture Principle #2: ONE Planner class customized via pluggable policies.
+
+Design: Policies are stateless and receive context (page graphs, etc.) when called.
+The Planner that uses these policies is responsible for providing the necessary context.
 """
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import Any
 import logging
 
-from ...models import ActionPlan, PlanStatus
-from .policies import ConflictResolver
 from .blackboard import PlanBlackboard
+from ...models import (
+    ActionPlan,
+    PlanStatus,
+    ConflictType,
+    ConflictSeverity,
+    ActionPlanConflict,
+    ConflictResolutionStrategy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +105,13 @@ class PartialGlobalPlanning(CoordinationStrategy):
 
     def __init__(
         self,
-        conflict_resolver: ConflictResolver,
+        conflict_resolver: ActionPlanConflictResolver,
         negotiation_protocol: NegotiationProtocol | None = None,
     ):
         """Initialize PGP coordinator.
 
         Args:
-            conflict_resolver: ConflictResolver for resolving conflicts
+            conflict_resolver: ActionPlanConflictResolver for resolving conflicts
             negotiation_protocol: Protocol for negotiation (optional)
         """
         self.conflict_resolver = conflict_resolver
@@ -554,4 +567,588 @@ class ConsensusNegotiation(NegotiationProtocol):
                 )
 
         return conflicts
+
+
+
+
+# ============================================================================
+# Cache-Aware Conflict Detection and Resolution
+# ============================================================================
+
+
+class CacheAwarePlanConflictDetector:
+    """Detect conflicts between plans based on cache requirements.
+
+    Identifies conflicts such as:
+    - Resource exhaustion (total working set exceeds cache capacity)
+    - Cache contention (multiple plans need same pages)
+    - Sequential dependencies (plans must execute in order)
+    """
+
+    def __init__(self, cache_capacity: int, page_size: int = 40000):
+        """Initialize conflict detector.
+
+        Args:
+            cache_capacity: Maximum number of pages that can be cached
+            page_size: Average page size in tokens
+        """
+        self.cache_capacity = cache_capacity
+        self.page_size = page_size
+
+    async def detect_conflicts(self, plans: list[ActionPlan]) -> list[ActionPlanConflict]:
+        """Detect conflicts between plans.
+
+        Args:
+            plans: List of plans to check for conflicts
+
+        Returns:
+            List of action plan conflicts
+        """
+
+        conflicts = []
+
+        # Check for resource exhaustion
+        all_pages = set()
+        for plan in plans:
+            all_pages.update(plan.cache_context.working_set)
+
+        resource_conflict = self._check_resource_exhaustion(all_pages)
+        if resource_conflict:
+            conflicts.append(resource_conflict)
+
+        # Check pairwise cache contention
+        for i, plan_a in enumerate(plans):
+            for plan_b in plans[i + 1 :]:
+                contention = self._check_cache_contention(plan_a, plan_b)
+                if contention:
+                    conflicts.append(contention)
+
+        # Calculate severity for each conflict
+        for conflict in conflicts:
+            conflict.severity = self._calculate_conflict_severity(conflict)
+
+        logger.info(f"Detected {len(conflicts)} conflicts between {len(plans)} plans")
+        return conflicts
+
+    def _check_resource_exhaustion(self, total_working_set: set[str]) -> ActionPlanConflict | None:
+        """Check if total working set exceeds cache capacity.
+
+        Args:
+            total_working_set: Combined working set of all plans
+
+        Returns:
+            Conflict description if exhaustion detected, None otherwise
+        """
+
+        if len(total_working_set) > self.cache_capacity:
+            return ActionPlanConflict(
+                type=ConflictType.RESOURCE_CONTENTION,
+                description=f"Total working set ({len(total_working_set)} pages) exceeds cache capacity ({self.cache_capacity} pages)",
+                severity=ConflictSeverity.HIGH,
+                details={
+                    "total_pages": len(total_working_set),
+                    "capacity": self.cache_capacity,
+                    "overflow": len(total_working_set) - self.cache_capacity,
+                },
+                recommended_strategy=ConflictResolutionStrategy.STAGGER_EXECUTION,
+            )
+        return None
+
+    def _check_cache_contention(self, plan_a: ActionPlan, plan_b: ActionPlan) -> ActionPlanConflict | None:
+        """Check for cache contention between two plans.
+
+        Args:
+            plan_a: First plan
+            plan_b: Second plan
+
+        Returns:
+            Conflict description if contention detected, None otherwise
+        """
+
+        # Find overlapping pages
+        pages_a = set(plan_a.cache_context.working_set)
+        pages_b = set(plan_b.cache_context.working_set)
+        shared_pages = pages_a & pages_b
+
+        # Check if combined working set exceeds capacity
+        combined_size = len(pages_a | pages_b)
+        if combined_size > self.cache_capacity:
+            return ActionPlanConflict(
+                type=ConflictType.CACHE_CONTENTION,
+                description=f"Plans {plan_a.plan_id} and {plan_b.plan_id} have combined working set ({combined_size} pages) exceeding cache capacity",
+                plan_a_id=plan_a.plan_id,
+                plan_b_id=plan_b.plan_id,
+                details={
+                    "shared_pages": list(shared_pages),
+                    "combined_size": combined_size,
+                    "capacity": self.cache_capacity,
+                    "overflow": combined_size - self.cache_capacity,
+                },
+                recommended_strategy=ConflictResolutionStrategy.STAGGER_EXECUTION,
+            )
+        return None
+
+    def _calculate_conflict_severity(self, conflict: ActionPlanConflict) -> ConflictSeverity:
+        """Calculate conflict severity.
+
+        Args:
+            conflict: Conflict description
+
+        Returns:
+            Severity level: "low", "medium", "high", "critical"
+        """
+
+        conflict_type = conflict.type
+
+        if conflict_type == ConflictType.RESOURCE_CONTENTION:
+            overflow = conflict.details.get("overflow", 0)
+            overflow_ratio = overflow / self.cache_capacity
+
+            if overflow_ratio > 0.5:
+                return ConflictSeverity.CRITICAL
+            elif overflow_ratio > 0.25:
+                return ConflictSeverity.HIGH
+            elif overflow_ratio > 0.1:
+                return ConflictSeverity.MEDIUM
+            else:
+                return ConflictSeverity.LOW
+
+        elif conflict_type == ConflictType.CACHE_CONTENTION:
+            overflow = conflict.details.get("overflow", 0)
+            overflow_ratio = overflow / self.cache_capacity
+
+            if overflow_ratio > 0.3:
+                return ConflictSeverity.HIGH
+            elif overflow_ratio > 0.15:
+                return ConflictSeverity.MEDIUM
+            else:
+                return ConflictSeverity.LOW
+
+        return ConflictSeverity.MEDIUM
+
+
+class CacheAwarePlanConflictResolver:
+    """Resolve conflicts between plans by modifying them.
+
+    Resolution strategies:
+    - Stagger execution (delay some plans)
+    - Partition working sets (split plans)
+    - Coordinate shared pages (optimize for sharing)
+    """
+
+    async def resolve_cache_contention(
+        self, plan_a: ActionPlan, plan_b: ActionPlan, conflict: ActionPlanConflict
+    ) -> tuple[ActionPlan, ActionPlan]:
+        """Resolve cache contention between two plans.
+
+        Args:
+            plan_a: First plan
+            plan_b: Second plan
+            conflict: Conflict description
+
+        Returns:
+            Modified (plan_a, plan_b) tuple
+        """
+        logger.info(
+            f"Resolving cache contention between {plan_a.plan_id} and {plan_b.plan_id}"
+        )
+
+        # Strategy: Stagger execution by adding delays
+        modified_a, modified_b = await self._stagger_execution([plan_a, plan_b])
+
+        return modified_a, modified_b
+
+    async def _stagger_execution(self, plans: list[ActionPlan]) -> list[ActionPlan]:
+        """Stagger plan execution to avoid simultaneous cache usage.
+
+        Args:
+            plans: Plans to stagger
+
+        Returns:
+            Modified plans with execution delays
+        """
+        # TODO: Is this even a robust strategy?
+
+        # Add execution delay to all but first plan
+        for i, plan in enumerate(plans):
+            if i > 0:
+                # Add metadata to indicate this plan should be delayed
+                plan.metadata["execution_delay_s"] = i * 10.0  # 10 second stagger
+                plan.metadata["staggered"] = True
+
+        logger.info(f"Staggered execution of {len(plans)} plans")
+        return plans
+
+    async def _partition_working_sets(self, plans: list[ActionPlan]) -> list[ActionPlan]:
+        """Partition working sets to reduce overlap.
+
+        Args:
+            plans: Plans to partition
+
+        Returns:
+            Modified plans with partitioned working sets
+        """
+        # Strategy: Identify shared pages and assign exclusivity
+        all_pages: dict[str, list[str]] = {}  # page_id -> [plan_ids using it]
+
+        for plan in plans:
+            for page_id in plan.cache_context.working_set:
+                if page_id not in all_pages:
+                    all_pages[page_id] = []
+                all_pages[page_id].append(plan.plan_id)
+
+        # Mark pages as exclusive or shareable
+        for plan in plans:
+            exclusive = []
+            shareable = []
+
+            for page_id in plan.cache_context.working_set:
+                if len(all_pages[page_id]) == 1:
+                    # Only this plan uses this page
+                    exclusive.append(page_id)
+                else:
+                    # Multiple plans use this page
+                    shareable.append(page_id)
+
+            plan.cache_context.exclusive_pages = exclusive
+            plan.cache_context.shareable_pages = shareable
+
+        logger.info(f"Partitioned working sets for {len(plans)} plans")
+        return plans
+
+    async def _coordinate_shared_pages(self, plans: list[ActionPlan]) -> list[ActionPlan]:
+        """Coordinate shared page access between plans.
+
+        Args:
+            plans: Plans to coordinate
+
+        Returns:
+            Modified plans with coordinated access
+        """
+        # Identify frequently shared pages
+        page_usage: dict[str, int] = {}
+        for plan in plans:
+            for page_id in plan.cache_context.working_set:
+                page_usage[page_id] = page_usage.get(page_id, 0) + 1
+
+        # Mark highly shared pages for keeping in cache
+        high_usage_threshold = len(plans) // 2
+        for plan in plans:
+            for page_id in plan.cache_context.working_set:
+                if page_usage[page_id] >= high_usage_threshold:
+                    # Mark as shareable and high priority
+                    if page_id not in plan.cache_context.shareable_pages:
+                        plan.cache_context.shareable_pages.append(page_id)
+                    plan.cache_context.working_set_priority[page_id] = 2.0  # High priority
+
+        logger.info(f"Coordinated shared pages for {len(plans)} plans")
+        return plans
+
+
+# ============================================================================
+# Generic Conflict Resolution
+# ============================================================================
+
+
+class ActionPlanConflictResolver:
+    """Generic conflict resolver for plans.
+
+    Resolves conflicts between plans using various strategies:
+    - Priority-based resolution/negotiation
+    - Temporal staggering
+    - Resource efficiency optimization
+    - Negotiation between agents
+    - Escalation to higher authority
+    - Partition working sets
+    """
+
+    def __init__(self, default_strategy: str = ConflictResolutionStrategy.PRIORITY):
+        """Initialize conflict resolver.
+
+        Args:
+            default_strategy: Default resolution strategy to use
+        """
+
+        self.default_strategy = default_strategy
+        self.cache_resolver = CacheAwarePlanConflictResolver()
+
+    async def resolve_conflict(
+        self,
+        conflict: ActionPlanConflict,
+        plans: list[ActionPlan],
+        strategy: str | None = None,
+    ) -> list[ActionPlan]:
+        """Resolve a conflict between plans.
+
+        Args:
+            conflict: Conflict description from detector
+            plans: Plans involved in conflict
+            strategy: Resolution strategy (uses default if None)
+
+        Returns:
+            Modified plans after resolution
+        """
+
+        strategy = strategy or self.default_strategy
+        conflict_type = conflict.type
+
+        logger.info(
+            f"Resolving {conflict_type} conflict using {strategy} strategy"
+        )
+
+        if strategy == ConflictResolutionStrategy.PRIORITY:
+            return await self._resolve_by_priority(conflict, plans)
+
+        elif strategy == ConflictResolutionStrategy.TEMPORAL:
+            return await self._resolve_by_temporal_staggering(conflict, plans)
+
+        elif strategy == ConflictResolutionStrategy.RESOURCE_EFFICIENCY:
+            return await self._resolve_by_efficiency(conflict, plans)
+
+        elif strategy == ConflictResolutionStrategy.NEGOTIATION:
+            return await self._resolve_by_negotiation(conflict, plans)
+
+        elif strategy == ConflictResolutionStrategy.ESCALATION:
+            return await self._resolve_by_escalation(conflict, plans)
+
+        elif strategy == ConflictResolutionStrategy.REPLAN:
+            return await self._resolve_by_replanning(conflict, plans)
+
+        else:
+            logger.warning(f"Unknown resolution strategy {strategy}, using priority")
+            return await self._resolve_by_priority(conflict, plans)
+
+    async def _resolve_by_priority(
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
+    ) -> list[ActionPlan]:
+        """Resolve conflict by priority ordering.
+
+        Higher priority plans execute first, lower priority plans delayed or cancelled.
+
+        Args:
+            conflict: Conflict description
+            plans: Conflicting plans
+
+        Returns:
+            Modified plans
+        """
+        # Sort plans by priority (metadata.priority field)
+        sorted_plans = sorted(
+            plans,
+            key=lambda p: p.metadata.get("priority", 0),
+            reverse=True,  # Higher priority first
+        )
+
+        # Highest priority plan proceeds unchanged
+        # Lower priority plans are delayed or suspended
+        for i, plan in enumerate(sorted_plans):
+            if i == 0:
+                # Highest priority - no changes
+                continue
+            else:
+                # Lower priority - add delay or suspend
+                plan.metadata["delayed_by_priority"] = True
+                plan.metadata["delay_reason"] = f"Conflict with higher priority plan {sorted_plans[0].plan_id}"
+
+                # Suspend if severe conflict
+                severity = conflict.severity
+                if severity in [ConflictSeverity.HIGH, ConflictSeverity.CRITICAL]:
+                    plan.status = PlanStatus.SUSPENDED
+                    plan.blocked_reason = f"Suspended due to {severity} conflict with higher priority plan"
+
+        logger.info(f"Resolved conflict by priority: {len(plans)} plans affected")
+        return sorted_plans
+
+    async def _resolve_by_temporal_staggering(
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
+    ) -> list[ActionPlan]:
+        """Resolve conflict by staggering execution over time.
+
+        Args:
+            conflict: Conflict description
+            plans: Conflicting plans
+
+        Returns:
+            Modified plans with execution delays
+        """
+        # Use cache resolver's staggering logic
+        return await self.cache_resolver._stagger_execution(plans)
+
+    async def _resolve_by_efficiency(
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
+    ) -> list[ActionPlan]:
+        """Resolve conflict by optimizing resource usage.
+
+        Args:
+            conflict: Conflict description
+            plans: Conflicting plans
+
+        Returns:
+            Modified plans optimized for efficiency
+        """
+
+        conflict_type = conflict.type
+
+        if conflict_type == ConflictType.CACHE_CONTENTION:
+            # Use cache-specific resolution
+            return await self.cache_resolver._partition_working_sets(plans)
+
+        elif conflict_type == ConflictType.RESOURCE_CONTENTION:
+            # Generic resource optimization - share resources when possible
+            for plan in plans:
+                # Mark resources as shareable
+                plan.metadata["resource_sharing_enabled"] = True
+
+        logger.info("Resolved conflict by efficiency optimization")
+        return plans
+
+    async def _resolve_by_negotiation(
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
+    ) -> list[ActionPlan]:
+        """Resolve conflict through negotiation between agents.
+
+        Args:
+            conflict: Conflict description
+            plans: Conflicting plans
+
+        Returns:
+            Modified plans after negotiation
+        """
+        # TODO: Implement negotiation protocol
+        # For now, fall back to priority
+        logger.warning("Negotiation not implemented, falling back to priority")
+        return await self._resolve_by_priority(conflict, plans)
+
+    async def _resolve_by_escalation(
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
+    ) -> list[ActionPlan]:
+        """Escalate conflict to higher authority.
+
+        Args:
+            conflict: Conflict description
+            plans: Conflicting plans
+
+        Returns:
+            Plans marked for escalation
+        """
+        # Mark all plans as needing approval
+        for plan in plans:
+            plan.approval_required = True
+            plan.metadata["escalated_conflict"] = True
+            plan.metadata["conflict_details"] = conflict
+            plan.status = PlanStatus.PROPOSED  # Wait for approval
+
+        logger.info(f"Escalated conflict involving {len(plans)} plans")
+        return plans
+
+    async def _resolve_by_replanning(
+        self, conflict: ActionPlanConflict, plans: list[ActionPlan]
+    ) -> list[ActionPlan]:
+        """Resolve conflict by requesting replanning.
+
+        Args:
+            conflict: Conflict description
+            plans: Conflicting plans
+
+        Returns:
+            Plans marked for replanning
+        """
+        # Mark lower priority plans for replanning
+        sorted_plans = sorted(
+            plans,
+            key=lambda p: p.metadata.get("priority", 0),
+            reverse=True,
+        )
+
+        for i, plan in enumerate(sorted_plans):
+            if i > 0:  # Skip highest priority plan
+                plan.metadata["requires_replanning"] = True
+                plan.metadata["replan_reason"] = f"Conflict: {conflict.description}"
+
+        logger.info(f"Marked {len(plans) - 1} plans for replanning")
+        return sorted_plans
+
+
+# ============================================================================
+# Coordination Policy
+# ============================================================================
+
+
+class ActionPlanCoordinationPolicy:
+    """Multi-agent coordination policy.
+
+    Handles coordination between multiple agent plans:
+    - Conflict detection
+    - Conflict resolution
+    - Resource allocation
+
+    Per Architecture Principle #2: This is a pluggable policy, NOT a separate planner.
+    """
+
+    def __init__(self, cache_capacity: int = 100):
+        """Initialize coordination policy.
+
+        Args:
+            cache_capacity: Maximum number of pages that can be cached
+        """
+        self.detector = CacheAwarePlanConflictDetector(cache_capacity)
+        self.resolver = ActionPlanConflictResolver(default_strategy="priority")
+
+    async def initialize(self) -> None:
+        """Initialize policy."""
+        logger.info("Initializing ActionPlanCoordinationPolicy")
+
+    async def check_conflicts(
+        self, plan: ActionPlan, other_plans: list[ActionPlan]
+    ) -> list[ActionPlanConflict]:
+        """Check for conflicts with other plans.
+
+        Args:
+            plan: ActionPlan to check
+            other_plans: Other active plans
+
+        Returns:
+            List of conflicts (empty if no conflicts)
+        """
+        logger.info(f"Checking conflicts for plan {plan.plan_id}")
+
+        # Use existing conflict detector
+        all_plans = [plan] + other_plans
+        conflicts = await self.detector.detect_conflicts(all_plans)
+
+        logger.info(f"Found {len(conflicts)} conflicts for plan {plan.plan_id}")
+        return conflicts
+
+    async def resolve_conflict(
+        self, plan: ActionPlan, conflict: ActionPlanConflict
+    ) -> ActionPlan | None:
+        """Resolve conflict for a plan.
+
+        Args:
+            plan: ActionPlan with conflict
+            conflict: Conflict details
+
+        Returns:
+            Modified plan, or None if conflict cannot be resolved
+        """
+        conflict_type = conflict.type
+        logger.info(f"Resolving {conflict_type} conflict for plan {plan.plan_id}")
+
+        # Use existing conflict resolver
+        strategy = conflict.recommended_strategy
+        resolved_plans = await self.resolver.resolve_conflict(
+            conflict=conflict,
+            plans=[plan],
+            strategy=strategy,
+        )
+
+        if resolved_plans:
+            resolved_plan = resolved_plans[0]
+            logger.info(f"Resolved conflict for plan {plan.plan_id} using {strategy} strategy")
+            return resolved_plan
+
+        logger.warning(f"Could not resolve conflict for plan {plan.plan_id}")
+        return None
+
+
 

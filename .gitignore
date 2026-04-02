@@ -1,3 +1,6 @@
+# TypeScript build cache
+*.tsbuildinfo
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -15,6 +18,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!**/frontend/src/lib/
 lib64/
 parts/
 sdist/

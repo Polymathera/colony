@@ -28,7 +28,6 @@ from polymathera.colony.agents.models import (
 )
 from polymathera.colony.cluster.models import InferenceResponse
 from polymathera.colony.agents.patterns.actions.policies import (
-    create_default_action_policy,
     action_executor,
 )
 from polymathera.colony.agents.patterns.capabilities.reflection import ReflectionCapability

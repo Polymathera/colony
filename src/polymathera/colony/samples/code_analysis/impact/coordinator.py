@@ -26,8 +26,6 @@ from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraph
 from polymathera.colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
 from polymathera.colony.agents.base import Agent, AgentCapability, AgentMetadata
 from polymathera.colony.agents.patterns.actions.policies import action_executor
-from polymathera.colony.agents.patterns.planning.policies import CacheAwarePlanningPolicy
-from polymathera.colony.agents.patterns.planning.strategies import ModelPredictiveControlStrategy
 from polymathera.colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
 from polymathera.colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
 from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
@@ -331,7 +329,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     spawning, monitoring, synthesis, and multi-hop propagation.
 
     This capability follows the patterns from CodeAnalysisCoordinatorV2:
-    1. Uses `Planner` with `CacheAwarePlanningPolicy` for cache-optimized planning
+    1. Uses a cache-aware `Planner` for cache-optimized planning
     2. Uses `spawn_next_batch()` for cache-aware agent scheduling
     3. Uses `SynthesisCapability` for progressive result synthesis
     4. Uses `HypothesisGameProtocol` for validating CRITICAL impacts
@@ -375,7 +373,6 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         self.blackboard: EnhancedBlackboard | None = None
 
         # Cache-aware components (initialized in initialize())
-        self.cache_policy: CacheAwarePlanningPolicy | None = None
         self.working_set_cap: WorkingSetCapability | None = None
         self.feedback_predictor: FeedbackLoopPredictor | None = None
         self.incremental_synthesizer: SynthesisCapability | None = None
@@ -406,14 +403,6 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         await super().initialize()
 
         self.blackboard = await self.get_blackboard()
-
-        # Initialize cache-aware planning policy
-        self.cache_policy = CacheAwarePlanningPolicy(
-            agent=self.agent,
-            cache_capacity=self.agent.metadata.parameters.get("cache_capacity", 50),
-            query_vcm_state=self.agent.metadata.parameters.get("query_vcm_state", False)
-        )
-        await self.cache_policy.initialize()
 
         # Get WorkingSetCapability from agent (must be added in Agent.initialize())
         self.working_set_cap = self.agent.get_capability_by_type(WorkingSetCapability)

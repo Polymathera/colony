@@ -4,11 +4,15 @@ This module provides:
 - ExecutionHistoryStore: Persistent storage for plan execution records
 - PatternLearner: Extracts reusable patterns from execution history
 - CostModelTrainer: Refines cost estimates based on actual execution data
+- ActionPlanLearningPolicy: Learning from execution history
 """
 
+
 import logging
+import time
 from typing import Any
 
+from ...base import Agent
 from ...models import (
     CostModel,
     ActionPlan,
@@ -388,3 +392,149 @@ class CostModelTrainer:
         )
 
         return refined
+
+
+# ============================================================================
+# Learning Policy
+# ============================================================================
+
+
+class ActionPlanLearningPolicy:
+    """Learning policy for plan improvement.
+
+    Uses execution history to:
+    - Learn successful patterns
+    - Refine cost models
+    - Recommend plan improvements
+
+    Per Architecture Principle #2: This is a pluggable policy, NOT a separate planner.
+    """
+
+    def __init__(self, agent: Agent | None = None):
+        """Initialize learning policy.
+
+        Args:
+            agent: Agent instance for accessing blackboard and other capabilities
+        """
+        self.agent = agent
+        self.history_store = None
+        self.pattern_learner = None
+        self.cost_trainer = None
+
+    async def initialize(self) -> None:
+        """Initialize policy (load learned patterns, cost models)."""
+        logger.info("Initializing ActionPlanLearningPolicy")
+
+        # Initialize learning components
+        from .learning import (
+            ExecutionHistoryStore,
+            PatternLearner,
+            CostModelTrainer,
+        )
+
+        self.history_store = ExecutionHistoryStore(
+            blackboard=await self.agent.get_agent_level_blackboard(namespace="planning_history")
+        )
+        await self.history_store.initialize()
+
+        self.pattern_learner = PatternLearner(self.history_store)
+        await self.pattern_learner.initialize()
+
+        self.cost_trainer = CostModelTrainer(self.history_store)
+        await self.cost_trainer.initialize()
+
+        # Train models from existing history
+        await self.cost_trainer.train()
+        await self.pattern_learner.learn_patterns()
+
+        logger.info("Learning policy initialized with execution history")
+
+    async def get_applicable_patterns(
+        self,
+        context: PlanningContext
+    ) -> list[PlanPattern]:
+        """Get patterns applicable to given goals.
+
+        Args:
+            context: Planning context
+
+        Returns:
+            List of applicable patterns
+        """
+        if not self.pattern_learner:
+            logger.warning("Pattern learner not initialized")
+            return []
+
+        # Query patterns for goals
+        goal_str = " ".join(context.goals)
+        patterns = await self.pattern_learner.get_applicable_patterns(goal_str, context)
+
+        logger.info(f"Found {len(patterns)} applicable patterns for goals")
+        return patterns
+
+    async def get_similar_plans(
+        self, goals: list[str], context: PlanningContext, limit: int = 5
+    ) -> list[PlanExecutionRecord]:
+        """Get similar successful plans from history.
+
+        Args:
+            goals: Current goals
+            context: Planning context
+            limit: Maximum number of plans to return
+
+        Returns:
+            List of similar plan records
+        """
+        if not self.history_store:
+            logger.warning("History store not initialized")
+            return []
+
+        # Query for similar goals
+        goal_str = " ".join(goals)
+        similar = await self.history_store.query_by_goal(goal_str, limit=limit)
+
+        logger.info(f"Found {len(similar)} similar plans for goals: {goals}")
+        return similar
+
+    async def learn_from_execution(
+        self, plan: ActionPlan, outcome: dict[str, Any]
+    ) -> None:
+        """Learn from plan execution outcome.
+
+        Args:
+            plan: Executed plan
+            outcome: Execution outcome with metrics
+        """
+        if not self.history_store:
+            logger.warning("History store not initialized, cannot learn")
+            return
+
+        logger.info(f"Learning from execution of plan {plan.plan_id}")
+
+        # Create execution record
+        record = PlanExecutionRecord(
+            plan_id=plan.plan_id,
+            agent_id=plan.agent_id,
+            goal=" ".join(plan.goals),
+            scope=plan.scope.value if plan.scope else "unknown",
+            created_at=time.time(),
+            actions=[a.model_dump() for a in plan.actions],
+            outcome=outcome.get("status", "unknown"),
+            success_rate=outcome.get("success_rate", 0.0),
+            duration_seconds=outcome.get("duration_seconds", 0.0),
+            estimated_cost=plan.estimated_cost,
+            actual_cost=plan.actual_cost,
+            strategy=plan.metadata.get("strategy", ""),
+        )
+
+        # Store for learning
+        await self.history_store.record_execution(record)
+
+        # Periodically retrain models (every 10 executions)
+        stats = await self.history_store.get_statistics()
+        if stats.get("total_executions", 0) % 10 == 0:
+            logger.info("Retraining cost and pattern models")
+            await self.cost_trainer.train()
+            await self.pattern_learner.learn_patterns()
+
+

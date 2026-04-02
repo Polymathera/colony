@@ -1483,7 +1483,7 @@ class IntentCoordinatorCapability(AgentCapability):
 
                         # Check for conflicts
                         agent1 = self.page_agents[list(self.page_agents.keys())[i]]
-                        conflicts = await agent1.detect_conflicts(intent1, [intent2])
+                        conflicts = await agent1.detect_conflicts(intent1, [intent2])  # TODO: Agents have no detect_conflicts method - this is a placeholder for where conflict detection logic would go
                         all_conflicts.extend(conflicts)
 
         # Run consensus game if conflicts exist

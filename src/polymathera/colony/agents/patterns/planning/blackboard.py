@@ -15,7 +15,7 @@ from ...base import Agent
 from ...blackboard.blackboard import EnhancedBlackboard
 from ...blackboard.protocol import PlanProtocol
 from ...scopes import BlackboardScope, get_scope_prefix
-from .policies import PlanAccessPolicy
+from .access import PlanAccessPolicy
 from ...models import ActionPlan, PlanStatus
 from ....distributed.ray_utils import serving
 

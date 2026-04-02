@@ -15,20 +15,20 @@ from ...base import Agent
 from ...models import (
     Action,
     ActionPlan,
-    ActionType,
     ActionStatus,
     CacheContext,
     PlanningContext,
     PlanningParameters,
+    PlanningStrategy,
     PlanStatus,
 )
-from .strategies import PlanningStrategyPolicy, TopDownPlanningStrategy
-from .policies import (
-    CacheAwarePlanningPolicy,
-    LearningPlanningPolicy,
-    CoordinationPlanningPolicy,
+from .strategies import (
+    ActionPlanningStrategy,
+    get_default_planning_strategy,
 )
-from ..models import Critique
+from .cache import ActionPlanningCachePolicy
+from .coordination import ActionPlanCoordinationPolicy
+from .learning import ActionPlanLearningPolicy
 
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class ActionPlanner(ABC):
 
     Implementations:
     - SequentialPlanner: Manually-specified linear sequence
-    - CacheAwareActionPlanner: LLM-driven planning via pluggable PlanningStrategyPolicy
+    - CacheAwareActionPlanner: LLM-driven planning via pluggable ActionPlanningStrategy
     """
 
     @abstractmethod
@@ -56,7 +56,7 @@ class ActionPlanner(ABC):
 
     @abstractmethod
     async def revise_plan(
-        self, current_plan: ActionPlan, planning_context: PlanningContext, critique: Critique
+        self, current_plan: ActionPlan, planning_context: PlanningContext
     ) -> ActionPlan:
         """Revise plan based on critique and new information.
 
@@ -129,25 +129,9 @@ class SequentialPlanner(ActionPlanner):
 
     @override
     async def revise_plan(
-        self, current_plan: ActionPlan, planning_context: PlanningContext, critique: Critique
+        self, current_plan: ActionPlan, planning_context: PlanningContext
     ) -> ActionPlan:
-        """Revise plan by appending corrective actions."""
-        # Simple strategy: add actions based on critique suggestions
-        corrective_actions = []
-        for suggestion in critique.suggestions:
-            # Convert suggestion to action (simple heuristic)
-            corrective_actions.append(
-                Action(
-                    type=ActionType.CUSTOM,  # TODO: How are these actions handled by executor?
-                    parameters={"suggestion": suggestion},
-                    reasoning=f"Addressing critique: {suggestion}",
-                )
-            )
-
-        # Prepend corrective actions (handle issues first)
-        for action in reversed(corrective_actions):
-            current_plan.prepend_action(action)
-
+        """Return the current plan without modification."""
         return current_plan
 
     @override
@@ -162,11 +146,11 @@ class CacheAwareActionPlanner(ActionPlanner):
     def __init__(
         self,
         agent: Agent,
-        planning_strategy: PlanningStrategyPolicy,
+        planning_strategy: ActionPlanningStrategy,
         planning_params: PlanningParameters,
-        cache_policy: CacheAwarePlanningPolicy | None = None,
-        learning_policy: LearningPlanningPolicy | None = None,
-        coordination_policy: CoordinationPlanningPolicy | None = None, # FIXME: Not used yet
+        cache_policy: ActionPlanningCachePolicy | None = None,
+        learning_policy: ActionPlanLearningPolicy | None = None,
+        coordination_policy: ActionPlanCoordinationPolicy | None = None, # FIXME: Not used yet
     ):
         self.agent = agent
         self.agent_id = agent.agent_id
@@ -179,7 +163,7 @@ class CacheAwareActionPlanner(ActionPlanner):
         self.planning_params = planning_params
         self.cache_policy = cache_policy
         self.learning_policy = learning_policy
-        self.coordination_policy = coordination_policy
+        self.coordination_policy = coordination_policy  # TODO: This is not used yet.
 
     async def initialize(self) -> None:
         """Initialize planner and its policies."""
@@ -238,7 +222,7 @@ class CacheAwareActionPlanner(ActionPlanner):
 
     @override
     async def revise_plan(
-        self, current_plan: ActionPlan, planning_context: PlanningContext, critique: Critique
+        self, current_plan: ActionPlan, planning_context: PlanningContext
     ) -> ActionPlan:
         """Replan next N steps (MPC)."""
         # Get learned patterns and cache context if policies are available
@@ -253,6 +237,24 @@ class CacheAwareActionPlanner(ActionPlanner):
             cache_context = await self.cache_policy.analyze_cache_requirements(planning_context)
         else:
             cache_context = CacheContext()
+
+        # TODO: Get critique here or from memory and add to the planning context for replanning
+        ### critique: Critique = 
+        ### # Simple strategy: add actions based on critique suggestions
+        ### corrective_actions = []
+        ### for suggestion in critique.suggestions:
+        ###     # Convert suggestion to action (simple heuristic)
+        ###     corrective_actions.append(
+        ###         Action(
+        ###             type=ActionType.CUSTOM,  # TODO: How are these actions handled by executor?
+        ###             parameters={"suggestion": suggestion},
+        ###             reasoning=f"Addressing critique: {suggestion}",
+        ###         )
+        ###     )
+
+        ### # Prepend corrective actions (handle issues first)
+        ### for action in reversed(corrective_actions):
+        ###     current_plan.prepend_action(action)
 
         new_actions = await self.planning_strategy.replan_horizon(
             plan=current_plan,
@@ -346,18 +348,45 @@ async def create_cache_aware_planner(
 
     # Create planning parameters
     planning_params = PlanningParameters(
+        strategy=PlanningStrategy.TOP_DOWN,  # TopDown works well for code analysis
         planning_horizon=planning_horizon,
         max_iterations=max_iterations,
         quality_threshold=quality_threshold,
         ideal_cache_size=ideal_cache_size,
+        ### **agent.metadata.parameters.get("planning_params", {})  # FIXME: Get the planning parameters properly
     )
 
-    # Create planning strategy (TopDown works well for code analysis)
-    planning_strategy = TopDownPlanningStrategy(agent=agent)
-    # Learn from execution outcomes
-    learning_policy = LearningPlanningPolicy(agent=agent)
+    # Create planning strategy
+    planning_strategy: ActionPlanningStrategy = get_default_planning_strategy(
+        planning_params, agent=agent
+    )
+
+    # Create default policies if not provided in metadata
     # Analyze cache needs and update working set
-    cache_policy = CacheAwarePlanningPolicy(agent=agent)
+    cache_policy = ActionPlanningCachePolicy(
+        agent=agent,
+        cache_capacity=planning_params.ideal_cache_size
+    )
+    await cache_policy.initialize()
+    logger.info(
+        f"Created default ActionPlanningCachePolicy for agent {agent.agent_id}"
+    )
+
+    # Learn from execution outcomes
+    learning_policy = ActionPlanLearningPolicy(agent=agent)
+    await learning_policy.initialize()
+    logger.info(
+        f"Created default ActionPlanLearningPolicy for agent {agent.agent_id}"
+    )
+
+    coordination_policy = ActionPlanCoordinationPolicy(
+        cache_capacity=planning_params.ideal_cache_size
+    )
+    await coordination_policy.initialize()
+    logger.info(
+        f"Created default ActionPlanCoordinationPolicy for agent {agent.agent_id}"
+    )
+
 
     # Create sophisticated planner with policies
     cache_aware_planner = CacheAwareActionPlanner(
@@ -366,12 +395,15 @@ async def create_cache_aware_planner(
         planning_params=planning_params,
         learning_policy=learning_policy,
         cache_policy=cache_policy,
+        coordination_policy=coordination_policy,
         # Policies will be created automatically in Agent.initialize()
         # when metadata doesn't provide them
     )
     await cache_aware_planner.initialize()
 
     return cache_aware_planner
+
+
 
 
 

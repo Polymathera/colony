@@ -18,11 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 import time
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, get_type_hints, get_origin, get_args
 from contextlib import AsyncExitStack
@@ -37,8 +35,6 @@ from ...models import (
     ActionGroupDescription,
     ActionPlan,
     ActionStatus,
-    PlanningContext,
-    PlanningParameters,
     PlanExecutionContext,
     AgentSuspensionState,
     ActionPolicyExecutionState,
@@ -61,19 +57,16 @@ from .repl import PolicyPythonREPL, REPLCapability, get_repl_guidance
 from ..planning import (
     ActionPlanner,
     PlanBlackboard,
-    PlanningStrategyPolicy,
-    CacheAwarePlanningPolicy,
-    LearningPlanningPolicy,
-    CoordinationPlanningPolicy,
     HierarchicalAccessPolicy,
-    CacheAwareActionPlanner,
-    get_default_planning_strategy,
     ReplanningPolicy,
     ReplanningDecision,
     PeriodicReplanningPolicy,
     PlanExhaustionReplanningPolicy,
     CompositeReplanningPolicy,
 )
+from ..planning.planner import create_cache_aware_planner
+from ..planning.context import PlanningContextBuilder
+
 # NOTE: Class-based ActionExecutors from executors.py are deprecated.
 # Use @action_executor decorated methods on AgentCapability classes instead.
 # See executors.py module docstring for migration details.
@@ -85,9 +78,6 @@ logger = setup_logger(__name__)
 # NOTE: With ambient transactions, action executors do not need access to transaction
 # handles. The dispatcher only needs to validate dependency versions and execute the
 # action within the dependency transactor contexts.
-
-
-
 
 
 class ActionExecutor(ABC):
@@ -2209,6 +2199,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         action_providers: list[Any] = [],
         io: ActionPolicyIO | None = None,
         replanning_policy: ReplanningPolicy | None = None,
+        context_builder: PlanningContextBuilder | None = None,
     ):
         """Initialize planning agent.
 
@@ -2237,6 +2228,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         self.current_plan: ActionPlan | None = None
         self.current_plan_id: str | None = None
         self.current_action_index: int | None = None
+        self.context_builder = context_builder or PlanningContextBuilder(agent)
 
     def get_action_group_description(self) -> str:
         return (
@@ -2254,53 +2246,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         self.plan_blackboard = await self._get_plan_blackboard()
 
         if self.planner is None:
-            # Get planning parameters from metadata
-            planning_params = PlanningParameters(
-                **self.agent.metadata.parameters.get("planning_params", {})  # FIXME: Get the planning parameters properly
-            )
-
-            # Get or create planning strategy
-            planning_strategy: PlanningStrategyPolicy = get_default_planning_strategy(
-                planning_params, agent=self
-            )
-
-            # Ensure strategy has agent reference
-            if not planning_strategy.agent:
-                planning_strategy.set_agent(self.agent)
-
-            # Create default policies if not provided in metadata
-            cache_policy = CacheAwarePlanningPolicy(
-                agent=self,
-                cache_capacity=planning_params.ideal_cache_size
-            )
-            await cache_policy.initialize()
-            logger.info(
-                f"Created default CacheAwarePlanningPolicy for agent {self.agent.agent_id}"
-            )
-
-            # Learning policy needs blackboard for ExecutionHistoryStore
-            learning_policy = LearningPlanningPolicy(agent=self.agent)
-            await learning_policy.initialize()
-            logger.info(
-                f"Created default LearningPlanningPolicy for agent {self.agent.agent_id}"
-            )
-
-            coordination_policy = CoordinationPlanningPolicy(
-                cache_capacity=planning_params.ideal_cache_size
-            )
-            await coordination_policy.initialize()
-            logger.info(
-                f"Created default CoordinationPlanningPolicy for agent {self.agent.agent_id}"
-            )
-
-            self.planner = CacheAwareActionPlanner(
-                agent=self.agent,
-                planning_strategy=planning_strategy,
-                planning_params=planning_params,
-                cache_policy=cache_policy,
-                learning_policy=learning_policy,
-                coordination_policy=coordination_policy,
-            )
+            self.planner = create_cache_aware_planner(agent=self.agent)
 
         # Create default replanning policy if none provided
         if self.replanning_policy is None:
@@ -2346,23 +2292,15 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         if not self.current_plan:
             raise RuntimeError("No current plan to replan.")
 
-        planning_context = await self._get_planning_context(
-            execution_context=self.current_plan.execution_context
+        planning_context = await self.context_builder.get_replanning_context(
+            execution_context=self.current_plan.execution_context,
+            decision=decision
         )
-
-        # Pass replanning decision info to planner via custom_data
-        if decision:
-            planning_context.custom_data["revision_triggers"] = [
-                t.value for t in decision.triggers
-            ]
-            planning_context.custom_data["revision_strategy"] = decision.strategy.value
-            planning_context.custom_data["revision_reason"] = decision.reason
 
         # Generate plan via strategy
         self.current_plan = await self.planner.revise_plan(
             current_plan=self.current_plan,
             planning_context=planning_context,
-            critique=None,  # TODO: Pass actual critique if available
         )
 
         triggers_str = (
@@ -2377,79 +2315,6 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         await self.plan_blackboard.update_plan(self.current_plan)
 
         return self.current_plan
-
-    async def _gather_planning_context(self) -> list[dict[str, Any]]:
-        """Gather memories for planning context via AgentContextEngine.
-
-        If the agent has an AgentContextEngine capability, this retrieves
-        relevant memories from working memory and potentially STM/LTM.
-
-        Returns:
-            List of recalled memory dicts for the planning context
-        """
-        # Import here to avoid circular imports
-        from ..memory import AgentContextEngine, MemoryQuery
-        from ...scopes import MemoryScope
-
-        ctx_engine: AgentContextEngine = self.agent.get_capability_by_type(AgentContextEngine)
-        if ctx_engine is None:
-            return []
-
-        try:
-            # Gather context from all available memory scopes
-            entries = await ctx_engine.gather_context(
-                query=MemoryQuery(max_results=50),
-                ### scopes=[
-                ###     MemoryScope.agent_working(self.agent),
-                ###     MemoryScope.agent_stm(self.agent),
-                ###     MemoryScope.agent_ltm_episodic(self.agent),
-                ### ],
-            )
-
-            # Diagnostic: log what gather_context returned
-            action_entries = [e for e in entries if e.tags and "action" in e.tags]
-            logger.warning(
-                f"gather_context returned {len(entries)} entries "
-                f"({len(action_entries)} actions): {[e.key for e in entries[:10]]}"
-            )
-
-            # Convert BlackboardEntry objects to dicts for the planning context
-            recalled_memories = []
-            for entry in entries:
-                recalled_memories.append({
-                    "key": entry.key,
-                    "value": entry.value,
-                    "tags": list(entry.tags) if entry.tags else [],
-                    "created_at": entry.created_at,
-                    "relevance": entry.metadata.get("relevance", 1.0),
-                })
-            return recalled_memories
-        except Exception as e:
-            logger.warning(f"Failed to gather planning context: {e}")
-            return []
-
-    async def _get_memory_architecture_guidance(self) -> str | None:
-        """Get memory architecture guidance for inclusion in planning prompts.
-
-        If the agent has an AgentContextEngine, generates a description of the
-        agent's memory system (levels, dataflow, available actions, capacity)
-        that the LLM planner can use to reason about memory as a first-class
-        cognitive resource.
-
-        Returns:
-            Guidance string, or None if no context engine is available.
-        """
-        from ..memory import AgentContextEngine
-
-        ctx_engine: AgentContextEngine = self.agent.get_capability_by_type(AgentContextEngine)
-        if ctx_engine is None:
-            return None
-
-        try:
-            return await ctx_engine.get_memory_architecture_guidance()
-        except Exception as e:
-            logger.warning(f"Failed to get memory architecture guidance: {e}")
-            return None
 
     async def plan_step(
         self,
@@ -2633,6 +2498,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
     async def _get_plan_blackboard(self) -> PlanBlackboard:
         """Get or create plan blackboard with access control."""
         # Create access policy with agent hierarchy
+        # TODO: FIXME: These two methods are incorrectly implemented.
         agent_hierarchy = await self.agent.get_agent_hierarchy()
         team_structure = await self.agent.get_team_structure()
 
@@ -2650,118 +2516,6 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         await plan_blackboard.initialize()
         return plan_blackboard
 
-    async def _build_system_prompt(self) -> str:
-        """Build stable agent identity prompt.
-
-        Uses AgentSelfConcept from ConsciousnessCapability when available,
-        falling back to agent metadata, class docstring, and capabilities.
-        """
-        from ..capabilities.consciousness import ConsciousnessCapability
-
-        agent = self.agent
-        parts: list[str] = []
-
-        # Try to get self-concept from ConsciousnessCapability
-        consciousness: ConsciousnessCapability | None = agent.get_capability_by_type(ConsciousnessCapability)
-        self_concept = await consciousness.get_self_concept() if consciousness else None
-
-        if self_concept:
-            # Build from self-concept
-            identity = f"You are {self_concept.name}"
-            if self_concept.role:
-                identity += f", {self_concept.role}"
-            parts.append(identity)
-
-            if self_concept.description:
-                parts.append(self_concept.description)
-
-            if self_concept.identity:
-                parts.append(self_concept.identity)
-
-            if self_concept.goals:
-                parts.append("Goals:\n" + "\n".join(f"- {g}" for g in self_concept.goals))
-
-            if self_concept.constraints:
-                parts.append("Constraints:\n" + "\n".join(f"- {c}" for c in self_concept.constraints))
-
-            if self_concept.capabilities:
-                parts.append(f"Capabilities: {', '.join(self_concept.capabilities)}")
-
-            if self_concept.limitations:
-                parts.append("Limitations:\n" + "\n".join(f"- {l}" for l in self_concept.limitations))
-
-            if self_concept.world_model:
-                parts.append(f"World model: {self_concept.world_model}")
-
-            if self_concept.frame_of_mind:
-                parts.append(f"Frame of mind: {self_concept.frame_of_mind}")
-        else:
-            # Fallback: build from agent metadata and class info
-            identity = f"You are {agent.__class__.__name__}"
-            if agent.metadata.role:
-                identity += f" (role: {agent.metadata.role})"
-            identity += f", a {agent.agent_type} agent."
-            parts.append(identity)
-
-            doc = agent.__class__.__doc__
-            if doc:
-                parts.append(doc.strip().split('\n\n')[0].strip())
-
-            cap_names = agent.get_capability_names()
-            if cap_names:
-                parts.append(f"Your capabilities: {', '.join(cap_names)}")
-
-        # Task parameters (always from metadata — these are per-run, not part of self-concept)
-        params = agent.metadata.parameters
-        if params:
-            param_lines = [f"- {k}: {v}" for k, v in params.items()
-                           if not k.startswith("_") and k != "planning_params"]
-            if param_lines:
-                parts.append("Task parameters:\n" + "\n".join(param_lines))
-
-        return "\n\n".join(parts)
-
-    def _get_constraints(self) -> dict[str, Any]:
-        """Extract execution constraints from agent metadata."""
-        constraints: dict[str, Any] = {}
-        meta = self.agent.metadata
-        if meta.max_iterations:
-            constraints["max_iterations"] = meta.max_iterations
-        params = meta.parameters
-        if "max_agents" in params:
-            constraints["max_parallel_workers"] = params["max_agents"]
-        if "quality_threshold" in params:
-            constraints["quality_threshold"] = params["quality_threshold"]
-        return constraints
-
-    async def _get_planning_context(self, execution_context: PlanExecutionContext) -> PlanningContext:
-        """Build the planning context for the current planning step (initial or replanning).
-        """
-        goals=self.agent.metadata.goals or []
-
-        # Recall memories for planning context
-        recalled_memories = await self._gather_planning_context()
-
-        # Get memory architecture guidance for LLM reasoning
-        memory_guidance = await self._get_memory_architecture_guidance()
-        custom_data: dict[str, Any] = {}
-        if memory_guidance:
-            custom_data["memory_architecture_guidance"] = memory_guidance
-
-        # Create new planning context based on current state
-        return PlanningContext(
-            system_prompt=await self._build_system_prompt(),
-            execution_context=execution_context,
-            page_ids=list(self.agent.bound_pages) if hasattr(self.agent, 'bound_pages') else [],
-            goals=goals,
-            constraints=self._get_constraints(),
-            action_descriptions=await self.get_action_descriptions(),
-            action_group_summaries=await self.get_action_group_summaries(),
-            recalled_memories=recalled_memories,
-            custom_data=custom_data,
-            # parent_plan_id=self.current_plan.parent_plan_id,
-        )
-
     @hookable
     async def _create_initial_plan(self) -> ActionPlan:
         """Create initial plan.
@@ -2771,7 +2525,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         """
 
         logger.warning("        🧠 _create_initial_plan: building planning context...")
-        planning_context = await self._get_planning_context(
+        planning_context = await self.context_builder.get_planning_context(
             execution_context=PlanExecutionContext()
         )
         logger.warning(
@@ -2859,7 +2613,6 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
                 "plan_actions_completed": self.current_plan.current_action_index,
             })
         return status
-
 
 
 

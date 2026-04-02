@@ -9,9 +9,9 @@ Core Components:
 - PlanBlackboard: Distributed plan storage with event-driven coordination
 
 Planning Strategies:
-- ModelPredictiveControlStrategy: Plan horizon steps, execute, re-evaluate
-- TopDownPlanningStrategy: Break goals into sub-goals first
-- BottomUpPlanningStrategy: Start with concrete actions
+- ModelPredictiveActionPlanningStrategy: Plan horizon steps, execute, re-evaluate
+- TopDownActionPlanningStrategy: Break goals into sub-goals first
+- BottomUpActionPlanningStrategy: Start with concrete actions
 
 Example:
     ```python
@@ -46,6 +46,10 @@ from .coordination import (
     MarketBasedNegotiation,
     NegotiationProtocol,
     PartialGlobalPlanning,
+    ActionPlanCoordinationPolicy,
+    CacheAwarePlanConflictDetector,
+    CacheAwarePlanConflictResolver,
+    ActionPlanConflictResolver,
 )
 from .evaluator import PlanEvaluator, PlanSelector
 from .planner import (
@@ -54,16 +58,10 @@ from .planner import (
     SequentialPlanner,
     create_cache_aware_planner,
 )
-from .policies import (
-    CacheAwarePlanningPolicy,
-    LearningPlanningPolicy,
-    CoordinationPlanningPolicy,
-    CacheAwareConflictDetector,
-    CacheAwareConflictResolver,
-    ConflictResolver,
-    PlanAccessPolicy,
-    HierarchicalAccessPolicy,
+from .cache import (
+    ActionPlanningCachePolicy,
 )
+from .access import PlanAccessPolicy, HierarchicalAccessPolicy
 from .replanning import (
     ReplanningDecision,
     ReplanningPolicy,
@@ -73,18 +71,23 @@ from .replanning import (
     CompositeReplanningPolicy,
 )
 from .strategies import (
-    AliasPromptFormatting,
-    BottomUpPlanningStrategy,
-    ModelPredictiveControlStrategy,
-    NumericIDPromptFormatting,
-    PlanningStrategyPolicy,
+    BottomUpActionPlanningStrategy,
+    ModelPredictiveActionPlanningStrategy,
+    ActionPlanningStrategy,
+    SCOPE_SELECTION_THRESHOLD,
+    ScopeSelectionResponse,
+    TopDownActionPlanningStrategy,
+    get_default_planning_strategy,
+)
+from .learning import (
+    ActionPlanLearningPolicy,
+)
+from .prompts import (
     PromptFormattingStrategy,
     MarkdownPromptFormatting,
     XMLPromptFormatting,
-    SCOPE_SELECTION_THRESHOLD,
-    ScopeSelectionResponse,
-    TopDownPlanningStrategy,
-    get_default_planning_strategy,
+    NumericIDPromptFormatting,
+    AliasPromptFormatting,
 )
 
 __all__ = [
@@ -98,12 +101,12 @@ __all__ = [
     "PlanEvaluator",
     "PlanSelector",
     # Policies
-    "CacheAwarePlanningPolicy",
-    "LearningPlanningPolicy",
-    "CoordinationPlanningPolicy",
-    "CacheAwareConflictDetector",
-    "CacheAwareConflictResolver",
-    "ConflictResolver",
+    "ActionPlanningCachePolicy",
+    "ActionPlanLearningPolicy",
+    "ActionPlanCoordinationPolicy",
+    "CacheAwarePlanConflictDetector",
+    "CacheAwarePlanConflictResolver",
+    "ActionPlanConflictResolver",
     "PlanAccessPolicy",
     "HierarchicalAccessPolicy",
     # Coordination
@@ -112,11 +115,6 @@ __all__ = [
     "NegotiationProtocol",
     "MarketBasedNegotiation",
     "ConsensusNegotiation",
-    # Enums
-    "PlanStatus",
-    "PlanVisibility",
-    "ActionStatus",
-    "PlanningStrategy",
     # Replanning policies
     "ReplanningDecision",
     "ReplanningPolicy",
@@ -125,16 +123,16 @@ __all__ = [
     "PlanExhaustionReplanningPolicy",
     "CompositeReplanningPolicy",
     # Strategies
-    "PlanningStrategyPolicy",
+    "ActionPlanningStrategy",
     # Prompt formatting
     "PromptFormattingStrategy",
     "MarkdownPromptFormatting",
     "XMLPromptFormatting",
     "AliasPromptFormatting",
     "NumericIDPromptFormatting",
-    "ModelPredictiveControlStrategy",
-    "TopDownPlanningStrategy",
-    "BottomUpPlanningStrategy",
+    "ModelPredictiveActionPlanningStrategy",
+    "TopDownActionPlanningStrategy",
+    "BottomUpActionPlanningStrategy",
     "get_default_planning_strategy",
     # Scope selection
     "ScopeSelectionResponse",
