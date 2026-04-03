@@ -722,6 +722,72 @@ class DistributedStateSubscriber:
 
 
 
+class RedisKeySchema:
+    """Single point of truth for all Redis key formats used by RedisOM.
+
+    All key construction and pattern matching goes through this class.
+    No raw key string construction should exist elsewhere — if the key
+    format changes, it changes here and only here.
+
+    Key layout (type segment separates key kinds structurally):
+        Object:     {ns}:{model}:o:{id}
+        Version:    {ns}:{model}:v:{id}
+        Lock:       {ns}:{model}:l:{id}
+        Index:      {ns}:{model}:i:{prefix}{field}
+        Index set:  {ns}:{model}:i:{prefix}{field}:{value}
+    """
+
+    SEP = ":"
+    OBJ = "o"
+    VER = "v"
+    LCK = "l"
+    IDX = "i"
+
+    def __init__(self, namespace: str, model_cls: type[BaseModel]):
+        self._model_name = model_cls.__name__.lower() # TODO: Will this lead to collisions?
+        self._prefix = f"{namespace}{self.SEP}{self._model_name}"
+
+    # --- Object keys ---
+
+    def object_key(self, id: str) -> str:
+        return f"{self._prefix}{self.SEP}{self.OBJ}{self.SEP}{id}"
+
+    def object_pattern(self) -> str:
+        """Glob that matches only object keys."""
+        return f"{self._prefix}{self.SEP}{self.OBJ}{self.SEP}*"
+
+    def object_prefix(self) -> str:
+        """Prefix string for extracting IDs from object keys."""
+        return f"{self._prefix}{self.SEP}{self.OBJ}{self.SEP}"
+
+    # --- Version keys ---
+
+    def version_key(self, id: str) -> str:
+        return f"{self._prefix}{self.SEP}{self.VER}{self.SEP}{id}"
+
+    # --- Lock keys ---
+
+    def lock_key(self, id: str) -> str:
+        return f"{self._prefix}{self.SEP}{self.LCK}{self.SEP}{id}"
+
+    # --- Index keys ---
+
+    def index_key(self, index: IndexMetadata) -> str:
+        return f"{self._prefix}{self.SEP}{self.IDX}{self.SEP}{index.prefix}{index.field_name}"
+
+    def index_set_key(self, index: IndexMetadata, value: Any) -> str:
+        return f"{self.index_key(index)}{self.SEP}{value}"
+
+    def index_all_sets_pattern(self, index: IndexMetadata) -> str:
+        return f"{self.index_key(index)}{self.SEP}*"
+
+    # --- Wildcard patterns ---
+
+    def all_pattern(self) -> str:
+        """Glob that matches all keys for this model (for remove_all)."""
+        return f"{self._prefix}{self.SEP}*"
+
+
 class RedisOM:
     """Redis Object Mapper"""
 
@@ -767,33 +833,37 @@ class RedisOM:
         parent = reduce(lambda o, key: getattr(o, key), parent_path, obj)
         setattr(parent, last, value)
 
+    def _key_schema(self, model_cls: type[BaseModel]) -> RedisKeySchema:
+        """Get or create a RedisKeySchema for the given model class."""
+        cache = getattr(self, '_key_schema_cache', None)
+        if cache is None:
+            self._key_schema_cache: dict[type, RedisKeySchema] = {}
+            cache = self._key_schema_cache
+        schema = cache.get(model_cls)
+        if schema is None:
+            schema = RedisKeySchema(self.namespace, model_cls)
+            cache[model_cls] = schema
+        return schema
+
+    # --- Delegating key builders (kept for internal use, all go through RedisKeySchema) ---
+
     def _build_key(self, model_cls: type[BaseModel], id: str) -> str:
-        """Build Redis key with namespace"""
-        model_name = model_cls.__name__.lower()
-        return f"{self.namespace}:{model_name}:{id}"
+        return self._key_schema(model_cls).object_key(id)
 
     def _build_version_key(self, model_cls: type[BaseModel], id: str) -> str:
-        """Build version key"""
-        return f"{self._build_key(model_cls, id)}:version"
+        return self._key_schema(model_cls).version_key(id)
 
     def _build_lock_key(self, model_cls: type[BaseModel], id: str) -> str:
-        """Build Redis key for item lock."""
-        return f"{self.namespace}:{model_cls.__name__}:lock:{id}"
+        return self._key_schema(model_cls).lock_key(id)
 
     def _build_index_key(self, model_cls: type[BaseModel], index: IndexMetadata) -> str:
-        """Build index key"""
-        model_name = model_cls.__name__.lower() # TODO: Will this lead to collisions?
-        return f"{self.namespace}:{model_name}:idx:{index.prefix}{index.field_name}"
+        return self._key_schema(model_cls).index_key(index)
 
     def _build_index_set_key(self, model_cls: type[BaseModel], index: IndexMetadata, value: Any) -> str:
-        """Build index set key"""
-        idx_key = self._build_index_key(model_cls, index)
-        return f"{idx_key}:{value}"
+        return self._key_schema(model_cls).index_set_key(index, value)
 
     def _build_index_all_sets_pattern(self, model_cls: type[BaseModel], index: IndexMetadata) -> str:
-        """Build index all-sets pattern"""
-        idx_key = self._build_index_key(model_cls, index)
-        return f"{idx_key}:*"
+        return self._key_schema(model_cls).index_all_sets_pattern(index)
 
     def _build_state_topic_key(self, topic_name: str) -> str:
         return f"{self.namespace}:state_topic:{topic_name}"
@@ -1342,7 +1412,7 @@ class RedisOM:
 
         async with self.redis_client.get_pipeline() as (_, redis):
             # Delete all keys for this model (objects, versions, indices) in one shot
-            model_pattern = f"{self.namespace}:{model_cls.__name__.lower()}:*"
+            model_pattern = self._key_schema(model_cls).all_pattern()
             all_keys = await redis.keys(model_pattern)
             if all_keys:
                 await redis.delete(*all_keys)
@@ -1435,9 +1505,10 @@ class RedisOM:
 
     async def get_all_item_ids(self, model_cls: type[T]) -> list[str]:
         """Get IDs of all items of a particular model type."""
+        schema = self._key_schema(model_cls)
         async with self.redis_client.get_pipeline() as (_, redis):
-            prefix = self._build_key(model_cls, "")
-            all_keys = await redis.keys(self._build_key(model_cls, "*"))
+            prefix = schema.object_prefix()
+            all_keys = await redis.keys(schema.object_pattern())
             return [key.decode()[len(prefix):] for key in all_keys]
 
     @track_operation("find")

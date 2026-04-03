@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -80,6 +81,91 @@ logger = setup_logger(__name__)
 # action within the dependency transactor contexts.
 
 
+class SchemaDetail(str, Enum):
+    """Controls how action parameter schemas are rendered in planning prompts.
+
+    COMPACT:   Type names only (e.g., ``run_context?: RunContext``).
+               Smallest token footprint. Works for simple parameters.
+    SELECTIVE: Compact for simple types; expands nested BaseModel fields
+               inline. Best default — adds detail only where the LLM
+               would otherwise guess field names.
+    COMPACT_SCHEMA: Full ``model_json_schema()`` but stripped of boilerplate
+               (``title``, outer ``type``) — only ``properties``, ``required``,
+               and ``$defs``. ~60-70 % smaller than FULL.
+    FULL:      Raw ``model_json_schema()`` output. Most precise but verbose.
+    """
+    COMPACT = "compact"
+    SELECTIVE = "selective"
+    COMPACT_SCHEMA = "compact_schema"
+    FULL = "full"
+
+
+def _compact_signature(schema_cls: type[BaseModel]) -> str:
+    """Build ``name: Type, name?: Type`` compact signature."""
+    parts = []
+    for name, field_info in schema_cls.model_fields.items():
+        ann = field_info.annotation
+        type_name = getattr(ann, '__name__', str(ann))
+        if field_info.is_required():
+            parts.append(f"{name}: {type_name}")
+        else:
+            parts.append(f"{name}?: {type_name}")
+    return ", ".join(parts)
+
+
+def _selective_signature(schema_cls: type[BaseModel]) -> str:
+    """Compact signature, but expand nested BaseModel fields inline."""
+    parts = []
+    for name, field_info in schema_cls.model_fields.items():
+        ann = field_info.annotation
+        type_name = getattr(ann, '__name__', str(ann))
+        opt = "?" if not field_info.is_required() else ""
+
+        # Check if annotation (or a Union member) is a BaseModel
+        nested_cls = None
+        for arg in get_args(ann) or [ann]:
+            if isinstance(arg, type) and issubclass(arg, BaseModel):
+                nested_cls = arg
+                break
+
+        if nested_cls is not None:
+            # Expand nested model fields inline
+            inner = []
+            for n, f in nested_cls.model_fields.items():
+                f_ann = f.annotation
+                f_type = getattr(f_ann, '__name__', str(f_ann))
+                f_opt = "?" if not f.is_required() else ""
+                inner.append(f"{n}{f_opt}: {f_type}")
+            parts.append(f"{name}{opt}: {type_name} {{{', '.join(inner)}}}")
+        else:
+            parts.append(f"{name}{opt}: {type_name}")
+    return ", ".join(parts)
+
+
+def _compact_json_schema(schema_cls: type[BaseModel]) -> dict:
+    """Full JSON schema with boilerplate stripped."""
+    schema = schema_cls.model_json_schema()
+    # Remove top-level noise — keep only what the LLM needs
+    schema.pop("title", None)
+    schema.pop("type", None)  # always "object"
+    # Strip titles from nested $defs
+    for defn in schema.get("$defs", {}).values():
+        defn.pop("title", None)
+    return schema
+
+
+def _format_schema(schema_cls: type[BaseModel], detail: SchemaDetail) -> str:
+    """Render parameter schema at the requested detail level."""
+    if detail == SchemaDetail.FULL:
+        return f"\n  Parameters (JSON Schema): {json.dumps(schema_cls.model_json_schema())}"
+    elif detail == SchemaDetail.COMPACT_SCHEMA:
+        return f"\n  Parameters (JSON Schema): {json.dumps(_compact_json_schema(schema_cls))}"
+    elif detail == SchemaDetail.SELECTIVE:
+        return f"\n  Parameters: {_selective_signature(schema_cls)}"
+    else:  # COMPACT
+        return f"\n  Parameters: {_compact_signature(schema_cls)}"
+
+
 class ActionExecutor(ABC):
     """Policy for executing actions.
 
@@ -104,9 +190,12 @@ class ActionExecutor(ABC):
         """
         ...
 
-    async def get_action_description(self) -> str:
+    async def get_action_description(self, schema_detail: SchemaDetail = SchemaDetail.SELECTIVE) -> str:
         """Get human-readable description of action or action policy to be
         used in LLM-based action selection.
+
+        Args:
+            schema_detail: How to render parameter schemas. See ``SchemaDetail``.
 
         Returns:
             Description string
@@ -202,10 +291,12 @@ class MethodWrapperActionExecutor(ActionExecutor):
             result = ActionResult(success=False, completed=True, error=str(e))
             return result
 
-    async def get_action_description(self) -> str:
+    @override
+    async def get_action_description(self, schema_detail: SchemaDetail = SchemaDetail.SELECTIVE) -> str:
         """Get human-readable description from planning_summary or the wrapped method's docstring.
 
-        Appends a compact parameter signature so the LLM knows exact field names.
+        Args:
+            schema_detail: How to render parameter schemas. See ``SchemaDetail``.
         """
         if self.planning_summary:
             desc = self.planning_summary
@@ -218,18 +309,8 @@ class MethodWrapperActionExecutor(ActionExecutor):
                 )
             desc = docstring
 
-        # Append parameter schema so the LLM uses correct field names
         if self.input_schema:
-            sig_parts = []
-            for name, field in self.input_schema.model_fields.items():
-                ann = field.annotation
-                type_name = getattr(ann, '__name__', str(ann))
-                if field.is_required():
-                    sig_parts.append(f"{name}: {type_name}")
-                else:
-                    sig_parts.append(f"{name}?: {type_name}")
-            if sig_parts:
-                desc += f"\n  Parameters: {', '.join(sig_parts)}"
+            desc += _format_schema(self.input_schema, schema_detail)
         return desc
 
 
@@ -353,10 +434,12 @@ class FunctionWrapperActionExecutor(ActionExecutor):
                 error=str(e)
             )
 
-    async def get_action_description(self) -> str:
+    @override
+    async def get_action_description(self, schema_detail: SchemaDetail = SchemaDetail.SELECTIVE) -> str:
         """Get description from planning_summary or function docstring.
 
-        Appends a compact parameter signature so the LLM knows exact field names.
+        Args:
+            schema_detail: How to render parameter schemas. See ``SchemaDetail``.
         """
         if self.planning_summary:
             desc = self.planning_summary
@@ -369,18 +452,8 @@ class FunctionWrapperActionExecutor(ActionExecutor):
                 )
             desc = docstring
 
-        # Append parameter schema so the LLM uses correct field names
         if self.input_schema:
-            sig_parts = []
-            for name, field in self.input_schema.model_fields.items():
-                ann = field.annotation
-                type_name = getattr(ann, '__name__', str(ann))
-                if field.is_required():
-                    sig_parts.append(f"{name}: {type_name}")
-                else:
-                    sig_parts.append(f"{name}?: {type_name}")
-            if sig_parts:
-                desc += f"\n  Parameters: {', '.join(sig_parts)}"
+            desc += _format_schema(self.input_schema, schema_detail)
         return desc
 
 
@@ -851,8 +924,10 @@ class ActionDispatcher:
         exclude_filter: frozenset[str] = getattr(obj, '_action_exclude_filter', frozenset())
 
         if not hasattr(obj, '_action_dispatch_key') or not obj._action_dispatch_key:
-            # Unique short ID to avoid name clashes
-            obj._action_dispatch_key = uuid.uuid4().hex[:8]
+            # Prefer capability_key (semantic, stable, LLM-friendly) over random hash.
+            # Non-capability objects (e.g., Agent, ActionPolicy) fall back to random hash.
+            cap_key = getattr(obj, '_capability_key', None) or getattr(obj, 'capability_key', None)
+            obj._action_dispatch_key = cap_key if isinstance(cap_key, str) else uuid.uuid4().hex[:8]
 
         # Register methods decorated with @action_executor.
         # Walk MRO to discover inherited methods (not just immediate class).
@@ -944,6 +1019,7 @@ class ActionDispatcher:
     async def get_action_descriptions(
         self,
         selected_groups: list[str] | None = None,
+        schema_detail: SchemaDetail = SchemaDetail.SELECTIVE,
     ) -> list[ActionGroupDescription]:
         """Get human-readable description of plannable actions for LLM-based
         action selection.
@@ -956,6 +1032,7 @@ class ActionDispatcher:
         Args:
             selected_groups: If provided, only return descriptions for groups
                 whose group_key is in this list. If None, return all groups.
+            schema_detail: How to render parameter schemas. See ``SchemaDetail``.
 
         Returns:
             List of ActionGroupDescription with full action descriptions.
@@ -969,7 +1046,7 @@ class ActionDispatcher:
                 if getattr(executor, 'exclude_from_planning', False):
                     continue
                 try:
-                    desc = await executor.get_action_description()
+                    desc = await executor.get_action_description(schema_detail=schema_detail)
                     action_descs[action_key] = desc
                 except NotImplementedError:
                     # Use the docstring of the execute() method instead
@@ -1682,14 +1759,19 @@ class BaseActionPolicy(ActionPolicy):
     async def get_action_descriptions(
         self,
         selected_groups: list[str] | None = None,
+        schema_detail: SchemaDetail = SchemaDetail.SELECTIVE,
     ) -> list[ActionGroupDescription]:
         """Get descriptions of available actions.
 
         Args:
             selected_groups: If provided, only return descriptions for these group keys.
+            schema_detail: How to render parameter schemas. See ``SchemaDetail``.
         """
         await self._create_action_dispatcher()
-        return await self._action_dispatcher.get_action_descriptions(selected_groups=selected_groups)
+        return await self._action_dispatcher.get_action_descriptions(
+            selected_groups=selected_groups,
+            schema_detail=schema_detail,
+        )
 
     async def get_action_group_summaries(self) -> list[ActionGroupDescription]:
         """Get lightweight group summaries for scope selection."""

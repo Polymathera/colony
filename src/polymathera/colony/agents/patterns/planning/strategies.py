@@ -193,6 +193,7 @@ class ActionPlanningStrategy(ABC):
 
         # Build prompt with execution history
         prompt = self.prompt_formatting.build_replanning_prompt(planning_context, plan, params)
+        _log_planning_context_sizes(planning_context, prompt)
 
         # Get LLM response using Agent.infer
         response = await self.agent.infer(
@@ -226,6 +227,7 @@ class ActionPlanningStrategy(ABC):
 
         prompt = self.prompt_formatting.build_scope_selection_prompt(planning_context)
         all_keys = [s.group_key for s in planning_context.action_group_summaries]
+        _log_planning_context_sizes(planning_context, prompt)
 
         logger.info(
             f"Scope selection: {len(all_keys)} groups available, "
@@ -494,6 +496,9 @@ class ModelPredictiveActionPlanningStrategy(ActionPlanningStrategy):
             cache_context=cache_context,
         )
 
+        # Log component sizes to diagnose prompt bloat
+        _log_planning_context_sizes(planning_context, prompt)
+
         # Get LLM response using Agent.infer
         logger.warning(
             f"\n"
@@ -561,9 +566,13 @@ class TopDownActionPlanningStrategy(ActionPlanningStrategy):
         # Phase 1: Scope selection (filters action_descriptions in place if beneficial)
         selected_groups = await self._apply_scope_selection(planning_context)
 
+        # Log context sizes for prompt bloat diagnosis
+        decomp_prompt = self.prompt_formatting.build_decomposition_prompt(planning_context)
+        _log_planning_context_sizes(planning_context, decomp_prompt)
+
         # Step 1: Decompose goals into hierarchy (with action awareness)
         decomp_response = await self.agent.infer(
-            prompt=self.prompt_formatting.build_decomposition_prompt(planning_context),
+            prompt=decomp_prompt,
             max_tokens=params.max_planning_tokens,
             temperature=0.3,  # More deterministic - TODO: Make configurable
             context_page_ids=[],  # TODO: Planning runs only on the prompt. Right?
@@ -587,8 +596,11 @@ class TopDownActionPlanningStrategy(ActionPlanningStrategy):
             g for g, data in goal_hierarchy_dict.items() if not data.get("sub_goals")
         ]
 
+        action_planning_prompt = self.prompt_formatting.build_action_planning_prompt(planning_context, leaf_goals, params)
+        _log_planning_context_sizes(planning_context, action_planning_prompt)
+
         action_response = await self.agent.infer(
-            prompt=self.prompt_formatting.build_action_planning_prompt(planning_context, leaf_goals, params),
+            prompt=action_planning_prompt,
             max_tokens=params.max_planning_tokens,
             temperature=0.3,  # More deterministic - TODO: Make configurable
             context_page_ids=[],  # TODO: Planning runs only on the prompt. Right?
@@ -634,9 +646,13 @@ class BottomUpActionPlanningStrategy(ActionPlanningStrategy):
         # Phase 1: Scope selection (filters action_descriptions in place if beneficial)
         selected_groups = await self._apply_scope_selection(planning_context)
 
+        # Log context sizes for prompt bloat diagnosis
+        action_prompt = self.prompt_formatting.build_action_planning_prompt(planning_context, planning_context.goals, params)
+        _log_planning_context_sizes(planning_context, action_prompt)
+
         # Step 1: Generate concrete actions
         action_response = await self.agent.infer(
-            prompt=self.prompt_formatting.build_action_planning_prompt(planning_context, planning_context.goals, params),
+            prompt=action_prompt,
             max_tokens=params.max_planning_tokens,
             temperature=0.3,  # More deterministic - TODO: Make configurable
             context_page_ids=[],  # TODO: Planning runs only on the prompt. Right?
@@ -648,6 +664,7 @@ class BottomUpActionPlanningStrategy(ActionPlanningStrategy):
 
         # Step 2: Infer goal hierarchy from actions
         hierarchy_prompt = self.prompt_formatting.build_goal_hierarchy_inference_prompt(actions)
+        _log_planning_context_sizes(planning_context, hierarchy_prompt)
 
         hier_response = await self.agent.infer(
             prompt=hierarchy_prompt,
@@ -682,6 +699,34 @@ class BottomUpActionPlanningStrategy(ActionPlanningStrategy):
             selected_groups=selected_groups,
         )
 
+
+
+def _log_planning_context_sizes(ctx: PlanningContext, prompt: str) -> None:
+    """Log the size of each PlanningContext component for diagnosing prompt bloat."""
+    action_desc_chars = sum(
+        len(desc)
+        for group in ctx.action_descriptions
+        for desc in group.action_descriptions.values()
+    )
+    action_group_count = len(ctx.action_descriptions)
+    action_count = sum(len(g.action_descriptions) for g in ctx.action_descriptions)
+    memories_chars = sum(len(json.dumps(m, default=str)) for m in ctx.recalled_memories)
+    custom_data_chars = len(json.dumps(ctx.custom_data, default=str)) if ctx.custom_data else 0
+    system_prompt_chars = len(ctx.system_prompt)
+    exec_ctx_chars = len(ctx.execution_context.model_dump_json()) if ctx.execution_context else 0
+
+    logger.warning(
+        f"\n            ┌─ Planning Context Sizes ───────────────────┐\n"
+        f"            │  system_prompt:      {system_prompt_chars:>8} chars          │\n"
+        f"            │  action_descriptions:{action_desc_chars:>8} chars ({action_group_count} groups, {action_count} actions) │\n"
+        f"            │  recalled_memories:  {memories_chars:>8} chars ({len(ctx.recalled_memories)} entries) │\n"
+        f"            │  execution_context:  {exec_ctx_chars:>8} chars          │\n"
+        f"            │  custom_data:        {custom_data_chars:>8} chars          │\n"
+        f"            │  goals:              {len(ctx.goals):>8} entries        │\n"
+        f"            │  ─────────────────────────────────────────── │\n"
+        f"            │  total prompt:       {len(prompt):>8} chars          │\n"
+        f"            └─────────────────────────────────────────────┘"
+    )
 
 
 def _get_prompt_formatting(params: PlanningParameters) -> PromptFormattingStrategy:

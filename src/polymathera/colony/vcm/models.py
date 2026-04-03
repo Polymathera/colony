@@ -119,7 +119,7 @@ class VirtualContextPage(BaseModel):
     size: int = Field(description="Number of tokens")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Arbitrary metadata")
 
-    scope_id: str = Field(description="Scope identifier for this page (e.g., repo ID, blackboard scope)")
+    scope_id: str | None = Field(None, description="Scope identifier for this page (e.g., repo ID, blackboard scope)")
     group_id: str | None = Field(None, description="Page group for spatial locality (pages in the same group should be loaded together)")
 
     # Storage location
@@ -298,15 +298,6 @@ class VCMBranch(BaseModel):
         """Check if branch is active."""
         return self.state == "active"
 
-
-
-class PagePriority(str, Enum):
-    """Priority levels for page allocation and loading."""
-
-    LOW = "low"
-    NORMAL = "normal"
-    HIGH = "high"
-    CRITICAL = "critical"
 
 
 @dataclass
@@ -1681,11 +1672,11 @@ class PageAllocationRequest(BaseModel):
     """
 
     virtual_page_ids: list[str]
-    group_id: str
+    group_id: str | None = None
     syscontext: serving.ExecutionContext = Field(
         default_factory=serving.require_execution_context
     )
-    priority: PagePriority = PagePriority.NORMAL
+    priority: int = 0
     preferred_deployment: str | None = None
     target_client_id: str | None = Field(
         None,

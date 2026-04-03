@@ -24,7 +24,10 @@ class PageCluster(BaseModel):
     """A cluster of related pages."""
     cluster_id: str
     page_ids: list[str]
-    syscontext: serving.ExecutionContext  # For identifying related pages (e.g., from same git repo)
+    syscontext: serving.ExecutionContext = Field(
+        default_factory=serving.require_execution_context,
+        description="For identifying related pages (e.g., from same git repo)."
+    )
     relationship_score: float = Field(ge=0.0, le=1.0, description="Average relationship strength")
     cluster_type: str  # "file_group", "semantic", "hybrid", etc.
     metadata: dict[str, Any] = Field(default_factory=dict)

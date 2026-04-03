@@ -877,10 +877,12 @@ class PageStorage:
             # 4. Reconstruct VirtualContextPage
             metadata = json.loads(page_metadata.metadata_json)
 
+            ctx = serving.require_execution_context()
+            assert ctx.tenant_id == page_metadata.tenant_id
+            assert ctx.colony_id == page_metadata.colony_id
+
             page = VirtualContextPage(
                 page_id=page_metadata.page_id,
-                tenant_id=page_metadata.tenant_id,
-                colony_id=page_metadata.colony_id,
                 tokens=tokens,
                 text=text,
                 size=page_metadata.size,

@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 from overrides import override
+import fnmatch
 import json
 import time
 import logging
@@ -373,7 +374,7 @@ class CriticCapability(AgentCapability):
         from_agent: str,
         to_agent: str,
         relation: Literal["peer2peer", "child2parent", "parent2child"],
-        request: dict[str, Any]
+        request: CritiqueRequest
     ) -> None:
         """Send critique request to another agent's blackboard."""
         request_key = ""
@@ -384,9 +385,11 @@ class CriticCapability(AgentCapability):
         elif relation == "parent2child":
             request_key = self._get_request_from_parent_key(to_agent)
 
-        # TODO: Who said the request should be sent to the agent-level scope?
-        to_blackboard = await self.agent.get_blackboard(scope_id=ScopeUtils.get_agent_level_scope(to_agent))
-        await to_blackboard.write(
+        # Write to the critique capability's own scope (colony-level) so the
+        # target agent's CriticCapability — which subscribes on the same colony
+        # scope — actually receives the event.
+        critique_blackboard = await self.get_blackboard()
+        await critique_blackboard.write(
             request_key,
             request,
             created_by=from_agent
@@ -436,10 +439,17 @@ class CriticCapability(AgentCapability):
         Returns:
             EventProcessingResult with PROCESSED status, or None if event not relevant
         """
+        # TODO: Allow the event_handler decorator to support multiple patterns not just one. The current alternative is to use 3 event_handler-decorated methods with the same code but different pattern filters, which is not ideal.
+
+        # Defense-in-depth: the shared event queue merges events from all
+        # capabilities, so filter to critique request keys only.
+        if not any(fnmatch.fnmatch(event.key, p) for p in CritiqueProtocol.all_request_patterns()):
+            return None
+
         try:
             request = CritiqueRequest.model_validate(event.value)
         except Exception as e:
-            logger.warning(f"Invalid CritiqueRequest event: {e}")
+            logger.warning(f"Invalid CritiqueRequest event:\n{e}\nEvent value: {event.value}")
             return None
 
         # Get appropriate policy for the relationship
@@ -586,14 +596,13 @@ class CriticCapability(AgentCapability):
             from_agent=from_agent,
             to_agent=to_agent,
             relation=relation,
-            request={
-                "requester_id": from_agent,
-                "output": my_output,
-                "goal": goal,
-                "premises": [],
-                "evidence": my_output.get("evidence", {}),
-                "timestamp": time.time()
-            },
+            request=CritiqueRequest(
+                requester_id=from_agent,
+                output_to_critique=my_output,
+                goal=goal,
+                premises=[],
+                evidence=my_output.get("evidence", {}),
+            ),
         )
 
         try:
