@@ -45,7 +45,7 @@ from ...cache_coordination import (
     EdgePageScorer,
     CompositePageScorer,
 )
-from ..actions.policies import action_executor
+from ..actions import action_executor
 from ...blackboard.protocol import WorkingSetStateProtocol
 
 if TYPE_CHECKING:

@@ -35,7 +35,7 @@ from overrides import override
 from ...base import AgentCapability, AgentHandle
 from ...scopes import BlackboardScope, get_scope_prefix
 from ...models import AgentMetadata, AgentResourceRequirements, AgentSuspensionState
-from ..actions.policies import action_executor
+from ..actions import action_executor
 from ...blackboard.protocol import WorkAssignmentProtocol
 
 if TYPE_CHECKING:

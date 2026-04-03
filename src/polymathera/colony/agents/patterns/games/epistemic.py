@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 
 from ...base import Agent, AgentCapability
 from ...models import AgentSuspensionState
-from ..actions.policies import action_executor
+from ..actions import action_executor
 from ...blackboard.blackboard import EnhancedBlackboard
 from ...blackboard.protocol import EpistemicProtocol
 from ...scopes import BlackboardScope, get_scope_prefix

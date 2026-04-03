@@ -81,7 +81,7 @@ from .capabilities import (
 )
 from ....base import Agent
 from ....models import AgentMetadata
-from ...actions.policies import action_executor, create_default_action_policy
+from ...actions import action_executor, create_default_action_policy
 
 
 logger = logging.getLogger(__name__)

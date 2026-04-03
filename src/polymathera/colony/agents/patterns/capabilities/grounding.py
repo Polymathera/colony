@@ -68,7 +68,7 @@ from ...base import (
 from ...scopes import BlackboardScope, get_scope_prefix
 from ..attention import PageQuery
 from .validation import ValidationResult, ValidationIssue
-from ..actions.policies import action_executor
+from ..actions import action_executor
 from ...models import Action, PolicyREPL, AgentSuspensionState
 from ... import BlackboardEvent
 from ..events import event_handler, EventProcessingResult

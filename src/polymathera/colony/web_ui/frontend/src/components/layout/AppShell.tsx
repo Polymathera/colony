@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { TabBar, type Tab } from "./TabBar";
 import { StatusBar } from "./StatusBar";
+import { ErrorBoundary } from "../shared/ErrorBoundary";
 import { OverviewTab } from "../dashboard/OverviewTab";
 import { AgentsTab } from "../agents/AgentsTab";
 import { SessionsTab } from "../sessions/SessionsTab";
@@ -64,7 +65,9 @@ function TabContent({ activeTab }: { activeTab: string }) {
         if (!Component) return null;
         return (
           <div key={id} style={{ display: activeTab === id ? "block" : "none" }}>
-            <Component />
+            <ErrorBoundary name={id}>
+              <Component />
+            </ErrorBoundary>
           </div>
         );
       })}

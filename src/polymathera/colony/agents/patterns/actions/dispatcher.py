@@ -701,8 +701,10 @@ def action_executor(
 
 
 
-def pydantic_model_to_str(model: BaseModel, trunc: int = 1000) -> tuple[str, str]:
+def pydantic_model_to_str(model: BaseModel | None, trunc: int = 1000) -> tuple[str, str]:
     """Helper to convert a Pydantic model to a pretty string for logging."""
+    if model is None:
+        return "None", "full"
     model_str = model.model_dump_json(indent=3)
     return (model_str[:trunc], "truncated") if len(model_str) > trunc else (model_str, "full" )
 

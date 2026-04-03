@@ -37,7 +37,7 @@ from .roles import GameRole
 from ..capabilities.reputation import ReputationTracker
 from ...blackboard.task_graph import Task, TaskStatus
 from ...base import Agent
-from ..actions.policies import action_executor
+from ..actions import action_executor
 
 
 class TaskBid(BaseModel):

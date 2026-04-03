@@ -17,7 +17,7 @@ from ...base import Agent, AgentCapability
 from ...blackboard.protocol import ReflectionProtocol
 from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ....distributed import get_polymathera
-from ..actions.policies import action_executor
+from ..actions import action_executor
 
 if TYPE_CHECKING:
     from ..memory.capability import MemoryCapability

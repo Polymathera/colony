@@ -83,7 +83,7 @@ from ....models import (
     PolicyREPL,
 )
 from ....scopes import ScopeUtils, BlackboardScope, get_scope_prefix
-from ...actions.policies import action_executor
+from ...actions import action_executor
 from ....blackboard import BlackboardEvent
 from ....blackboard.protocol import GameStateProtocol
 

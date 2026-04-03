@@ -78,7 +78,7 @@ from ...base import Agent, AgentCapability, CapabilityResultFuture
 from ...blackboard import EnhancedBlackboard, BlackboardEvent, CombinationFilter
 from ...blackboard.protocol import GameStateProtocol
 from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
-from ..actions.policies import action_executor
+from ..actions import action_executor
 from ..hooks import hookable
 from ..events import event_handler, EventProcessingResult
 from ...models import Action, PolicyREPL

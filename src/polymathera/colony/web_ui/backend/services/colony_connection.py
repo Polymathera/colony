@@ -262,6 +262,7 @@ class ColonyConnection:
 
     @contextmanager
     def user_execution_context(
+        self,
         *,
         colony_id: str | None = None,
         tenant_id: str | None = None,
@@ -283,6 +284,7 @@ class ColonyConnection:
 
     @contextmanager
     def kernel_execution_context(
+        self,
         *,
         colony_id: str | None = None,
         tenant_id: str | None = None,

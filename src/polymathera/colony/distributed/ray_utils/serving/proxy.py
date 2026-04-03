@@ -796,12 +796,19 @@ class DeploymentProxyRayActor:
                 if self._app_ready:
                     await self._call_app_ready_hooks(actor_handle)
 
+                # Fetch replica metadata (e.g., client_id for routing)
+                try:
+                    replica_metadata = await actor_handle.__get_replica_metadata__.remote()
+                except Exception:
+                    replica_metadata = {}
+
                 # Create replica info
                 replica = DeploymentReplicaInfo(
                     replica_id=replica_id,
                     actor_handle=actor_handle,
                     is_healthy=True,
                     last_health_check=time.time(),
+                    metadata=replica_metadata,
                 )
 
                 self.replicas.append(replica)

@@ -171,6 +171,13 @@ class DeploymentHandle:
 
             # Capture execution context from contextvars
             ctx = require_execution_context()
+            if ctx.ring.name == "KERNEL":
+                logger.warning(
+                    f"DeploymentHandle capturing KERNEL context for "
+                    f"{self.deployment_name}.{method_name}() — "
+                    f"tenant={ctx.tenant_id}, colony={ctx.colony_id}, "
+                    f"session={ctx.session_id}, origin={ctx.origin}"
+                )
 
             # Get endpoint router class and kwargs
             router_class = self._get_endpoint_router_class(method_name)

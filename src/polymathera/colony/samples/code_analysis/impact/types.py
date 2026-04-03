@@ -12,7 +12,20 @@ from polymathera.colony.agents.blackboard import CausalityTimeline
 
 
 
-class ChangeType(str, Enum):
+class CaseInsensitiveEnum(str, Enum):
+    """str Enum that accepts values case-insensitively (e.g., 'MODIFICATION' → 'modification')."""
+
+    @classmethod
+    def _missing_(cls, value: object):
+        if isinstance(value, str):
+            lower = value.lower()
+            for member in cls:
+                if member.value == lower:
+                    return member
+        return None
+
+
+class ChangeType(CaseInsensitiveEnum):
     """Types of code changes."""
 
     ADDITION = "addition"  # New code added
@@ -26,7 +39,7 @@ class ChangeType(str, Enum):
     DOCUMENTATION = "documentation"  # Doc changes
 
 
-class ImpactType(str, Enum):
+class ImpactType(CaseInsensitiveEnum):
     """Types of impact from changes."""
 
     FUNCTIONAL = "functional"  # Behavior changes
@@ -40,7 +53,7 @@ class ImpactType(str, Enum):
     DEPLOYMENT = "deployment"  # Deployment impact
 
 
-class ImpactSeverity(str, Enum):
+class ImpactSeverity(CaseInsensitiveEnum):
     """Severity of change impact."""
 
     CRITICAL = "critical"  # System-wide impact

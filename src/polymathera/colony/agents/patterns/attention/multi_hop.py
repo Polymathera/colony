@@ -22,7 +22,7 @@ from ...base import Agent, AgentCapability
 from ...blackboard.protocol import MultiHopSearchProtocol
 from ...scopes import BlackboardScope, get_scope_prefix
 from ....utils import setup_logger
-from ..actions.policies import CacheAwareActionPolicy, action_executor
+from ..actions import CacheAwareActionPolicy, action_executor
 from .attention import PageQuery, AttentionScore
 from .query_routing import PageQueryRoutingPolicy
 

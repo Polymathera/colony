@@ -58,7 +58,7 @@ from polymathera.colony.agents.blackboard import EnhancedBlackboard, CausalityTi
 from polymathera.colony.agents.base import Agent, AgentCapability
 from polymathera.colony.agents.blackboard.protocol import DependencyQueryProtocol, ImpactAnalysisProtocol
 from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
-from polymathera.colony.agents.patterns.actions.policies import action_executor
+from polymathera.colony.agents.patterns.actions import action_executor
 from polymathera.colony.agents.patterns.capabilities.reflection import ReflectionCapability
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
 from polymathera.colony.agents.models import (

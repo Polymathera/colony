@@ -56,7 +56,7 @@ from .protocols import (
     RecencyRetrieval,
 )
 from ...blackboard.types import BlackboardEntry
-from ..actions.policies import action_executor
+from ..actions import action_executor
 
 if TYPE_CHECKING:
     from ...base import Agent

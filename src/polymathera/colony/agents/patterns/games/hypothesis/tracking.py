@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from ....base import AgentCapability
 from ....models import AgentSuspensionState
 from ....scopes import BlackboardScope, get_scope_prefix
-from ...actions.policies import action_executor
+from ...actions import action_executor
 from .types import (
     HypothesisFilter,
     HypothesisStatus,

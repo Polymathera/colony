@@ -41,7 +41,7 @@ from typing import Any, TYPE_CHECKING
 from pydantic import BaseModel
 
 from ...blackboard.types import BlackboardEntry
-from ..actions.policies import action_executor
+from ..actions import action_executor
 from .capability import MemoryCapability
 from .types import MemoryLens, MaintenanceConfig, MemoryProducerConfig
 from .protocols import (
@@ -433,6 +433,8 @@ class WorkingMemoryCapability(MemoryCapability):
         Returns:
             Estimated token count
         """
+        if data is None:
+            return 0
         # Convert to string and estimate
         if hasattr(data, "model_dump_json"):
             text = data.model_dump_json()

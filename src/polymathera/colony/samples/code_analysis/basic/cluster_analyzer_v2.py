@@ -27,9 +27,7 @@ from polymathera.colony.agents.models import (
     AttentionContext,
 )
 from polymathera.colony.cluster.models import InferenceResponse
-from polymathera.colony.agents.patterns.actions.policies import (
-    action_executor,
-)
+from polymathera.colony.agents.patterns.actions import action_executor
 from polymathera.colony.agents.patterns.capabilities.reflection import ReflectionCapability
 from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
 from polymathera.colony.agents.patterns.capabilities.result import ResultCapability

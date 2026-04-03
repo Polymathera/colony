@@ -637,6 +637,11 @@ def deployment(
                 # Restore execution context from request
                 ctx = request.execution_context
                 if not isinstance(ctx, ExecutionContext):
+                    logger.warning(
+                        f"__handle_request__ for {request.method_name}: "
+                        f"execution_context is {type(ctx).__name__}, not ExecutionContext — "
+                        f"falling back to KERNEL. Value: {ctx!r}"
+                    )
                     ctx = ExecutionContext(ring=Ring.KERNEL, origin="legacy_request")
 
                 with restore_execution_context(ctx):
@@ -656,7 +661,8 @@ def deployment(
                         if ctx.ring == Ring.KERNEL and endpoint_ring == Ring.USER:
                             raise PermissionError(
                                 f"KERNEL context cannot call USER endpoint "
-                                f"'{request.method_name}'. Transition to USER context first."
+                                f"'{request.method_name}({request.args}, kwargs: {request.kwargs})'."
+                                f" Transition to USER context first."
                             )
 
                         # Get the endpoint method
@@ -694,6 +700,16 @@ def deployment(
                     Status message.
                 """
                 return "healthy"
+
+            async def __get_replica_metadata__(self) -> dict[str, Any]:
+                """Return metadata for this replica, stored in DeploymentReplicaInfo.metadata.
+
+                Override ``get_replica_metadata()`` on the deployment class to
+                provide custom metadata (e.g., client_id for routing).
+                """
+                if hasattr(self, "get_replica_metadata") and callable(self.get_replica_metadata):
+                    return await self.get_replica_metadata()
+                return {}
 
             async def __get_replica_properties__(self) -> dict[str, str]:
                 """Get replica property mapping (internal).

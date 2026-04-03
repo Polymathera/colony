@@ -18,7 +18,7 @@ from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.models import AgentSuspensionState
 from polymathera.colony.cluster.models import InferenceResponse
 from polymathera.colony.agents.patterns.scope import ScopeAwareResult
-from polymathera.colony.agents.patterns.actions.policies import action_executor
+from polymathera.colony.agents.patterns.actions import action_executor
 from polymathera.colony.agents.scopes import ScopeUtils
 from polymathera.colony.agents.blackboard.protocol import BasicAnalysisProtocol
 

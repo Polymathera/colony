@@ -326,10 +326,13 @@ def get_session_manager(app_name: str | None = None) -> serving.DeploymentHandle
 
 def get_vllm_deployment(deployment_name: str, app_name: str | None = None) -> serving.DeploymentHandle:
     """Get specific VLLM deployment via serving."""
+    from .cluster.vllm_deployment import VLLMDeployment
+
     try:
         handle = serving.get_deployment(
             app_name or serving.get_my_app_name(),
-            deployment_name
+            deployment_name,
+            deployment_class=VLLMDeployment,
         )
         logger.info(f"Connected to VLLM deployment: {deployment_name}")
         return handle

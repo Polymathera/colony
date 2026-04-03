@@ -38,7 +38,7 @@ from ...base import Agent, AgentCapability, AgentState, CapabilityResultFuture
 from ...models import AgentSuspensionState, PolicyREPL
 from ...blackboard.types import BlackboardEntry, BlackboardEvent, KeyPatternFilter
 from ...scopes import MemoryScope, ScopeUtils, BlackboardScope, get_scope_prefix
-from ..actions.policies import action_executor
+from ..actions import action_executor
 from ..events import event_handler, EventProcessingResult
 from .lifecycle import AgentTerminationEvent, AgentCreationEvent
 from ..hooks.decorator import hookable

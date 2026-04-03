@@ -31,7 +31,7 @@ from ...base import AgentCapability
 from ...blackboard.protocol import RelationshipProtocol
 from ...scopes import BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
-from ..actions.policies import action_executor
+from ..actions import action_executor
 
 if TYPE_CHECKING:
     from ...base import Agent

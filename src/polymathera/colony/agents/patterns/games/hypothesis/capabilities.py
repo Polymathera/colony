@@ -92,7 +92,7 @@ from ....models import (
     AgentMetadata,
     PolicyREPL,
 )
-from ...actions.policies import action_executor
+from ...actions import action_executor
 from ....blackboard import BlackboardEvent
 from ....blackboard.protocol import GameStateProtocol
 

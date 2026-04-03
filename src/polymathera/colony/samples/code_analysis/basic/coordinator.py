@@ -35,7 +35,7 @@ from polymathera.colony.agents.patterns.capabilities.critique import (
 )
 from polymathera.colony.agents.blackboard import KeyPatternFilter, BlackboardEvent
 from polymathera.colony.agents.patterns.attention import HierarchicalAttentionRouting
-from polymathera.colony.agents.patterns.actions.policies import action_executor
+from polymathera.colony.agents.patterns.actions import action_executor
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
 from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, BasicAnalysisProtocol, ErrorSignalProtocol
 from polymathera.colony.agents.patterns.capabilities.working_set import WorkingSetCapability

@@ -40,6 +40,7 @@ from .models import (
     VLLMDeploymentState,
 )
 from .remote_config import RemoteLLMDeploymentConfig
+from .routing import TargetClientRouter
 
 logger = logging.getLogger(__name__)
 
@@ -221,11 +222,18 @@ class RemoteLLMDeployment:
             f"(capacity={self.max_cached_tokens} tokens, ttl={self.config.ttl})"
         )
 
+    async def get_replica_metadata(self) -> dict[str, Any]:
+        """Report metadata for proxy routing (called by serving framework)."""
+        return {"client_id": self.client_id}
+
     # -------------------------------------------------------------------------
     # Endpoints (same interface as VLLMDeployment)
     # -------------------------------------------------------------------------
 
-    @serving.endpoint(router_class="TargetClientRouter")
+    @serving.endpoint(
+        router_class=TargetClientRouter,
+        router_kwargs={"strip_routing_params": ["target_client_id"]}
+    )
     async def load_page(self, page: VirtualContextPage) -> bool:
         """Load a context page by creating a prefix cache entry on the remote API.
 

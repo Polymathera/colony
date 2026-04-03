@@ -25,7 +25,7 @@ from polymathera.colony.agents.patterns.capabilities.critique import CriticCapab
 from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraphCapability
 from polymathera.colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
 from polymathera.colony.agents.base import Agent, AgentCapability, AgentMetadata
-from polymathera.colony.agents.patterns.actions.policies import action_executor
+from polymathera.colony.agents.patterns.actions import action_executor
 from polymathera.colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
 from polymathera.colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
 from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol

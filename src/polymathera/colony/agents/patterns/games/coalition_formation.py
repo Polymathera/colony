@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from .acl import ACLMessage, Performative
 from ..capabilities.reputation import AgentReputation, ReputationTracker
 from .state import GamePhase, GameProtocolCapability, GameState, GameOutcome, GameEventType
-from ..actions.policies import action_executor
+from ..actions import action_executor
 
 
 class CoalitionPhase(str, Enum):

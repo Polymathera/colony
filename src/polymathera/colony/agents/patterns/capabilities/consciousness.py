@@ -27,7 +27,7 @@ from ...base import AgentCapability, CapabilityResultFuture
 from ...blackboard.protocol import ConsciousnessProtocol
 from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
-from ..actions.policies import action_executor
+from ..actions import action_executor
 
 if TYPE_CHECKING:
     from ...base import Agent

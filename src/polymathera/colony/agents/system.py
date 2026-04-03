@@ -1328,10 +1328,14 @@ class AgentSystemDeployment:
         Called by EnhancedBlackboard.initialize() so the dashboard can
         discover scopes without scanning Redis keys.
         """
+        logger.info(f"Registering blackboard scope {scope_id} with backend {backend_type}")
         import time
         async for state in self.state_manager.write_transaction():
+            syscontext = serving.require_execution_context()
             state.blackboard_scopes[scope_id] = {
                 "scope_id": scope_id,
+                "tenant_id": syscontext.tenant_id,
+                "colony_id": syscontext.colony_id,
                 "backend_type": backend_type,
                 "registered_at": time.time(),
             }

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 
@@ -386,6 +386,10 @@ class VLLMDeployment(AgentManagerBase):
         """Discover sibling deployment handles after all deployments are started."""
         await self.discover_handles()
         logger.info(f"VLLMDeployment {self.client_id} handle discovery complete")
+
+    async def get_replica_metadata(self) -> dict[str, Any]:
+        """Report metadata for proxy routing (called by serving framework)."""
+        return {"client_id": self.client_id}
 
     @serving.endpoint
     @inference_circuit

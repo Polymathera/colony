@@ -54,7 +54,7 @@ from ...base import (
     CapabilityResultFuture,
 )
 from ...scopes import BlackboardScope, get_scope_prefix
-from ..actions.policies import action_executor
+from ..actions import action_executor
 from ... import KeyPatternFilter, BlackboardEvent
 from ...models import Action, PolicyREPL, AgentSuspensionState
 from ..events import event_handler, EventProcessingResult

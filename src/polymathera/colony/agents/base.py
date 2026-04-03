@@ -2508,8 +2508,10 @@ class Agent(BaseModel):
 
         logger.info(f"Agent {self.agent_id} requested suspension: {reason}")
 
-    def _model_to_str(self, model: BaseModel, trunc: int = 1000) -> tuple[str, str]:
+    def _model_to_str(self, model: BaseModel | None, trunc: int = 1000) -> tuple[str, str]:
         """Helper to convert a Pydantic model to a pretty string for logging."""
+        if model is None:
+            return "None", "full"
         result_str = model.model_dump_json(indent=3)
         return (result_str[:trunc], "truncated") if len(result_str) > trunc else (result_str, "full" )
 

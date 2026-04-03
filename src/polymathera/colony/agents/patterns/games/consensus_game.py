@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 from .acl import ACLMessage, Performative
 from .state import GameState, GamePhase, GameOutcome, GameProtocolCapability, GameEventType
 from ...base import Agent
-from ..actions.policies import action_executor
+from ..actions import action_executor
 
 class VotingMethod(str, Enum):
     """Voting aggregation method."""

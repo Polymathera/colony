@@ -51,9 +51,7 @@ from ...base import (
 )
 from .validation import ValidationCapability, Contradiction
 from ..scope import ScopeAwareResult, AnalysisScope
-from ..actions.policies import (
-    action_executor,
-)
+from ..actions import action_executor
 from ...scopes import BlackboardScope, get_scope_prefix
 from ...models import Action, PolicyREPL, AgentSuspensionState
 from ... import BlackboardEvent

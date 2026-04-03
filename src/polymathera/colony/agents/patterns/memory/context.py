@@ -41,7 +41,7 @@ from ...base import AgentCapability, CapabilityResultFuture
 from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ...models import AgentSuspensionState
 from ...blackboard.types import BlackboardEntry, BlackboardEvent
-from ..actions.policies import action_executor
+from ..actions import action_executor
 from .types import (
     MemoryQuery,
     MemoryScopeInfo,

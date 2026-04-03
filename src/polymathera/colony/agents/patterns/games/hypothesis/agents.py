@@ -69,7 +69,7 @@ from ....base import Agent, CapabilityResultFuture
 from ..state import GameOutcome
 from ...models import Hypothesis
 from ....models import AgentMetadata
-from ...actions.policies import action_executor
+from ...actions import action_executor
 from .capabilities import (
     HypothesisGameProtocol,
     HypothesisRole

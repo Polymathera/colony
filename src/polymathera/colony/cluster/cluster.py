@@ -17,7 +17,9 @@ from .models import (
     ClusterStatistics,
     InferenceRequest,
     InferenceResponse,
-    LLMClusterState
+    LLMClientId,
+    LLMClientState,
+    LLMClusterState,
 )
 from ..vcm.models import VirtualContextPage, ContextPageId
 logger = logging.getLogger(__name__)
@@ -266,9 +268,11 @@ class LLMCluster:
         # because tenacity captures _thread._local which Ray can't serialize.
         from ..utils.retry import create_retry_with_logging
 
+        from .remote_deployment import RemoteLLMDeployment
+
         @create_retry_with_logging(logger, stop_attempts=30, wait_min=2, wait_max=2)
         async def _get_remote_handle(deployment_name: str):
-            return serving.get_deployment(self.app_name, deployment_name)
+            return serving.get_deployment(self.app_name, deployment_name, deployment_class=RemoteLLMDeployment)
 
         for rconf in self.config.remote_deployments:
             deployment_name = rconf.get_deployment_name()
@@ -348,6 +352,8 @@ class LLMCluster:
             RuntimeError: If cluster is not deployed
             ValueError: If no deployment matches requirements or tenant validation fails
         """
+        self._check_initialized()
+
         all_handles = {**self.vllm_deployment_handles, **self.remote_deployment_handles}
         if not all_handles:
             raise RuntimeError("Cluster not deployed. Call deploy() first.")
@@ -386,6 +392,8 @@ class LLMCluster:
         Raises:
             RuntimeError: If cluster is not deployed or no embedding deployment configured
         """
+        self._check_initialized()
+
         if not self.embedding_deployment_handle:
             raise RuntimeError(
                 "No embedding deployment configured. "
@@ -418,6 +426,8 @@ class LLMCluster:
             RuntimeError: If cluster is not deployed
             ValueError: If tenant validation fails or client_id specified without deployment_name
         """
+        self._check_initialized()
+
         all_handles = {**self.vllm_deployment_handles, **self.remote_deployment_handles}
         if not all_handles:
             raise RuntimeError("Cluster not deployed. Call deploy() first.")
@@ -484,6 +494,8 @@ class LLMCluster:
         Raises:
             RuntimeError: If cluster is not deployed
         """
+        self._check_initialized()
+
         all_handles = {**self.vllm_deployment_handles, **self.remote_deployment_handles}
         if not all_handles:
             raise RuntimeError("Cluster not deployed. Call deploy() first.")
@@ -520,8 +532,7 @@ class LLMCluster:
         Returns:
             Cluster statistics including health, capacity, and performance metrics
         """
-        if not self.app:
-            raise RuntimeError("Cluster not deployed. Call deploy() first.")
+        self._check_initialized()
 
         # Aggregate statistics from all deployment states
         total_clients = 0
@@ -588,8 +599,7 @@ class LLMCluster:
         Returns:
             List of deployment names
         """
-        if self.top_level and not self.app:
-            raise RuntimeError("Cluster not deployed. Call deploy() first.")
+        self._check_initialized()
 
         handles = list(self.vllm_deployment_handles.keys()) + list(self.remote_deployment_handles.keys())
         if not self.top_level and not handles:
@@ -598,61 +608,29 @@ class LLMCluster:
         return handles
 
     @serving.endpoint
-    async def get_all_client_states(self) -> dict[str, dict[str, dict[str, any]]]:
-        """Get client states from all VLLMDeployment replicas.
+    async def get_all_client_states(self) -> dict[LLMClientId, LLMClientState]:
+        """Get client states from all deployments.
 
-        This method queries all deployment replicas and aggregates their client states.
-        Used by VCM for making informed allocation decisions.
+        Returns a flat mapping from client_id to LLMClientState, aggregated
+        across all deployments (vLLM + remote). Each deployment replica
+        registers exactly one client, so client_id uniquely identifies a
+        replica.
+
+        Used by VCM's allocation strategy which expects
+        ``dict[client_id, LLMClientState]``.
 
         Returns:
-            Nested dict: {deployment_name: {replica_id: {client_id: client_state_dict}}}
-
-        Example:
-            ```python
-            states = await cluster.get_all_client_states()
-            # states = {
-            #     "vllm-llama-8b": {
-            #         "replica-0": {
-            #             "client-0": {"kv_cache_used": 10000, "loaded_pages": [...], ...},
-            #             ...
-            #         },
-            #         ...
-            #     },
-            #     ...
-            # }
-            ```
+            Flat dict: {client_id: LLMClientState}
         """
-        if not self.app:
-            raise RuntimeError("Cluster not deployed. Call deploy() first.")
+        self._check_initialized()
 
-        all_states = {}
+        all_client_states: dict[LLMClientId, LLMClientState] = {}
 
-        # Query each deployment's state
-        for deployment_name, state_manager in self.deployment_state_managers.items():
-            deployment_states = {}
-
+        for state_manager in self.deployment_state_managers.values():
             async for dep_state in state_manager.read_transaction():
-                # Convert client states to dict format
-                for client_id, client_state in dep_state.client_states.items():
-                    # Group by replica (client_id typically includes replica info)
-                    # For now, use deployment_name as replica ID
-                    replica_id = dep_state.deployment_name or deployment_name
+                all_client_states.update(dep_state.client_states)
 
-                    if replica_id not in deployment_states:
-                        deployment_states[replica_id] = {}
-
-                    deployment_states[replica_id][client_id] = {
-                        "client_id": client_id,
-                        "kv_cache_capacity": client_state.kv_cache_capacity,
-                        "kv_cache_used": client_state.kv_cache_used,
-                        "loaded_page_ids": list(client_state.loaded_page_ids.keys()),
-                        "is_healthy": client_state.is_healthy,
-                        "last_heartbeat": client_state.last_heartbeat,
-                    }
-
-            all_states[deployment_name] = deployment_states
-
-        return all_states
+        return all_client_states
 
     async def _update_cluster_state(
         self,
@@ -669,6 +647,13 @@ class LLMCluster:
             state.total_requests += 1
             if response.page_faults:
                 state.total_page_faults += len(response.page_faults)
+
+    def _check_initialized(self):
+        if self.top_level and not self.app:
+            raise RuntimeError("Cluster not deployed. Call deploy() first.")
+
+        if not self.state_manager:
+            raise RuntimeError("Cluster not initialized. State manager not available.")
 
     @serving.endpoint(ring=serving.Ring.KERNEL)
     async def select_deployment(
@@ -699,6 +684,8 @@ class LLMCluster:
             )
             ```
         """
+        self._check_initialized()
+
         from .routing import RequirementBasedRouter
 
         # Create router for deployment selection

@@ -29,9 +29,7 @@ from polymathera.colony.vcm.sources import PageCluster
 from polymathera.colony.agents.patterns.attention.query_routing import PageQueryRoutingPolicy, create_page_query_router2
 
 from polymathera.colony.agents.patterns.scope import ScopeAwareResult
-from polymathera.colony.agents.patterns.actions.policies import (
-    action_executor,
-)
+from polymathera.colony.agents.patterns.actions import action_executor
 
 logger = logging.getLogger(__name__)
 

@@ -14,10 +14,8 @@ from ...blackboard.protocol import AnalysisResultProtocol
 from ...scopes import BlackboardScope, get_scope_prefix
 from ....utils import setup_logger
 from .attention import PageQuery
-from ..actions.policies import (
-    CacheAwareActionPolicy,
-    action_executor,
-)
+from ..actions import CacheAwareActionPolicy, action_executor
+
 
 logger = setup_logger(__name__)
 

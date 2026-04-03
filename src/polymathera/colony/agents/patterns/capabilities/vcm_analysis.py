@@ -50,7 +50,7 @@ from ...models import AgentSuspensionState
 from ...base import AgentCapability, AgentMetadata
 from ...blackboard.protocol import VCMAnalysisProtocol
 from ...scopes import BlackboardScope, get_scope_prefix
-from ..actions.policies import action_executor
+from ..actions import action_executor
 from ..scope import ScopeAwareResult, AnalysisScope
 
 if TYPE_CHECKING:
