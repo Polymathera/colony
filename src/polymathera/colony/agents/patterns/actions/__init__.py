@@ -1,11 +1,13 @@
 """Domain-agnostic patterns for distributed agent action policies."""
 
-from .policies import (
+from .dispatcher import (
     ActionExecutor,
     MethodWrapperActionExecutor,
     ActionDispatcher,
     SchemaDetail,
     action_executor,
+)
+from .policies import (
     CacheAwareActionPolicy,
     EventDrivenActionPolicy,
     create_default_action_policy,
