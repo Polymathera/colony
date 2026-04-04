@@ -1,4 +1,9 @@
-"""Log streaming endpoints."""
+"""Log streaming + persistent log query endpoints.
+
+Live logs stream from Ray Dashboard API (only while actors are alive).
+Persistent logs are stored in PostgreSQL via Kafka pipeline and can be
+queried after the application stops.
+"""
 
 from __future__ import annotations
 
@@ -116,3 +121,82 @@ async def get_log_file(
         return resp.json()
     except Exception as e:
         return {"lines": [], "error": str(e)}
+
+
+# === Persistent log queries (PostgreSQL) ===
+
+
+@router.get("/logs/persistent")
+async def query_persistent_logs(
+    session_id: str | None = Query(None),
+    run_id: str | None = Query(None),
+    trace_id: str | None = Query(None),
+    actor_class: str | None = Query(None),
+    level: str | None = Query(None, description="Minimum level: DEBUG, INFO, WARNING, ERROR, CRITICAL"),
+    search: str | None = Query(None, description="Search in message (case-insensitive)"),
+    since: float | None = Query(None, description="Unix timestamp — logs after this time"),
+    until: float | None = Query(None, description="Unix timestamp — logs before this time"),
+    limit: int = Query(500, le=5000),
+    offset: int = Query(0),
+    colony: ColonyConnection = Depends(get_colony),
+) -> dict[str, Any]:
+    """Query persistent logs from PostgreSQL.
+
+    Works even when the application is not running — logs are durably stored
+    via the Kafka pipeline.
+    """
+    store = colony.get_log_query_store()
+    if not store:
+        return {"logs": [], "error": "Log store not initialized (PostgreSQL unavailable)"}
+
+    try:
+        logs = await store.query_logs(
+            session_id=session_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            actor_class=actor_class,
+            level=level,
+            search=search,
+            since=since,
+            until=until,
+            limit=limit,
+            offset=offset,
+        )
+        return {"logs": logs, "count": len(logs)}
+    except Exception as e:
+        logger.warning("Failed to query persistent logs: %s", e)
+        return {"logs": [], "error": str(e)}
+
+
+@router.get("/logs/persistent/stats")
+async def get_log_stats(
+    session_id: str | None = Query(None),
+    since: float | None = Query(None),
+    colony: ColonyConnection = Depends(get_colony),
+) -> dict[str, Any]:
+    """Get aggregate log statistics."""
+    store = colony.get_log_query_store()
+    if not store:
+        return {}
+
+    try:
+        return await store.get_log_stats(session_id=session_id, since=since)
+    except Exception as e:
+        logger.warning("Failed to get log stats: %s", e)
+        return {"error": str(e)}
+
+
+@router.get("/logs/persistent/actors")
+async def list_log_actor_classes(
+    colony: ColonyConnection = Depends(get_colony),
+) -> list[dict[str, Any]]:
+    """List distinct actor classes that have emitted logs."""
+    store = colony.get_log_query_store()
+    if not store:
+        return []
+
+    try:
+        return await store.list_actor_classes()
+    except Exception as e:
+        logger.warning("Failed to list log actor classes: %s", e)
+        return []

@@ -88,6 +88,7 @@ nav:
     - Blackboard Pattern: architecture/blackboard.md
     - Hook System: architecture/hook-system.md
     - Game Patterns: architecture/game-engine.md
+    - Observability: architecture/observability.md
     - Training: architecture/training.md
   - Design Insights:
     - Overview: design-insights/index.md

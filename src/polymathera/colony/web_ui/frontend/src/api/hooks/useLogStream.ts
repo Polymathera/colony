@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../client";
-import type { LogSource } from "../types";
+import type { LogSource, LogQueryResult, LogStats, LogActorSummary } from "../types";
 
 const MAX_LOG_LINES = 5000;
 
@@ -72,4 +72,50 @@ export function useLogStream(source: LogSource | null) {
   const clear = useCallback(() => setLines([]), []);
 
   return { lines, connected, clear };
+}
+
+/* ── Persistent log queries (PostgreSQL) ──────────────────────── */
+
+export interface PersistentLogFilters {
+  session_id?: string;
+  run_id?: string;
+  trace_id?: string;
+  actor_class?: string;
+  level?: string;
+  search?: string;
+  since?: number;
+  until?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export function usePersistentLogs(filters: PersistentLogFilters, enabled = true) {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(filters)) {
+    if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
+  }
+  return useQuery({
+    queryKey: ["logs", "persistent", params.toString()],
+    queryFn: () => apiFetch<LogQueryResult>(`/logs/persistent?${params}`),
+    enabled,
+    refetchInterval: false,
+  });
+}
+
+export function useLogStats(sessionId?: string) {
+  const params = new URLSearchParams();
+  if (sessionId) params.set("session_id", sessionId);
+  return useQuery({
+    queryKey: ["logs", "stats", sessionId ?? "all"],
+    queryFn: () => apiFetch<LogStats>(`/logs/persistent/stats?${params}`),
+    refetchInterval: 30000,
+  });
+}
+
+export function useLogActorClasses() {
+  return useQuery({
+    queryKey: ["logs", "actors", "persistent"],
+    queryFn: () => apiFetch<LogActorSummary[]>("/logs/persistent/actors"),
+    refetchInterval: 30000,
+  });
 }

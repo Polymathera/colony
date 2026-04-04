@@ -100,6 +100,9 @@ Aspect-oriented programming for cross-cutting concerns. The `@hookable` decorato
 
 A framework for structured multi-agent deliberation. Four game types -- hypothesis, bidding/contract, negotiation, consensus -- with defined roles and an Agent Communication Language. Games serve as error correction mechanisms: hypothesis games combat hallucination, contract nets combat laziness, objective guards combat goal drift.
 
+### [Observability](observability.md)
+
+Distributed tracing and persistent logging for long-running sessions. Traces capture structured execution spans (LLM calls, agent steps) via `TracingCapability`. Logs capture all Python logging under `polymathera.colony` via `KafkaLogHandler`. Both flow through Kafka to PostgreSQL for durable, queryable post-mortem debugging -- even after agents stop.
 
 ### [Training](training.md)
 

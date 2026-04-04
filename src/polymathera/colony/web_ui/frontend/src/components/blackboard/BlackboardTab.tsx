@@ -9,6 +9,8 @@ import { DataTable } from "../shared/DataTable";
 
 const scopeColumns = [
   { key: "scope_id", header: "Scope ID", className: "font-mono text-xs" },
+  { key: "tenant_id", header: "Tenant" },
+  { key: "colony_id", header: "Colony" },
   { key: "entry_count", header: "Entries" },
   {
     key: "backend_type",
@@ -36,10 +38,17 @@ function truncateValue(val: unknown): string {
 
 export function BlackboardTab() {
   const scopes = useBlackboardScopes();
-  const [selected, setSelected] = useState<{ scopeId: string; backendType: string } | null>(null);
+  const [selected, setSelected] = useState<{
+    scopeId: string;
+    backendType: string;
+    tenantId: string | null;
+    colonyId: string | null;
+  } | null>(null);
   const entries = useBlackboardEntries(
     selected?.scopeId ?? "",
     selected?.backendType ?? "",
+    selected?.tenantId ?? null,
+    selected?.colonyId ?? null,
   );
 
   // Tag + text filtering
@@ -94,7 +103,12 @@ export function BlackboardTab() {
           columns={scopeColumns}
           data={scopes.data ?? []}
           onRowClick={(row) =>
-            setSelected({ scopeId: row.scope_id, backendType: row.backend_type })
+            setSelected({
+              scopeId: row.scope_id,
+              backendType: row.backend_type,
+              tenantId: row.tenant_id,
+              colonyId: row.colony_id,
+            })
           }
           emptyMessage={
             scopes.isLoading

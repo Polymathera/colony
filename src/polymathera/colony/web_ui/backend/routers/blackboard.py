@@ -1,6 +1,8 @@
 """Blackboard scope and entry endpoints.
 
 All data flows through AgentSystemDeployment endpoints.
+The scopes list returns tenant_id/colony_id per scope; the frontend passes
+them back when requesting entries so the backend can set proper USER context.
 """
 
 from __future__ import annotations
@@ -41,13 +43,17 @@ async def get_blackboard_entries(
     scope_id: str,
     limit: int = Query(default=100, le=1000),
     backend_type: str = Query(default=""),
+    tenant_id: str = Query(default=""),
+    colony_id: str = Query(default=""),
     colony: ColonyConnection = Depends(get_colony),
 ) -> list[dict[str, Any]]:
     """List entries in a specific blackboard scope."""
     if not colony.is_connected:
         return []
 
-    with colony.kernel_execution_context(
+    with colony.user_execution_context(
+        tenant_id=tenant_id or None,
+        colony_id=colony_id or None,
         origin="dashboard",
     ):
         try:

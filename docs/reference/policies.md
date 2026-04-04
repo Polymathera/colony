@@ -1,6 +1,6 @@
 # Action Policies
 
-## Base Action Policy
+## `BaseActionPolicy`
 
 ::: polymathera.colony.agents.patterns.actions.policies.BaseActionPolicy
     options:
@@ -9,6 +9,6 @@
         - execute_iteration
         - plan_step
 
-## action_executor decorator
+## `action_executor` decorator
 
-::: polymathera.colony.agents.patterns.actions.policies.action_executor
+::: polymathera.colony.agents.patterns.actions.dispatcher.action_executor

@@ -464,6 +464,7 @@ def deployment(
     max_concurrency: int | None = None,
     logging_config: LoggingConfig | None = None,
     health_check_config: dict[str, Any] | None = None,
+    enable_kafka_logs: bool = True,
 ) -> Callable[[Type[Any]], Type[Any]] | Type[Any]:
     """Decorator to mark a class as a deployment.
 
@@ -484,6 +485,9 @@ def deployment(
         logging_config: Logging configuration for deployment actors.
         health_check_config: Health check configuration dict
             (keys: interval_s, timeout_s, max_consecutive_failures).
+        enable_kafka_logs: If True (default), automatically attaches a
+            ``KafkaLogHandler`` to the ``polymathera.colony`` logger during
+            deployment initialization.  Requires ``KAFKA_BOOTSTRAP`` env var.
 
     Returns:
         Decorated class, or decorator function.
@@ -741,6 +745,15 @@ def deployment(
 
         # Copy over deployment config
         WrappedDeployment.__deployment_config__ = config  # type: ignore
+
+        # Inject Kafka log handler lifecycle hook if enabled
+        if enable_kafka_logs:
+            @initialize_deployment
+            async def __attach_kafka_logs__(self):
+                from polymathera.colony.agents.observability.log_setup import attach_kafka_log_handler
+                await attach_kafka_log_handler()
+
+            WrappedDeployment.__attach_kafka_logs__ = __attach_kafka_logs__
 
         # Update registry with wrapped class
         _DEPLOYMENT_REGISTRY[deployment_name] = WrappedDeployment

@@ -108,6 +108,49 @@ export interface LogSource {
   repr_name: string;
 }
 
+export interface PersistentLogEntry {
+  log_id: string;
+  timestamp: number;
+  level: string;
+  logger_name: string;
+  message: string;
+  module: string;
+  func_name: string;
+  line_no: number;
+  pid: number;
+  thread_name: string;
+  actor_class: string;
+  node_id: string;
+  tenant_id: string | null;
+  colony_id: string | null;
+  session_id: string | null;
+  run_id: string | null;
+  trace_id: string | null;
+  exc_info: string | null;
+}
+
+export interface LogQueryResult {
+  logs: PersistentLogEntry[];
+  count: number;
+  error?: string;
+}
+
+export interface LogStats {
+  total: number;
+  errors: number;
+  warnings: number;
+  sessions: number;
+  actors: number;
+  earliest: number | null;
+  latest: number | null;
+}
+
+export interface LogActorSummary {
+  actor_class: string;
+  log_count: number;
+  latest: number;
+}
+
 export interface PageGraphScope {
   tenant_id: string;
   colony_id: string;

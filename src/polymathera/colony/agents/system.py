@@ -1348,8 +1348,13 @@ class AgentSystemDeployment:
 
         Reads the scope registry (populated by EnhancedBlackboard.initialize())
         and queries each scope's backend for current stats.
+
+        Each scope is queried inside a USER execution context derived from the
+        scope's registered tenant/colony, so that any downstream calls
+        (e.g., ``_register_scope``) see proper USER context.
         """
         from ..agents.blackboard import EnhancedBlackboard
+        from ..distributed.ray_utils.serving.context import Ring, execution_context
 
         # Read registered scopes from shared state
         async for state in self.state_manager.read_transaction():
@@ -1359,17 +1364,27 @@ class AgentSystemDeployment:
         for _key, info in registered.items():
             scope_id = info["scope_id"]
             backend_type = info.get("backend_type", self.blackboard_backend_type)
+            tenant_id = info.get("tenant_id")
+            colony_id = info.get("colony_id")
 
             try:
-                bb = EnhancedBlackboard(
-                    app_name=self.app_name,
-                    scope_id=scope_id,
-                    enable_events=False,
-                    backend_type=backend_type,
-                )
-                stats = await bb.get_statistics()
+                with execution_context(
+                    ring=Ring.USER,
+                    tenant_id=tenant_id,
+                    colony_id=colony_id,
+                    origin="get_blackboard_scopes",
+                ):
+                    bb = EnhancedBlackboard(
+                        app_name=self.app_name,
+                        scope_id=scope_id,
+                        enable_events=False,
+                        backend_type=backend_type,
+                    )
+                    stats = await bb.get_statistics()
                 scopes.append({
                     "scope_id": scope_id,
+                    "tenant_id": tenant_id,
+                    "colony_id": colony_id,
                     "entry_count": stats.get("entry_count", 0),
                     "oldest_entry_age": stats.get("oldest_entry_age"),
                     "newest_entry_age": stats.get("newest_entry_age"),
@@ -1380,6 +1395,8 @@ class AgentSystemDeployment:
                 logger.debug(f"Failed to get stats for {scope_id}: {e}")
                 scopes.append({
                     "scope_id": scope_id,
+                    "tenant_id": tenant_id,
+                    "colony_id": colony_id,
                     "entry_count": 0,
                     "backend_type": backend_type,
                     "error": str(e),

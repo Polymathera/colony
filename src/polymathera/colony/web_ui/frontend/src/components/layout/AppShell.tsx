@@ -45,6 +45,10 @@ const TAB_COMPONENTS: Record<string, React.FC> = {
   settings: SettingsTab,
 };
 
+// Tabs that use WebGL or other resources that don't survive display:none.
+// These are fully unmounted when not active instead of kept alive.
+const UNMOUNT_WHEN_HIDDEN = new Set(["graph"]);
+
 function TabContent({ activeTab }: { activeTab: string }) {
   const [mounted, setMounted] = useState<Set<string>>(() => new Set([activeTab]));
 
@@ -60,11 +64,15 @@ function TabContent({ activeTab }: { activeTab: string }) {
   return (
     <>
       {TABS.map(({ id }) => {
-        if (!mounted.has(id)) return null;
+        const shouldUnmount = UNMOUNT_WHEN_HIDDEN.has(id);
+        // Unmount-when-hidden tabs: only render when active
+        // Keep-alive tabs: render once mounted, hide with display:none
+        if (shouldUnmount && activeTab !== id) return null;
+        if (!shouldUnmount && !mounted.has(id)) return null;
         const Component = TAB_COMPONENTS[id];
         if (!Component) return null;
         return (
-          <div key={id} style={{ display: activeTab === id ? "block" : "none" }}>
+          <div key={id} className="h-full overflow-auto" style={{ display: activeTab === id ? "block" : "none" }}>
             <ErrorBoundary name={id}>
               <Component />
             </ErrorBoundary>
@@ -95,8 +103,8 @@ export function AppShell() {
       {/* Tabs */}
       <TabBar tabs={TABS} activeTab={activeTab} onTabChange={setActiveTab} />
 
-      {/* Content */}
-      <main className="flex-1 overflow-auto p-5">
+      {/* Content — no overflow-auto here; each tab controls its own scroll */}
+      <main className="flex-1 min-h-0 p-5">
         <TabContent activeTab={activeTab} />
       </main>
 

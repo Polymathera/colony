@@ -26,7 +26,17 @@ async def list_all_mapped_memory_scopes(
         origin="dashboard",
     ):
         try:
-            return await colony.get_vcm().get_all_mapped_scopes()
+            raw = await colony.get_vcm().get_all_mapped_scopes()
+            # Flatten: backend returns {syscontext: {tenant_id, colony_id, ...}, scope_id}
+            # Frontend expects {tenant_id, colony_id, scope_id}
+            return [
+                {
+                    "tenant_id": item.get("syscontext", {}).get("tenant_id", ""),
+                    "colony_id": item.get("syscontext", {}).get("colony_id", ""),
+                    "scope_id": item.get("scope_id", ""),
+                }
+                for item in raw
+            ]
         except Exception as e:
             logger.warning("Failed to list page graph groups: %s", e)
             return []

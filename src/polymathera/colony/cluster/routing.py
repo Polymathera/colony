@@ -515,8 +515,11 @@ class TargetClientRouter(RequestRouter):
 
         # Strip routing parameters from kwargs before passing to method
         # This prevents TypeError when the target method doesn't accept these params
+        logger.debug(
+            f"Stripping routing parameters {self.strip_routing_params} from kwargs {request.kwargs} for TargetClientRouter. ")
         for param in self.strip_routing_params:
             request.kwargs.pop(param, None)
+        logger.debug(f"Kwargs after stripping: {request.kwargs}")
 
         # Find the replica with matching client_id
         for replica in replicas:

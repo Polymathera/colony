@@ -286,7 +286,7 @@ function GroupSelector({
           key={`${g.tenant_id}:::${g.colony_id}`}
           value={`${g.tenant_id}:::${g.colony_id}`}
         >
-          {g.scope_id} ({g.colony_id.slice(0, 16)})
+          {g.scope_id} ({(g.colony_id ?? "").slice(0, 16)})
         </option>
       ))}
     </select>

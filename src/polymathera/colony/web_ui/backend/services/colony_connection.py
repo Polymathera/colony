@@ -44,11 +44,13 @@ class ColonyConnection:
         self._connected = False
         self._handle_cache: dict[str, Any] = {}
         self._http_client: httpx.AsyncClient | None = None
-        # Observability (direct DB + Kafka access for traces)
+        # Observability (direct DB + Kafka access for traces + logs)
         self._kafka_bootstrap: str | None = None
         self._db_pool: Any | None = None
         self._span_consumer: Any | None = None
         self._span_query_store: Any | None = None
+        self._log_consumer: Any | None = None
+        self._log_query_store: Any | None = None
 
     async def connect(self) -> None:
         """Connect to the Ray cluster via Client API."""
@@ -73,7 +75,10 @@ class ColonyConnection:
         """Disconnect from the Ray cluster."""
         import ray
 
-        # Stop observability consumer
+        # Stop observability consumers
+        if self._log_consumer:
+            await self._log_consumer.stop()
+            self._log_consumer = None
         if self._span_consumer:
             await self._span_consumer.stop()
             self._span_consumer = None
@@ -97,7 +102,8 @@ class ColonyConnection:
         """Get a cached deployment handle using colony.system helpers.
 
         Uses get_deployment_names() to resolve the actual deployment name,
-        then serving.get_deployment() to get the handle.
+        then serving.get_deployment() to get the handle. Retries on failure
+        since deployments may not be ready when the dashboard starts.
         """
         if name_attr in self._handle_cache:
             return self._handle_cache[name_attr]
@@ -113,6 +119,7 @@ class ColonyConnection:
         )
         handle = get_deployment(self.app_name, deployment_name)
         self._handle_cache[name_attr] = handle
+        logger.info("Resolved deployment handle: %s → %s", name_attr, deployment_name)
         return handle
 
     def get_session_manager(self) -> Any:
@@ -178,13 +185,28 @@ class ColonyConnection:
                 db_pool=self._db_pool,
             )
             await self._span_consumer.start()
-            logger.info("Observability initialized (PG pool + Kafka consumer)")
+
+            # Log consumer + query store (same pattern as spans)
+            from polymathera.colony.agents.observability.log_consumer import LogConsumer
+            from polymathera.colony.agents.observability.log_store import LogQueryStore
+            self._log_query_store = LogQueryStore(self._db_pool)
+            self._log_consumer = LogConsumer(
+                kafka_bootstrap=kafka_bootstrap,
+                db_pool=self._db_pool,
+            )
+            await self._log_consumer.start()
+
+            logger.info("Observability initialized (PG pool + Kafka span consumer + log consumer)")
         except Exception as e:
             logger.warning(f"Observability init failed: {e}. Traces will be unavailable.")
 
     def get_span_query_store(self) -> Any:
         """Get the SpanQueryStore for trace queries."""
         return self._span_query_store
+
+    def get_log_query_store(self) -> Any:
+        """Get the LogQueryStore for persistent log queries."""
+        return self._log_query_store
 
     @property
     def db_pool(self) -> Any:
