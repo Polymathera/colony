@@ -144,7 +144,7 @@ All Colony dependencies run inside Docker -- no local GPU drivers, Ray, or Redis
 
 | Service | Port | Description |
 |---------|------|-------------|
-| Colony dashboard | `localhost:8080` | Web UI for agents, sessions, VCM |
+| Colony dashboard | `localhost:8080` | Web UI for agents, sessions, VCM, blackboards, traces, logs and more |
 | Ray dashboard | `localhost:8265` | Cluster monitoring UI |
 | Ray client | `localhost:10001` | Ray client connection |
 | Redis | `localhost:6379` | State management backend |

@@ -152,6 +152,16 @@ class PlanningContextBuilder:
             logger.warning(f"Failed to get memory architecture guidance: {e}")
             return None
 
+    def _indefinite_article(self, word: str) -> str:
+        """Return 'a' or 'an' based on the first letter of the word."""
+        return "an" if word[0].lower() in "aeiou" else "a"
+
+    def _format_role(self, name: str, role: str | None) -> str:
+        identity = f"You are {self._indefinite_article(name)} {name}"
+        if role:
+            identity += f", {self._indefinite_article(role)} {role}"
+        return identity
+
     async def _build_system_prompt(self) -> str:
         """Build stable agent identity prompt.
 
@@ -169,9 +179,7 @@ class PlanningContextBuilder:
 
         if self_concept:
             # Build from self-concept
-            identity = f"You are {self_concept.name}"
-            if self_concept.role:
-                identity += f", {self_concept.role}"
+            identity = self._format_role(self_concept.name, self_concept.role)
             parts.append(identity)
 
             if self_concept.description:
@@ -181,27 +189,25 @@ class PlanningContextBuilder:
                 parts.append(self_concept.identity)
 
             if self_concept.goals:
-                parts.append("Goals:\n" + "\n".join(f"- {g}" for g in self_concept.goals))
+                parts.append("Your goals are:\n" + "\n".join(f"- {g}" for g in self_concept.goals))
 
             if self_concept.constraints:
-                parts.append("Constraints:\n" + "\n".join(f"- {c}" for c in self_concept.constraints))
+                parts.append("Your constraints are:\n" + "\n".join(f"- {c}" for c in self_concept.constraints))
 
             if self_concept.capabilities:
-                parts.append(f"Capabilities: {', '.join(self_concept.capabilities)}")
+                parts.append(f"Your capabilities are: {', '.join(self_concept.capabilities)}")
 
             if self_concept.limitations:
-                parts.append("Limitations:\n" + "\n".join(f"- {l}" for l in self_concept.limitations))
+                parts.append("Your limitations are:\n" + "\n".join(f"- {l}" for l in self_concept.limitations))
 
             if self_concept.world_model:
-                parts.append(f"World model: {self_concept.world_model}")
+                parts.append(f"Your world model is: {self_concept.world_model}")
 
             if self_concept.frame_of_mind:
-                parts.append(f"Frame of mind: {self_concept.frame_of_mind}")
+                parts.append(f"Your frame of mind is: {self_concept.frame_of_mind}")
         else:
             # Fallback: build from agent metadata and class info
-            identity = f"You are {agent.__class__.__name__}"
-            if agent.metadata.role:
-                identity += f" (role: {agent.metadata.role})"
+            identity = self._format_role(agent.__class__.__name__, agent.metadata.role)
             identity += f", a {agent.agent_type} agent."
             parts.append(identity)
 

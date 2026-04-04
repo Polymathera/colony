@@ -618,7 +618,6 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
                 all_page_ids = all_clusters[0].page_ids
 
             await self.working_set_cap.initialize_from_policy(
-                page_graph=page_graph,
                 available_pages=all_page_ids,
                 run_context=RunContext(
                     analysis_goal=self.agent.metadata.parameters.get("goal", "code analysis"),

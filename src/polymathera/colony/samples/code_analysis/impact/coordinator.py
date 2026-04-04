@@ -696,14 +696,12 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         Returns:
             Unified impact report with multi-hop propagation
         """
-        page_graph = await self.agent.load_page_graph()
         self._current_changes = changes
         change_description = change_description or self._summarize_changes(changes)
         # TODO: Write this summary to agent memory to be used by the action policy
 
         # Phase 1: Initialize working set from page graph
         await self.working_set_cap.initialize_from_policy(
-            page_graph=page_graph,
             available_pages=page_ids,
             run_context=RunContext(
                 analysis_goal=f"Impact analysis: {change_description}",
