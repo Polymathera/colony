@@ -8,7 +8,7 @@ from ...models import (
     PlanningContext,
     PlanExecutionContext,
 )
-from .replanning import ReplanningDecision
+from .capabilities.replanning import ReplanningDecision
 
 
 logger = setup_logger(__name__)

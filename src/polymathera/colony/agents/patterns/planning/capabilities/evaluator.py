@@ -3,19 +3,37 @@
 This module provides plan evaluation and selection capabilities:
 - PlanEvaluator: Evaluates plans based on cost, benefit, and risk
 - PlanSelector: Selects best plan from candidates
+- PlanEvaluationCapability: Agent capability for evaluating plans with both programmatic and LLM APIs
+
+PlanEvaluationCapability provides cost-benefit-risk analysis for action plans. Used by agents
+that need to assess plan quality before committing or to compare
+alternative approaches.
+
+Dual interface:
+- **Programmatic API**: ``evaluate()`` — used by ``CacheAwareActionPlanner``
+  and ``AdaptiveReplanningPolicy``.
+- **LLM API**: ``@action_executor`` methods — used by ``MinimalActionPolicy``.
 """
+
+from __future__ import annotations
 
 import logging
 from typing import Any
+from overrides import override
 
-from ...models import (
-    BenefitModel,
-    CostModel,
+from ....base import Agent, AgentCapability
+from ....models import (
     ActionPlan,
+    AgentSuspensionState,
     PlanEvaluation,
     PlanningContext,
+    BenefitModel,
+    CostModel,
     RiskModel,
 )
+from ...actions.dispatcher import action_executor
+from ....scopes import BlackboardScope, get_scope_prefix
+
 
 logger = logging.getLogger(__name__)
 
@@ -287,4 +305,119 @@ class PlanSelector:
         rankings = [(e.plan_id, e.utility_score) for e in evaluations]
         rankings.sort(key=lambda x: x[1], reverse=True)
         return rankings
+
+
+class PlanEvaluationCapability(AgentCapability):
+    """Cost-benefit-risk evaluation for action plans.
+
+    Estimates execution cost (tokens, time, pages), benefit (quality,
+    information gain), and risk (failure probability, resource exhaustion).
+    Computes a utility score that balances all three.
+
+    Usage::
+
+        # Programmatic API
+        evaluation = await cap.evaluate(plan, planning_context)
+        print(f"Utility: {evaluation.utility}")
+
+        # LLM API
+        # evaluate_plan — returns utility, cost, benefit, risk breakdown
+    """
+
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "plan_evaluation",
+        input_patterns: list[str] | None = None,
+        capability_key: str = "plan_evaluation",
+    ):
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns or [],
+            capability_key=capability_key,
+        )
+
+    def get_action_group_description(self) -> str:
+        return (
+            "Plan Evaluation — estimates cost, benefit, and risk of action plans. "
+            "Computes a utility score to help decide whether to commit to a plan "
+            "or revise it."
+        )
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        pass
+
+    # =========================================================================
+    # Programmatic API
+    # =========================================================================
+
+    async def evaluate(
+        self, plan: ActionPlan, context: PlanningContext | None = None
+    ) -> PlanEvaluation:
+        """Evaluate a plan's cost, benefit, and risk.
+
+        Args:
+            plan: The plan to evaluate.
+            context: Planning context for additional signals.
+
+        Returns:
+            PlanEvaluation with cost, benefit, risk, and utility score.
+        """
+        evaluator = PlanEvaluator()
+        return evaluator.evaluate(plan, context or PlanningContext(goals=plan.goals))
+
+    # =========================================================================
+    # LLM API (@action_executor)
+    # =========================================================================
+
+    @action_executor(
+        planning_summary=(
+            "Evaluate the quality of the current plan. Returns utility score, "
+            "cost estimate, benefit estimate, and risk factors."
+        ),
+    )
+    async def evaluate_plan(self) -> dict[str, Any]:
+        """Evaluate the current plan's cost-benefit-risk tradeoff.
+
+        Retrieves the agent's current plan from the plan blackboard and
+        evaluates it.
+
+        Returns:
+            Dict with utility, cost, benefit, risk breakdowns, and recommendation.
+        """
+        from ..blackboard import PlanBlackboard
+
+        try:
+            plan_bb = PlanBlackboard(
+                agent=self.agent,
+                scope=BlackboardScope.COLONY,
+                namespace="action_plans",
+            )
+            plan = await plan_bb.get_plan(self.agent.agent_id)
+        except Exception:
+            plan = None
+
+        if not plan:
+            return {
+                "utility": 0.0,
+                "note": "No active plan to evaluate",
+            }
+
+        evaluation = await self.evaluate(plan)
+        return {
+            "utility": evaluation.utility,
+            "cost": evaluation.cost.model_dump() if evaluation.cost else {},
+            "benefit": evaluation.benefit.model_dump() if evaluation.benefit else {},
+            "risk": evaluation.risk.model_dump() if evaluation.risk else {},
+            "recommendation": (
+                "proceed" if evaluation.utility > 0.5 else "consider revising"
+            ),
+        }
 

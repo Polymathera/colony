@@ -48,14 +48,10 @@ from ..planning import (
     ActionPlanner,
     PlanBlackboard,
     HierarchicalAccessPolicy,
-    ReplanningPolicy,
-    ReplanningDecision,
-    PeriodicReplanningPolicy,
-    PlanExhaustionReplanningPolicy,
-    CompositeReplanningPolicy,
 )
 from ..planning.planner import create_cache_aware_planner
 from ..planning.context import PlanningContextBuilder
+from ..planning.capabilities import ReplanningDecision, ReplanningCapability
 
 
 logger = setup_logger(__name__)
@@ -698,7 +694,6 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         action_map: list[ActionGroup] | None = None,
         action_providers: list[Any] = [],
         io: ActionPolicyIO | None = None,
-        replanning_policy: ReplanningPolicy | None = None,
         context_builder: PlanningContextBuilder | None = None,
     ):
         """Initialize planning agent.
@@ -709,9 +704,6 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             action_map: List of action groups
             action_providers: Additional action providers
             io: Policy I/O contract (inputs/outputs)
-            replanning_policy: Policy that decides WHEN to replan and what
-                strategy to use. Defaults to CompositeReplanningPolicy with
-                PeriodicReplanningPolicy + PlanExhaustionReplanningPolicy.
         """
         super().__init__(
             agent=agent,
@@ -721,7 +713,9 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         )
         self.planner = planner  # TODO: Unify planner with planning strategy.
         self.plan_blackboard: PlanBlackboard | None = None
-        self.replanning_policy = replanning_policy
+
+        # replanning_capability: Capability that decides WHEN to replan and what strategy to use.
+        self.replanning_capability = None
 
         # Stream of consciousness: actions and planning
         self.action_history: list[Action] = [] # TODO: Currently unused
@@ -748,20 +742,20 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         if self.planner is None:
             self.planner = create_cache_aware_planner(agent=self.agent)
 
-        # Create default replanning policy if none provided
-        if self.replanning_policy is None:
+        # Create default replanning capability if none provided
+        if not self.agent.get_capability_by_type(ReplanningCapability):
             replan_every_n = 3
             replan_on_failure = True
             if hasattr(self.planner, 'planning_params'):
                 replan_every_n = self.planner.planning_params.replan_every_n_steps
                 replan_on_failure = self.planner.planning_params.replan_on_failure
-            self.replanning_policy = CompositeReplanningPolicy([
-                PeriodicReplanningPolicy(
-                    replan_every_n_steps=replan_every_n,
-                    replan_on_failure=replan_on_failure,
-                ),
-                PlanExhaustionReplanningPolicy(),
-            ])
+            self.replanning_capability = ReplanningCapability(
+                agent=self.agent,
+                replan_every_n_steps=replan_every_n,
+                replan_on_failure=replan_on_failure,
+            )
+            self.agent.add_capability(self.replanning_capability)
+            logger.info(f"Added default ReplanningCapability to agent {self.agent.agent_id}")
 
         # Get current plan (if resuming from a previous session)
         # NOTE: Initial plan creation is NOT done here — it happens in
@@ -931,7 +925,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             f"      📋 PLAN_STEP: idx={state.current_plan.current_action_index} / "
             f"{len(state.current_plan.actions)} actions"
         )
-        decision = await self.replanning_policy.evaluate_replanning_need(
+        decision = await self.replanning_capability.evaluate_replanning_need(
             state=state,
             last_result=last_result,
         )
@@ -971,7 +965,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
                 # Signal IDLE via state.custom → execute_iteration reads it → returns idle=True
                 # Agent.run_step() reads idle=True and transitions agent state
                 state.custom["idle"] = True
-                self.replanning_policy.reset_state(state)  # Reset for next work cycle
+                self.replanning_capability.reset_state(state)  # Reset for next work cycle
                 return None
             else:
                 # ONE_SHOT: signal completion → execute_iteration returns policy_completed=True

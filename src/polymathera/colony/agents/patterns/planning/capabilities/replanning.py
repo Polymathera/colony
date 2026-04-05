@@ -1,4 +1,4 @@
-"""Replanning policies for adaptive plan execution.
+"""Replanning policies and capability for adaptive plan execution.
 
 This module provides the ReplanningPolicy abstraction that decides WHEN to replan
 and WHAT revision strategy to use. This separates the replanning decision from
@@ -13,6 +13,15 @@ Concrete policies:
 - PeriodicReplanningPolicy: Replan every N steps (default, current behavior)
 - AdaptiveReplanningPolicy: Trigger-based replanning (failure, blocked, quality, resources)
 - CompositeReplanningPolicy: Combines multiple policies (triggers if ANY says yes)
+
+ReplanningCapability provides replanning trigger evaluation so agents can check whether
+their current plan should be revised. Wraps the composable
+``ReplanningPolicy`` system.
+
+Dual interface:
+- **Programmatic API**: ``evaluate_replanning_need()`` — used by
+  ``CacheAwareActionPolicy`` in its pre-programmed loop.
+- **LLM API**: ``@action_executor`` methods — used by ``MinimalActionPolicy``.
 """
 
 from __future__ import annotations
@@ -21,8 +30,12 @@ import logging
 from abc import ABC, abstractmethod
 from overrides import override
 from pydantic import BaseModel, Field
+from typing import Any, TYPE_CHECKING
 
-from ...models import (
+from ....base import Agent, AgentCapability
+from ...actions.dispatcher import action_executor
+from ....scopes import BlackboardScope, get_scope_prefix
+from ....models import (
     ActionPlan,
     ActionResult,
     ActionStatus,
@@ -30,8 +43,10 @@ from ...models import (
     RevisionTrigger,
     ActionPolicyExecutionState,
     PlanExhaustionBehavior,
+    AgentSuspensionState,
 )
-from .evaluator import PlanEvaluator
+if TYPE_CHECKING:
+    from .evaluator import PlanEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +265,7 @@ class AdaptiveReplanningPolicy(ReplanningPolicy):
         # PlanEvaluator.evaluate() only reads plan fields (actions, cache_context,
         # goals, depth, depends_on) — it does not use PlanningContext.
         try:
-            from ...models import PlanningContext as _PC
+            from ....models import PlanningContext as _PC
 
             evaluation = await self.evaluator.evaluate(plan, _PC())
             if evaluation.benefit.expected_quality < self.quality_threshold:
@@ -461,3 +476,146 @@ class CompositeReplanningPolicy(ReplanningPolicy):
             strategy=best_strategy,
             reason="; ".join(all_reasons),
         )
+
+
+
+class ReplanningCapability(AgentCapability):
+    """Replanning trigger evaluation.
+
+    Evaluates whether the current plan should be revised based on
+    execution progress, failures, resource exhaustion, or quality
+    threshold breaches. Does NOT execute replanning — only decides
+    WHEN to replan and WHAT strategy to use.
+
+     Defaults to CompositeReplanningPolicy with PeriodicReplanningPolicy + PlanExhaustionReplanningPolicy.
+
+    Usage::
+
+        # Programmatic API (used by CacheAwareActionPolicy)
+        decision = await cap.evaluate_replanning_need(state, last_result)
+        if decision.should_replan:
+            await planner.revise_plan(plan, context)
+
+        # LLM API
+        # should_replan — returns whether to revise and why
+    """
+
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.AGENT,
+        namespace: str = "replanning",
+        replan_every_n_steps: int = 3,
+        replan_on_failure: bool = True,
+        max_replan_cycles: int = 5,
+        input_patterns: list[str] | None = None,
+        capability_key: str = "replanning",
+    ):
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns or [],
+            capability_key=capability_key,
+        )
+        self._replan_every_n_steps = replan_every_n_steps
+        self._replan_on_failure = replan_on_failure
+        self._max_replan_cycles = max_replan_cycles
+        self._composite_policy = None
+
+    def get_action_group_description(self) -> str:
+        return (
+            "Replanning — evaluates whether the current plan should be revised. "
+            "Checks for failures, plan exhaustion, periodic triggers, and "
+            "resource exhaustion. Returns recommended revision strategy."
+        )
+
+    async def _ensure_initialized(self) -> None:
+        """Lazily initialize the composite replanning policy."""
+        if self._composite_policy is not None:
+            return
+
+        self._composite_policy = CompositeReplanningPolicy(policies=[
+            PeriodicReplanningPolicy(
+                replan_every_n_steps=self._replan_every_n_steps,
+                replan_on_failure=self._replan_on_failure,
+            ),
+            PlanExhaustionReplanningPolicy(
+                max_replan_cycles=self._max_replan_cycles,
+            ),
+        ])
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        pass
+
+    # =========================================================================
+    # Programmatic API
+    # =========================================================================
+
+    async def evaluate_replanning_need(
+        self,
+        state: ActionPolicyExecutionState,
+        last_result: ActionResult | None = None,
+    ) -> Any:
+        """Evaluate whether the current plan should be revised.
+
+        Args:
+            state: Current execution state with plan, iteration count, etc.
+            last_result: Result of the most recent action (if any).
+
+        Returns:
+            ReplanningDecision with should_replan, triggers, strategy, reason.
+        """
+        await self._ensure_initialized()
+        return await self._composite_policy.evaluate_replanning_need(state, last_result)
+
+    def reset_state(self, state: ActionPolicyExecutionState) -> None:
+        """Reset replanning state counters (e.g., replan cycle count)."""
+        if self._composite_policy:
+            self._composite_policy.reset_state(state)
+
+    # =========================================================================
+    # LLM API (@action_executor)
+    # =========================================================================
+
+    @action_executor(
+        planning_summary=(
+            "Check if the current plan should be revised based on progress, "
+            "failures, or resource constraints. Returns whether to replan and why."
+        ),
+    )
+    async def should_replan(self) -> dict[str, Any]:
+        """Evaluate whether the current plan needs revision.
+
+        Uses the agent's execution state to check for replanning triggers:
+        failures, plan exhaustion, periodic threshold, resource pressure.
+
+        Returns:
+            Dict with 'should_replan', 'triggers', 'strategy', and 'reason'.
+        """
+        await self._ensure_initialized()
+
+        # Build a minimal state from agent context
+        # NOTE: In the pre-programmed path (CacheAwareActionPolicy),
+        # the full state is passed. Here we construct what we can.
+        state = ActionPolicyExecutionState(
+            iteration_count=0,
+            custom={},
+        )
+
+        decision = await self._composite_policy.evaluate_replanning_need(state, None)
+
+        return {
+            "should_replan": decision.should_replan,
+            "plan_exhausted": decision.plan_exhausted,
+            "triggers": [t.value if hasattr(t, 'value') else str(t) for t in decision.triggers],
+            "strategy": decision.strategy.value if hasattr(decision.strategy, 'value') else str(decision.strategy),
+            "reason": decision.reason,
+        }
+
+
+

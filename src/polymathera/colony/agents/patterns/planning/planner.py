@@ -26,9 +26,6 @@ from .strategies import (
     ActionPlanningStrategy,
     get_default_planning_strategy,
 )
-from .cache import ActionPlanningCachePolicy
-from .coordination import ActionPlanCoordinationPolicy
-from .learning import ActionPlanLearningPolicy
 
 
 logger = logging.getLogger(__name__)
@@ -148,9 +145,6 @@ class CacheAwareActionPlanner(ActionPlanner):
         agent: Agent,
         planning_strategy: ActionPlanningStrategy,
         planning_params: PlanningParameters,
-        cache_policy: ActionPlanningCachePolicy | None = None,
-        learning_policy: ActionPlanLearningPolicy | None = None,
-        coordination_policy: ActionPlanCoordinationPolicy | None = None, # FIXME: Not used yet
     ):
         self.agent = agent
         self.agent_id = agent.agent_id
@@ -161,20 +155,67 @@ class CacheAwareActionPlanner(ActionPlanner):
             planning_strategy.set_agent(agent)
 
         self.planning_params = planning_params
-        self.cache_policy = cache_policy
-        self.learning_policy = learning_policy
-        self.coordination_policy = coordination_policy  # TODO: This is not used yet.
+        self._cache_cap = None
+        self._learning_cap = None
+        self._coordination_cap = None
+        self._evaluation_cap = None
 
     async def initialize(self) -> None:
-        """Initialize planner and its policies."""
-        if self.cache_policy:
-            await self.cache_policy.initialize()
+        """Initialize planner and ensure planning capabilities are on the agent.
 
-        if self.learning_policy:
-            await self.learning_policy.initialize()
+        If the agent doesn't already have planning capabilities registered,
+        this method adds default instances. This means using
+        ``CacheAwareActionPlanner`` automatically gives the agent access to
+        cache analysis, plan learning, coordination, evaluation, and
+        replanning — both through the pre-programmed pipeline AND through
+        ``@action_executor`` methods visible to any action policy.
+        """
+        from .capabilities import (
+            CacheAnalysisCapability,
+            PlanLearningCapability,
+            PlanCoordinationCapability,
+            PlanEvaluationCapability,
+        )
 
-        if self.coordination_policy:
-            await self.coordination_policy.initialize()
+        # Ensure planning capabilities are registered on the agent.
+        # If already present (user pre-registered a custom version), use theirs.
+        if not self.agent.get_capability_by_type(CacheAnalysisCapability):
+            cap = CacheAnalysisCapability(
+                agent=self.agent,
+                cache_capacity=self.planning_params.ideal_cache_size,
+            )
+            await cap.initialize()
+            self.agent.add_capability(cap)
+            logger.info(f"Added default CacheAnalysisCapability to agent {self.agent_id}")
+
+        if not self.agent.get_capability_by_type(PlanLearningCapability):
+            cap = PlanLearningCapability(agent=self.agent)
+            await cap.initialize()
+            self.agent.add_capability(cap)
+            logger.info(f"Added default PlanLearningCapability to agent {self.agent_id}")
+
+        if not self.agent.get_capability_by_type(PlanCoordinationCapability):
+            cap = PlanCoordinationCapability(
+                agent=self.agent,
+                cache_capacity=self.planning_params.ideal_cache_size,
+            )
+            await cap.initialize()
+            self.agent.add_capability(cap)
+            logger.info(f"Added default PlanCoordinationCapability to agent {self.agent_id}")
+
+        if not self.agent.get_capability_by_type(PlanEvaluationCapability):
+            cap = PlanEvaluationCapability(agent=self.agent)
+            await cap.initialize()
+            self.agent.add_capability(cap)
+            logger.info(f"Added default PlanEvaluationCapability to agent {self.agent_id}")
+
+        # Discover capabilities for the pre-programmed pipeline.
+        # These are the same objects visible to CodeGenerationActionPolicy
+        # and MinimalActionPolicy via @action_executor.
+        self._cache_cap = self.agent.get_capability_by_type(CacheAnalysisCapability)
+        self._learning_cap = self.agent.get_capability_by_type(PlanLearningCapability)
+        self._coordination_cap = self.agent.get_capability_by_type(PlanCoordinationCapability)
+        self._evaluation_cap = self.agent.get_capability_by_type(PlanEvaluationCapability)
 
     @override
     async def create_plan(self, planning_context: PlanningContext) -> ActionPlan:
@@ -184,15 +225,15 @@ class CacheAwareActionPlanner(ActionPlanner):
             goals: List of goals to achieve
             planning_context: Planning context (goals, constraints, resources, etc.)
         """
-        # Apply learning policy (get similar successful plans)
+        # Apply learning — prefer capability, fall back to old-style policy
         learned_patterns = None
-        if self.learning_policy:
-            learned_patterns = await self.learning_policy.get_applicable_patterns(planning_context)
+        if self._learning_cap:
+            learned_patterns = await self._learning_cap.get_applicable_patterns(planning_context)
 
-        # Apply cache policy (analyze cache requirements)
+        # Apply cache analysis — prefer capability, fall back to old-style policy
         cache_context = CacheContext()
-        if self.cache_policy:
-            cache_context = await self.cache_policy.analyze_cache_requirements(planning_context)
+        if self._cache_cap:
+            cache_context = await self._cache_cap.analyze_cache_requirements(planning_context)
 
         # Generate plan via strategy
         logger.warning(
@@ -225,18 +266,17 @@ class CacheAwareActionPlanner(ActionPlanner):
         self, current_plan: ActionPlan, planning_context: PlanningContext
     ) -> ActionPlan:
         """Replan next N steps (MPC)."""
-        # Get learned patterns and cache context if policies are available
+        # Get learned patterns — prefer capability, fall back to old-style policy
         learned_patterns = None
-        if self.learning_policy:
-            learned_patterns = await self.learning_policy.get_applicable_patterns(
-                planning_context
-            )
+        if self._learning_cap:
+            learned_patterns = await self._learning_cap.get_applicable_patterns(planning_context)
 
         cache_context = current_plan.cache_context if hasattr(current_plan, "cache_context") else None
-        if not cache_context and self.cache_policy:
-            cache_context = await self.cache_policy.analyze_cache_requirements(planning_context)
-        else:
-            cache_context = CacheContext()
+        if not cache_context:
+            if self._cache_cap:
+                cache_context = await self._cache_cap.analyze_cache_requirements(planning_context)
+            else:
+                cache_context = CacheContext()
 
         # TODO: Get critique here or from memory and add to the planning context for replanning
         ### critique: Critique = 
@@ -326,8 +366,8 @@ class CacheAwareActionPlanner(ActionPlanner):
         logger.info(
             f"Learning from plan {plan.plan_id}: {outcome_status} with {success_rate:.1%} success rate"
         )
-        if self.learning_policy:
-            await self.learning_policy.learn_from_execution(plan, outcome)
+        if self._learning_cap:
+            await self._learning_cap.learn_from_execution(plan, outcome)
 
 
 
@@ -361,41 +401,11 @@ async def create_cache_aware_planner(
         planning_params, agent=agent
     )
 
-    # Create default policies if not provided in metadata
-    # Analyze cache needs and update working set
-    cache_policy = ActionPlanningCachePolicy(
-        agent=agent,
-        cache_capacity=planning_params.ideal_cache_size
-    )
-    await cache_policy.initialize()
-    logger.info(
-        f"Created default ActionPlanningCachePolicy for agent {agent.agent_id}"
-    )
-
-    # Learn from execution outcomes
-    learning_policy = ActionPlanLearningPolicy(agent=agent)
-    await learning_policy.initialize()
-    logger.info(
-        f"Created default ActionPlanLearningPolicy for agent {agent.agent_id}"
-    )
-
-    coordination_policy = ActionPlanCoordinationPolicy(
-        cache_capacity=planning_params.ideal_cache_size
-    )
-    await coordination_policy.initialize()
-    logger.info(
-        f"Created default ActionPlanCoordinationPolicy for agent {agent.agent_id}"
-    )
-
-
     # Create sophisticated planner with policies
     cache_aware_planner = CacheAwareActionPlanner(
         agent=agent,
         planning_strategy=planning_strategy,
         planning_params=planning_params,
-        learning_policy=learning_policy,
-        cache_policy=cache_policy,
-        coordination_policy=coordination_policy,
         # Policies will be created automatically in Agent.initialize()
         # when metadata doesn't provide them
     )

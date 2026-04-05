@@ -250,3 +250,226 @@ blueprint = CacheAwareActionPolicy.bind(
 ```
 
 Blueprints are validated for serializability at creation time. The `agent` reference is injected at instantiation time, not bound in the blueprint.
+
+## Minimal Action Policy
+
+`MinimalActionPolicy` is the simplest possible policy: gather available actions, show them to the LLM, dispatch whatever it selects. No planning infrastructure, no event processing, no pre-programmed enrichment.
+
+```python
+from polymathera.colony.agents.patterns.actions import (
+    MinimalActionPolicy,
+    create_minimal_action_policy,
+)
+
+policy = await create_minimal_action_policy(agent, max_iterations=20)
+```
+
+The LLM sees all `@action_executor` methods from the agent's capabilities and selects one per iteration. If planning capabilities are registered on the agent, their actions appear too — but the LLM is not forced to use them.
+
+This is the **baseline** for evaluating what structure and guidance add to planning quality.
+
+## Planning Capabilities
+
+Planning capabilities are cognitive capabilities that augment an agent's reasoning about its own planning process. They support three consumption modes:
+
+| Mode | Consumer | Interface |
+|------|----------|-----------|
+| Pre-programmed | `CacheAwareActionPlanner` | Programmatic API (complex params) |
+| LLM-selected | `MinimalActionPolicy` | `@action_executor` (simple params) |
+| Code-generated | `CodeGenerationActionPolicy` | Programmatic API via generated code |
+
+### Available Planning Capabilities
+
+| Capability | Purpose | Key `@action_executor` methods |
+|------------|---------|-------------------------------|
+| `CacheAnalysisCapability` | Working set analysis, page priorities, cache-optimal batching | `analyze_cache`, `get_cache_optimal_batches`, `get_page_dependencies` |
+| `PlanLearningCapability` | Learn from execution history, surface applicable patterns | `get_learned_patterns`, `get_execution_history`, `record_outcome` |
+| `PlanCoordinationCapability` | Multi-agent conflict detection and resolution | `check_plan_conflicts`, `get_sibling_plans`, `propose_plan`, `resolve_contention` |
+| `PlanEvaluationCapability` | Cost-benefit-risk analysis for plans | `evaluate_plan` |
+| `ReplanningCapability` | Decide when to revise the current plan | `should_replan` |
+
+### Automatic Registration
+
+`CacheAwareActionPlanner` automatically registers missing planning capabilities on `initialize()`. Using `CacheAwareActionPolicy` automatically gives the agent access to all planning capabilities — both through the planner's pre-programmed pipeline and through `@action_executor` methods.
+
+### The Action Policy Space
+
+```
+                            Structure / Guidance
+                (Granularity of planning abstractions or primitives
+                            provided to the LLM)
+                ────────────────────────────────────────────────────►
+                    None            Optional           Full
+                (LLM decides    (available but     (pre-programmed
+                 everything)     not forced)        sequence)
+
+Turing Completeness
+    Code Gen    ┌──────────────────┬──────────────────┬──────────────────┐
+    (arbitrary  │                  │                  │                  │
+     Python)    │     CodeGen      │    CodeGen +     │    CodeGen +     │
+         ▲      │     Minimal      │    Planning      │      Full        │
+         │      │                  │   Capabilities   │    Pipeline      │
+     Execution  │                  │                  │                  │
+        Mode    ├──────────────────┼──────────────────┼──────────────────┤
+         │      │                  │                  │                  │
+         │      │     Minimal      │    Minimal +     │    CacheAware    │
+         ▼      │     Action       │    Planning      │      Action      │
+    JSON action │     Policy       │   Capabilities   │      Policy      │
+    selection   │                  │                  │                  │
+                └──────────────────┴──────────────────┴──────────────────┘
+```
+
+Moving right adds structure; moving up adds expressiveness. The same capabilities work across all positions in this space.
+
+**Bottom-left**: `MinimalActionPolicy` — LLM picks from `@action_executor` **domain actions**. No planning infrastructure.
+
+**Bottom-middle**: `MinimalActionPolicy` + planning capabilities registered on the agent. The LLM sees `analyze_cache`, `get_learned_patterns`, `check_plan_conflicts` as available actions and MAY use them (its choice).
+
+**Bottom-right**: `CacheAwareActionPolicy` — full *pre-programmed, rigid, hard-coded pipeline* or sequence: learning → cache → strategy → replan. LLM doesn't decide when to analyze cache; the planner always does it before prompting.
+
+**Top-left**: `CodeGenerationActionPolicy` with no planning capabilities. LLM writes Python that *parameterizes* and calls **domain actions** only.
+
+**Top-middle**: `CodeGenerationActionPolicy` with planning capabilities. LLM writes Python that can call `self.agent.get_capability_by_type(CacheAnalysisCapability).analyze_cache_requirements(...)` — the full programmatic API, not just `@action_executor` wrappers.
+
+**Top-right**: `CodeGenerationActionPolicy` with full planning pipeline available. LLM can call the entire planner programmatically OR bypass it and call individual components.
+
+
+### Dual-interface pattern: Programmatic + LLM interfaces on the same capability
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    AgentCapability                       │
+│                                                          │
+│  Programmatic API              LLM API                   │
+│  (complex params,              (@action_executor,        │
+│   system objects)               simple params)           │
+│                                                          │
+│  analyze_cache_requirements    analyze_cache             │
+│  (PlanningContext)             (page_ids: list[str])     │
+│          │                            │                  │
+│          └────── shared logic ────────┘                  │
+│                                                          │
+│  Called by:                    Called by:                │
+│  • CacheAwareActionPlanner    • MinimalActionPolicy      │
+│    (direct method call)         (via JSON action select) │
+│  • CodeGenerationActionPolicy                            │
+│    (via generated Python)                                │
+└──────────────────────────────────────────────────────────┘
+```
+Each planning component is an `AgentCapability` with `@action_executor` methods for the LLM. But it ALSO exposes a **programmatic API** (plain async methods without `@action_executor`) that `CacheAwareActionPlanner` and `CodeGenerationActionPolicy` call directly.
+
+The `@action_executor` methods are thin wrappers that:
+1. Accept simple, LLM-producible parameters (strings, lists, dicts)
+2. Call the programmatic API internally
+3. Return structured results the LLM can use
+
+The programmatic API methods are NOT `@action_executor` — they accept complex objects (`PlanningContext`, `CacheContext`, `list[Action]`) that the LLM can't produce. They exist for `CacheAwareActionPlanner` which already has these objects.
+
+**The `@action_executor` methods are simplified wrappers that accept LLM-friendly types and call the programmatic API internally**. The `@action_executor` methods are **simplified entry points** for policies that use JSON action selection (like `MinimalActionPolicy`). `CodeGenerationActionPolicy` doesn't need them — it calls the programmatic API directly in generated code.
+
+## Code Generation Policy
+
+`CodeGenerationActionPolicy` is an alternative to `CacheAwareActionPolicy` that replaces JSON action selection with **Python code generation**. Instead of the LLM selecting from a list of action types and filling parameter dicts, it generates executable Python that composes capability methods with real control flow.
+
+### Why Code Generation?
+
+The JSON action selection approach has a structural limitation: the LLM produces flat `{"action_type": "...", "parameters": {...}}` dicts. When an action needs the output of a prior action, the LLM must encode data flow as `$ref` expressions — an unnatural and error-prone interface. Complex parameters (nested Pydantic models, system-generated objects) are even harder.
+
+Code generation eliminates these problems:
+
+```python
+# Instead of:
+{"action_type": "analyze_pages", "parameters": {"page_ids": ["p1"]}}
+{"action_type": "synthesize", "parameters": {"result_id": "$results.step_1.output.result_id"}}
+
+# The LLM writes:
+result = await run("analyze_pages", page_ids=["p1"])
+if result.success:
+    synthesis = await run("synthesize", result_id=result.output["result_id"])
+```
+
+Empirical evidence (CodeAct, ICML 2024) shows 20% higher success rates with code-based actions.
+
+### How It Works
+
+`CodeGenerationActionPolicy` extends `EventDrivenActionPolicy`. Its `plan_step()`:
+
+1. Builds a prompt with execution history, capability summaries, and goals
+2. Calls the LLM to generate Python code
+3. Returns an `EXECUTE_CODE` action containing the generated code
+4. The existing `ActionDispatcher` executes it via `PolicyPythonREPL`
+
+If the generated code fails, the error is fed back to the LLM on the next iteration for correction (iterative refinement).
+
+### Enriched Namespace
+
+Generated code has access to:
+
+| Name | Type | Description |
+|------|------|-------------|
+| `run(action_key, **params)` | async function | Dispatch a capability action through the action dispatcher |
+| `browse(query=None)` | async function | Progressive capability discovery |
+| `bb` | `EnhancedBlackboard` | Agent's primary blackboard |
+| `results` | `dict` | Prior action results by key |
+| `pages` | `list[str]` | Current working set page IDs |
+| `goals` | `list[str]` | Agent's current goals |
+| `log(msg)` | function | Structured logging |
+| `signal_complete()` | function | Signal that all goals are achieved |
+
+### Progressive Capability Discovery
+
+The `browse()` function provides hierarchical discovery:
+
+```python
+# Top level: list all capability groups
+groups = await browse()
+# {"analysis": {"description": "...", "actions": ["analyze_pages", ...], "count": 5}, ...}
+
+# Group level: list actions with signatures
+actions = await browse("analysis")
+# {"analyze_pages": "Analyze pages for findings.\n  Parameters: page_ids: list[str], ...", ...}
+
+# Action level: full docstring and source
+detail = await browse("analysis.analyze_pages")
+# "analyze_pages(self, page_ids: list[str], ...) -> AnalysisResult\n\nFull docstring..."
+```
+
+### Usage
+
+```python
+from polymathera.colony.agents.patterns.actions import (
+    CodeGenerationActionPolicy,
+    create_code_generation_action_policy,
+)
+
+# Via factory (recommended)
+policy = await create_code_generation_action_policy(
+    agent=agent,
+    max_retries=2,
+    code_timeout=30.0,
+)
+
+# Via blueprint (for agent configuration)
+blueprint = CodeGenerationActionPolicy.bind(
+    max_retries=2,
+    code_timeout=30.0,
+)
+```
+
+### Transaction Semantics
+
+On code execution failure:
+1. The REPL namespace is restored to its pre-execution state (partial variable mutations are rolled back)
+2. The error message and failed code are stored for iterative refinement
+3. On the next `plan_step()`, the LLM receives the error and generates corrected code
+
+### When to Use
+
+| Scenario | Recommended Policy |
+|----------|-------------------|
+| Simple sequential actions | `CacheAwareActionPolicy` |
+| Complex data flow between actions | `CodeGenerationActionPolicy` |
+| Actions with complex parameter types | `CodeGenerationActionPolicy` |
+| Multi-step conditional logic | `CodeGenerationActionPolicy` |
+| Well-defined fixed workflows | `CacheAwareActionPolicy` |
+| Exploratory analysis with branching | `CodeGenerationActionPolicy` |

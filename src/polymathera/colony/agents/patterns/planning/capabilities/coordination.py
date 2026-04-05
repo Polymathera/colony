@@ -5,27 +5,42 @@ This module provides coordination mechanisms for multi-agent planning that custo
 - NegotiationProtocol: Protocol for conflict negotiation
 - MarketBasedNegotiation: Market-based resource allocation
 - ConsensusNegotiation: Consensus-based conflict resolution
-- ActionPlanCoordinationPolicy: Multi-agent coordination
+- PlanCoordinationCapability: Multi-agent coordination
 
 Per Architecture Principle #2: ONE Planner class customized via pluggable policies.
 
 Design: Policies are stateless and receive context (page graphs, etc.) when called.
 The Planner that uses these policies is responsible for providing the necessary context.
+
+PlanCoordinationCapability provides conflict detection and resolution for multi-agent planning
+over shared VCM-paged context. Used by coordinator agents that need
+to ensure their plans don't conflict with sibling agents' plans.
+
+Dual interface:
+- **Programmatic API**: ``check_conflicts()``, ``resolve_conflict()`` — used
+  by ``CacheAwareActionPlanner`` and ``CodeGenerationActionPolicy``.
+- **LLM API**: ``@action_executor`` methods — used by ``MinimalActionPolicy``.
 """
+
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from typing import Any
-import logging
+from overrides import override
 
-from .blackboard import PlanBlackboard
-from ...models import (
+from ..blackboard import PlanBlackboard
+from ...actions.dispatcher import action_executor
+from ....base import Agent, AgentCapability
+from ....scopes import BlackboardScope, get_scope_prefix
+from ....models import (
     ActionPlan,
     PlanStatus,
     ConflictType,
     ConflictSeverity,
     ActionPlanConflict,
     ConflictResolutionStrategy,
+    AgentSuspensionState,
 )
 
 logger = logging.getLogger(__name__)
@@ -570,7 +585,6 @@ class ConsensusNegotiation(NegotiationProtocol):
 
 
 
-
 # ============================================================================
 # Cache-Aware Conflict Detection and Resolution
 # ============================================================================
@@ -1070,78 +1084,136 @@ class ActionPlanConflictResolver:
 
 
 # ============================================================================
-# Coordination Policy
+# Coordination capability
 # ============================================================================
 
+class PlanCoordinationCapability(AgentCapability):
+    """Multi-agent plan coordination for shared VCM context.
 
-class ActionPlanCoordinationPolicy:
-    """Multi-agent coordination policy.
+    Detects conflicts between an agent's plan and other agents' active
+    plans (cache contention, resource exhaustion), and resolves them
+    using configurable strategies (stagger, partition, negotiate).
 
-    Handles coordination between multiple agent plans:
-    - Conflict detection
-    - Conflict resolution
-    - Resource allocation
+    Usage::
 
-    Per Architecture Principle #2: This is a pluggable policy, NOT a separate planner.
+        # Programmatic API
+        conflicts = await cap.check_conflicts(my_plan, sibling_plans)
+        resolved = await cap.resolve_conflict(my_plan, conflicts[0])
+
+        # LLM API
+        # check_plan_conflicts, get_sibling_plans, propose_plan, resolve_contention
     """
 
-    def __init__(self, cache_capacity: int = 100):
-        """Initialize coordination policy.
+    def __init__(
+        self,
+        agent: Agent,
+        scope: BlackboardScope = BlackboardScope.COLONY,
+        namespace: str = "plan_coordination",
+        cache_capacity: int = 100,
+        input_patterns: list[str] | None = None,
+        capability_key: str = "plan_coordination",
+    ):
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns or [],
+            capability_key=capability_key,
+        )
+        self.cache_capacity = cache_capacity
+        self._detector = None
+        self._resolver = None
+        self._plan_blackboard = None
 
-        Args:
-            cache_capacity: Maximum number of pages that can be cached
-        """
-        self.detector = CacheAwarePlanConflictDetector(cache_capacity)
-        self.resolver = ActionPlanConflictResolver(default_strategy="priority")
+    def get_action_group_description(self) -> str:
+        return (
+            "Plan Coordination — detects and resolves conflicts between agents' plans. "
+            "Checks for cache contention and resource exhaustion across sibling agents, "
+            "resolves via staggering, partitioning, or negotiation. "
+            "Publishes plans for colony-wide visibility."
+        )
 
-    async def initialize(self) -> None:
-        """Initialize policy."""
-        logger.info("Initializing ActionPlanCoordinationPolicy")
+    async def _ensure_initialized(self) -> None:
+        """Lazily initialize coordination components."""
+        if self._detector is not None:
+            return
+
+        from .coordination import (
+            CacheAwarePlanConflictDetector,
+            ActionPlanConflictResolver,
+        )
+        from ..blackboard import PlanBlackboard
+
+        self._detector = CacheAwarePlanConflictDetector(self.cache_capacity)
+        self._resolver = ActionPlanConflictResolver(default_strategy="priority")
+        self._plan_blackboard = PlanBlackboard(
+            agent=self.agent,
+            scope=BlackboardScope.COLONY,
+            namespace="action_plans",
+        )
+
+    @override
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        return state
+
+    @override
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        pass
+
+    # =========================================================================
+    # Programmatic API
+    # =========================================================================
 
     async def check_conflicts(
-        self, plan: ActionPlan, other_plans: list[ActionPlan]
+        self, plan: ActionPlan, other_plans: list[ActionPlan] | None = None
     ) -> list[ActionPlanConflict]:
-        """Check for conflicts with other plans.
+        """Check if a plan conflicts with other agents' active plans.
 
         Args:
-            plan: ActionPlan to check
-            other_plans: Other active plans
+            plan: The plan to check.
+            other_plans: Sibling plans. If None, fetches from plan blackboard.
 
         Returns:
-            List of conflicts (empty if no conflicts)
+            List of conflict dicts with type, severity, description, and
+            recommended_strategy.
         """
         logger.info(f"Checking conflicts for plan {plan.plan_id}")
+        await self._ensure_initialized()
 
-        # Use existing conflict detector
-        all_plans = [plan] + other_plans
-        conflicts = await self.detector.detect_conflicts(all_plans)
+        if other_plans is None and self._plan_blackboard:
+            all_plans = await self._plan_blackboard.get_all_plans()
+            other_plans = [p for p in all_plans if p.agent_id != plan.agent_id]
 
+        if not other_plans:
+            return []
+
+        conflicts = self._detector.detect_conflicts([plan] + other_plans)
         logger.info(f"Found {len(conflicts)} conflicts for plan {plan.plan_id}")
         return conflicts
 
     async def resolve_conflict(
         self, plan: ActionPlan, conflict: ActionPlanConflict
     ) -> ActionPlan | None:
-        """Resolve conflict for a plan.
+        """Resolve a detected conflict.
 
         Args:
-            plan: ActionPlan with conflict
-            conflict: Conflict details
+            plan: The plan to adjust.
+            conflict: Conflict dict from check_conflicts().
 
         Returns:
-            Modified plan, or None if conflict cannot be resolved
+            Adjusted plan, or None if resolution failed.
         """
         conflict_type = conflict.type
         logger.info(f"Resolving {conflict_type} conflict for plan {plan.plan_id}")
 
+        await self._ensure_initialized()
+
         # Use existing conflict resolver
         strategy = conflict.recommended_strategy
-        resolved_plans = await self.resolver.resolve_conflict(
+        resolved_plans = await self._resolver.resolve_conflict(
             conflict=conflict,
             plans=[plan],
             strategy=strategy,
         )
-
         if resolved_plans:
             resolved_plan = resolved_plans[0]
             logger.info(f"Resolved conflict for plan {plan.plan_id} using {strategy} strategy")
@@ -1150,5 +1222,143 @@ class ActionPlanCoordinationPolicy:
         logger.warning(f"Could not resolve conflict for plan {plan.plan_id}")
         return None
 
+    # =========================================================================
+    # LLM API (@action_executor)
+    # =========================================================================
+
+    @action_executor(
+        planning_summary=(
+            "Check if the current working set conflicts with other agents' "
+            "plans in the colony. Returns conflicts with severity and resolution strategies."
+        ),
+    )
+    async def check_plan_conflicts(self) -> dict[str, Any]:
+        """Check for conflicts between this agent's plan and sibling plans.
+
+        Returns:
+            Dict with 'conflicts' list and 'has_conflicts' flag.
+        """
+        await self._ensure_initialized()
+
+        if not self._plan_blackboard:
+            return {"conflicts": [], "has_conflicts": False}
+
+        my_plan = await self._plan_blackboard.get_plan(self.agent.agent_id)
+        if not my_plan:
+            return {"conflicts": [], "has_conflicts": False, "note": "No active plan"}
+
+        conflicts = await self.check_conflicts(my_plan)
+        return {
+            "conflicts": conflicts,
+            "has_conflicts": len(conflicts) > 0,
+            "count": len(conflicts),
+        }
+
+    @action_executor(
+        planning_summary=(
+            "Get active plans of sibling agents in the colony. "
+            "Useful for understanding what other agents are doing."
+        ),
+    )
+    async def get_sibling_plans(self) -> dict[str, Any]:
+        """Get plans of other agents in the colony.
+
+        Returns:
+            Dict with 'plans' list containing agent_id, goals, status,
+            working_set_size for each sibling.
+        """
+        await self._ensure_initialized()
+
+        if not self._plan_blackboard:
+            return {"plans": [], "count": 0}
+
+        all_plans = await self._plan_blackboard.get_all_plans()
+        sibling_plans = [p for p in all_plans if p.agent_id != self.agent.agent_id]
+
+        return {
+            "plans": [
+                {
+                    "agent_id": p.agent_id,
+                    "goals": p.goals[:3],
+                    "status": p.status.value if hasattr(p.status, 'value') else str(p.status),
+                    "action_count": len(p.actions),
+                    "working_set_size": len(p.cache_context.working_set) if p.cache_context else 0,
+                }
+                for p in sibling_plans
+            ],
+            "count": len(sibling_plans),
+        }
+
+    @action_executor(
+        planning_summary=(
+            "Propose the current plan for approval by the parent agent. "
+            "Publishes to the colony plan blackboard."
+        ),
+    )
+    async def propose_plan(self, description: str) -> dict[str, Any]:
+        """Publish the current plan for colony-wide visibility.
+
+        Args:
+            description: Human-readable plan description.
+
+        Returns:
+            Dict with 'proposed' flag and approval status.
+        """
+        await self._ensure_initialized()
+
+        if not self._plan_blackboard:
+            return {"proposed": False, "error": "No plan blackboard"}
+
+        my_plan = await self._plan_blackboard.get_plan(self.agent.agent_id)
+        if not my_plan:
+            return {"proposed": False, "error": "No active plan"}
+
+        my_plan.description = description
+        approved, message = await self._plan_blackboard.propose_plan(
+            my_plan, requesting_agent_id=self.agent.agent_id
+        )
+        return {"proposed": True, "approved": approved, "message": message}
+
+    @action_executor(
+        planning_summary=(
+            "Resolve cache contention with another agent by adjusting "
+            "working set overlap (stagger, partition, or negotiate)."
+        ),
+    )
+    async def resolve_contention(
+        self,
+        conflicting_agent_id: str,
+        strategy: str = "stagger",
+    ) -> dict[str, Any]:
+        """Resolve cache contention with a specific agent.
+
+        Args:
+            conflicting_agent_id: The agent causing the conflict.
+            strategy: Resolution strategy ('stagger', 'partition', 'priority').
+
+        Returns:
+            Dict with 'resolved' flag and details.
+        """
+        await self._ensure_initialized()
+
+        if not self._plan_blackboard:
+            return {"resolved": False, "error": "No plan blackboard"}
+
+        my_plan = await self._plan_blackboard.get_plan(self.agent.agent_id)
+        their_plan = await self._plan_blackboard.get_plan(conflicting_agent_id)
+
+        if not my_plan or not their_plan:
+            return {"resolved": False, "error": "Plan not found"}
+
+        conflicts = await self.check_conflicts(my_plan, [their_plan])
+        if not conflicts:
+            return {"resolved": True, "note": "No conflicts detected"}
+
+        resolved = await self.resolve_conflict(my_plan, conflicts[0])
+        if resolved:
+            await self._plan_blackboard.update_plan(resolved)
+            return {"resolved": True, "strategy": strategy}
+
+        return {"resolved": False, "error": "Resolution failed"}
 
 

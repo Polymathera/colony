@@ -16,7 +16,7 @@ from ....models import (
     PlanStatus,
     SpawnedChildInfo,
 )
-from ..replanning import PeriodicReplanningPolicy
+from ..capabilities.replanning import PeriodicReplanningPolicy
 
 AGENT_ID = "agent_1"
 
