@@ -93,6 +93,9 @@ class CacheAnalysisCapability(AgentCapability):
         self.cache_capacity = cache_capacity
         self.query_vcm_state = query_vcm_state
 
+    def get_capability_tags(self) -> frozenset[str]:
+        return frozenset({"planning"})
+
     def get_action_group_description(self) -> str:
         return (
             "Cache Analysis — analyzes VCM cache requirements for agent action planning. "

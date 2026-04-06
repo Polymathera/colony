@@ -522,6 +522,9 @@ class ReplanningCapability(AgentCapability):
         self._max_replan_cycles = max_replan_cycles
         self._composite_policy = None
 
+    def get_capability_tags(self) -> frozenset[str]:
+        return frozenset({"planning"})
+
     def get_action_group_description(self) -> str:
         return (
             "Replanning — evaluates whether the current plan should be revised. "

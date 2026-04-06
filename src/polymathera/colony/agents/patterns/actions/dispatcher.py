@@ -980,6 +980,8 @@ class ActionDispatcher:
         self,
         selected_groups: list[str] | None = None,
         schema_detail: SchemaDetail = SchemaDetail.SELECTIVE,
+        include_tags: frozenset[str] | None = None,
+        exclude_tags: frozenset[str] | None = None,
     ) -> list[ActionGroupDescription]:
         """Get human-readable description of plannable actions for LLM-based
         action selection.
@@ -993,6 +995,10 @@ class ActionDispatcher:
             selected_groups: If provided, only return descriptions for groups
                 whose group_key is in this list. If None, return all groups.
             schema_detail: How to render parameter schemas. See ``SchemaDetail``.
+            include_tags: If provided, only include groups that have at least
+                one of these tags. Used for mode filtering (e.g., ``{"planning"}``
+                for planning mode, ``{"execution"}`` or no tags for execution mode).
+            exclude_tags: If provided, exclude groups that have any of these tags.
 
         Returns:
             List of ActionGroupDescription with full action descriptions.
@@ -1000,6 +1006,12 @@ class ActionDispatcher:
         descriptions: list[ActionGroupDescription] = []
         for group in self.action_map:
             if selected_groups is not None and group.group_key not in selected_groups:
+                continue
+
+            # Tag-based mode filtering
+            if include_tags is not None and not (group.tags & include_tags):
+                continue
+            if exclude_tags is not None and (group.tags & exclude_tags):
                 continue
             action_descs: dict[str, str] = {}
             for action_key, executor in group.executors.items():

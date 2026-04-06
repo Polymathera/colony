@@ -34,8 +34,6 @@ Usage::
 
 from __future__ import annotations
 
-import asyncio
-import copy
 import inspect
 import logging
 import time
@@ -44,7 +42,7 @@ from typing import Any
 from overrides import override
 
 from ...base import Agent
-from ...blueprint import ActionPolicyBlueprint
+from ...blueprint import ActionPolicyBlueprint, AgentCapabilityBlueprint
 from ...models import (
     Action,
     ActionType,
@@ -76,23 +74,35 @@ class CapabilityBrowser:
     - ``browse()`` — returns all capability groups with one-line summaries
     - ``browse("group_name")`` — returns action names + signatures for a group
     - ``browse("group_name.action_name")`` — returns full docstring + source
+    - ``browse("programmatic")`` — returns programmatic API methods on all
+      capabilities (not just ``@action_executor`` — the full Python methods
+      that generated code can call directly)
+
+    The ``"programmatic"`` query is unique to ``CodeGenerationActionPolicy`` —
+    it exposes the richer programmatic APIs that ``CacheAwareActionPlanner``
+    uses internally, making them available to LLM-generated code.
     """
 
-    def __init__(self, dispatcher: ActionDispatcher):
+    def __init__(self, dispatcher: ActionDispatcher, agent: Agent | None = None):
         self._dispatcher = dispatcher
+        self._agent = agent
 
     async def __call__(self, query: str | None = None) -> dict[str, Any] | str:
         """Browse available capabilities.
 
         Args:
             query: None for top-level groups, group name for group detail,
-                   "group.action" for full action detail.
+                   "group.action" for full action detail,
+                   "programmatic" for all programmatic methods on capabilities.
 
         Returns:
             Structured capability information.
         """
         if query is None:
             return await self._list_groups()
+
+        if query == "programmatic":
+            return await self._list_programmatic_apis()
 
         if "." in query:
             group_key, action_key = query.split(".", 1)
@@ -113,7 +123,52 @@ class CapabilityBrowser:
                 "actions": action_names,
                 "count": len(action_names),
             }
+        # Add hint about programmatic APIs
+        groups["_hint"] = {
+            "description": "Use browse('programmatic') to see full Python APIs on capabilities",
+            "actions": [],
+            "count": 0,
+        }
         return groups
+
+    async def _list_programmatic_apis(self) -> dict[str, Any]:
+        """List all public async methods on registered capabilities.
+
+        This goes beyond ``@action_executor`` — it shows the full programmatic
+        API that generated code can call directly via ``_agent.get_capability_by_type()``.
+        """
+        if not self._agent:
+            return {"error": "No agent reference — programmatic API browsing unavailable"}
+
+        apis: dict[str, Any] = {}
+        for cap in self._agent.get_capabilities():
+            cap_name = cap.__class__.__name__
+            methods = {}
+
+            for name in dir(cap):
+                if name.startswith("_"):
+                    continue
+                attr = getattr(cap, name, None)
+                if not callable(attr) or not inspect.iscoroutinefunction(attr):
+                    continue
+                # Skip inherited AgentCapability methods
+                if name in ("initialize", "get_blackboard", "stream_events_to_queue",
+                            "get_result_future", "send_request", "serialize_suspension_state",
+                            "deserialize_suspension_state"):
+                    continue
+
+                sig = inspect.signature(attr)
+                doc = inspect.getdoc(attr) or "(no docstring)"
+                methods[name] = f"{name}{sig}\n{doc}"
+
+            if methods:
+                apis[cap_name] = {
+                    "description": cap.get_action_group_description() if hasattr(cap, 'get_action_group_description') else "",
+                    "methods": methods,
+                    "access": f"_agent.get_capability_by_type({cap_name})",
+                }
+
+        return apis
 
     async def _group_detail(self, group_key: str) -> dict[str, Any]:
         """Group-level: list actions with signatures and summaries."""
@@ -241,10 +296,11 @@ Write async Python code that accomplishes the next step(s) toward your goals.
 
 Available in your namespace:
 - `await run("action_key", param1=val1, ...)` — execute a capability action, returns ActionResult
-- `await browse(query=None)` — discover available capabilities (None=list groups, "group"=detail, "group.action"=full docs)
+- `await browse(query=None)` — discover available capabilities (None=list groups, "group"=detail, "group.action"=full docs, "programmatic"=full Python APIs)
 - `_agent` — the Agent instance (for calling programmatic APIs on capabilities directly)
 - `bb` — the agent's primary blackboard (await bb.read/write/query)
 - `results` — dict of prior action results by action_id
+- `switch_mode("planning"|"execution")` — switch which capabilities appear in the prompt
 - `pages` — current working set page IDs (list[str])
 - `goals` — agent's current goals (list[str])
 - `log(msg)` — structured logging
@@ -292,6 +348,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
     def __init__(
         self,
         agent: Agent,
+        planning_capability_blueprints: list[AgentCapabilityBlueprint] | None = None,
         max_retries: int = 2,
         code_timeout: float = 30.0,
         max_code_iterations: int = 50,
@@ -301,6 +358,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self.max_retries = max_retries
         self.code_timeout = code_timeout
         self.max_code_iterations = max_code_iterations
+        self._planning_capability_blueprints = planning_capability_blueprints
 
         # Execution tracking
         self._execution_history: list[dict[str, Any]] = []
@@ -311,10 +369,19 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self._run_helper_installed: bool = False
         self._complete_signaled: bool = False
 
+        # Mode: "planning" shows only planning capabilities in prompt,
+        # "execution" shows only domain capabilities. Starts in planning.
+        self._mode: str = "planning"
+
     @override
     async def initialize(self) -> None:
-        """Initialize the policy and set up the enriched REPL namespace."""
+        """Initialize the policy, add planning capabilities, and set up REPL."""
         await super().initialize()
+
+        # Ensure planning capabilities are registered — same as CacheAwareActionPlanner.
+        # This gives the LLM access to cache analysis, learned patterns,
+        # coordination, evaluation, and replanning in generated code.
+        await self._ensure_planning_capabilities()
 
         # Ensure REPL exists
         if not self._action_dispatcher or not self._action_dispatcher.repl:
@@ -324,8 +391,25 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             )
             return
 
-        self._browser = CapabilityBrowser(self._action_dispatcher)
+        self._browser = CapabilityBrowser(self._action_dispatcher, self.agent)
         await self._setup_enriched_namespace()
+
+    async def _ensure_planning_capabilities(self) -> None:
+        """Add default planning capabilities if not already registered."""
+        from ..planning.capabilities import (
+            CacheAnalysisCapability,
+            PlanLearningCapability,
+            PlanCoordinationCapability,
+            PlanEvaluationCapability,
+        )
+        if self._planning_capability_blueprints is None:
+             self._planning_capability_blueprints = [
+                CacheAnalysisCapability.bind(key="cache_analysis", kwargs={}),
+                PlanLearningCapability.bind(key="plan_learning", kwargs={}),
+                PlanCoordinationCapability.bind(key="plan_coordination", kwargs={}),
+                PlanEvaluationCapability.bind(key="plan_evaluation", kwargs={}),
+            ]
+        await self.use_capability_blueprints(self._planning_capability_blueprints)
 
     async def _setup_enriched_namespace(self) -> None:
         """Install helper functions into the REPL namespace."""
@@ -363,6 +447,27 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 "timestamp": time.time(),
             })
 
+            # Mode transitions based on action results:
+            # - should_replan returning should_replan=True → back to planning mode
+            # - Any planning action completing → switch to execution mode
+            action_lower = action_key.lower()
+            if "should_replan" in action_lower and result.success:
+                output = result.output if isinstance(result.output, dict) else {}
+                if output.get("should_replan"):
+                    self._mode = "planning"
+                    log(f"Mode → PLANNING (replan triggered: {output.get('reason', '')})")
+
+            # After planning actions succeed, switch to execution mode
+            planning_actions = {"analyze_cache", "get_learned_patterns", "get_cache_optimal_batches",
+                              "check_plan_conflicts", "get_sibling_plans", "evaluate_plan"}
+            if any(pa in action_lower for pa in planning_actions) and result.success:
+                # Stay in planning mode until the LLM explicitly starts executing
+                pass
+            elif self._mode == "planning" and result.success and not any(pa in action_lower for pa in planning_actions | {"should_replan", "browse"}):
+                # First non-planning action → switch to execution mode
+                self._mode = "execution"
+                log("Mode → EXECUTION (first domain action dispatched)")
+
             return result
 
         # browse() — progressive capability discovery
@@ -379,6 +484,18 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             """Signal that all goals are achieved. Call this when done."""
             self._complete_signaled = True
 
+        def switch_mode(mode: str):
+            """Switch between planning and execution modes.
+
+            Args:
+                mode: 'planning' (shows planning capabilities in prompt) or
+                      'execution' (shows domain capabilities in prompt).
+            """
+            if mode not in ("planning", "execution"):
+                raise ValueError(f"Mode must be 'planning' or 'execution', got {mode!r}")
+            self._mode = mode
+            log(f"Mode → {mode.upper()} (explicit switch)")
+
         # log() — structured logging
         def log(msg: str):
             """Log a message visible in the execution trace."""
@@ -388,6 +505,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         ns["run"] = run
         ns["browse"] = browse
         ns["signal_complete"] = signal_complete
+        ns["switch_mode"] = switch_mode
         ns["log"] = log
         ns["results"] = {}
         ns["pages"] = []
@@ -463,20 +581,31 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         # Ensure enriched namespace is ready
         await self._update_dynamic_namespace()
 
-        # Build capability summaries for the prompt
-        if self._browser:
-            try:
-                groups = await self._browser(None)
-                cap_lines = []
-                for key, info in groups.items():
-                    actions = ", ".join(info.get("actions", [])[:5])
-                    more = f" (+{info['count'] - 5} more)" if info.get("count", 0) > 5 else ""
-                    cap_lines.append(f"- {key}: {info.get('description', '')[:80]} [{actions}{more}]")
-                capability_summaries = "\n".join(cap_lines)
-            except Exception as e:
-                capability_summaries = f"(error loading capabilities: {e})"
+        # Build capability summaries filtered by current mode.
+        # Planning mode: only planning capabilities (cache, learning, coordination, etc.)
+        # Execution mode: only domain capabilities (analysis, synthesis, etc.)
+        if self._mode == "planning":
+            include_tags = frozenset({"planning"})
+            exclude_tags = None
+            mode_label = "PLANNING MODE — select strategy, analyze cache, check coordination"
         else:
-            capability_summaries = "(no capability browser available)"
+            include_tags = None
+            exclude_tags = frozenset({"planning"})
+            mode_label = "EXECUTION MODE — perform domain actions toward your goals"
+
+        try:
+            action_descriptions = await self.get_action_descriptions(
+                include_tags=include_tags,
+                exclude_tags=exclude_tags,
+            )
+            cap_lines = [f"[{mode_label}]"]
+            for group in action_descriptions:
+                actions_str = ", ".join(list(group.action_descriptions.keys())[:5])
+                more = f" (+{group.action_count - 5} more)" if group.action_count > 5 else ""
+                cap_lines.append(f"- {group.group_key}: {group.group_description[:80]} [{actions_str}{more}]")
+            capability_summaries = "\n".join(cap_lines)
+        except Exception as e:
+            capability_summaries = f"(error loading capabilities: {e})"
 
         # Build error feedback if previous code failed
         error_feedback = None

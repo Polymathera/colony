@@ -1124,6 +1124,9 @@ class PlanCoordinationCapability(AgentCapability):
         self._resolver = None
         self._plan_blackboard = None
 
+    def get_capability_tags(self) -> frozenset[str]:
+        return frozenset({"planning"})
+
     def get_action_group_description(self) -> str:
         return (
             "Plan Coordination — detects and resolves conflicts between agents' plans. "

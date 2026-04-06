@@ -294,32 +294,90 @@ Planning capabilities are cognitive capabilities that augment an agent's reasoni
 
 ### The Action Policy Space
 
-```
-                            Structure / Guidance
-                (Granularity of planning abstractions or primitives
-                            provided to the LLM)
-                ────────────────────────────────────────────────────►
-                    None            Optional           Full
-                (LLM decides    (available but     (pre-programmed
-                 everything)     not forced)        sequence)
-
-Turing Completeness
-    Code Gen    ┌──────────────────┬──────────────────┬──────────────────┐
-    (arbitrary  │                  │                  │                  │
-     Python)    │     CodeGen      │    CodeGen +     │    CodeGen +     │
-         ▲      │     Minimal      │    Planning      │      Full        │
-         │      │                  │   Capabilities   │    Pipeline      │
-     Execution  │                  │                  │                  │
-        Mode    ├──────────────────┼──────────────────┼──────────────────┤
-         │      │                  │                  │                  │
-         │      │     Minimal      │    Minimal +     │    CacheAware    │
-         ▼      │     Action       │    Planning      │      Action      │
-    JSON action │     Policy       │   Capabilities   │      Policy      │
-    selection   │                  │                  │                  │
-                └──────────────────┴──────────────────┴──────────────────┘
-```
-
 Moving right adds structure; moving up adds expressiveness. The same capabilities work across all positions in this space.
+
+<div style="margin:1.5rem 0;">
+
+<style>
+.ap-svg text { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+.ap-svg .r-codegen { fill: #f5f3ff; stroke: #8b5cf6; }
+.ap-svg .r-json    { fill: #eff6ff; stroke: #3b82f6; }
+.ap-svg .r-cell    { fill: #fafafa; stroke: #d4d4d4; }
+.ap-svg .r-cell-hi { fill: #ecfdf5; stroke: #10b981; }
+.ap-svg .t-title   { fill: #1e1b4b; }
+.ap-svg .t-body    { fill: #374151; }
+.ap-svg .t-muted   { fill: #6b7280; }
+.ap-svg .t-label   { fill: #7c3aed; }
+.ap-svg .t-green   { fill: #064e3b; }
+[data-md-color-scheme="slate"] .ap-svg .r-codegen { fill: #1e1338; stroke: #7c3aed; }
+[data-md-color-scheme="slate"] .ap-svg .r-json    { fill: #0c1929; stroke: #2563eb; }
+[data-md-color-scheme="slate"] .ap-svg .r-cell    { fill: #1a1a1a; stroke: #525252; }
+[data-md-color-scheme="slate"] .ap-svg .r-cell-hi { fill: #052e16; stroke: #059669; }
+[data-md-color-scheme="slate"] .ap-svg .t-title   { fill: #c4b5fd; }
+[data-md-color-scheme="slate"] .ap-svg .t-body    { fill: #d1d5db; }
+[data-md-color-scheme="slate"] .ap-svg .t-muted   { fill: #9ca3af; }
+[data-md-color-scheme="slate"] .ap-svg .t-label   { fill: #a78bfa; }
+[data-md-color-scheme="slate"] .ap-svg .t-green   { fill: #6ee7b7; }
+</style>
+
+<svg class="ap-svg" viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg">
+  <!-- Axis labels -->
+  <text class="t-muted" x="380" y="18" text-anchor="middle" font-size="11" font-weight="600">Structure / Guidance provided to LLM ───────►</text>
+  <text class="t-muted" x="15" y="200" text-anchor="middle" font-size="11" font-weight="600" transform="rotate(-90,15,200)">Execution Mode ▲</text>
+  <text class="t-muted" x="25" y="200" text-anchor="middle" font-size="11" font-weight="600" transform="rotate(-90,25,200)">(Turing Completeness)</text>
+
+  <!-- Column headers -->
+  <text class="t-muted" x="155" y="42" text-anchor="middle" font-size="10">None</text>
+  <text class="t-muted" x="390" y="42" text-anchor="middle" font-size="10">Optional</text>
+  <text class="t-muted" x="625" y="42" text-anchor="middle" font-size="10">Full</text>
+
+  <!-- Row labels -->
+  <text class="t-label" x="45" y="120" text-anchor="middle" font-size="10" font-weight="600" transform="rotate(-90,45,120)">Code Gen</text>
+  <text class="t-muted" x="55" y="120" text-anchor="middle" font-size="9" transform="rotate(-90,55,120)">(Python)</text>
+  <text class="t-label" x="45" y="260" text-anchor="middle" font-size="10" font-weight="600" transform="rotate(-90,45,260)">JSON</text>
+  <text class="t-muted" x="55" y="255" text-anchor="middle" font-size="9" transform="rotate(-90,55,255)">action selection</text>
+
+  <!-- Top row: Code Generation -->
+  <rect class="r-cell" x="65" y="55" width="230" height="110" rx="6" stroke-width="1.2"/>
+  <text class="t-title" x="180" y="80" text-anchor="middle" font-size="11" font-weight="600">CodeGen Minimal</text>
+  <text class="t-muted" x="180" y="96" text-anchor="middle" font-size="9">LLM writes Python</text>
+  <text class="t-muted" x="180" y="110" text-anchor="middle" font-size="9">Domain actions only</text>
+
+  <rect class="r-cell-hi" x="300" y="55" width="230" height="110" rx="6" stroke-width="1.2"/>
+  <text class="t-green" x="415" y="80" text-anchor="middle" font-size="11" font-weight="600">CodeGen + Planning</text>
+  <text class="t-green" x="415" y="96" text-anchor="middle" font-size="9">Programmatic APIs via</text>
+  <text class="t-green" x="415" y="110" text-anchor="middle" font-size="9">browse("programmatic")</text>
+  <text class="t-green" x="415" y="126" text-anchor="middle" font-size="9">Planning + Execution modes</text>
+
+  <rect class="r-codegen" x="535" y="55" width="210" height="110" rx="6" stroke-width="1.2"/>
+  <text class="t-title" x="640" y="80" text-anchor="middle" font-size="11" font-weight="600">CodeGen + Full</text>
+  <text class="t-muted" x="640" y="96" text-anchor="middle" font-size="9">Full planner callable</text>
+  <text class="t-muted" x="640" y="110" text-anchor="middle" font-size="9">in generated code</text>
+
+  <!-- Bottom row: JSON Action Selection -->
+  <rect class="r-cell" x="65" y="195" width="230" height="110" rx="6" stroke-width="1.2"/>
+  <text class="t-title" x="180" y="220" text-anchor="middle" font-size="11" font-weight="600">MinimalActionPolicy</text>
+  <text class="t-muted" x="180" y="236" text-anchor="middle" font-size="9">LLM picks actions</text>
+  <text class="t-muted" x="180" y="250" text-anchor="middle" font-size="9">No planning infrastructure</text>
+
+  <rect class="r-cell-hi" x="300" y="195" width="230" height="110" rx="6" stroke-width="1.2"/>
+  <text class="t-green" x="415" y="220" text-anchor="middle" font-size="11" font-weight="600">Minimal + Planning</text>
+  <text class="t-green" x="415" y="236" text-anchor="middle" font-size="9">@action_executor wrappers</text>
+  <text class="t-green" x="415" y="250" text-anchor="middle" font-size="9">LLM uses if it wants</text>
+
+  <rect class="r-json" x="535" y="195" width="210" height="110" rx="6" stroke-width="1.2"/>
+  <text class="t-title" x="640" y="220" text-anchor="middle" font-size="11" font-weight="600">CacheAwarePolicy</text>
+  <text class="t-muted" x="640" y="236" text-anchor="middle" font-size="9">Pre-programmed pipeline</text>
+  <text class="t-muted" x="640" y="250" text-anchor="middle" font-size="9">learning → cache → strategy</text>
+
+  <!-- Caption -->
+  <text class="t-muted" x="380" y="345" text-anchor="middle" font-size="11" font-style="italic">Same planning capabilities work across all positions.</text>
+  <text class="t-muted" x="380" y="362" text-anchor="middle" font-size="11" font-style="italic">Green cells = planning capabilities available to the LLM.</text>
+  <text class="t-muted" x="380" y="379" text-anchor="middle" font-size="11" font-style="italic">Structure / Guidance provided to LLM takes the form of granularity of planning abstractions or primitives:</text>
+  <text class="t-muted" x="380" y="396" text-anchor="middle" font-size="11" font-style="italic">None=LLM decides everything, Optional=available but not forced, Full=pre-programmed sequence.</text>
+</svg>
+
+</div>
 
 **Bottom-left**: `MinimalActionPolicy` — LLM picks from `@action_executor` **domain actions**. No planning infrastructure.
 
@@ -329,33 +387,55 @@ Moving right adds structure; moving up adds expressiveness. The same capabilitie
 
 **Top-left**: `CodeGenerationActionPolicy` with no planning capabilities. LLM writes Python that *parameterizes* and calls **domain actions** only.
 
-**Top-middle**: `CodeGenerationActionPolicy` with planning capabilities. LLM writes Python that can call `self.agent.get_capability_by_type(CacheAnalysisCapability).analyze_cache_requirements(...)` — the full programmatic API, not just `@action_executor` wrappers.
+**Top-middle**: `CodeGenerationActionPolicy` with planning capabilities. LLM writes Python that can call `self.agent.get_capability_by_type(CacheAnalysisCapability).analyze_cache_requirements(...)` — the full programmatic API, not just `@action_executor` wrappers via `browse("programmatic")`. Supports **planning mode** and **execution mode** for context window optimization.
 
 **Top-right**: `CodeGenerationActionPolicy` with full planning pipeline available. LLM can call the entire planner programmatically OR bypass it and call individual components.
 
 
-### Dual-interface pattern: Programmatic + LLM interfaces on the same capability
+### Dual-Interface Pattern
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                    AgentCapability                       │
-│                                                          │
-│  Programmatic API              LLM API                   │
-│  (complex params,              (@action_executor,        │
-│   system objects)               simple params)           │
-│                                                          │
-│  analyze_cache_requirements    analyze_cache             │
-│  (PlanningContext)             (page_ids: list[str])     │
-│          │                            │                  │
-│          └────── shared logic ────────┘                  │
-│                                                          │
-│  Called by:                    Called by:                │
-│  • CacheAwareActionPlanner    • MinimalActionPolicy      │
-│    (direct method call)         (via JSON action select) │
-│  • CodeGenerationActionPolicy                            │
-│    (via generated Python)                                │
-└──────────────────────────────────────────────────────────┘
-```
+Each planning capability exposes both a programmatic API (for planners and code generation) and simplified `@action_executor` wrappers (for JSON-selecting policies):
+
+<div style="margin:1.5rem 0;">
+
+<svg class="ap-svg" viewBox="0 0 640 280" xmlns="http://www.w3.org/2000/svg">
+  <!-- Main container -->
+  <rect class="r-codegen" x="20" y="20" width="600" height="240" rx="8" stroke-width="1.5"/>
+  <text class="t-title" x="320" y="48" text-anchor="middle" font-size="13" font-weight="600">AgentCapability (e.g., CacheAnalysisCapability)</text>
+
+  <!-- Programmatic API box -->
+  <rect class="r-cell" x="40" y="65" width="250" height="100" rx="6" stroke-width="1"/>
+  <text class="t-title" x="175" y="85" text-anchor="middle" font-size="11" font-weight="600">Programmatic API</text>
+  <text class="t-muted" x="175" y="102" text-anchor="middle" font-size="9">(complex params, system objects)</text>
+  <text class="t-body" x="55" y="124" font-size="10">analyze_cache_requirements(</text>
+  <text class="t-muted" x="65" y="138" font-size="9">  PlanningContext, DiGraph</text>
+  <text class="t-body" x="55" y="152" font-size="10">) → CacheContext</text>
+
+  <!-- LLM API box -->
+  <rect class="r-cell-hi" x="350" y="65" width="250" height="100" rx="6" stroke-width="1"/>
+  <text class="t-green" x="465" y="85" text-anchor="middle" font-size="11" font-weight="600">@action_executor API</text>
+  <text class="t-green" x="465" y="102" text-anchor="middle" font-size="9">(simple params, LLM-producible)</text>
+  <text class="t-body" x="365" y="124" font-size="10">analyze_cache(</text>
+  <text class="t-muted" x="375" y="138" font-size="9">  page_ids: list[str]</text>
+  <text class="t-body" x="365" y="152" font-size="10">) → dict</text>
+
+  <!-- Shared logic arrow -->
+  <line x1="290" y1="130" x2="350" y2="130" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text class="t-label" x="320" y="120" text-anchor="middle" font-size="8">shared</text>
+  <text class="t-label" x="320" y="128" text-anchor="middle" font-size="8">logic</text>
+
+  <!-- Callers -->
+  <text class="t-muted" x="175" y="190" text-anchor="middle" font-size="9" font-weight="600">Called by:</text>
+  <text class="t-body" x="175" y="206" text-anchor="middle" font-size="9">CacheAwareActionPlanner</text>
+  <text class="t-body" x="175" y="220" text-anchor="middle" font-size="9">CodeGenerationActionPolicy</text>
+  <text class="t-muted" x="175" y="234" text-anchor="middle" font-size="8">(direct method call or generated code)</text>
+
+  <text class="t-muted" x="465" y="190" text-anchor="middle" font-size="9" font-weight="600">Called by:</text>
+  <text class="t-body" x="465" y="206" text-anchor="middle" font-size="9">MinimalActionPolicy</text>
+  <text class="t-muted" x="465" y="220" text-anchor="middle" font-size="8">(via JSON action selection)</text>
+</svg>
+
+</div>
 Each planning component is an `AgentCapability` with `@action_executor` methods for the LLM. But it ALSO exposes a **programmatic API** (plain async methods without `@action_executor`) that `CacheAwareActionPlanner` and `CodeGenerationActionPolicy` call directly.
 
 The `@action_executor` methods are thin wrappers that:
@@ -473,3 +553,22 @@ On code execution failure:
 | Multi-step conditional logic | `CodeGenerationActionPolicy` |
 | Well-defined fixed workflows | `CacheAwareActionPolicy` |
 | Exploratory analysis with branching | `CodeGenerationActionPolicy` |
+| Evaluation baseline | `MinimalActionPolicy` |
+
+## Planning Mode vs Execution Mode
+
+To conserve the LLM's context window, `CodeGenerationActionPolicy` operates in two modes:
+
+- **Planning mode**: Only planning capabilities appear in the prompt (cache analysis, learned patterns, coordination, evaluation, replanning). The LLM decides strategy and resource allocation.
+- **Execution mode**: Only domain capabilities appear in the prompt (analysis, synthesis, page operations). The LLM performs the actual work.
+
+Mode transitions:
+
+1. **Initial state**: Planning mode.
+2. **First domain action dispatched**: Automatically switches to execution mode.
+3. **`should_replan` returns `should_replan=True`**: Switches back to planning mode.
+4. **Explicit**: Generated code calls `switch_mode("planning")` or `switch_mode("execution")`.
+
+Planning capabilities are tagged with `"planning"` via `get_capability_tags()`. The `ActionDispatcher.get_action_descriptions()` method accepts `include_tags` and `exclude_tags` parameters, used by the policy to filter based on the current mode.
+
+This optimization is important because showing all capabilities simultaneously wastes tokens — planning actions are irrelevant during execution and vice versa. The mode system ensures the LLM always sees the most relevant action vocabulary for its current task.

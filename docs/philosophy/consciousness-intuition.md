@@ -94,6 +94,10 @@ Most agent frameworks treat the LLM as the complete behavior: prompt in, actions
     The LLM provides raw reasoning power -- remarkable **leaps of insight**, but also confabulation, laziness, and drift. By design, Colony provides structure -- sequencing, verification, and correction of those intuitions into reliable behavior. Colony enforces the most useful cognitive processes, general reasoning tasks and multi-agent collaboration patterns by factoring them out into `AgentCapabilities` and treating the LLM as the source of **intuition** to be infused in all those capabilities. Colony then uses an LLM-powered `ActionPolicy` to compose (or *weave*) all these deliberative, reflective, and meta-cognitive processes that the LLM alone cannot sustain over long reasoning chains.
 
 
+!!! info "Intuition vs. Consciousness: A Cognitive Analogy for Agent Architecture"
+    Colony's architecture draws an analogy to the distinction between **intuition** and **consciousness**. LLMs provide the "intuition" -- fast, associative, pattern-matching capabilities that can generate ideas, hypotheses, and plans in a single leap but are opaque, inscrutable, and prone to error. The `ActionPolicy` and `AgentCapabilities` provide the "consciousness" -- slower, deliberate, sequential processes that compose, verify, and correct those intuitions into coherent behavior. Just as human consciousness weaves together various cognitive processes (perception, memory, reasoning) with the intuitive leaps of the subconscious mind, Colony's `ActionPolicy` weaves together various `AgentCapabilities` with the intuitive power of the LLM.
+
+
 
 <div style="margin:1.5rem 0;">
 <svg class="ci-svg" viewBox="0 0 820 340" xmlns="http://www.w3.org/2000/svg" style="max-width:820px;">
@@ -115,11 +119,11 @@ Most agent frameworks treat the LLM as the complete behavior: prompt in, actions
   <text class="t-llm-sub" x="762" y="188" text-anchor="middle">aspect</text>
 
   <!-- Infusion arrows from LLM to each capability group -->
-  <line class="arrow-infuse" x1="720" y1="80"  x2="688" y2="120"/>
-  <line class="arrow-infuse" x1="720" y1="130" x2="688" y2="155"/>
-  <line class="arrow-infuse" x1="720" y1="170" x2="688" y2="190"/>
-  <line class="arrow-infuse" x1="720" y1="210" x2="688" y2="225"/>
-  <line class="arrow-infuse" x1="720" y1="250" x2="688" y2="260"/>
+  <line class="arrow-infuse" x1="720" y1="120" x2="688" y2="120"/>
+  <line class="arrow-infuse" x1="720" y1="155" x2="688" y2="155"/>
+  <line class="arrow-infuse" x1="720" y1="190" x2="688" y2="190"/>
+  <line class="arrow-infuse" x1="720" y1="225" x2="688" y2="225"/>
+  <line class="arrow-infuse" x1="720" y1="260" x2="688" y2="260"/>
   <!-- Infusion arrow to ActionPolicy -->
   <line class="arrow-infuse" x1="720" y1="42"  x2="688" y2="42"/>
 

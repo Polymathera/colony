@@ -459,3 +459,159 @@ The `@action_executor` wrappers are the **accessibility layer** — they make pl
 16. Update `docs/architecture/action-policies.md` with the policy space diagram
 17. Document dual-interface pattern with examples
 18. Document how to evaluate policies against each other on the same task
+
+---
+
+## Philosophy: The Agent's Environment as a Programming Environment
+
+### Core thesis
+
+The agent's environment — its capabilities, blackboard, VCM, sibling agents, and the external systems it interacts with — can be modeled as a **programming environment**. The agent's interactions with this environment are most naturally expressed as **dynamically generated code** that manipulates the environment's API surface.
+
+This is not a metaphor. It is a literal architectural claim:
+
+| Environment concept | Programming analogy | Colony implementation |
+|---|---|---|
+| Agent capabilities | Libraries/modules | `AgentCapability` classes with methods |
+| Blackboard | Shared mutable state | `EnhancedBlackboard` (Redis-backed KV store) |
+| VCM pages | File system | `PageStorage` + `VirtualContextManager` |
+| Sibling agents | Network services | `DeploymentHandle` RPC calls |
+| Action executors | Public API functions | `@action_executor` decorated methods |
+| Programmatic methods | Internal library functions | Non-decorated async methods on capabilities |
+| REPL namespace | Process memory | `PolicyPythonREPL.user_ns` |
+| Execution history | Call stack / log | `_execution_history` list |
+
+When the LLM generates code rather than selecting from a JSON menu, it operates as a **programmer writing against an API**, not as a decision-maker picking from a fixed set of options. This is a fundamental shift — it means the LLM can:
+
+1. **Compose** operations with control flow (loops, conditionals, error handling)
+2. **Transform** data between operations (parse, filter, aggregate)
+3. **Introspect** the API surface at runtime (`browse()`, `inspect`)
+4. **Adapt** its approach based on intermediate results (without replanning)
+
+### The semantic gap
+
+The main challenge: how does the LLM know what the environment's API surface *means*? When a developer reads a library's documentation, they understand:
+
+- What each function does (behavior)
+- What it expects (preconditions, parameter types and semantics)
+- What it returns (postconditions, return type and structure)
+- How it relates to other functions (dependencies, typical call sequences)
+- When to use it vs. alternatives (design intent)
+
+The LLM needs the same information. Currently, the LLM receives:
+
+- **For `@action_executor` methods**: The `planning_summary` string + compact parameter signature. This is analogous to a function's one-line docstring + type stub — minimal.
+- **For programmatic methods**: Nothing, unless `browse("programmatic")` is called, which shows full signatures and docstrings.
+- **For the environment itself**: Nothing explicit. The LLM must infer from context (goals, execution history, capability names) what the environment looks like and how to interact with it.
+
+### `CodeInspector`: Extracting and conveying semantics
+
+The `CapabilityBrowser` currently provides three levels of detail: group summaries → action signatures → full docstrings. This is adequate for JSON action selection but insufficient for code generation, where the LLM needs to understand API contracts well enough to write correct calls.
+
+A `CodeInspector` generalizes this by extracting **structured semantics** from any code artifact:
+
+```python
+class CodeInspector:
+    """Extracts and formats the semantics of code artifacts for LLM consumption.
+
+    Can inspect:
+    - @action_executor methods (signature + planning_summary + param descriptions)
+    - Programmatic methods on AgentCapability (full docstring + type hints)
+    - Pydantic models (field schemas, validation rules)
+    - Generated code snippets (infer behavior from structure)
+    - External APIs (from OpenAPI specs, CLI help text, library docs)
+    """
+
+    async def inspect_method(self, method) -> MethodSemantics:
+        """Extract structured semantics from a method."""
+        ...
+
+    async def inspect_capability(self, cap: AgentCapability) -> CapabilitySemantics:
+        """Extract full API surface of a capability."""
+        ...
+
+    async def inspect_model(self, model_cls: type[BaseModel]) -> ModelSemantics:
+        """Extract field-level schema from a Pydantic model."""
+        ...
+
+    async def suggest_usage(self, goal: str, available_apis: list[MethodSemantics]) -> str:
+        """Use LLM to suggest how to combine APIs to achieve a goal."""
+        ...
+```
+
+**`MethodSemantics`** would include:
+- `name`, `signature`, `return_type`
+- `description` (full, not truncated)
+- `parameters` with per-parameter descriptions and types
+- `preconditions` (what must be true before calling)
+- `postconditions` (what is guaranteed after calling)
+- `related_methods` (typically called before/after this one)
+- `example_usage` (a concrete code snippet)
+- `side_effects` (what state changes does this method cause)
+
+**`CapabilitySemantics`** would include:
+- `name`, `description`
+- `public_methods` (list of `MethodSemantics`)
+- `state_model` (what persistent state does this capability maintain)
+- `typical_workflow` (the usual sequence of method calls)
+- `access_pattern` (how to get an instance: `_agent.get_capability_by_type(...)`)
+
+This is not a theoretical exercise. The LLM generating code NEEDS this information to:
+- Know that `analyze_cache_requirements` returns a `CacheContext` with fields `working_set`, `spatial_locality`, `working_set_priority`
+- Know that `get_applicable_patterns` should be called BEFORE `generate_plan` because patterns inform the prompt
+- Know that `check_conflicts` takes a list of OTHER agents' plans, not the current agent's plan
+- Know that after `optimize_action_sequence`, the actions should be dispatched in the returned order
+
+Without structured semantics, the LLM must guess from method names — and guesses produce bugs.
+
+### Progressive disclosure of semantics
+
+A full `CodeInspector` dump of all capabilities would exceed the context window. The solution is **progressive disclosure** — the same principle used in `CapabilityBrowser` but applied to semantics:
+
+1. **Level 0 (always in prompt)**: Capability names + one-line descriptions. ~100 tokens per capability.
+2. **Level 1 (on demand via `browse()`)**: Method signatures + first paragraph of docstring. ~200 tokens per method.
+3. **Level 2 (on demand via `browse("group.method")`)**: Full docstring + parameter descriptions + return type + example. ~500 tokens per method.
+4. **Level 3 (on demand via `inspect`)**: `MethodSemantics` with preconditions, postconditions, related methods, side effects. ~1000 tokens per method. This level may require an LLM call to generate (using the source code as input).
+
+The LLM starts at Level 0 and drills down as needed. This is how developers navigate large codebases — they don't read every file; they skim, then drill into what's relevant.
+
+### Self-describing capabilities
+
+The `@action_executor` decorator already captures some semantics (`planning_summary`, `input_schema`, `output_schema`, `reads`, `writes`). To support `CodeInspector`, capabilities should be self-describing at a richer level:
+
+- **`get_typical_workflow()`**: Returns a code snippet showing the typical sequence of method calls. This is the "README example" of the capability.
+- **`get_related_capabilities()`**: Returns a list of capabilities that are typically used together (e.g., `CacheAnalysisCapability` → `WorkingSetCapability`).
+- **`get_state_description()`**: Describes what persistent state the capability maintains and how it changes.
+
+These methods are optional — the `CodeInspector` can fall back to docstring parsing and type inference when they're not implemented. But when present, they dramatically improve the LLM's ability to generate correct code.
+
+### Interface between generated code and the environment
+
+The current interface is:
+
+```python
+# Through dispatcher (tracked, hooked, observable)
+result = await run("action_key", param1=val1, ...)
+
+# Through programmatic API (direct, untracked)
+cap = _agent.get_capability_by_type(CacheAnalysisCapability)
+cache_ctx = await cap.analyze_cache_requirements(context)
+```
+
+The `run()` path goes through the `ActionDispatcher`, which provides tracking (execution history), hooks (memory observation), Ref resolution, and error handling. The direct programmatic path bypasses all of this — the generated code is responsible for its own error handling.
+
+For production use, the generated code should prefer `run()` for observability. But for complex multi-step programmatic operations (building a `PlanningContext`, calling `analyze_cache_requirements`, then `optimize_action_sequence`), the direct path is more natural and efficient.
+
+The design decision: **both paths are valid, and the LLM should understand the tradeoff**. The `CodeInspector` should annotate each method with whether it's "tracked" (goes through dispatcher) or "untracked" (direct call), so the LLM can make informed decisions.
+
+### Context window optimization
+
+The fundamental tension: the LLM needs enough information to generate correct code, but showing everything exceeds the context window. The mode system (planning vs. execution) is one dimension of optimization. Others:
+
+1. **Scope selection** (already implemented in `ActionPlanningStrategy`): Before showing detailed action descriptions, ask the LLM which capability groups are relevant. Only expand those.
+2. **Progressive disclosure** (described above): Start with summaries, let the LLM request detail.
+3. **Execution context pruning**: Only show the last N steps of execution history, not the full trace.
+4. **Result compression**: Store full action results in the REPL namespace but show only summaries in the prompt.
+5. **Capability-aware caching**: If the LLM called `browse("CacheAnalysisCapability")` in a previous iteration, the response can be cached in the REPL namespace — the LLM can reference it without re-requesting.
+
+These optimizations compose: scope selection reduces the number of groups, progressive disclosure reduces per-group tokens, result compression reduces execution context tokens. Together they keep the prompt within bounds even for agents with 50+ capabilities and 100+ action history entries.

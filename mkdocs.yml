@@ -61,6 +61,7 @@ nav:
     - Installation: getting-started/installation.md
     - Quick Start: getting-started/quickstart.md
     - Key Concepts: getting-started/concepts.md
+    - Example Gallery: getting-started/example-gallery.md
   - Examples:
     - Gallery: examples/index.md
     - Codebase Analysis: examples/basic-analysis.md

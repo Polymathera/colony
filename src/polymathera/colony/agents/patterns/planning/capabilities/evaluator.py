@@ -339,6 +339,9 @@ class PlanEvaluationCapability(AgentCapability):
             capability_key=capability_key,
         )
 
+    def get_capability_tags(self) -> frozenset[str]:
+        return frozenset({"planning"})
+
     def get_action_group_description(self) -> str:
         return (
             "Plan Evaluation — estimates cost, benefit, and risk of action plans. "

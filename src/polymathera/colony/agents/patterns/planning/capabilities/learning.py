@@ -460,6 +460,9 @@ class PlanLearningCapability(AgentCapability):
         self._cost_trainer = None
         self._initialized = False
 
+    def get_capability_tags(self) -> frozenset[str]:
+        return frozenset({"planning"})
+
     def get_action_group_description(self) -> str:
         return (
             "Plan Learning — learns from execution history to improve future planning. "

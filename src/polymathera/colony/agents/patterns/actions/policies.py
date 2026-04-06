@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 from overrides import override
 from pydantic import BaseModel
 
@@ -51,7 +51,8 @@ from ..planning import (
 )
 from ..planning.planner import create_cache_aware_planner
 from ..planning.context import PlanningContextBuilder
-from ..planning.capabilities import ReplanningDecision, ReplanningCapability
+if TYPE_CHECKING:
+    from ..planning.capabilities import ReplanningDecision
 
 
 logger = setup_logger(__name__)
@@ -174,17 +175,24 @@ class BaseActionPolicy(ActionPolicy):
         self,
         selected_groups: list[str] | None = None,
         schema_detail: SchemaDetail = SchemaDetail.SELECTIVE,
+        include_tags: frozenset[str] | None = None,
+        exclude_tags: frozenset[str] | None = None,
     ) -> list[ActionGroupDescription]:
         """Get descriptions of available actions.
 
         Args:
             selected_groups: If provided, only return descriptions for these group keys.
             schema_detail: How to render parameter schemas. See ``SchemaDetail``.
+            include_tags: If provided, only include groups with at least one of these tags.
+                Used for mode filtering (e.g., ``frozenset({"planning"})`` for planning mode).
+            exclude_tags: If provided, exclude groups with any of these tags.
         """
         await self._create_action_dispatcher()
         return await self._action_dispatcher.get_action_descriptions(
             selected_groups=selected_groups,
             schema_detail=schema_detail,
+            include_tags=include_tags,
+            exclude_tags=exclude_tags,
         )
 
     async def get_action_group_summaries(self) -> list[ActionGroupDescription]:
@@ -742,6 +750,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         if self.planner is None:
             self.planner = create_cache_aware_planner(agent=self.agent)
 
+        from ..planning.capabilities import ReplanningCapability
         # Create default replanning capability if none provided
         if not self.agent.get_capability_by_type(ReplanningCapability):
             replan_every_n = 3
