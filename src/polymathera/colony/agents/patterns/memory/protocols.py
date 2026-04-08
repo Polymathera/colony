@@ -1062,7 +1062,6 @@ class DecayMaintenancePolicy:
                     value=entry.value,
                     metadata=entry.metadata,
                     tags=entry.tags,
-                    expected_version=entry.version,
                 )
                 modified += 1
 

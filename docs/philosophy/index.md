@@ -32,6 +32,7 @@ Three philosophical pillars support Colony's architecture:
 ## Read More
 
 - [The NoRAG Paradigm](no-rag.md) -- Why retrieval-augmented generation is the wrong abstraction for deep reasoning
-- [The Consciousness-Intuition Interaction](consciousness-intuition.md) -- How Colony models cognition as inter-woven intuition + deliberate policies
+- [Modular Agents](modular-agents.md) -- How Colony models cognition as inter-woven intuition + deliberate policies in a modular architecture.
 - [Agents All the Way Down](agents-all-the-way-down.md) -- How general intelligence emerges from composition
 - [Cache-Aware Patterns](cache-awareness.md) -- Why cache management is a first-class concern, not an optimization
+- [The BDI Model](bdi.md) -- How Colony maps to the Belief-Desire-Intention model

@@ -158,6 +158,8 @@ class ProgramSlicingCapability(AgentCapability):
 
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"compute_slice_{request_id}",
+                agent_id=self.agent.agent_id,
                 action_type="compute_slice",
                 parameters={
                     "criterion": criterion_data,
@@ -932,6 +934,8 @@ class SlicingCoordinatorCapability(AgentCapability):
 
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"start_slicing_{request_id}",
+                agent_id=self.agent.agent_id,
                 action_type="start_slicing_analysis",
                 parameters={
                     "criterion": criterion,

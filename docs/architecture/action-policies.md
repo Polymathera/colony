@@ -1,298 +1,25 @@
 # Action Policies
 
-Action policies are the decision-making core of Colony agents. They determine what actions an agent takes at each step, how it plans to achieve its goals, and how it adapts to new information. Agents can use custom action policies by implementing the `ActionPolicy` interface. Colony's main implementation is `CacheAwareActionPolicy`, which uses Model-Predictive Control (MPC) for iterative planning and execution. `CacheAwareActionPolicy` uses a LLM-based planner that examines (*at every step*) the planning context (including relevant memory entries) and action descriptions (exported by the agent's `AgentCapabilities`) enabled at that step. The LLM planner selects the next action, and the dispatcher executes it where the results are automatically written to memory, thus closing the loop between planning, execution, and learning.
+Action policies are the decision-making core of Colony agents. They determine what actions an agent takes at each step (including how it interacts with other agents), how it plans to achieve its goals, and how it adapts to new information at runtime (*replanning*). Agents can use custom action policies by implementing the `ActionPolicy` interface. Colony's main implementations are `CacheAwareActionPolicy` and `CodeGenerationActionPolicy`, which use Model-Predictive Control (MPC) for iterative planning and execution. Both action policies use a LLM-based planner that examines (*at every step*) the planning context (including goals, constraints, execution history, and relevant memory entries) and action descriptions (exported by the agent's `AgentCapabilities`) enabled at that step. The LLM planner selects the next action, and the dispatcher executes it where the results are automatically written to memory, thus closing the loop between planning, execution, and learning. Other `ActionPolicy` implementations can provide simpler and cheaper but more rigid plan graphs, prescribed workflows, state machines, or rule-based orchestration.
 
-## The LLM as Planner
+A "plan" in Colony is the LLM's current thinking plus execution history -- not a fixed sequence. The action policy can revise or abandon its plan at any point based on new information.
 
-Colony does not emphasize rigid plan graphs, state machines, or rule-based orchestration, although these approaches can be provided as `ActionPolicy` implementations. Instead:
 
-1. The framework gathers context (goals, constraints, execution history, available actions)
-2. The LLM reasons about what to do next
-3. The framework executes the chosen action
-4. Results feed back into context for the next iteration
+## The Action Policy Space
 
-A "plan" in Colony is the LLM's current thinking plus execution history -- not a fixed sequence. The LLM can revise or abandon its plan at any point based on new information.
+Action policies that dynamically adapt can be categorized along two dimensions (see diagram below):
 
-!!! tip "Real-Time Adaptability"
-    Strategies can adapt to data at runtime rather than following prescribed workflows.
+1. **Planning Pipeline Structure**: How much structure and guidance is provided to the LLM in its planning process?
+    - *None*: LLM decides the action plan with no scaffolding. This is the most flexible but also the most difficult for the LLM to get right.
+    - *Optional*: **Planning capabilities** are provided but it is left up to the LLM to use them.
+    - *Full*: The action policy follows a pre-programmed planning pipeline or sequence.
+2. **Execution Mode**: How expressive is the plan execution flow produced by the LLM?
+    - *Turing-complete*: LLM generates code that can express any logic, including loops and conditionals.
+    - *Action Sequence*: LLM selects from a fixed set of actions with no internal control flow. Data flow is mediated by the agent memory or a policy-specific mechanism (e.g., `PolicyPythonREPL`).
 
+!!! info "Planning Capabilities vs. Domain Capabilities"
+    Planning capabilities (cache analysis, plan learning, plan coordination, plan evaluation, replanning) are orthogonal to domain capabilities (page analysis, code synthesis, hypothesis testing). Both can be exposed to the LLM as `@action_executor` methods, but planning capabilities are more likely to be used in structured planning pipelines while domain capabilities may be more useful for flexible code generation.
 
-
-## `ActionPolicy` Base Class
-
-`polymathera.colony.agents.base.ActionPolicy` defines the contract:
-
-```python
-class ActionPolicy(ABC):
-    async def execute_iteration(
-        self, state: ActionPolicyExecutionState
-    ) -> ActionPolicyIterationResult:
-        """Execute one iteration of the policy loop."""
-        ...
-
-    async def serialize_suspension_state(
-        self, state: AgentSuspensionState
-    ) -> AgentSuspensionState:
-        """Serialize policy state for suspension."""
-        ...
-
-    async def deserialize_suspension_state(
-        self, state: AgentSuspensionState
-    ) -> None:
-        """Restore policy state from suspension."""
-        ...
-```
-
-The policy manages which `AgentCapability` instances are active via `use_agent_capabilities()` and `disable_agent_capabilities()`. Active capabilities provide action executors that the policy can invoke.
-
-The execution state passed to each iteration:
-
-```python
-class ActionPolicyExecutionState(BaseModel):
-    current_plan: ActionPlan | None = None
-    iteration_history: list[ActionPolicyIterationResult] = []
-    iteration_num: int = 0
-    custom: dict[str, Any] = {}  # Arbitrary state for the policy
-```
-
-Each iteration returns:
-
-```python
-class ActionPolicyIterationResult(BaseModel):
-    policy_completed: bool = False
-    success: bool
-    error_context: ErrorContext | None = None
-    requires_termination: bool = False
-    blocked_reason: str | None = None
-    idle: bool = False            # Policy requests IDLE state
-    action_executed: Action | None = None
-    result: ActionResult | None = None
-```
-
-## Two-Phase Action Selection
-
-Action selection follows a two-phase process to manage the potentially large action space (many `AgentCapability` instances, each with multiple actions):
-
-!!! bug "This description is outdated"
-    First phase select "action groups" (an action group is the set of all `@action_executor` methods on a given `AgentCapability`), then the second phase selects and parameterizes a specific action within that group. This two-phase process is intended to reduce the size of the action selection prompt.
-
-
-### Phase 1: Action Selection
-The LLM receives descriptions of all available actions (from active capabilities) and chooses which action to take. Actions are typed via `ActionType` -- planning, reasoning, tool usage, communication, memory management, orchestration, and output.
-
-### Phase 2: Parameterization
-Once an action type is selected, the LLM receives the specific action's JSON schema and fills in parameters. This separation prevents the LLM from being overwhelmed by the full parameter space of all actions simultaneously.
-
-Actions are defined on capabilities via the `@action_executor` decorator, which auto-infers input/output schemas from type hints:
-
-```python
-from polymathera.colony.agents.patterns.actions.policies import action_executor
-
-class QueryCapability(AgentCapability):
-    @action_executor(reads=["page_graph"], writes=["query_results"])
-    async def route_query(
-        self,
-        query: str,
-        max_results: int = 10,
-    ) -> list[str]:
-        """Route query to find relevant pages."""
-        ...
-
-    @action_executor(exclude_from_planning=True)
-    async def update_index(self, page_id: str) -> None:
-        """Not exposed to LLM planner -- invoked programmatically only."""
-        ...
-```
-
-`@action_executor` parameters:
-
-- `action_key`: Identifier for the action type (defaults to method name)
-- `input_schema` / `output_schema`: Override auto-inferred Pydantic schemas
-- `reads` / `writes`: Scope variable dependencies for dataflow tracking
-- `exclude_from_planning`: Hide from LLM planner (for programmatic-only actions)
-- `planning_summary`: Custom description for the LLM planner
-- `tags`: Domain/modality tags for filtering (e.g., `frozenset({"memory", "expensive"})`)
-
-## `ActionPolicy` I/O Contract
-
-The policy operates on structured input and produces structured output:
-
-**Input** (`ActionPolicyInput`):
-
-- `goals`: What the agent is trying to achieve
-- `constraints`: Boundaries on behavior
-- `initial_context`: Starting context for the task
-- `action_descriptions`: Available actions from active capabilities
-
-**Output** (`ActionPolicyOutput`):
-
-- `success`: Whether the policy achieved its goals
-- `final_result`: The produced result
-- `exported_results`: Results to share with other agents
-- `learned_patterns`: Patterns discovered during execution
-
-The I/O contract is declared via `ActionPolicyIO`:
-
-```python
-class MyPolicy(CacheAwareActionPolicy):
-    io = ActionPolicyIO(
-        inputs={"query": str, "max_results": int},
-        outputs={"page_ids": list[str], "analysis": dict},
-    )
-```
-
-## Model-Predictive Control
-
-`CacheAwareActionPolicy` (in `polymathera.colony.agents.patterns.actions.policies`) uses Model-Predictive Control (MPC) for plan execution:
-
-```mermaid
-graph LR
-    Plan["Create/Revise Plan"] --> Execute["Execute Next Actions"]
-    Execute --> Evaluate["Evaluate Results"]
-    Evaluate -->|"Conditions changed"| Plan
-    Evaluate -->|"On track"| Execute
-    Evaluate -->|"Done"| Complete["Complete"]
-```
-
-1. **Plan**: The LLM creates or revises a plan based on current context
-2. **Execute**: Execute only the next few actions (not the full plan)
-3. **Evaluate**: Check results against expectations
-4. **Adapt**: If conditions changed, revise the plan; otherwise continue
-
-This accounts for the nonstationary nature of multi-agent environments -- other agents may change shared state, new information may invalidate assumptions, and resource availability fluctuates.
-
-## `CacheAwareActionPolicy`
-
-The primary policy implementation, extending `EventDrivenActionPolicy`:
-
-```python
-class CacheAwareActionPolicy(EventDrivenActionPolicy):
-    """Action policy with multi-step planning.
-
-    - Creates plans using configurable strategies (MPC, top-down, bottom-up)
-    - Executes plans incrementally via Agent.run_step
-    - Handles replanning when needed
-    - Coordinates with child agents event-driven (no polling)
-    """
-```
-
-Key features:
-
-- **Configurable planning strategies**: MPC (default), top-down decomposition, bottom-up aggregation
-- **Event-driven coordination**: No polling for child agent results; events trigger re-evaluation
-- **Cache context in plans**: Every plan includes working set information, access patterns, page graph summary, prefetch hints, and shareable vs. exclusive page designations
-- **Sub-plan generation**: JIT sub-plan creation when executing composite actions, with arbitrary depth and maintained position in the plan tree
-
-!!! bug "Explain cache-awareness in detail"
-    Explain how the `CacheAwareActionPlanner` works
-
-## Replanning
-
-Replanning is triggered by:
-
-- **Plan exhaustion**: All actions in the current plan have been executed
-- **Failure**: An action fails or produces unexpected results
-- **New information**: Events from other agents or blackboard changes invalidate assumptions
-- **Resource changes**: VCM page availability changes
-
-Replanning strategies:
-
-- **Revision**: Modify the existing plan to account for new information
-- **Backtracking**: Undo recent actions and try a different approach
-- **Escalation**: Request help from a supervisor agent
-- **Re-creation**: Discard the plan entirely and create a new one
-
-!!! warning "Cache-conscious revision"
-    When revising plans, the policy preserves cache locality when possible. Abandoning a plan may mean abandoning cached pages, so the cost of re-planning is weighed against the cost of cache misses.
-
-## Hierarchical Planning
-
-Plans can be hierarchical -- higher-level plans use high-level actions that encapsulate lower-level plans:
-
-1. A parent agent creates a high-level plan with composite actions
-2. When executing a composite action, a sub-plan is generated JIT
-3. The sub-plan may itself contain composite actions, creating arbitrary depth
-4. The policy maintains its position in the plan tree for context
-
-This allows natural decomposition of complex tasks without requiring the LLM to plan everything up front.
-
-## Dataflow `Refs` and The `PolicyPythonREPL`
-
-!!! bug "Explain Refs and the PolicyPythonREPL in detail"
-    Explain how action results are stored in the REPL and how action parameters can reference previous results, planning context, capability state, or blackboard entries via typed `Ref` objects. This enables dataflow between actions without manual state threading or storing large amounts of intermediate data in agent memory or context window. Also explain how the `PolicyPythonREPL` allows the LLM to execute arbitrary Python code for complex reasoning or dynamic action generation, with access to the same context and `Refs`.
-
-
-Action parameters generated by the `CacheAwareActionPolicy` can reference results from previous actions, planning context, capability state, or blackboard entries via typed `Ref` objects. This enables dataflow between actions without manual state threading:
-
-```python
-class Ref(BaseModel):
-    """Reference to a value in scope for dataflow between actions.
-
-    References follow a path syntax:
-        $variable           - Scope variable from current/parent scope
-        $results.action_id  - Previous action's result
-        $global.CapName     - Agent capability
-        $shared.key         - Blackboard entry
-    """
-```
-
-## Blueprint Pattern
-
-!!! bug "Reference the full blueprint pattern in the example gallery"
-
-Policies are configured via `ActionPolicyBlueprint`, created through the `bind()` class method:
-
-```python
-blueprint = CacheAwareActionPolicy.bind(
-    planning_strategy="mpc",
-    max_iterations=50,
-)
-```
-
-Blueprints are validated for serializability at creation time. The `agent` reference is injected at instantiation time, not bound in the blueprint.
-
-## Minimal Action Policy
-
-`MinimalActionPolicy` is the simplest possible policy: gather available actions, show them to the LLM, dispatch whatever it selects. No planning infrastructure, no event processing, no pre-programmed enrichment.
-
-```python
-from polymathera.colony.agents.patterns.actions import (
-    MinimalActionPolicy,
-    create_minimal_action_policy,
-)
-
-policy = await create_minimal_action_policy(agent, max_iterations=20)
-```
-
-The LLM sees all `@action_executor` methods from the agent's capabilities and selects one per iteration. If planning capabilities are registered on the agent, their actions appear too — but the LLM is not forced to use them.
-
-This is the **baseline** for evaluating what structure and guidance add to planning quality.
-
-## Planning Capabilities
-
-Planning capabilities are cognitive capabilities that augment an agent's reasoning about its own planning process. They support three consumption modes:
-
-| Mode | Consumer | Interface |
-|------|----------|-----------|
-| Pre-programmed | `CacheAwareActionPlanner` | Programmatic API (complex params) |
-| LLM-selected | `MinimalActionPolicy` | `@action_executor` (simple params) |
-| Code-generated | `CodeGenerationActionPolicy` | Programmatic API via generated code |
-
-### Available Planning Capabilities
-
-| Capability | Purpose | Key `@action_executor` methods |
-|------------|---------|-------------------------------|
-| `CacheAnalysisCapability` | Working set analysis, page priorities, cache-optimal batching | `analyze_cache`, `get_cache_optimal_batches`, `get_page_dependencies` |
-| `PlanLearningCapability` | Learn from execution history, surface applicable patterns | `get_learned_patterns`, `get_execution_history`, `record_outcome` |
-| `PlanCoordinationCapability` | Multi-agent conflict detection and resolution | `check_plan_conflicts`, `get_sibling_plans`, `propose_plan`, `resolve_contention` |
-| `PlanEvaluationCapability` | Cost-benefit-risk analysis for plans | `evaluate_plan` |
-| `ReplanningCapability` | Decide when to revise the current plan | `should_replan` |
-
-### Automatic Registration
-
-`CacheAwareActionPlanner` automatically registers missing planning capabilities on `initialize()`. Using `CacheAwareActionPolicy` automatically gives the agent access to all planning capabilities — both through the planner's pre-programmed pipeline and through `@action_executor` methods.
-
-### The Action Policy Space
 
 Moving right adds structure; moving up adds expressiveness. The same capabilities work across all positions in this space.
 
@@ -447,7 +174,315 @@ The programmatic API methods are NOT `@action_executor` — they accept complex 
 
 **The `@action_executor` methods are simplified wrappers that accept LLM-friendly types and call the programmatic API internally**. The `@action_executor` methods are **simplified entry points** for policies that use JSON action selection (like `MinimalActionPolicy`). `CodeGenerationActionPolicy` doesn't need them — it calls the programmatic API directly in generated code.
 
-## Code Generation Policy
+
+## `ActionPolicy` Base Class
+
+`polymathera.colony.agents.base.ActionPolicy` defines the contract:
+
+```python
+class ActionPolicy(ABC):
+    async def execute_iteration(
+        self, state: ActionPolicyExecutionState
+    ) -> ActionPolicyIterationResult:
+        """Execute one iteration of the policy loop."""
+        ...
+
+    async def serialize_suspension_state(
+        self, state: AgentSuspensionState
+    ) -> AgentSuspensionState:
+        """Serialize policy state for suspension."""
+        ...
+
+    async def deserialize_suspension_state(
+        self, state: AgentSuspensionState
+    ) -> None:
+        """Restore policy state from suspension."""
+        ...
+```
+
+The policy manages which `AgentCapability` instances are active via `use_agent_capabilities()` and `disable_agent_capabilities()`. Active capabilities provide action executors that the policy can invoke.
+
+The execution state passed to each iteration:
+
+```python
+class ActionPolicyExecutionState(BaseModel):
+    current_plan: ActionPlan | None = None
+    iteration_history: list[ActionPolicyIterationResult] = []
+    iteration_num: int = 0
+    custom: dict[str, Any] = {}  # Arbitrary state for the policy
+```
+
+Each iteration returns:
+
+```python
+class ActionPolicyIterationResult(BaseModel):
+    policy_completed: bool = False
+    success: bool
+    error_context: ErrorContext | None = None
+    requires_termination: bool = False
+    blocked_reason: str | None = None
+    idle: bool = False            # Policy requests IDLE state
+    action_executed: Action | None = None
+    result: ActionResult | None = None
+```
+
+
+### `ActionPolicy` I/O Contract
+
+The policy operates on structured input and produces structured output:
+
+**Input** (`ActionPolicyInput`):
+
+- `goals`: What the agent is trying to achieve
+- `constraints`: Boundaries on behavior
+- `initial_context`: Starting context for the task
+- `action_descriptions`: Available actions from active capabilities
+
+**Output** (`ActionPolicyOutput`):
+
+- `success`: Whether the policy achieved its goals
+- `final_result`: The produced result
+- `exported_results`: Results to share with other agents
+- `learned_patterns`: Patterns discovered during execution
+
+The I/O contract is declared via `ActionPolicyIO`:
+
+```python
+class MyPolicy(CacheAwareActionPolicy):
+    io = ActionPolicyIO(
+        inputs={"query": str, "max_results": int},
+        outputs={"page_ids": list[str], "analysis": dict},
+    )
+```
+
+## Planning Framework
+
+### Planning Capabilities
+
+Planning capabilities are cognitive capabilities that augment an agent's reasoning about its own planning process. They support three consumption modes:
+
+| Mode | Consumer | Interface |
+|------|----------|-----------|
+| Pre-programmed | `CacheAwareActionPlanner` | Programmatic API (complex params) |
+| LLM-selected | `MinimalActionPolicy` | `@action_executor` (simple params) |
+| Code-generated | `CodeGenerationActionPolicy` | Programmatic API via generated code |
+
+#### Available Planning Capabilities
+
+| Capability | Purpose | Key `@action_executor` methods |
+|------------|---------|-------------------------------|
+| `CacheAnalysisCapability` | Working set analysis, page priorities, cache-optimal batching | `analyze_cache`, `get_cache_optimal_batches`, `get_page_dependencies` |
+| `PlanLearningCapability` | Learn from execution history, surface applicable patterns | `get_learned_patterns`, `get_execution_history`, `record_outcome` |
+| `PlanCoordinationCapability` | Multi-agent conflict detection and resolution | `check_plan_conflicts`, `get_sibling_plans`, `propose_plan`, `resolve_contention` |
+| `PlanEvaluationCapability` | Cost-benefit-risk analysis for plans | `evaluate_plan` |
+| `ReplanningCapability` | Decide when to revise the current plan | `should_replan` |
+
+#### Automatic Registration
+
+`CacheAwareActionPlanner` automatically registers missing planning capabilities on `initialize()`. Using `CacheAwareActionPolicy` automatically gives the agent access to all planning capabilities — both through the planner's pre-programmed pipeline and through `@action_executor` methods.
+
+
+### Replanning
+
+Replanning is triggered by:
+
+- **Plan exhaustion**: All actions in the current plan have been executed
+- **Failure**: An action fails or produces unexpected results
+- **New information**: Events from other agents or blackboard changes invalidate assumptions
+- **Resource changes**: VCM page availability changes
+
+Replanning strategies:
+
+- **Revision**: Modify the existing plan to account for new information
+- **Backtracking**: Undo recent actions and try a different approach
+- **Escalation**: Request help from a supervisor agent
+- **Re-creation**: Discard the plan entirely and create a new one
+
+!!! warning "Cache-conscious revision"
+    When revising plans, the policy preserves cache locality when possible. Abandoning a plan may mean abandoning cached pages, so the cost of re-planning is weighed against the cost of cache misses.
+
+
+
+### Hierarchical Planning
+
+Plans can be hierarchical -- higher-level plans use high-level actions that encapsulate lower-level plans:
+
+1. A parent agent creates a high-level plan with composite actions
+2. When executing a composite action, a sub-plan is generated JIT
+3. The sub-plan may itself contain composite actions, creating arbitrary depth
+4. The policy maintains its position in the plan tree for context
+
+This allows natural decomposition of complex tasks without requiring the LLM to plan everything up front.
+
+### Blueprint Pattern
+
+!!! bug "Reference the full blueprint pattern in the example gallery"
+
+Policies are configured via `ActionPolicyBlueprint`, created through the `bind()` class method:
+
+```python
+blueprint = CacheAwareActionPolicy.bind(
+    planning_strategy="mpc",
+    max_iterations=50,
+)
+```
+
+Blueprints are validated for serializability at creation time. The `agent` reference is injected at instantiation time, not bound in the blueprint.
+
+
+### Planning Mode vs Execution Mode
+
+To conserve the LLM's context window, `CodeGenerationActionPolicy` operates in two modes:
+
+- **Planning mode**: Only planning capabilities appear in the prompt (cache analysis, learned patterns, coordination, evaluation, replanning). The LLM decides strategy and resource allocation.
+- **Execution mode**: Only domain capabilities appear in the prompt (analysis, synthesis, page operations). The LLM performs the actual work.
+
+Mode transitions:
+
+1. **Initial state**: Planning mode.
+2. **First domain action dispatched**: Automatically switches to execution mode.
+3. **`should_replan` returns `should_replan=True`**: Switches back to planning mode.
+4. **Explicit**: Generated code calls `switch_mode("planning")` or `switch_mode("execution")`.
+
+Planning capabilities are tagged with `"planning"` via `get_capability_tags()`. The `ActionDispatcher.get_action_descriptions()` method accepts `include_tags` and `exclude_tags` parameters, used by the policy to filter based on the current mode.
+
+This optimization is important because showing all capabilities simultaneously wastes tokens — planning actions are irrelevant during execution and vice versa. The mode system ensures the LLM always sees the most relevant action vocabulary for its current task.
+
+
+## `MinimalActionPolicy`
+
+`MinimalActionPolicy` is the simplest possible policy: gather available actions, show them to the LLM, dispatch whatever it selects. No planning infrastructure, no event processing, no pre-programmed enrichment.
+
+```python
+from polymathera.colony.agents.patterns.actions import (
+    MinimalActionPolicy,
+    create_minimal_action_policy,
+)
+
+policy = await create_minimal_action_policy(agent, max_iterations=20)
+```
+
+The LLM sees all `@action_executor` methods from the agent's capabilities and selects one per iteration. If planning capabilities are registered on the agent, their actions appear too — but the LLM is not forced to use them.
+
+This is the **baseline** for evaluating what structure and guidance add to planning quality.
+
+
+
+
+## `CacheAwareActionPolicy`
+
+The primary policy implementation, extending `EventDrivenActionPolicy`:
+
+```python
+class CacheAwareActionPolicy(EventDrivenActionPolicy):
+    """Action policy with multi-step planning.
+
+    - Creates plans using configurable strategies (MPC, top-down, bottom-up)
+    - Executes plans incrementally via Agent.run_step
+    - Handles replanning when needed
+    - Coordinates with child agents event-driven (no polling)
+    """
+```
+
+Key features:
+
+- **Configurable planning strategies**: MPC (default), top-down decomposition, bottom-up aggregation
+- **Event-driven coordination**: No polling for child agent results; events trigger re-evaluation
+- **Cache context in plans**: Every plan includes working set information, access patterns, page graph summary, prefetch hints, and shareable vs. exclusive page designations
+- **Sub-plan generation**: JIT sub-plan creation when executing composite actions, with arbitrary depth and maintained position in the plan tree
+
+!!! bug "Explain cache-awareness in detail"
+    Explain how the `CacheAwareActionPlanner` works
+
+
+
+### Two-Phase Action Selection
+
+Action selection follows a two-phase process to manage the potentially large action space (many `AgentCapability` instances, each with multiple actions):
+
+!!! bug "This description is outdated"
+    First phase select "action groups" (an action group is the set of all `@action_executor` methods on a given `AgentCapability`), then the second phase selects and parameterizes a specific action within that group. This two-phase process is intended to reduce the size of the action selection prompt.
+
+
+#### Phase 1: Action Selection
+The LLM receives descriptions of all available actions (from active capabilities) and chooses which action to take. Actions are typed via `ActionType` -- planning, reasoning, tool usage, communication, memory management, orchestration, and output.
+
+#### Phase 2: Parameterization
+Once an action type is selected, the LLM receives the specific action's JSON schema and fills in parameters. This separation prevents the LLM from being overwhelmed by the full parameter space of all actions simultaneously.
+
+Actions are defined on capabilities via the `@action_executor` decorator, which auto-infers input/output schemas from type hints:
+
+```python
+from polymathera.colony.agents.patterns.actions.policies import action_executor
+
+class QueryCapability(AgentCapability):
+    @action_executor(reads=["page_graph"], writes=["query_results"])
+    async def route_query(
+        self,
+        query: str,
+        max_results: int = 10,
+    ) -> list[str]:
+        """Route query to find relevant pages."""
+        ...
+
+    @action_executor(exclude_from_planning=True)
+    async def update_index(self, page_id: str) -> None:
+        """Not exposed to LLM planner -- invoked programmatically only."""
+        ...
+```
+
+`@action_executor` parameters:
+
+- `action_key`: Identifier for the action type (defaults to method name)
+- `input_schema` / `output_schema`: Override auto-inferred Pydantic schemas
+- `reads` / `writes`: Scope variable dependencies for dataflow tracking
+- `exclude_from_planning`: Hide from LLM planner (for programmatic-only actions)
+- `planning_summary`: Custom description for the LLM planner
+- `tags`: Domain/modality tags for filtering (e.g., `frozenset({"memory", "expensive"})`)
+
+### Model-Predictive Control
+
+`CacheAwareActionPolicy` (in `polymathera.colony.agents.patterns.actions.policies`) uses Model-Predictive Control (MPC) for plan execution:
+
+```mermaid
+graph LR
+    Plan["Create/Revise Plan"] --> Execute["Execute Next Actions"]
+    Execute --> Evaluate["Evaluate Results"]
+    Evaluate -->|"Conditions changed"| Plan
+    Evaluate -->|"On track"| Execute
+    Evaluate -->|"Done"| Complete["Complete"]
+```
+
+1. **Plan**: The LLM creates or revises a plan based on current context
+2. **Execute**: Execute only the next few actions (not the full plan)
+3. **Evaluate**: Check results against expectations
+4. **Adapt**: If conditions changed, revise the plan; otherwise continue
+
+This accounts for the nonstationary nature of multi-agent environments -- other agents may change shared state, new information may invalidate assumptions, and resource availability fluctuates.
+
+
+### Dataflow `Refs` and The `PolicyPythonREPL`
+
+!!! bug "Explain Refs and the PolicyPythonREPL in detail"
+    Explain how action results are stored in the REPL and how action parameters can reference previous results, planning context, capability state, or blackboard entries via typed `Ref` objects. This enables dataflow between actions without manual state threading or storing large amounts of intermediate data in agent memory or context window. Also explain how the `PolicyPythonREPL` allows the LLM to execute arbitrary Python code for complex reasoning or dynamic action generation, with access to the same context and `Refs`.
+
+
+Action parameters generated by the `CacheAwareActionPolicy` can reference results from previous actions, planning context, capability state, or blackboard entries via typed `Ref` objects. This enables dataflow between actions without manual state threading:
+
+```python
+class Ref(BaseModel):
+    """Reference to a value in scope for dataflow between actions.
+
+    References follow a path syntax:
+        $variable           - Scope variable from current/parent scope
+        $results.action_id  - Previous action's result
+        $global.CapName     - Agent capability
+        $shared.key         - Blackboard entry
+    """
+```
+
+
+## `CodeGenerationActionPolicy`
 
 `CodeGenerationActionPolicy` is an alternative to `CacheAwareActionPolicy` that replaces JSON action selection with **Python code generation**. Instead of the LLM selecting from a list of action types and filling parameter dicts, it generates executable Python that composes capability methods with real control flow.
 
@@ -554,21 +589,3 @@ On code execution failure:
 | Well-defined fixed workflows | `CacheAwareActionPolicy` |
 | Exploratory analysis with branching | `CodeGenerationActionPolicy` |
 | Evaluation baseline | `MinimalActionPolicy` |
-
-## Planning Mode vs Execution Mode
-
-To conserve the LLM's context window, `CodeGenerationActionPolicy` operates in two modes:
-
-- **Planning mode**: Only planning capabilities appear in the prompt (cache analysis, learned patterns, coordination, evaluation, replanning). The LLM decides strategy and resource allocation.
-- **Execution mode**: Only domain capabilities appear in the prompt (analysis, synthesis, page operations). The LLM performs the actual work.
-
-Mode transitions:
-
-1. **Initial state**: Planning mode.
-2. **First domain action dispatched**: Automatically switches to execution mode.
-3. **`should_replan` returns `should_replan=True`**: Switches back to planning mode.
-4. **Explicit**: Generated code calls `switch_mode("planning")` or `switch_mode("execution")`.
-
-Planning capabilities are tagged with `"planning"` via `get_capability_tags()`. The `ActionDispatcher.get_action_descriptions()` method accepts `include_tags` and `exclude_tags` parameters, used by the policy to filter based on the current mode.
-
-This optimization is important because showing all capabilities simultaneously wastes tokens — planning actions are irrelevant during execution and vice versa. The mode system ensures the LLM always sees the most relevant action vocabulary for its current task.

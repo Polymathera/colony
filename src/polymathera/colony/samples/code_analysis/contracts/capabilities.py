@@ -177,6 +177,8 @@ class ContractInferenceCapability(AgentCapability):
         # Return immediate action to execute analysis
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"infer_contracts_{request_id}",
+                agent_id=self.agent.agent_id,
                 action_type="infer_contracts",
                 parameters={
                     "page_ids": page_ids,
@@ -1313,6 +1315,8 @@ class ContractCoordinatorCapability(AgentCapability):
 
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"infer_contracts_{request_id}",
+                agent_id=self.agent.agent_id,
                 action_type=ActionType.CAPABILITY_ACTION,  # TODO: FIXME: This does not exist
                 capability=self.get_capability_name(),
                 action_key="analyze_codebase",
@@ -1373,6 +1377,8 @@ class ContractCoordinatorCapability(AgentCapability):
                 if len(self._pending_results) >= len(self._worker_handles):
                     return EventProcessingResult(
                         immediate_action=Action(
+                            action_id=f"finalize_analysis_{self._pending_request_id}",
+                            agent_id=self.agent.agent_id,
                             action_type=ActionType.CAPABILITY_ACTION,  # TODO: FIXME: This does not exist
                             capability=self.get_capability_name(),
                             action_key="finalize_analysis",

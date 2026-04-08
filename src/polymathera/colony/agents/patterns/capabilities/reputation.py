@@ -880,12 +880,14 @@ class ReputationCapability(AgentCapability):
     ) -> EventProcessingResult | None:
         """Handle reputation update request events."""
         # Extract request ID from key
-        request_id = event.key.split(":")[-1]
+        request_id = event.key.split(":")[-1]  # TODO: More robust parsing.
         request = ReputationUpdateRequest.model_validate(event.value)
 
         # Return immediate action to execute analysis
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"reputation_update_{request_id}",
+                agent_id=self.agent.agent_id,
                 action_type="update_from_reputation_request",
                 parameters={
                     "requesting_agent_id": request.requesting_agent_id,
@@ -901,6 +903,7 @@ class ReputationCapability(AgentCapability):
         repl: PolicyREPL
     ) -> EventProcessingResult | None:
         """Handle game completion events."""
+        request_id = event.key.split(":")[-1]  # TODO: More robust parsing
         # Extract request ID from key
         game_state = GameState.model_validate(event.value)
         if not game_state.is_terminal():
@@ -909,6 +912,8 @@ class ReputationCapability(AgentCapability):
         # Return immediate action to execute analysis
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"reputation_update_{request_id}",
+                agent_id=self.agent.agent_id,
                 action_type="update_from_game_outcome",
                 parameters={
                     "game_type": game_state.game_type,
@@ -930,6 +935,8 @@ class ReputationCapability(AgentCapability):
         # Return immediate action to execute analysis
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"reputation_update_{task_outcome.task_id}",
+                agent_id=self.agent.agent_id,
                 action_type="update_from_task_outcome",
                 parameters={
                     "outcome": task_outcome.outcome

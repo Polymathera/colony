@@ -278,6 +278,8 @@ class ObjectiveGuardCapability(AgentCapability):
         request = GoalAlignmentRequest.model_validate(event.value)
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"check_alignment_{request.requesting_agent_id}_{request.goal_id}_{uuid4().hex[:8]}",
+                agent_id=self.agent.agent_id,
                 action_type="check_goal_alignment",
                 parameters={
                     "requesting_agent_id": request.requesting_agent_id,
@@ -298,6 +300,8 @@ class ObjectiveGuardCapability(AgentCapability):
         registration = JointGoalRegistration.model_validate(event.value)
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"register_goal_{registration.goal.goal_id}_{uuid4().hex[:8]}",
+                agent_id=self.agent.agent_id,
                 action_type="register_goal",
                 parameters={
                     "goal": registration.goal

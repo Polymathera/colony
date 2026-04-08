@@ -425,6 +425,8 @@ class SpecificationComplianceCapability(AgentCapability):
 
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"check_compliance_{request_id}",
+                agent_id=self.agent.agent_id,
                 action_type="check_compliance",
                 parameters={
                     "code_page_ids": code_page_ids,

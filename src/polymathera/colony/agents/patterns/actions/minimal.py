@@ -256,6 +256,7 @@ Respond with ONLY a JSON object:
 
         return Action(
             action_id=f"minimal_{uuid.uuid4().hex[:8]}",
+            agent_id=self.agent.agent_id,
             action_type=resolved_key,
             parameters=parameters,
             reasoning=data.get("reasoning", ""),

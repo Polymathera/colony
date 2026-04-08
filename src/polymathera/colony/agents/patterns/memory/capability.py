@@ -1356,7 +1356,6 @@ class MemoryCapability(AgentCapability):
             value=entry.value,
             metadata=entry.metadata,
             tags=entry.tags,
-            expected_version=entry.version,
         )
 
 

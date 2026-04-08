@@ -2108,7 +2108,7 @@ class Agent(BaseModel):
                     capability_key="repl",
                     allowed_imports=None,     # TODO: Make configurable
                     restrict_builtins=True,   # TODO: Make configurable
-                    max_execution_time=10.0,  # TODO: Make configurable
+                    max_execution_time=self.metadata.repl_max_execution_time,
                 )
                 await repl_cap.initialize()
                 self.add_capability(
@@ -2124,7 +2124,7 @@ class Agent(BaseModel):
         # (standalone functions, external objects).
         if not self.action_policy_blueprint:
             logger.warning("Agent does not have action_policy or action_policy_blueprint defined. We will create a default ActionPolicy, but consider defining a custom one for better performance and capabilities.")
-            from .patterns.actions.policies import create_default_action_policy
+            from .patterns.actions import create_default_action_policy
             self.action_policy = await create_default_action_policy(
                 agent=self,
                 action_map={},  # Action executors are discovered from capabilities

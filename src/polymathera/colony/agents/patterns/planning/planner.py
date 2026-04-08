@@ -286,6 +286,8 @@ class CacheAwareActionPlanner(ActionPlanner):
         ###     # Convert suggestion to action (simple heuristic)
         ###     corrective_actions.append(
         ###         Action(
+        ###             action_id=f"replan_{int(time.time() * 1000)}",
+        ###             agent_id=self.agent.agent_id,
         ###             type=ActionType.CUSTOM,  # TODO: How are these actions handled by executor?
         ###             parameters={"suggestion": suggestion},
         ###             reasoning=f"Addressing critique: {suggestion}",

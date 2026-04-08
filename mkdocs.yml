@@ -74,9 +74,10 @@ nav:
   - Philosophy:
     - Overview: philosophy/index.md
     - The NoRAG Paradigm: philosophy/no-rag.md
-    - The Consciousness-Intuition Interaction: philosophy/consciousness-intuition.md
+    - Modular Agents: philosophy/modular-agents.md
     - Agents All the Way Down: philosophy/agents-all-the-way-down.md
     - Cache-Aware Patterns: philosophy/cache-awareness.md
+    - The BDI Model: philosophy/bdi.md
   - Architecture:
     - Overview: architecture/index.md
     - Distributed Architecture: architecture/distributed.md

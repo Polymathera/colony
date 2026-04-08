@@ -24,6 +24,7 @@ Example:
     # LLM planner decides storage type via StorageHint
     action = Action(
         action_type=ActionType.ANALYZE_PAGE,
+        agent_id=self.agent.agent_id,
         result_var="analysis_result",
         storage_hint=StorageHint(
             var_name="analysis_result",

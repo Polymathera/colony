@@ -1153,6 +1153,7 @@ class PlanCoordinationCapability(AgentCapability):
             scope=BlackboardScope.COLONY,
             namespace="action_plans",
         )
+        await self._plan_blackboard.initialize()
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:

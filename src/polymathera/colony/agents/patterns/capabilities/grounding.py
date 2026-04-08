@@ -283,6 +283,8 @@ class GroundingCapability(AgentCapability):
         # The dispatcher will invoke GroundingCapability.generate_grounding_query(request=action.parameters["request"])
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"process_grounding_request_{request.claim_id}",
+                agent_id=self.agent.agent_id,
                 action_type="generate_grounding_query",
                 parameters={
                     "request": request

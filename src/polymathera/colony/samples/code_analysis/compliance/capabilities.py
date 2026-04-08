@@ -141,6 +141,8 @@ class ComplianceAnalysisCapability(AgentCapability):
         # Return immediate action to execute analysis
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"analyze_compliance_{request_id}",
+                agent_id=self.agent.agent_id,
                 action_type="analyze_compliance",
                 parameters={
                     "page_ids": page_ids,
@@ -1542,6 +1544,8 @@ class ComplianceCoordinatorCapability(AgentCapability):
 
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"start_analysis_{request_id}",
+                agent_id=self.agent.agent_id,
                 action_type="start_codebase_analysis",
                 parameters={
                     "page_ids": page_ids,
@@ -1576,6 +1580,8 @@ class ComplianceCoordinatorCapability(AgentCapability):
                 # All results collected, trigger merge
                 return EventProcessingResult(
                     immediate_action=Action(
+                        action_id=f"complete_analysis_{self._pending_request_id}",
+                        agent_id=self.agent.agent_id,
                         action_type="complete_analysis",
                         parameters={
                             "request_id": self._pending_request_id

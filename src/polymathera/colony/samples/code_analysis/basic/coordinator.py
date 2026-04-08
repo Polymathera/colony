@@ -170,6 +170,8 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
             await self.synthesize_global_report()
             return EventProcessingResult(
                 immediate_action=Action(
+                    action_id=f"synthesize_global_report_{int(time.time() * 1000)}",
+                    agent_id=self.agent.agent_id,
                     action_type="synthesize_global_report",
                 )
             )
@@ -222,6 +224,8 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
                 await self.synthesize_global_report()
                 return EventProcessingResult(
                     immediate_action=Action(
+                        action_id=f"synthesize_global_report_{int(time.time() * 1000)}",
+                        agent_id=self.agent.agent_id,
                         action_type="synthesize_global_report",
                     )
                 )

@@ -145,7 +145,7 @@ class HypothesisGameAgent(Agent):
 
         # Use CacheAwareActionPolicy - the protocol's @event_handler
         # methods will handle all game logic
-        from ...actions.policies import create_default_action_policy
+        from ...actions import create_default_action_policy
 
         self.action_policy = await create_default_action_policy(agent=self)
 

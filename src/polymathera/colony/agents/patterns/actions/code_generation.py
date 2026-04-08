@@ -34,9 +34,9 @@ Usage::
 
 from __future__ import annotations
 
+import ast
 import inspect
 import logging
-import time
 from typing import Any
 
 from overrides import override
@@ -50,11 +50,27 @@ from ...models import (
     ActionPolicyExecutionState,
     ActionPolicyIterationResult,
     ActionPolicyIO,
+    PlanningContext,
+    PlanExecutionContext,
 )
 from .dispatcher import ActionGroup, ActionDispatcher
 from .policies import (
     BaseActionPolicy,
     EventDrivenActionPolicy,
+)
+from ..planning.context import PlanningContextBuilder
+from .code_constraints import (
+    CodeGenerator,
+    FreeFormCodeGenerator,
+    CodeValidator,
+    NoOpValidator,
+    IterationShapeValidator,
+    SkillLibrary,
+    NoOpSkillLibrary,
+    RecoveryStrategy,
+    DeterministicRecovery,
+    RuntimeGuardrail,
+    NoGuardrail,
 )
 
 
@@ -92,7 +108,7 @@ class CapabilityBrowser:
 
         Args:
             query: None for top-level groups, group name for group detail,
-                   "group.action" for full action detail,
+                   full action key for full action detail,
                    "programmatic" for all programmatic methods on capabilities.
 
         Returns:
@@ -104,21 +120,25 @@ class CapabilityBrowser:
         if query == "programmatic":
             return await self._list_programmatic_apis()
 
-        if "." in query:
-            group_key, action_key = query.split(".", 1)
-            return await self._action_detail(group_key, action_key)
+        # Try as a full action key first (e.g., "CacheAnalysis.CacheAnalysis.analyze_cache").
+        # Action keys contain dots so we can't split on "." to distinguish
+        # group vs action queries — instead, check if the query matches any
+        # registered executor key directly.
+        detail = await self._action_detail_by_full_key(query)
+        if detail is not None:
+            return detail
 
         return await self._group_detail(query)
 
     async def _list_groups(self) -> dict[str, Any]:
         """Top-level: list all capability groups with summaries."""
         groups = {}
-        for key, group in self._dispatcher.action_map.items():
+        for group in self._dispatcher.action_map:
             action_names = [
                 name for name, ex in group.executors.items()
                 if not getattr(ex, 'exclude_from_planning', False)
             ]
-            groups[key] = {
+            groups[group.group_key] = {
                 "description": group.description or "",
                 "actions": action_names,
                 "count": len(action_names),
@@ -172,15 +192,14 @@ class CapabilityBrowser:
 
     async def _group_detail(self, group_key: str) -> dict[str, Any]:
         """Group-level: list actions with signatures and summaries."""
-        group = self._dispatcher.action_map.get(group_key)
-        if not group:
+        group = None
+        for g in self._dispatcher.action_map:
             # Fuzzy match
-            for key, g in self._dispatcher.action_map.items():
-                if group_key.lower() in key.lower():
-                    group = g
-                    break
-            if not group:
-                return {"error": f"No capability group matching '{group_key}'"}
+            if g.group_key == group_key or group_key.lower() in g.group_key.lower():
+                group = g
+                break
+        if not group:
+            return {"error": f"No capability group matching '{group_key}'"}
 
         actions = {}
         for name, executor in group.executors.items():
@@ -190,131 +209,381 @@ class CapabilityBrowser:
             actions[name] = desc
         return actions
 
-    async def _action_detail(self, group_key: str, action_key: str) -> str:
-        """Action-level: full docstring and signature."""
-        group = self._dispatcher.action_map.get(group_key)
-        if not group:
-            for key, g in self._dispatcher.action_map.items():
-                if group_key.lower() in key.lower():
-                    group = g
-                    break
-            if not group:
-                return f"No capability group matching '{group_key}'"
+    async def _action_detail_by_full_key(self, query: str) -> str | None:
+        """Look up an action by its full compound key.
 
-        executor = group.executors.get(action_key)
-        if not executor:
-            for name, ex in group.executors.items():
-                if action_key.lower() in name.lower():
-                    executor = ex
-                    break
-            if not executor:
-                return f"No action matching '{action_key}' in group '{group_key}'"
+        Returns None if no match found (so the caller can try group lookup).
+        """
+        for group in self._dispatcher.action_map:
+            executor = group.executors.get(query)
+            if executor:
+                return await self._format_executor(executor)
+        return None
 
-        # Get full docstring
+    @staticmethod
+    async def _format_executor(executor) -> str:
+        """Format an executor's method signature and docstring."""
         method = getattr(executor, 'method', None)
         if method:
             sig = inspect.signature(method)
             doc = inspect.getdoc(method) or "(no docstring)"
             return f"{method.__name__}{sig}\n\n{doc}"
-
-        desc = await executor.get_action_description() if hasattr(executor, 'get_action_description') else str(executor)
-        return desc
+        if hasattr(executor, 'get_action_description'):
+            return await executor.get_action_description()
+        return str(executor)
 
 
 # ---------------------------------------------------------------------------
-# Code prompt builder
+# Code prompt formatting — thin layer on top of PlanningContext
 # ---------------------------------------------------------------------------
 
-def build_code_prompt(
-    agent: Agent,
-    state: ActionPolicyExecutionState,
-    execution_history: list[dict[str, Any]],
-    capability_summaries: str,
-    error_feedback: str | None = None,
+
+def _normalize_code_for_reuse(code: str) -> str:
+    """Normalize code snippets so semantically identical examples dedupe."""
+    text = code.strip()
+    if not text:
+        return ""
+
+    try:
+        return ast.unparse(ast.parse(text))
+    except Exception:
+        return "\n".join(
+            line.strip()
+            for line in text.splitlines()
+            if line.strip()
+        )
+
+
+def _extract_run_action_keys_from_code(code: str) -> list[str]:
+    """Extract literal action keys used in ``run("...")`` calls."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    action_keys: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "run":
+            continue
+        if not node.args:
+            continue
+        first_arg = node.args[0]
+        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+            action_keys.append(first_arg.value)
+    return action_keys
+
+
+def _build_codegen_step_summary(
+    *,
+    actions_called: list[str],
+    planning_action_keys: set[str],
+    had_failures: bool,
+    repl_success: bool,
+    errors: list[str],
+    mode_before: str,
+    mode_after: str,
+) -> dict[str, Any]:
+    """Build a structured summary for one generated-code iteration."""
+    planning_actions = [key for key in actions_called if key in planning_action_keys]
+    domain_actions = [key for key in actions_called if key not in planning_action_keys]
+
+    if planning_actions and domain_actions:
+        step_kind = "mixed"
+    elif planning_actions:
+        step_kind = "planning"
+    elif domain_actions:
+        step_kind = "execution"
+    else:
+        step_kind = "noop"
+
+    return {
+        "actions_called": list(actions_called),
+        "planning_actions": planning_actions,
+        "domain_actions": domain_actions,
+        "step_kind": step_kind,
+        "had_failures": had_failures,
+        "repl_success": repl_success,
+        "errors": list(errors),
+        "mode_before": mode_before,
+        "mode_after": mode_after,
+    }
+
+
+def _format_codegen_step_history(step_info: dict[str, Any]) -> list[str]:
+    """Render one stored step summary into prompt-friendly history lines."""
+    ok = step_info.get("repl_success", False) and not step_info.get("had_failures", False)
+    status = "✓" if ok else "✗"
+    errors = [str(err) for err in step_info.get("errors", []) if err]
+
+    planning_actions = list(step_info.get("planning_actions", []))
+    domain_actions = list(step_info.get("domain_actions", []))
+    actions = list(step_info.get("actions_called", []))
+
+    step_kind = step_info.get("step_kind")
+    if step_kind not in {"planning", "execution", "mixed", "noop"}:
+        if planning_actions and domain_actions:
+            step_kind = "mixed"
+        elif planning_actions:
+            step_kind = "planning"
+        elif domain_actions or actions:
+            step_kind = "execution"
+        else:
+            step_kind = "noop"
+
+    mode_before = step_info.get("mode_before")
+    mode_after = step_info.get("mode_after")
+    mode_change = bool(mode_before and mode_after and mode_before != mode_after)
+
+    lines: list[str] = []
+    if planning_actions or domain_actions or actions:
+        display_actions = planning_actions + [
+            key for key in domain_actions if key not in planning_actions
+        ]
+        if not display_actions:
+            display_actions = actions
+        action_names = ", ".join(key.rsplit(".", 1)[-1] for key in display_actions)
+        label = {
+            "planning": "Planning step",
+            "execution": "Execution step",
+            "mixed": "Mixed step",
+            "noop": "Step",
+        }[step_kind]
+        line = f"  [{status}] {label}: {action_names}"
+        if mode_change:
+            line += f" -> {mode_after.upper()}"
+        lines.append(line)
+    elif mode_change:
+        lines.append(f"  [{status}] Mode switch: {mode_before.upper()} -> {mode_after.upper()}")
+    elif ok and not errors:
+        return []
+    else:
+        lines.append(f"  [{status}] No-op step")
+
+    for error_msg in errors:
+        lines.append(f"        Error: {error_msg[:200]}")
+
+    return lines
+
+
+def _should_store_skill_from_step_summary(step_info: dict[str, Any] | None) -> bool:
+    """Store only iterations that actually performed domain work."""
+    if not step_info:
+        return False
+    if step_info.get("had_failures"):
+        return False
+    return bool(step_info.get("domain_actions"))
+
+
+def _select_prompt_skills(
+    skills: list[Any],
+    *,
+    mode: str,
+    planning_action_keys: set[str],
+) -> list[Any]:
+    """Select high-signal prior code examples for the prompt.
+
+    Planning mode intentionally avoids code few-shot examples. Planning already
+    has dedicated planning capabilities and historical plan-learning actions;
+    replaying successful planning stubs tends to anchor the model into
+    repeating the planning preamble instead of advancing into domain work.
+    """
+    if mode != "execution":
+        return []
+
+    selected: list[Any] = []
+    seen_code: set[str] = set()
+    for skill in skills:
+        code = getattr(skill, "code", "")
+        run_action_keys = _extract_run_action_keys_from_code(code)
+        if not run_action_keys:
+            continue
+        if not any(key not in planning_action_keys for key in run_action_keys):
+            continue
+
+        normalized_code = _normalize_code_for_reuse(code)
+        if not normalized_code or normalized_code in seen_code:
+            continue
+
+        seen_code.add(normalized_code)
+        selected.append(skill)
+
+    return selected
+
+def format_planning_context_for_codegen(
+    planning_context: PlanningContext,
+    mode: str,
+    error_history: list[dict[str, str]] | None = None,
 ) -> str:
-    """Build the LLM prompt for code generation.
+    """Format a ``PlanningContext`` as a code-generation prompt.
+
+    This is a thin rendering layer — all context gathering (memories, identity,
+    constraints, action descriptions) is done by ``PlanningContextBuilder``.
 
     Args:
-        agent: The agent instance.
-        state: Current execution state.
-        execution_history: List of prior step results.
-        capability_summaries: String representation of available capabilities.
-        error_feedback: If set, the previous code failed and this contains
-            the error message + failed code for iterative refinement.
+        planning_context: Structured context from ``PlanningContextBuilder``.
+        mode: Current mode — ``"planning"`` or ``"execution"``.
+        error_history: Accumulated list of ``{"code": ..., "error": ...}`` dicts
+            from ALL prior failed attempts, not just the last one.
     """
-    goals_str = "\n".join(f"- {g}" for g in (agent.metadata.goals or ["Complete the assigned task"]))
+    parts: list[str] = []
 
-    # Build execution history section
-    history_str = ""
-    if execution_history:
+    # System prompt (agent identity from ConsciousnessCapability or metadata)
+    if planning_context.system_prompt:
+        parts.append(planning_context.system_prompt)
+
+    # Goals
+    goals = planning_context.goals or []
+    if goals:
+        parts.append("## Goals\n" + "\n".join(f"- {g}" for g in goals))
+
+    # Constraints
+    if planning_context.constraints:
+        constraint_lines = [f"- {k}: {v}" for k, v in planning_context.constraints.items()]
+        parts.append("## Constraints\n" + "\n".join(constraint_lines))
+
+    # Execution progress — show what actions each code step called,
+    # Only render code steps (codegen_plan_step_*), not internal actions.
+    exec_ctx = planning_context.execution_context
+    step_summaries = (exec_ctx.custom_data.get("codegen_step_summaries", {})
+                      if exec_ctx else {})
+    if step_summaries:
         history_lines = []
-        for i, entry in enumerate(execution_history[-10:]):  # Last 10 steps
-            status = "✓" if entry.get("success") else "✗"
-            history_lines.append(f"  Step {i+1} [{status}]: {entry.get('summary', 'no summary')}")
-        history_str = "\n## Execution History\n" + "\n".join(history_lines)
+        # Iterate step summaries in insertion order (Python 3.7+ dict)
+        for step_id, step_info in list(step_summaries.items())[-20:]:  # TODO: Make this configurable
+            history_lines.extend(_format_codegen_step_history(step_info))
+        if history_lines:
+            parts.append("## Execution History\n" + "\n".join(history_lines))
 
-    # Build error feedback section
-    error_str = ""
-    if error_feedback:
-        error_str = f"""
-## Previous Code Failed — Fix Required
+    if exec_ctx and exec_ctx.findings:
+        findings_lines = [f"- {k}: {v}" for k, v in list(exec_ctx.findings.items())[:10]]  # TODO: Make this configurable
+        parts.append("## Findings So Far\n" + "\n".join(findings_lines))
 
-The following code raised an error:
+    # Recalled memories
+    if planning_context.recalled_memories:
+        memory_lines = []
+        for mem in planning_context.recalled_memories[:10]:
+            memory_lines.append(f"- [{mem.get('key', '?')}] {str(mem.get('value', ''))[:200]}")
+        parts.append("## Recalled Memories\n" + "\n".join(memory_lines))
+
+    # Memory architecture guidance
+    mem_guidance = planning_context.custom_data.get("memory_architecture_guidance")
+    if mem_guidance:
+        parts.append(f"## Memory Architecture\n{mem_guidance}")
+
+    # Current mode + lifecycle
+    parts.append(_build_mode_section(mode, planning_context))
+
+    # -- Available actions (explicit run() calls with exact keys + full descriptions) --
+    cap_lines = []
+    for group in planning_context.action_descriptions:
+        cap_lines.append(f"\n### {group.group_key}")
+        cap_lines.append(group.group_description)
+        for action_key, action_desc in group.action_descriptions.items():
+            cap_lines.append(f'\n#### `await run("{action_key}")`')
+            cap_lines.append(action_desc)
+    parts.append("## Available Actions\n" + "\n".join(cap_lines))
+
+    # Error feedback — show ALL prior failed attempts so the LLM doesn't
+    # repeat the same mistakes.
+    if error_history:
+        error_lines = ["## Failed Attempts — Do NOT Repeat These\n"]
+        for i, attempt in enumerate(error_history, 1):
+            error_lines.append(f"### Attempt {i}")
+            error_lines.append(f"```python\n{attempt['code']}\n```")
+            error_lines.append(f"**Error:** {attempt['error']}\n")
+        error_lines.append(
+            "Analyze ALL the above failures. Do NOT use any action key format "
+            "that has already failed. Use the EXACT keys from the Available Actions "
+            "section above."
+        )
+        parts.append("\n".join(error_lines))
+
+    # -- Instructions --
+    parts.append(_build_instructions_section(mode, planning_context))
+
+    return "\n\n".join(parts)
+
+
+def _build_mode_section(mode: str, planning_context: PlanningContext) -> str:
+    """Build the mode lifecycle section with a worked example.
+
+    The example uses a real action key from the current planning context so
+    the LLM sees immediately usable code, not a placeholder pattern.
+    """
+    if mode == "planning":
+        # Pick a real action key for the example
+        example_key = _first_action_key(planning_context)
+        example_call = f'await run("{example_key}")' if example_key else 'await run("<action_key>")'
+        return f"""## Current Mode: PLANNING
+
+You are selecting strategy before doing domain work. Available actions are
+planning capabilities (cache analysis, coordination, learned patterns).
+
+After 1–2 planning actions, call `switch_mode("execution")` to begin domain work.
+Do NOT start domain actions while in planning mode.
+
+Example of a good planning iteration:
 ```python
-{error_feedback}
-```
+result = {example_call}
+if result.success:
+    results["planning"] = result.output
+    switch_mode("execution")
+```"""
+    else:
+        example_key = _first_action_key(planning_context)
+        example_call = f'await run("{example_key}")' if example_key else 'await run("<action_key>")'
+        return f"""## Current Mode: EXECUTION
 
-Analyze the error and generate corrected code.
-"""
+You are performing domain work toward your goals. Available actions are domain
+capabilities. Read task parameters from `params` — do NOT hardcode values.
 
-    iteration_count = state.iteration_count
+Example of a good execution iteration:
+```python
+result = {example_call}
+if result.success:
+    results["step"] = result.output
+```"""
 
-    prompt = f"""## Your Role
-{agent.metadata.role or agent.agent_type}
 
-## Goals
-{goals_str}
-{history_str}
+def _build_instructions_section(mode: str, planning_context: PlanningContext) -> str:
+    """Build the tightened instructions section."""
+    return """## Rules
 
-## Available Capabilities
-{capability_summaries}
-Use `await browse()` for detailed signatures and `await browse("group_name")` for action details.
+1. Write 1–3 focused actions per iteration. NOT a complete program.
+2. Use EXACT action keys from Available Actions above with `await run("key")`.
+3. Read task parameters from `params` — do NOT hardcode file paths, thresholds, or config values.
+4. Check `result.success` before using `result.output`.
+5. Store important results: `results["key"] = value`.
+6. When all goals are achieved, call `signal_complete()`.
 
-## Planning Capabilities (if registered)
-If the agent has planning capabilities, you can call their programmatic APIs directly:
-- `cap = _agent.get_capability_by_type(CacheAnalysisCapability)` — cache analysis
-- `cap = _agent.get_capability_by_type(PlanLearningCapability)` — learned patterns from history
-- `cap = _agent.get_capability_by_type(PlanCoordinationCapability)` — multi-agent conflict detection
-These provide richer APIs than the @action_executor wrappers. Use `await browse()` to discover them.
-
-## Iteration
-This is iteration {iteration_count}. Generate code for the next 1-3 steps toward your goals.
-{error_str}
-## Instructions
-
-Write async Python code that accomplishes the next step(s) toward your goals.
-
-Available in your namespace:
+## Namespace
 - `await run("action_key", param1=val1, ...)` — execute a capability action, returns ActionResult
 - `await browse(query=None)` — discover available capabilities (None=list groups, "group"=detail, "group.action"=full docs, "programmatic"=full Python APIs)
+- `params` — task parameters dict (repo_id, target_files, thresholds, etc.)
 - `_agent` — the Agent instance (for calling programmatic APIs on capabilities directly)
 - `bb` — the agent's primary blackboard (await bb.read/write/query)
 - `results` — dict of prior action results by action_id
 - `switch_mode("planning"|"execution")` — switch which capabilities appear in the prompt
 - `pages` — current working set page IDs (list[str])
 - `goals` — agent's current goals (list[str])
+- `signal_complete()` — signal all goals achieved
 - `log(msg)` — structured logging
 - Standard library: json, re, math, itertools, functools, collections, asyncio
 
-Rules:
-- Use `await run(...)` to invoke capability actions — do NOT call capability methods directly
-- Handle errors: check `result.success` before using `result.output`
-- Store important intermediate results: `results["my_key"] = value`
-- When done with all goals, call `signal_complete()`
+Respond with ONLY Python code. No markdown fences. No explanation."""
 
-Respond with ONLY Python code (no markdown fences, no explanation).
-"""
-    return prompt
+
+def _first_action_key(planning_context: PlanningContext) -> str | None:
+    """Extract the first real action key from the planning context.
+
+    Used to build worked examples with actual keys instead of placeholders.
+    """
+    for group in planning_context.action_descriptions:
+        for key in group.action_descriptions:
+            return key
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -332,23 +601,54 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
     This is a peer to ``CacheAwareActionPolicy`` — an alternative, not a
     replacement. It plugs into the same ``Agent.run_step()`` loop.
 
+    The code generation process is decomposed into five independent dimensions,
+    each controlled by an abstract class that library users can replace:
+
+    1. **CodeGenerator** — controls HOW code is produced (free-form, grammar-
+       constrained, skeleton-with-holes). Default: ``FreeFormCodeGenerator``.
+    2. **CodeValidator** — checks generated code BEFORE execution. Default:
+       ``IterationShapeValidator`` (enforces focused iterations).
+    3. **SkillLibrary** — stores/retrieves successful code for reuse. Default:
+       ``NoOpSkillLibrary``.
+    4. **RecoveryStrategy** — handles failures (deterministic fix, LLM retry).
+       Default: ``DeterministicRecovery``.
+    5. **RuntimeGuardrail** — enforces constraints DURING execution (capability
+       boundaries, temporal ordering). Default: ``NoGuardrail``.
+
     Args:
         agent: The owning agent.
-        max_retries: Maximum retries on code execution failure (iterative refinement).
+        code_generator: Dimension 1 — how code is produced.
+        code_validators: Dimension 2 — pre-execution validation.
+        skill_library: Dimension 3 — skill storage and retrieval.
+        recovery_strategy: Dimension 4 — failure recovery.
+        runtime_guardrail: Dimension 5 — runtime constraints.
+        max_retries: Maximum retries on code execution failure.
         code_timeout: Timeout for each code execution in seconds.
         max_code_iterations: Maximum code generation iterations before signaling completion.
 
     Example::
 
-        policy = CodeGenerationActionPolicy(agent=agent, max_retries=2)
+        policy = CodeGenerationActionPolicy(
+            agent=agent,
+            code_validators=[APIKnowledgeBaseValidator(agent)],
+            skill_library=InMemorySkillLibrary(),
+            runtime_guardrail=CapabilityBoundaryGuardrail(
+                allowed_prefixes=["CacheAnalysis", "Analysis"],
+            ),
+        )
         await policy.initialize()
-        # Agent's run loop calls execute_iteration() which calls plan_step()
     """
 
     def __init__(
         self,
         agent: Agent,
+        context_builder: PlanningContextBuilder | None = None,
         planning_capability_blueprints: list[AgentCapabilityBlueprint] | None = None,
+        code_generator: CodeGenerator | None = None,
+        code_validators: list[CodeValidator] | None = None,
+        skill_library: SkillLibrary | None = None,
+        recovery_strategy: RecoveryStrategy | None = None,
+        runtime_guardrail: RuntimeGuardrail | None = None,
         max_retries: int = 2,
         code_timeout: float = 30.0,
         max_code_iterations: int = 50,
@@ -359,12 +659,24 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self.code_timeout = code_timeout
         self.max_code_iterations = max_code_iterations
         self._planning_capability_blueprints = planning_capability_blueprints
+        self._context_builder = context_builder or PlanningContextBuilder(agent)
 
-        # Execution tracking
-        self._execution_history: list[dict[str, Any]] = []
+        # Constraint dimensions — each is a user-replaceable abstract class.
+        self._code_generator = code_generator or FreeFormCodeGenerator()
+        self._code_validators = code_validators or [IterationShapeValidator()]
+        self._skill_library = skill_library or NoOpSkillLibrary()
+        self._recovery_strategy = recovery_strategy or DeterministicRecovery()
+        self._runtime_guardrail = runtime_guardrail or NoGuardrail()
+
+        # Execution tracking — PlanExecutionContext is the structured state.
+        self._execution_context = PlanExecutionContext()
         self._code_iteration_count: int = 0
-        self._last_error: str | None = None
-        self._last_failed_code: str | None = None
+        self._error_history: list[dict[str, str]] = []
+        self._recovered_code: str | None = None
+        self._consecutive_failures: int = 0
+        self._call_history: list[str] = []
+        self._had_internal_failures: bool = False
+        self._internal_errors: list[str] = []
         self._browser: CapabilityBrowser | None = None
         self._run_helper_installed: bool = False
         self._complete_signaled: bool = False
@@ -381,7 +693,15 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         # Ensure planning capabilities are registered — same as CacheAwareActionPlanner.
         # This gives the LLM access to cache analysis, learned patterns,
         # coordination, evaluation, and replanning in generated code.
+        # NOTE: use_capability_blueprints() nulls _action_dispatcher to force
+        # rebuild with the new capabilities. We must recreate it before
+        # setting up the REPL namespace.
         await self._ensure_planning_capabilities()
+
+        # Recreate the dispatcher — _ensure_planning_capabilities() nulled it
+        # via use_agent_capabilities(). _create_action_dispatcher() is idempotent
+        # (no-op if dispatcher already exists).
+        await self._create_action_dispatcher()
 
         # Ensure REPL exists
         if not self._action_dispatcher or not self._action_dispatcher.repl:
@@ -401,15 +721,38 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             PlanLearningCapability,
             PlanCoordinationCapability,
             PlanEvaluationCapability,
+            ReplanningCapability,
         )
         if self._planning_capability_blueprints is None:
              self._planning_capability_blueprints = [
-                CacheAnalysisCapability.bind(key="cache_analysis", kwargs={}),
-                PlanLearningCapability.bind(key="plan_learning", kwargs={}),
-                PlanCoordinationCapability.bind(key="plan_coordination", kwargs={}),
-                PlanEvaluationCapability.bind(key="plan_evaluation", kwargs={}),
+                CacheAnalysisCapability.bind(),
+                PlanLearningCapability.bind(),
+                PlanCoordinationCapability.bind(),
+                PlanEvaluationCapability.bind(),
+                ReplanningCapability.bind(),
             ]
         await self.use_capability_blueprints(self._planning_capability_blueprints)
+
+    def _get_planning_action_keys(self) -> set[str]:
+        """Return the full action keys tagged as planning actions."""
+        if not self._action_dispatcher:
+            return set()
+
+        planning_action_keys: set[str] = set()
+        for group in self._action_dispatcher.action_map:
+            if "planning" not in group.tags:
+                continue
+            planning_action_keys.update(group.executors.keys())
+        return planning_action_keys
+
+    def _is_planning_action_key(self, action_key: str) -> bool:
+        """Check whether an action key belongs to a planning-tagged capability."""
+        planning_action_keys = self._get_planning_action_keys()
+        if not planning_action_keys:
+            return False
+        if action_key in planning_action_keys:
+            return True
+        return any(key.endswith(f".{action_key}") for key in planning_action_keys)
 
     async def _setup_enriched_namespace(self) -> None:
         """Install helper functions into the REPL namespace."""
@@ -430,40 +773,52 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             Returns:
                 ActionResult with success, output, error fields
             """
+            # Runtime guardrail check
+            decision = await self._runtime_guardrail.check(
+                action_key=action_key,
+                params=params,
+                call_history=self._call_history,
+            )
+            if not decision.allowed:
+                logger.warning(f"Guardrail blocked '{action_key}': {decision.reason}")
+                return ActionResult(
+                    success=False,
+                    error=f"Blocked by guardrail: {decision.reason}. {decision.suggestion}",
+                )
+
             import uuid
             action = Action(
-                action_id=f"codegen_{uuid.uuid4().hex[:8]}",
+                action_id=f"codegen_internal_{uuid.uuid4().hex[:8]}",
+                agent_id=self.agent.agent_id,
                 action_type=action_key,
                 parameters=params,
             )
             result = await self._action_dispatcher.dispatch(action)
 
-            # Track result
-            self._execution_history.append({
-                "action": action_key,
-                "params": {k: str(v)[:100] for k, v in params.items()},
-                "success": result.success,
-                "summary": str(result.output)[:200] if result.output else (result.error or "no output"),
-                "timestamp": time.time(),
-            })
+            # Track result in structured PlanExecutionContext
+            self._execution_context.completed_action_ids.append(action.action_id)
+            self._execution_context.action_results[action.action_id] = result
+
+            # Track internal failures so the skill library doesn't store
+            # code that "executed" but had failing actions inside it.
+            if not result.success:
+                self._had_internal_failures = True
+                self._internal_errors.append(result.error or "unknown error")
+
+            resolved_action_key = str(action.action_type)
+            self._call_history.append(resolved_action_key)
 
             # Mode transitions based on action results:
             # - should_replan returning should_replan=True → back to planning mode
-            # - Any planning action completing → switch to execution mode
-            action_lower = action_key.lower()
+            # - First domain action in planning mode → switch to execution mode
+            action_lower = resolved_action_key.lower()
             if "should_replan" in action_lower and result.success:
                 output = result.output if isinstance(result.output, dict) else {}
                 if output.get("should_replan"):
                     self._mode = "planning"
                     log(f"Mode → PLANNING (replan triggered: {output.get('reason', '')})")
 
-            # After planning actions succeed, switch to execution mode
-            planning_actions = {"analyze_cache", "get_learned_patterns", "get_cache_optimal_batches",
-                              "check_plan_conflicts", "get_sibling_plans", "evaluate_plan"}
-            if any(pa in action_lower for pa in planning_actions) and result.success:
-                # Stay in planning mode until the LLM explicitly starts executing
-                pass
-            elif self._mode == "planning" and result.success and not any(pa in action_lower for pa in planning_actions | {"should_replan", "browse"}):
+            if self._mode == "planning" and result.success and not self._is_planning_action_key(resolved_action_key):
                 # First non-planning action → switch to execution mode
                 self._mode = "execution"
                 log("Mode → EXECUTION (first domain action dispatched)")
@@ -510,11 +865,15 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         ns["results"] = {}
         ns["pages"] = []
         ns["goals"] = list(self.agent.metadata.goals or [])
+        ns["params"] = dict(self.agent.metadata.parameters or {})
 
         # bb — the agent's primary blackboard (lazy, since it needs await)
         # We'll set it on first use
         ns["bb"] = None
 
+        # Track which keys we installed so execute_iteration's namespace
+        # snapshot/restore knows not to roll them back.
+        self._enriched_ns_keys = frozenset(ns.keys()) - {'In', 'Out', 'get_ipython'}
         self._run_helper_installed = True
         logger.info("CodeGenerationActionPolicy: enriched REPL namespace installed")
 
@@ -535,8 +894,9 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         except Exception:
             pass
 
-        # Update goals
+        # Update goals and params
         ns["goals"] = list(self.agent.metadata.goals or [])
+        ns["params"] = dict(self.agent.metadata.parameters or {})
 
         # Lazy-init blackboard
         if ns.get("bb") is None:
@@ -544,6 +904,42 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 ns["bb"] = await self.agent.get_blackboard()
             except Exception:
                 pass
+
+    @staticmethod
+    def _build_skill_query(planning_context: PlanningContext) -> str:
+        """Build a meaningful skill retrieval query from structured planning context.
+
+        Combines goals, recent action names (from step summaries, not opaque
+        IDs), and findings into a query that reflects what the agent needs to
+        accomplish *right now*, not just its static goals.
+        """
+        parts: list[str] = []
+
+        # Current goals
+        if planning_context.goals:
+            parts.append("Goals: " + "; ".join(planning_context.goals))
+
+        # Recent execution progress — what has already been done
+        exec_ctx = planning_context.execution_context
+        if exec_ctx:
+            # Use step summaries to get real action names, not codegen_internal_* IDs
+            step_summaries = exec_ctx.custom_data.get("codegen_step_summaries", {})
+            recent_actions: list[str] = []
+            for step_info in list(step_summaries.values())[-3:]:  # TODO: Make this configurable
+                for action_key in step_info.get("actions_called", []):
+                    recent_actions.append(action_key.rsplit(".", 1)[-1])
+            if recent_actions:
+                parts.append("Recent actions: " + ", ".join(recent_actions))
+
+            if exec_ctx.findings:
+                finding_keys = list(exec_ctx.findings.keys())[:5]  # TODO: Make this configurable
+                parts.append("Findings: " + ", ".join(finding_keys))
+
+            # Cache state narrows to data-relevant skills
+            if exec_ctx.analyzed_pages:
+                parts.append(f"Analyzed {len(exec_ctx.analyzed_pages)} pages")
+
+        return " | ".join(parts) if parts else "general agent task"
 
     @override
     async def plan_step(
@@ -569,9 +965,9 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             state.custom["policy_complete"] = True
             return None
 
-        # Check iteration limit
-        self._code_iteration_count += 1
-        if self._code_iteration_count > self.max_code_iterations:
+        # Check iteration limit (incremented after validation, not before,
+        # so validation failures don't consume iterations)
+        if self._code_iteration_count >= self.max_code_iterations:
             logger.warning(
                 f"CodeGenerationActionPolicy: max iterations ({self.max_code_iterations}) reached"
             )
@@ -584,67 +980,109 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         # Build capability summaries filtered by current mode.
         # Planning mode: only planning capabilities (cache, learning, coordination, etc.)
         # Execution mode: only domain capabilities (analysis, synthesis, etc.)
+        # Mode-specific tag filtering for action descriptions
         if self._mode == "planning":
             include_tags = frozenset({"planning"})
             exclude_tags = None
-            mode_label = "PLANNING MODE — select strategy, analyze cache, check coordination"
         else:
             include_tags = None
             exclude_tags = frozenset({"planning"})
-            mode_label = "EXECUTION MODE — perform domain actions toward your goals"
 
-        try:
-            action_descriptions = await self.get_action_descriptions(
-                include_tags=include_tags,
-                exclude_tags=exclude_tags,
-            )
-            cap_lines = [f"[{mode_label}]"]
-            for group in action_descriptions:
-                actions_str = ", ".join(list(group.action_descriptions.keys())[:5])
-                more = f" (+{group.action_count - 5} more)" if group.action_count > 5 else ""
-                cap_lines.append(f"- {group.group_key}: {group.group_description[:80]} [{actions_str}{more}]")
-            capability_summaries = "\n".join(cap_lines)
-        except Exception as e:
-            capability_summaries = f"(error loading capabilities: {e})"
-
-        # Build error feedback if previous code failed
-        error_feedback = None
-        if self._last_error and self._last_failed_code:
-            error_feedback = f"{self._last_failed_code}\n\nError:\n{self._last_error}"
-
-        # Build the prompt
-        prompt = build_code_prompt(
-            agent=self.agent,
-            state=state,
-            execution_history=self._execution_history,
-            capability_summaries=capability_summaries,
-            error_feedback=error_feedback,
+        # Build full planning context via PlanningContextBuilder. This gathers memories,
+        # builds identity from ConsciousnessCapability, extracts constraints,
+        # and includes action descriptions.
+        planning_context = await self._context_builder.get_planning_context(
+            execution_context=self._execution_context,
+        )
+        # Override action descriptions with mode-filtered versions
+        planning_context.action_descriptions = await self.get_action_descriptions(
+            include_tags=include_tags,
+            exclude_tags=exclude_tags,
         )
 
-        # Call LLM to generate code
-        try:
-            response = await self.agent.infer(
-                prompt=prompt,
-                system_prompt=(
-                    "You are a Python code generator for an autonomous agent. "
-                    "Generate clean, correct async Python code that uses the provided "
-                    "helper functions to accomplish the agent's goals. "
-                    "Output ONLY executable Python code — no markdown, no explanation."
-                ),
-                max_tokens=2048,
-            )
-            code = self._extract_code(response)
-        except Exception as e:
-            logger.error(f"CodeGenerationActionPolicy: LLM inference failed: {e}")
-            return None
+        # Format the PlanningContext for code generation, including full
+        # error history so the LLM can see ALL prior failed attempts.
+        prompt = format_planning_context_for_codegen(
+            planning_context=planning_context,
+            mode=self._mode,
+            error_history=self._error_history if self._error_history else None,
+        )
+
+        # --- Dimension 1: Code Generation (or use recovered code) ---
+        if self._recovered_code:
+            code = self._recovered_code
+            self._recovered_code = None
+            logger.info("CodeGenerationActionPolicy: using recovered code from previous failure")
+        else:
+            # Dimension 3: Skill Library — only execution mode reuses prior code.
+            # Planning mode already has explicit planning capabilities and learned
+            # planning patterns; replaying code examples here tends to lock the
+            # model into repeating planning stubs instead of moving to execution.
+            skills: list[Any] = []
+            if self._mode == "execution":
+                skill_query = self._build_skill_query(planning_context)
+                planning_action_keys = self._get_planning_action_keys()
+                retrieved_skills = await self._skill_library.retrieve(goal=skill_query, k=3)
+                skills = _select_prompt_skills(
+                    retrieved_skills,
+                    mode=self._mode,
+                    planning_action_keys=planning_action_keys,
+                )
+            if skills:
+                skill_section = "\n\n## Relevant Examples from Prior Runs\n"
+                for s in skills:
+                    skill_section += f"# Goal: {s.goal}\n{s.code}\n\n"
+                prompt += skill_section
+
+            # Dimension 1: CodeGenerator
+            try:
+                code = await self._code_generator.generate(
+                    agent=self.agent,
+                    prompt=prompt,
+                    max_tokens=2048,
+                    temperature=0.3,
+                )
+            except Exception as e:
+                logger.error(f"CodeGenerationActionPolicy: code generation failed: {e}")
+                return None
 
         if not code or not code.strip():
-            logger.warning("CodeGenerationActionPolicy: LLM generated empty code")
+            logger.warning("CodeGenerationActionPolicy: generated empty code")
             return None
 
-        # Clear error state on new generation
-        self._last_error = None
-        self._last_failed_code = None
+        # --- Dimension 2: Code Validation (all validators must pass) ---
+        for validator in self._code_validators:
+            validation = await validator.validate(code, self.agent)
+            if not validation.valid:
+                logger.warning(
+                    f"CodeGenerationActionPolicy: validation failed: {validation.errors}"
+                )
+                # Dimension 4: Recovery from validation failure
+                recovery = await self._recovery_strategy.recover(
+                    code=code,
+                    error="\n".join(validation.errors),
+                    validation_result=validation,
+                    attempt=self._consecutive_failures,
+                    max_attempts=self.max_retries,
+                )
+                if recovery.recovered and recovery.code:
+                    code = recovery.code
+                    logger.info(f"CodeGenerationActionPolicy: {recovery.strategy_used} produced fixed code")
+                else:
+                    error_msg = recovery.error_context or "\n".join(validation.errors)
+                    self._error_history.append({"code": code, "error": error_msg})
+                    self._consecutive_failures += 1
+                    return None
+
+        # Clear consecutive failure count on successful generation + validation
+        self._consecutive_failures = 0
+
+        # Reset call history for this code execution (Dimension 5 tracking)
+        self._call_history.clear()
+        self._had_internal_failures = False
+        self._internal_errors.clear()
+
+        self._code_iteration_count += 1
 
         logger.info(
             f"CodeGenerationActionPolicy: generated code ({len(code)} chars) "
@@ -653,38 +1091,13 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
 
         # Return as EXECUTE_CODE action
         return Action(
-            action_id=f"codegen_step_{self._code_iteration_count}",
+            action_id=f"codegen_plan_step_{self._code_iteration_count}",
+            agent_id=self.agent.agent_id,
             action_type=ActionType.EXECUTE_CODE,
             parameters={"code": code},
+            code=code,
             description=f"Code generation step {self._code_iteration_count}",
         )
-
-    def _extract_code(self, response: Any) -> str:
-        """Extract Python code from LLM response.
-
-        Handles responses with or without markdown code fences.
-        """
-        if hasattr(response, 'text'):
-            text = response.text
-        elif hasattr(response, 'content'):
-            text = response.content
-        elif isinstance(response, str):
-            text = response
-        elif isinstance(response, dict):
-            text = response.get("text", response.get("content", str(response)))
-        else:
-            text = str(response)
-
-        # Strip markdown code fences if present
-        text = text.strip()
-        if text.startswith("```python"):
-            text = text[len("```python"):].strip()
-        elif text.startswith("```"):
-            text = text[3:].strip()
-        if text.endswith("```"):
-            text = text[:-3].strip()
-
-        return text
 
     @override
     async def execute_iteration(
@@ -699,19 +1112,60 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         """
         repl = self._action_dispatcher.repl if self._action_dispatcher else None
 
-        # Snapshot namespace before execution
+        # Snapshot only LLM-introduced variables. Enriched namespace vars
+        # (run, browse, results, params, etc.) must NOT be rolled back —
+        # results accumulates across iterations, and the helpers are closures.
+        exclude = getattr(self, '_enriched_ns_keys', frozenset())
         namespace_snapshot = None
         if repl and hasattr(repl, '_shell') and repl._shell:
             try:
                 namespace_snapshot = {
                     k: v for k, v in repl._shell.user_ns.items()
-                    if not k.startswith('_') and k not in ('In', 'Out', 'get_ipython')
+                    if (not k.startswith('_')
+                        and k not in ('In', 'Out', 'get_ipython')
+                        and k not in exclude)
                 }
             except Exception:
                 pass
 
+        mode_before = self._mode
+        planning_action_keys = self._get_planning_action_keys()
+
         # Execute (parent handles plan_step → dispatch)
         result = await super().execute_iteration(state)
+
+        # Record what this iteration did — stored in execution context so
+        # format_planning_context_for_codegen can show it.
+        # The code step's own ID must be in completed_action_ids so the
+        # rendering loop can find its summary.
+        # (Internal run() calls add codegen_internal_* IDs, but the code
+        # step itself — codegen_plan_step_* — was never added, causing
+        # the execution history to be completely empty.)
+        if (result.action_executed
+                and result.action_executed.action_type == ActionType.EXECUTE_CODE):
+            step_id = result.action_executed.action_id
+            self._execution_context.completed_action_ids.append(step_id)
+            self._execution_context.action_results[step_id] = result.result
+            summaries = self._execution_context.custom_data.setdefault(
+                "codegen_step_summaries", {}
+            )
+            # Collect all errors: internal run() failures + REPL crash error.
+            # Without the REPL error, the execution history shows [✗] with no
+            # explanation — the LLM can't learn what went wrong and repeats
+            # the same failing code indefinitely.
+            step_errors = list(self._internal_errors)
+            if result.result and not result.result.success and result.result.error:
+                step_errors.append(result.result.error)
+
+            summaries[step_id] = _build_codegen_step_summary(
+                actions_called=list(self._call_history),
+                planning_action_keys=planning_action_keys,
+                had_failures=self._had_internal_failures,
+                repl_success=result.result.success if result.result else False,
+                errors=step_errors,
+                mode_before=mode_before,
+                mode_after=self._mode,
+            )
 
         # Check if code execution failed
         if (result.result and not result.result.success
@@ -725,22 +1179,45 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 f"CodeGenerationActionPolicy: code execution failed: {error_msg[:200]}"
             )
 
-            # Restore namespace on failure
+            # Restore LLM-introduced variables on failure
             if namespace_snapshot and repl and hasattr(repl, '_shell') and repl._shell:
                 try:
                     # Only restore user-defined variables, not system ones
                     for key in list(repl._shell.user_ns.keys()):
-                        if not key.startswith('_') and key not in ('In', 'Out', 'get_ipython'):
-                            if key not in namespace_snapshot:
-                                del repl._shell.user_ns[key]
+                        if (not key.startswith('_')
+                                and key not in ('In', 'Out', 'get_ipython')
+                                and key not in exclude
+                                and key not in namespace_snapshot):
+                            del repl._shell.user_ns[key]
                     for key, val in namespace_snapshot.items():
                         repl._shell.user_ns[key] = val
                 except Exception as e:
                     logger.warning(f"Failed to restore namespace: {e}")
 
-            # Store error for iterative refinement on next iteration
-            self._last_error = error_msg
-            self._last_failed_code = failed_code
+            # Dimension 4: Recovery Strategy
+            self._consecutive_failures += 1
+            recovery = await self._recovery_strategy.recover(
+                code=failed_code,
+                error=error_msg,
+                validation_result=None,
+                attempt=self._consecutive_failures,
+                max_attempts=self.max_retries,
+            )
+
+            if recovery.recovered and recovery.code:
+                # Recovery produced fixed code — use it on the next iteration
+                self._recovered_code = recovery.code
+                logger.info(
+                    f"CodeGenerationActionPolicy: {recovery.strategy_used} "
+                    f"produced recovered code, will execute next iteration"
+                )
+            else:
+                # Accumulate error into history so the LLM sees ALL prior
+                # failures and doesn't repeat the same key format mistakes.
+                self._error_history.append({
+                    "code": failed_code,
+                    "error": recovery.error_context or error_msg,
+                })
 
             # Return failure but don't complete — retry on next iteration
             return ActionPolicyIterationResult(
@@ -749,6 +1226,39 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 action_executed=result.action_executed,
                 result=result.result,
             )
+
+        # Successful code execution
+        if (result.result and result.result.success
+                and result.action_executed
+                and result.action_executed.action_type == ActionType.EXECUTE_CODE):
+            self._consecutive_failures = 0
+            self._error_history.clear()
+            executed_code = result.action_executed.parameters.get("code", "")
+            step_summaries = self._execution_context.custom_data.get("codegen_step_summaries", {})
+            step_info = step_summaries.get(result.action_executed.action_id)
+
+            # Dimension 3: Skill Library — store successful code for reuse.
+            # Only store if no run() calls inside the code failed and the step
+            # actually performed domain work. Planning-only stubs pollute the
+            # prompt and cause the model to replay the planning preamble.
+            if (
+                executed_code
+                and not self._had_internal_failures
+                and _should_store_skill_from_step_summary(step_info)
+            ):
+                try:
+                    planning_context = await self._context_builder.get_planning_context(
+                        execution_context=self._execution_context,
+                    )
+                    skill_goal = self._build_skill_query(planning_context)
+                    await self._skill_library.store(
+                        code=executed_code,
+                        goal=skill_goal,
+                        result=result.result,
+                        description=result.action_executed.description or "",
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to store skill: {e}")
 
         return result
 
@@ -771,22 +1281,47 @@ async def create_code_generation_action_policy(
     action_map: list[ActionGroup] | None = None,
     action_providers: list[Any] = [],
     io: ActionPolicyIO | None = None,
+    context_builder: PlanningContextBuilder | None = None,
+    code_generator: CodeGenerator | None = None,
+    code_validators: list[CodeValidator] | None = None,
+    skill_library: SkillLibrary | None = None,
+    recovery_strategy: RecoveryStrategy | None = None,
+    runtime_guardrail: RuntimeGuardrail | None = None,
     max_retries: int = 2,
     code_timeout: float = 30.0,
     max_code_iterations: int = 50,
-) -> "CodeGenerationActionPolicy":
+) -> CodeGenerationActionPolicy:
     """Create a code-generation-based action policy.
 
     The LLM generates Python code that composes ``@action_executor`` methods
     with real control flow, instead of selecting from a JSON action schema.
 
     Requires ``REPLCapability`` on the agent.
+    Uses ``PlanningContextBuilder`` to build structured planning context
+    including memories, agent identity, constraints, and action descriptions.
+
+    Each of the five constraint dimensions accepts an implementation of the
+    corresponding abstract class. Pass ``None`` for defaults::
+
+        policy = await create_code_generation_action_policy(
+            agent=agent,
+            code_validators=[APIKnowledgeBaseValidator(agent)],
+            runtime_guardrail=CapabilityBoundaryGuardrail(
+                allowed_prefixes=["CacheAnalysis", "Analysis"],
+            ),
+        )
 
     Args:
         agent: The owning agent.
         action_map: Optional pre-built action groups.
         action_providers: Additional action providers.
         io: Action policy I/O configuration.
+        context_builder: Planning context builder (default: ``PlanningContextBuilder(agent)``).
+        code_generator: How code is produced (default: ``FreeFormCodeGenerator``).
+        code_validators: Pre-execution validation (default: ``[IterationShapeValidator()]``).
+        skill_library: Skill storage/retrieval (default: ``NoOpSkillLibrary``).
+        recovery_strategy: Failure recovery (default: ``DeterministicRecovery``).
+        runtime_guardrail: Runtime constraints (default: ``NoGuardrail``).
         max_retries: Max retries on code execution failure.
         code_timeout: Timeout for each code execution.
         max_code_iterations: Max code generation iterations.
@@ -794,10 +1329,14 @@ async def create_code_generation_action_policy(
     Returns:
         CodeGenerationActionPolicy
     """
-    from .code_generation import CodeGenerationActionPolicy
-
     action_policy = CodeGenerationActionPolicy(
         agent=agent,
+        context_builder=context_builder,
+        code_generator=code_generator,
+        code_validators=code_validators,
+        skill_library=skill_library,
+        recovery_strategy=recovery_strategy,
+        runtime_guardrail=runtime_guardrail,
         max_retries=max_retries,
         code_timeout=code_timeout,
         max_code_iterations=max_code_iterations,
@@ -808,4 +1347,3 @@ async def create_code_generation_action_policy(
     await action_policy.initialize()
 
     return action_policy
-

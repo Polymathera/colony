@@ -1,4 +1,5 @@
 
+import uuid
 from enum import Enum
 from pydantic import BaseModel, Field
 import time
@@ -67,7 +68,8 @@ class CodeChange(BaseModel):
     """A code change to analyze."""
 
     change_id: str = Field(
-        description="Unique change identifier"
+        default_factory=lambda: f"change-{uuid.uuid4().hex[:8]}",
+        description="Unique change identifier (auto-generated if not provided)"
     )
 
     file_path: str = Field(
@@ -75,7 +77,8 @@ class CodeChange(BaseModel):
     )
 
     line_range: tuple[int, int] = Field(
-        description="Lines affected (start, end)"
+        default=(0, 0),
+        description="Lines affected (start, end). (0, 0) means the entire file."
     )
 
     change_type: ChangeType = Field(

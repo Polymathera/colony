@@ -620,7 +620,12 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         # Check if all done
         if not self.page_agents and not self.pending_pages:
             return EventProcessingResult(
-                immediate_action=Action(action_type=ActionType.CUSTOM, parameters={"custom_type": "finalize_analysis"})
+                immediate_action=Action(
+                    action_type=ActionType.CUSTOM,
+                    action_id=f"finalize_analysis_{self._pending_request_id}",
+                    agent_id=self.agent.agent_id,
+                    parameters={"custom_type": "finalize_analysis"},
+                )
             )
         return None
 
@@ -658,7 +663,12 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
 
             if not self.page_agents and not self.pending_pages:
                 return EventProcessingResult(
-                    immediate_action=Action(action_type=ActionType.CUSTOM, parameters={"custom_type": "finalize_analysis"})
+                    immediate_action=Action(
+                        action_type=ActionType.CUSTOM,
+                        action_id=f"finalize_analysis_{self._pending_request_id}",
+                        agent_id=self.agent.agent_id,
+                        parameters={"custom_type": "finalize_analysis"}
+                    )
                 )
         return None
 

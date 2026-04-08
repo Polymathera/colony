@@ -170,6 +170,7 @@ class Action(BaseModel):
     Example:
         ```python
         action = Action(
+            agent_id=self.agent.agent_id,
             action_type=ActionType.ROUTE_QUERY,
             parameters={
                 "query": "Where is AuthManager defined?",
@@ -1126,6 +1127,7 @@ class ActionPlan(BaseModel):
             goal="Analyze authentication cluster",
             actions=[
                 Action(
+                    agent_id="coordinator",
                     action_type=ActionType.ANALYZE_CLUSTER,
                     sub_plan=Plan(
                         goal="Analyze all pages",
@@ -2622,6 +2624,12 @@ class AgentMetadata(BaseModel):
     enable_repl: bool = Field(
         default=True,
         description="Automatically create REPLCapability during agent initialization"
+    )
+    repl_max_execution_time: float = Field(
+        default=30.0,
+        description="Max seconds for a single REPL code execution. Must be large "
+        "enough for generated code that dispatches real capability actions "
+        "(blackboard writes, LLM calls, worker spawning)."
     )
     action_policy_config: dict[str, Any] = Field(default_factory=dict)
     suspended_agent_id: str | None = None

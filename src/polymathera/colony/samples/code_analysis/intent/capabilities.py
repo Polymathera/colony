@@ -183,6 +183,8 @@ class IntentInferenceCapability(AgentCapability):
         # Return immediate action to execute inference
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"infer_intent_{request_id}",
+                agent_id=self.agent.agent_id,
                 action_type="infer_intent",
                 parameters={
                     "page_ids": page_ids,
@@ -1259,6 +1261,8 @@ class IntentCoordinatorCapability(AgentCapability):
 
         return EventProcessingResult(
             immediate_action=Action(
+                action_id=f"start_analysis::{request_id}",
+                agent_id=self.agent.agent_id,
                 action_type="start_codebase_analysis",
                 parameters={
                     "page_ids": page_ids,
@@ -1287,6 +1291,8 @@ class IntentCoordinatorCapability(AgentCapability):
                     if len(self._collected_results) >= len(self._worker_handles):
                         return EventProcessingResult(
                             immediate_action=Action(
+                                action_id=f"finalize_analysis_{self._pending_request_id}",
+                                agent_id=self.agent.agent_id,
                                 action_type="finalize_analysis",
                                 parameters={"request_id": self._pending_request_id}
                             )

@@ -22,22 +22,6 @@ This architectural claim has specific consequences for how the framework is buil
     Add explanation here of how the action policy is an aspect weaver that decides control and data flow inside an agent.
 
 
-<!-->
-## The Argument from Bounded Depth
-
-A single LLM call has finite reasoning depth. No matter how capable the model, its forward pass executes a fixed number of layers, and the chain-of-thought it produces in a single generation has practical limits. This is not a flaw -- it is a fundamental property of any finite computational process.
-
-But many real-world tasks require reasoning depth that exceeds what any single call can produce. Understanding the full implications of a change across a million-line codebase. Tracing a causal chain through hundreds of scientific papers. Synthesizing a legal argument that accounts for thousands of precedents.
-
-Colony's answer: **iterative deepening**. If a single LLM call produces finite-depth reasoning, then iterative deepening of that reasoning -- with reflection, learning, and accumulated context -- produces unbounded-depth reasoning. Each iteration builds on the findings of the previous one, effectively traversing arbitrary path lengths through the implicit knowledge graph.
-
-
-!!! tip "Unbounded Depth, Unbounded Context"
-    Iterative deepening gives unbounded reasoning *depth* (arbitrary path length in the knowledge hypergraph). **Distributed reasoning over partitioned context** gives unbounded reasoning *breadth* (relationships with arbitrary degree in the knowledge hypergraph). Colony combines both.
-
-## The Argument from Bounded Context
--->
-
 ## The Virtual Agent
 
 Here is Colony's most provocative architectural idea: a multi-agent system is not a collection of independent agents collaborating on a task. It is the **different cognitive levels of a single virtual agent**.

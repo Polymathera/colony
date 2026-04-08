@@ -60,13 +60,20 @@ logger = setup_logger(__name__)
 # These builtins are excluded for security:
 # - Code execution: eval, exec, compile, __import__
 # - File/IO access: open, input
-# - Introspection that can leak info or escape sandbox: globals, locals, vars, dir
+# - Introspection that can leak info or escape sandbox: globals
 # - Process control: breakpoint, exit, quit
 # - Help (can access filesystem): help
+# locals(), vars(), and dir() are read-only introspection functions.
+# The LLM uses them to check what variables exist in the namespace.
+# Blocking them forces the LLM into workarounds like 'x' in results (which works) but
+# also prevents legitimate patterns. globals() is the genuinely dangerous one — it can
+# expose __builtins__ and allow sandbox escape.
+# dir() is especially useful — it's the standard Python way to discover attributes on
+# objects. locals() and vars() are used for namespace introspection.
 DANGEROUS_BUILTINS = frozenset({
     "eval", "exec", "compile", "__import__",
     "open", "input",
-    "globals", "locals", "vars", "dir",
+    "globals",
     "breakpoint", "exit", "quit",
     "help",
 })
@@ -174,6 +181,8 @@ class PolicyPythonREPL(PolicyREPL):
             high_priority = [p for p in page_ids if p.startswith("core/")]
             for page_id in high_priority:
                 submit_action(Action(
+                    action_id=f"analyze_{page_id}",
+                    agent_id=agent.agent_id,
                     action_type=ActionType.ANALYZE_PAGE,
                     parameters={"page_id": page_id}
                 ))
@@ -256,9 +265,15 @@ class PolicyPythonREPL(PolicyREPL):
     # =========================================================================
 
     def _create_shell(self) -> InteractiveShell:
-        """Create and configure IPython InteractiveShell."""
-        # Create shell with empty namespace
-        shell = InteractiveShell.instance(user_ns={})
+        """Create and configure IPython InteractiveShell.
+
+        Each REPL gets its own shell instance with an isolated user_ns.
+        Using InteractiveShell.instance() would return a process-wide
+        singleton — when multiple agents run in the same deployment
+        actor (AgentManagerBase), they would share the same namespace
+        and overwrite each other's params, results, and run() closures.
+        """
+        shell = InteractiveShell(user_ns={})
 
         # Configure for programmatic use
         shell.cache_size = 0  # Disable output caching
@@ -704,7 +719,7 @@ class PolicyPythonREPL(PolicyREPL):
             return {
                 "success": exec_result.success,
                 "result": exec_result.result,
-                "error": str(exec_result.error_in_exec) if exec_result.error_in_exec else None,
+                "error": f"{type(exec_result.error_in_exec).__name__}: {exec_result.error_in_exec}" if exec_result.error_in_exec else None,
                 "new_names": new_names,
                 "pending_actions": list(self._pending_actions),
             }
@@ -713,7 +728,7 @@ class PolicyPythonREPL(PolicyREPL):
             return {
                 "success": False,
                 "result": None,
-                "error": f"Timeout ({self._max_execution_time}s):\n{type(e).__name__}: {e}",
+                "error": f"TimeoutError: code execution exceeded {self._max_execution_time}s limit:\n{type(e).__name__}: {e}",
                 "new_names": [],
                 "pending_actions": [],
             }
@@ -1250,6 +1265,8 @@ REPL code can submit actions to the agent system:
 # In REPL code:
 for page_id in high_priority[:5]:
     submit_action(Action(
+        action_id=f"analyze_{uuid.uuid4().hex[:8]}",
+        agent_id=agent_id,
         action_type=ActionType.ANALYZE_PAGE,
         parameters={"page_id": page_id},
         result_var=f"analysis_{page_id.replace('/', '_')}"
@@ -1315,13 +1332,13 @@ composable primitives. **YOU decide the strategy** - the system doesn't force a 
 **Strategy A: Cluster-Based with Incremental Merge**
 ```python
 # 1. Get clusters from page graph
-submit_action(Action(action_type="get_clusters", result_var="clusters"))
+submit_action(Action(action_type="get_clusters", result_var="clusters", action_id=f"get_clusters_{uuid.uuid4().hex[:8]}", agent_id=agent_id))
 # 2. Process first cluster
 submit_action(Action(action_type="spawn_workers",
-    parameters={"page_ids": Ref.var("clusters[0]"), "cache_affine": True}))
+    parameters={"page_ids": Ref.var("clusters[0]"), "cache_affine": True}, action_id=f"spawn_workers_{uuid.uuid4().hex[:8]}", agent_id=agent_id))
 # 3. Wait for workers, then merge cluster results
 submit_action(Action(action_type="merge_results",
-    parameters={"page_ids": Ref.var("clusters[0]"), "detect_conflicts": True}))
+    parameters={"page_ids": Ref.var("clusters[0]"), "detect_conflicts": True}, action_id=f"merge_results_{uuid.uuid4().hex[:8]}", agent_id=agent_id))
 # 4. Check for contradictions, mark for revisit if needed
 # 5. Move to next cluster
 ```
@@ -1329,14 +1346,14 @@ submit_action(Action(action_type="merge_results",
 **Strategy B: Query-Driven Continuous Analysis**
 ```python
 # 1. Check outstanding queries
-submit_action(Action(action_type="get_outstanding_queries", result_var="queries"))
+submit_action(Action(action_type="get_outstanding_queries", result_var="queries", action_id=f"get_queries_{uuid.uuid4().hex[:8]}", agent_id=agent_id))
 # 2. Process top query's target pages
 for query in queries[:3]:
     submit_action(Action(action_type="spawn_worker",
-        parameters={"page_id": query["target_pages"][0]}))
+        parameters={"page_id": query["target_pages"][0]}, action_id=f"spawn_worker_{uuid.uuid4().hex[:8]}", agent_id=agent_id))
 # 3. On completion, detect contradictions
 submit_action(Action(action_type="detect_contradictions",
-    parameters={"page_ids": completed_pages}))
+    parameters={"page_ids": completed_pages}, action_id=f"detect_contradictions_{uuid.uuid4().hex[:8]}", agent_id=agent_id))
 # 4. If contradictions found, mark for revisit with new context
 ```
 
@@ -1344,15 +1361,15 @@ submit_action(Action(action_type="detect_contradictions",
 ```python
 # 1. Spawn workers for all pages (fast start)
 submit_action(Action(action_type="spawn_workers",
-    parameters={"page_ids": all_pages, "max_parallel": 10}))
+    parameters={"page_ids": all_pages, "max_parallel": 10}, action_id=f"spawn_workers_{uuid.uuid4().hex[:8]}", agent_id=agent_id))
 # 2. As results come in, check confidence
 submit_action(Action(action_type="get_pages_with_issues",
-    parameters={"min_severity": "medium"}, result_var="issues"))
+    parameters={"min_severity": "medium"}, result_var="issues", action_id=f"get_pages_with_issues_{uuid.uuid4().hex[:8]}", agent_id=agent_id))
 # 3. Mark low-confidence pages for revisit
 for issue in issues:
     if issue["issue_type"] == "low_confidence":
         submit_action(Action(action_type="mark_for_revisit",
-            parameters={"page_id": issue["page_id"], "reason": "low confidence"}))
+            parameters={"page_id": issue["page_id"], "reason": "low confidence"}, action_id=f"mark_for_revisit_{uuid.uuid4().hex[:8]}", agent_id=agent_id))
 # 4. Periodically process revisit queue
 ```
 

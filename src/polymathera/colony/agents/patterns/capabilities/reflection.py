@@ -127,6 +127,8 @@ class ReflectionCapability(AgentCapability):
 
         # Trigger reflection via action
         result = await action_policy.dispatch(Action(
+            action_id="reflect_on_performance",
+            agent_id=self.agent.agent_id,
             action_type="reflect",
             parameters={"focus": "performance"}
         ))

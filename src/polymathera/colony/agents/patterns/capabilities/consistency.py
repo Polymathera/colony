@@ -365,6 +365,8 @@ class ConsistencyCapability(AgentCapability):
 
             return EventProcessingResult(
                 immediate_action=Action(
+                    action_id=f"consistency_check_{request.requesting_agent_id}_{int(time.time())}",
+                    agent_id=self.agent.agent_id,
                     action_type="check_consistency",
                     parameters={
                         "requesting_agent_id": request.requesting_agent_id,

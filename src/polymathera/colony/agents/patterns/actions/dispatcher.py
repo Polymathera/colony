@@ -1297,6 +1297,7 @@ class ActionDispatcher:
         result = ActionResult(
             success=result_dict["success"],
             output=result_dict,
+            error=result_dict.get("error"),
         )
 
         action.status = ActionStatus.COMPLETED if result.success else ActionStatus.FAILED

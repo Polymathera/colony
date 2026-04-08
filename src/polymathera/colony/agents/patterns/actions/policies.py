@@ -101,6 +101,7 @@ class BaseActionPolicy(ActionPolicy):
                 # Return an Action to execute
                 return Action(
                     action_id="analyze_001",
+                    agent_id=self.agent.agent_id,
                     action_type="analyze",
                     parameters={"query": state.scope.get("query")}
                 )
@@ -426,7 +427,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
                 if not event:
                     return None  # No events pending
                 # Parse event.value and produce action
-                return Action(action_type="process_event", parameters={...})
+                return Action(action_type="process_event", agent_id=self.agent.agent_id, parameters={...})
         ```
     """
 
@@ -1120,7 +1121,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
 
 
 
-async def create_default_action_policy(
+async def create_cache_aware_action_policy(
     agent: Agent,
     action_map: list[ActionGroup] | None = None,
     action_providers: list[Any] = [],
