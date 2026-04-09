@@ -113,6 +113,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         blackboard,
         page_graph,
         traces,
+        trace_analysis,
     )
     from .streaming import sse
 
@@ -126,6 +127,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     app.include_router(blackboard.router, prefix="/api/v1", tags=["blackboard"])
     app.include_router(page_graph.router, prefix="/api/v1", tags=["page-graph"])
     app.include_router(traces.router, prefix="/api/v1", tags=["traces"])
+    app.include_router(trace_analysis.router, prefix="/api/v1", tags=["trace-analysis"])
     app.include_router(sse.router, prefix="/api/v1", tags=["streaming"])
 
     # Serve built frontend as static files (production mode)

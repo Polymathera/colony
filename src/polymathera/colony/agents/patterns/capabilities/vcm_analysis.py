@@ -317,9 +317,12 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         # Determine bound_pages for cache affinity
         bound_pages = [page_id] if cache_affine else None
 
+        worker_cap_cls = self.get_worker_capability_class()
+        worker_cap_fqn = f"{worker_cap_cls.__module__}.{worker_cap_cls.__qualname__}"
+
         result = await pool_cap.create_agent(
             agent_type=self.get_worker_agent_type(),
-            capabilities=[self.get_worker_capability_class().__name__],
+            capabilities=[worker_cap_fqn],
             bound_pages=bound_pages,
             metadata=AgentMetadata(
                 parameters={

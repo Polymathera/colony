@@ -5,6 +5,13 @@ import { Badge } from "../shared/Badge";
 import { MetricCard } from "../shared/MetricCard";
 import { formatTimestamp, formatTokens, cn } from "@/lib/utils";
 import type { TraceSummary, TraceSpan } from "@/api/types";
+import type { TraceViewMode } from "./traces/types";
+import { TraceViewSelector } from "./traces/TraceViewSelector";
+import { AgentSelector } from "./traces/AgentSelector";
+import { LinearizedTimelineView } from "./traces/LinearizedTimelineView";
+import { PromptDiffView } from "./traces/PromptDiffView";
+import { FSMView } from "./traces/FSMView";
+import { ControlFlowView } from "./traces/ControlFlowView";
 
 /* ── Constants ───────────────────────────────────────────────── */
 
@@ -732,6 +739,8 @@ function TraceWaterfallView({
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [zoom, setZoom] = useState(1);
+  const [viewMode, setViewMode] = useState<TraceViewMode>("tree");
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
   const toggleCollapsed = useCallback((spanId: string) => {
     setCollapsed((prev) => {
@@ -784,8 +793,37 @@ function TraceWaterfallView({
       {/* Header stats */}
       <TraceHeader spans={allSpans} traceId={traceId} isStreaming={isStreaming} />
 
-      {/* Kind legend + zoom slider */}
+      {/* View selector + agent filter */}
       <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <TraceViewSelector value={viewMode} onChange={setViewMode} />
+          {viewMode !== "tree" && (
+            <AgentSelector
+              spans={allSpans}
+              value={selectedAgentId}
+              onChange={setSelectedAgentId}
+            />
+          )}
+        </div>
+        {viewMode === "tree" && (
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-[10px] text-muted-foreground">Zoom</span>
+            <input
+              type="range"
+              min={1}
+              max={20}
+              step={0.5}
+              value={zoom}
+              onChange={(e) => setZoom(parseFloat(e.target.value))}
+              className="w-24 h-1 accent-primary"
+            />
+            <span className="text-[10px] font-mono text-muted-foreground w-6">{zoom}x</span>
+          </div>
+        )}
+      </div>
+
+      {/* Kind legend (tree view only) */}
+      {viewMode === "tree" && (
         <div className="flex flex-wrap gap-3">
           {Object.entries(KIND_LABELS).map(([kind, label]) => (
             <span key={kind} className="flex items-center gap-1 text-[10px] text-muted-foreground">
@@ -797,57 +835,62 @@ function TraceWaterfallView({
             </span>
           ))}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <span className="text-[10px] text-muted-foreground">Zoom</span>
-          <input
-            type="range"
-            min={1}
-            max={20}
-            step={0.5}
-            value={zoom}
-            onChange={(e) => setZoom(parseFloat(e.target.value))}
-            className="w-24 h-1 accent-primary"
-          />
-          <span className="text-[10px] font-mono text-muted-foreground w-6">{zoom}x</span>
-        </div>
-      </div>
+      )}
 
-      {/* Waterfall + Detail split */}
-      <div className="flex gap-0 rounded-lg border overflow-hidden" style={{ height: "calc(100vh - 360px)" }}>
-        {/* Left: waterfall */}
-        <div className={cn("h-full overflow-auto", selectedSpan ? "w-3/5" : "w-full")}>
-          {flat.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-              No spans recorded
+      {/* View content */}
+      {viewMode === "tree" && (
+        <div className="flex gap-0 rounded-lg border overflow-hidden" style={{ height: "calc(100vh - 360px)" }}>
+          {/* Left: waterfall */}
+          <div className={cn("h-full overflow-auto", selectedSpan ? "w-3/5" : "w-full")}>
+            {flat.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                No spans recorded
+              </div>
+            ) : (
+              flat.map((node) => (
+                <WaterfallRow
+                  key={node.span.span_id}
+                  node={node}
+                  traceStart={traceStart}
+                  traceDuration={traceDuration}
+                  zoom={zoom}
+                  isSelected={node.span.span_id === selectedSpanId}
+                  isCollapsed={collapsed.has(node.span.span_id)}
+                  onClick={() =>
+                    setSelectedSpanId(
+                      node.span.span_id === selectedSpanId ? null : node.span.span_id
+                    )
+                  }
+                  onToggle={() => toggleCollapsed(node.span.span_id)}
+                />
+              ))
+            )}
+          </div>
+
+          {/* Right: detail panel */}
+          {selectedSpan && (
+            <div className="w-2/5 border-l overflow-auto bg-card">
+              <SpanDetail span={selectedSpan} />
             </div>
-          ) : (
-            flat.map((node) => (
-              <WaterfallRow
-                key={node.span.span_id}
-                node={node}
-                traceStart={traceStart}
-                traceDuration={traceDuration}
-                zoom={zoom}
-                isSelected={node.span.span_id === selectedSpanId}
-                isCollapsed={collapsed.has(node.span.span_id)}
-                onClick={() =>
-                  setSelectedSpanId(
-                    node.span.span_id === selectedSpanId ? null : node.span.span_id
-                  )
-                }
-                onToggle={() => toggleCollapsed(node.span.span_id)}
-              />
-            ))
           )}
         </div>
+      )}
 
-        {/* Right: detail panel */}
-        {selectedSpan && (
-          <div className="w-2/5 border-l overflow-auto bg-card">
-            <SpanDetail span={selectedSpan} />
-          </div>
-        )}
-      </div>
+      {viewMode === "timeline" && (
+        <LinearizedTimelineView traceId={traceId} agentId={selectedAgentId} />
+      )}
+
+      {viewMode === "diff" && (
+        <PromptDiffView traceId={traceId} agentId={selectedAgentId} />
+      )}
+
+      {viewMode === "fsm" && (
+        <FSMView traceId={traceId} agentId={selectedAgentId} />
+      )}
+
+      {viewMode === "flow" && (
+        <ControlFlowView traceId={traceId} agentId={selectedAgentId} />
+      )}
     </div>
   );
 }

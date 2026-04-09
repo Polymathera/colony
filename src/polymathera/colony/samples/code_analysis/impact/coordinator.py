@@ -680,7 +680,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     async def analyze_change_impact(
         self,
         page_ids: list[str],
-        changes: list[CodeChange],
+        changes: list[CodeChange] | list[dict],
         change_description: str | None = None
     ) -> ScopeAwareResult[ChangeImpactReport]:
         """Analyze change impact using cache-aware agent scheduling.
@@ -706,7 +706,17 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         Returns:
             Unified impact report with multi-hop propagation
         """
-        self._current_changes = changes
+        self._current_changes = []
+        for c in changes:
+            if isinstance(c, CodeChange):
+                self._current_changes.append(c)
+            elif isinstance(c, dict):
+                try:
+                    self._current_changes.append(CodeChange(**c))
+                except Exception as e:
+                    logger.warning(f"Failed to parse change dict {c}: {e}")
+            else:
+                logger.warning(f"Invalid change format (not CodeChange or dict): {c}")
         change_description = change_description or self._summarize_changes(changes)
         # TODO: Write this summary to agent memory to be used by the action policy
 

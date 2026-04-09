@@ -110,6 +110,11 @@ class AgentPoolCapability(AgentCapability):
     def _resolve_class(fully_qualified_name: str) -> type:
         """Resolve a class from its fully qualified name (e.g., 'pkg.module.ClassName')."""
         import importlib
+        if not isinstance(fully_qualified_name, str) or "." not in fully_qualified_name:
+            raise ValueError(
+                f"Expected fully qualified class name (e.g., 'pkg.module.Class'), "
+                f"got: {fully_qualified_name!r}"
+            )
         module_path, class_name = fully_qualified_name.rsplit(".", 1)
         module = importlib.import_module(module_path)
         return getattr(module, class_name)
