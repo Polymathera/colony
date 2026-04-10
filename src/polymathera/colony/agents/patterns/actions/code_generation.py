@@ -760,7 +760,9 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         if not repl or self._run_helper_installed:
             return
 
-        ns = repl._shell.user_ns if hasattr(repl, '_shell') and repl._shell else {}
+        if not repl._shell:
+            raise RuntimeError("REPL shell not available for namespace enrichment")
+        ns = repl._shell.user_ns
 
         # run() — dispatch an action through the dispatcher
         async def run(action_key: str, **params) -> ActionResult:

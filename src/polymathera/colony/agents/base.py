@@ -688,6 +688,19 @@ class AgentCapability(ABC):
         """
         ...
 
+    async def stop(self) -> None:
+        """Stop the capability and perform any necessary cleanup.
+
+        This is called when the owning agent is stopping. Subclasses can
+        override to clean up resources, cancel tasks, etc.
+
+        Note: This does not remove the capability from the agent's
+        `_capabilities` dict. To fully remove a capability, call
+        `agent.remove_capability(capability_key)`.
+        """
+        pass
+
+
 
 class AgentHandle:
     """Handle for interacting with agents from anywhere in the cluster.
@@ -1466,12 +1479,12 @@ class AgentHandle:
     # Agent Control
     # =========================================================================
 
-    async def stop(self) -> None:
+    async def stop(self, reason: str = "stop_requested") -> None:
         """Request the target agent to stop."""
         from ..system import get_agent_system
 
         agent_system = get_agent_system(app_name=self._app_name)
-        await agent_system.stop_agent(self.child_agent_id)
+        await agent_system.stop_agent(self.child_agent_id, reason=reason)
 
 
 class CapabilityResultFuture:
@@ -1720,6 +1733,7 @@ class Agent(BaseModel):
     _capabilities: dict[str, AgentCapability] = PrivateAttr(default_factory=dict)
     _running: bool = PrivateAttr(default=False)
     _stop_requested: bool = PrivateAttr(default=False)
+    _stop_reason: str = PrivateAttr(default="")
     _suspend_requested: bool = PrivateAttr(default=False)
     _suspend_reason: str | None = PrivateAttr(default=None)
     _resumption_condition: ResumptionCondition | None = PrivateAttr(default=None)
@@ -2442,15 +2456,21 @@ class Agent(BaseModel):
         self._stop_requested = False
 
     @hookable
-    async def stop(self) -> None:
+    async def stop(self, reason: str = "completed") -> None:
         """Stop agent execution.
 
         This method is @hookable, so capabilities can register BEFORE hooks
         to flush memories, AFTER hooks for cleanup, etc.
 
-        Override in subclasses to perform cleanup logic.
+        Args:
+            reason: Why the agent is stopping. Stored in ``_stop_reason``
+                for tracing and run status updates. Common values:
+                ``"policy_completed"``, ``"idle_timeout"``,
+                ``"max_iterations"``, ``"error"``, ``"cancelled"``,
+                ``"stop_requested"``.
         """
         self._stop_requested = True
+        self._stop_reason = reason
         self.state = AgentState.STOPPED
         self._running = False
         self.action_policy_state = None
@@ -2591,7 +2611,7 @@ class Agent(BaseModel):
             if self.state == AgentState.STOPPED:
                 logger.info(f"Agent {self.agent_id} has entered STOPPED state")
                 # Stop agent gracefully
-                await self.stop()
+                await self.stop(reason="policy_completed")
 
             if self.state == AgentState.IDLE:
                 timeout = self.metadata.idle_timeout
@@ -2600,7 +2620,7 @@ class Agent(BaseModel):
                         logger.info(
                             f"Agent {self.agent_id} idle timeout ({timeout}s) reached, stopping"
                         )
-                        await self.stop()
+                        await self.stop(reason="idle_timeout")
                         return
                 await self.on_idle()
 
@@ -2894,16 +2914,17 @@ class Agent(BaseModel):
 
     # === Agent Hierarchy Management ===
 
-    async def stop_child_agent(self, agent_id: str) -> None:
+    async def stop_child_agent(self, agent_id: str, reason: str = "stop_requested") -> None:
         """Stop a child agent.
 
         Args:
             agent_id: Agent identifier
+            reason: Reason for stopping the agent
         """
         from ..system import get_agent_system
 
         agent_system_handle = get_agent_system()
-        await agent_system_handle.stop_agent(agent_id)
+        await agent_system_handle.stop_agent(agent_id, reason=reason)
 
     async def spawn_child_agents(
         self,
@@ -3505,12 +3526,13 @@ class AgentManagerBase:
             return agent_id
 
     @serving.endpoint(router_class=AgentAffinityRouter)
-    async def stop_agent(self, agent_id: str, graceful: bool = True) -> None:
+    async def stop_agent(self, agent_id: str, graceful: bool = True, reason: str = "stop_requested") -> None:
         """Stop an agent.
 
         Args:
             agent_id: Agent identifier
             graceful: If True, wait for graceful shutdown with timeout
+            reason: Reason for stopping the agent
         """
         async with self._agent_lock:
             if agent_id not in self._agents:
@@ -3542,7 +3564,7 @@ class AgentManagerBase:
                             del self._agent_tasks[agent_id]
             else:
                 # Force stop immediately
-                await agent.stop()
+                await agent.stop(reason=reason)
                 task = self._agent_tasks.get(agent_id)
                 if task:
                     task.cancel()
@@ -3856,10 +3878,11 @@ class AgentManagerBase:
             agent: Agent instance
             max_iterations: Optional maximum number of iterations for the agent's action policy
         """
+        iteration = 0
+        error_msg: str | None = None
         try:
             await agent.start()
 
-            iteration = 0
             while not agent._stop_requested and (max_iterations is None or iteration < max_iterations):
                 # Check if agent requested suspension
                 if agent._suspend_requested:
@@ -3885,17 +3908,98 @@ class AgentManagerBase:
                     await agent.run_step()
                     iteration += 1
                 except Exception as e:
-                    logger.error(f"Error in agent {agent.agent_id} step: {e}")
+                    error_msg = f"{type(e).__name__}: {e}"
+                    logger.error(f"Error in agent {agent.agent_id} step: {error_msg}")
                     agent.state = AgentState.FAILED
                     break
 
         except asyncio.CancelledError:
             logger.info(f"Agent {agent.agent_id} loop cancelled")
         except Exception as e:
-            logger.error(f"Error in agent {agent.agent_id} loop: {e}")
+            error_msg = f"{type(e).__name__}: {e}"
+            logger.error(f"Error in agent {agent.agent_id} loop: {error_msg}")
             agent.state = AgentState.FAILED
         finally:
             agent._running = False
+
+            # Determine stop reason from agent state
+            if agent.state == AgentState.FAILED:
+                stop_reason = "error"
+            elif agent._stop_reason:
+                stop_reason = agent._stop_reason
+            elif agent._stop_requested:
+                stop_reason = "stop_requested"
+            elif max_iterations is not None and iteration >= max_iterations:
+                stop_reason = "max_iterations"
+            else:
+                stop_reason = "unknown"
+
+            # Ensure stop() is called if the agent hasn't already stopped
+            if agent.state not in (AgentState.STOPPED, AgentState.SUSPENDED):
+                await agent.stop(reason=stop_reason)
+
+            logger.warning(
+                f"\n"
+                f"╔══════════════════════════════════════════════════════════╗\n"
+                f"║  🔄 AGENT LOOP  FINISHED iter={iteration:<4}                    ║\n"
+                f"║  agent={agent.agent_id:<48}║\n"
+                f"║  state={str(agent.state):<20} reason={stop_reason:<14}║\n"
+                f"╚══════════════════════════════════════════════════════════╝"
+            )
+
+            # Finalize tracing spans with actual agent state
+            from .observability.capability import TracingCapability
+            tracing_cap = agent.get_capability_by_type(TracingCapability)
+            if tracing_cap:
+                tracing_cap.emit_lifecycle_event(stop_reason, {
+                    "error": error_msg,
+                    "iterations": iteration,
+                    "agent_state": str(agent.state),
+                })
+                await tracing_cap.shutdown()
+
+            # Update AgentRun status in session system
+            await self._finalize_agent_run(agent, stop_reason, error_msg)
+
+    async def _finalize_agent_run(
+        self,
+        agent: Agent,
+        stop_reason: str,
+        error_msg: str | None = None,
+    ) -> None:
+        """Update the AgentRun status when the agent loop exits.
+
+        Bridges the agent loop exit to the session system so that
+        ``AgentRun.status`` reflects the actual outcome.
+        """
+        run_id = getattr(agent.metadata, "run_id", None)
+        if not run_id or run_id == "default":
+            return
+
+        from .sessions.models import RunStatus
+        status_map = {
+            "completed": RunStatus.COMPLETED,
+            "policy_completed": RunStatus.COMPLETED,
+            "stop_requested": RunStatus.COMPLETED,
+            "idle_timeout": RunStatus.COMPLETED,
+            "max_iterations": RunStatus.TIMEOUT,
+            "error": RunStatus.FAILED,
+            "cancelled": RunStatus.CANCELLED,
+        }
+        status = status_map.get(stop_reason, RunStatus.FAILED)
+
+        try:
+            from ..system import get_session_manager
+            session_mgr = get_session_manager()
+            await session_mgr.update_run_status.remote(
+                run_id=run_id,
+                status=status,
+                error=error_msg,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to finalize run {run_id} for agent {agent.agent_id}: {e}"
+            )
 
     def _get_deployment_replica_id(self) -> str:
         """Get deployment replica ID for this agent manager."""

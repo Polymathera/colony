@@ -527,8 +527,18 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
 
             result = await pool.create_agent(
                 agent_type=agent_type,
-                metadata=AgentMetadata(parameters={"game_id": self.game_id}, role=role),
+                metadata=AgentMetadata(
+                    parameters={
+                        "game_id": self.game_id,
+                    },
+                ),
+                label=role,
                 role=role,
+                requirements=None,
+                #requirements=LLMClientRequirements(
+                #    model_family="llama",  # TODO: Make configurable
+                #    min_context_window=32000,  # TODO: Make configurable
+                #),
             )
             if result.get("created"):
                 spawned.append(result["agent_id"])

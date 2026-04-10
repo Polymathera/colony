@@ -289,11 +289,11 @@ class ClusterAnalyzerCapability(AgentCapability):
                 )
 
             # Mark work complete
-            self.state = AgentState.STOPPED
+            self.agent.state = AgentState.STOPPED
 
         except Exception as e:
             logger.error(f"Synthesis failed: {e}", exc_info=True)
-            self.state = AgentState.FAILED
+            self.agent.state = AgentState.FAILED
             raise
 
     # === Helper Methods ===

@@ -75,11 +75,8 @@ class LogQueryStore:
             idx += 1
 
         if level:
-            level_order = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
-            min_level = level_order.get(level.upper(), 0)
-            allowed = [k for k, v in level_order.items() if v >= min_level]
-            conditions.append(f"level = ANY(${idx})")
-            params.append(allowed)
+            conditions.append(f"level = ${idx}")
+            params.append(level.upper())
             idx += 1
 
         if search:

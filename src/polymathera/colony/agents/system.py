@@ -307,7 +307,8 @@ class AgentSystemDeployment:
         from ..system import (
             get_llm_cluster,
             get_standalone_agents,
-            get_vllm_deployment
+            get_vllm_deployment,
+            get_remote_llm_deployment,
         )
 
         # Ensure agent_id is in the blueprint
@@ -332,19 +333,23 @@ class AgentSystemDeployment:
             llm_cluster_handle = get_llm_cluster()
             # Use LLMCluster to select deployment based on requirements
             try:
-                vllm_deployment_name = await llm_cluster_handle.select_deployment(
+                deployment_name, deployment_kind = await llm_cluster_handle.select_deployment(
                     requirements=requirements
                 )
 
-                vllm_handle = get_vllm_deployment(vllm_deployment_name)
+                if deployment_kind == "remote":
+                    llm_handle = get_remote_llm_deployment(deployment_name)
+                else:
+                    llm_handle = get_vllm_deployment(deployment_name)
+
                 spawned_id = await self._start_agent(
-                    vllm_handle,
+                    llm_handle,
                     blueprint,
                     suspend_agents=suspend_agents,
                     expected_agent_id=agent_id,
                 )
                 logger.info(
-                    f"Spawned page-affinity agent {spawned_id} on {vllm_deployment_name} "
+                    f"Spawned page-affinity agent {spawned_id} on {deployment_name} "
                     f"(pages={len(blueprint.bound_pages)}, requirements={'set' if requirements else 'none'})"
                 )
                 return spawned_id
@@ -352,23 +357,23 @@ class AgentSystemDeployment:
             except ResourceExhausted as e:
                 # Handle resource exhaustion with strategy loop
                 logger.warning(
-                    f"ResourceExhausted for VLLM agent {agent_id}: {e}"
+                    f"ResourceExhausted for agent {agent_id} on {deployment_name}: {e}"
                 )
 
-                spawned_id = await self._handle_resource_exhausted_vllm(
+                spawned_id = await self._handle_resource_exhausted_llm(
                     blueprint=blueprint,
-                    vllm_handle=vllm_handle,
+                    llm_handle=llm_handle,
                     soft_affinity=soft_affinity,
                     suspend_agents=suspend_agents,
                 )
                 logger.info(
-                    f"Spawned VLLM agent {spawned_id} after handling ResourceExhausted"
+                    f"Spawned agent {spawned_id} after handling ResourceExhausted"
                 )
                 return spawned_id
 
             except Exception as e:
                 logger.error(
-                    f"Failed to spawn agent {agent_id} on VLLM deployment: {e}"
+                    f"Failed to spawn agent {agent_id} on deployment {deployment_name}: {e}"
                 )
                 raise
 
@@ -439,11 +444,12 @@ class AgentSystemDeployment:
         return agent_ids
 
     @serving.endpoint
-    async def stop_agent(self, agent_id: str) -> None:
+    async def stop_agent(self, agent_id: str, reason: str = "stop_requested") -> None:
         """Stop an agent.
 
         Args:
             agent_id: Agent identifier
+            reason: Reason for stopping the agent
         """
         replica_id = await self.get_agent_location(agent_id)
         if not replica_id:
@@ -454,7 +460,7 @@ class AgentSystemDeployment:
             logger.warning(f"Deployment name not found for {replica_id}")
             return
         handle = serving.get_deployment(self.app_name, deployment_name)
-        await handle.stop_agent(agent_id)
+        await handle.stop_agent(agent_id, reason=reason)
         logger.info(f"Stopped agent {agent_id} on {deployment_name}")
 
     # === Agent Registration ===
@@ -1017,25 +1023,22 @@ class AgentSystemDeployment:
             f"Failed to spawn agent {agent_id} after {self.resource_exhausted_config.max_retries} retries"
         )
 
-    async def _handle_resource_exhausted_vllm(
+    async def _handle_resource_exhausted_llm(
         self,
         blueprint: AgentBlueprint,
-        vllm_handle: serving.DeploymentHandle,
+        llm_handle: serving.DeploymentHandle,
         soft_affinity: bool,
         suspend_agents: bool,
     ) -> str:
-        """Handle ResourceExhausted error for VLLM agent spawning.
+        """Handle ResourceExhausted error for LLM-backed agent spawning.
 
         Tries strategies in configured order:
         - SOFT_CONSTRAINT: Allow spawning without all pages (will page fault)
         - SUSPEND_AGENTS: Enable agent suspension to free resources
-        - RETRY_LATER: Wait and retry
 
         Args:
             blueprint: Agent blueprint (agent_id already in kwargs)
-            requirements: LLM deployment requirements
-            vllm_handle: Handle to VLLMDeployment
-            vllm_deployment_name: Name of VLLM deployment
+            llm_handle: Handle to the LLM deployment (vLLM or remote)
             soft_affinity: Current soft_affinity setting
             suspend_agents: Current suspend_agents setting
 
@@ -1055,7 +1058,7 @@ class AgentSystemDeployment:
 
         strategies = self.resource_exhausted_config.vllm_strategy_order
         logger.info(
-            f"ResourceExhausted for VLLM agent {agent_id}, trying {len(strategies)} strategies: "
+            f"ResourceExhausted for LLM agent {agent_id}, trying {len(strategies)} strategies: "
             f"{[s.value for s in strategies]}"
         )
 
@@ -1075,7 +1078,7 @@ class AgentSystemDeployment:
                         f"SOFT_CONSTRAINT strategy: Retrying agent {agent_id} with soft_affinity=True"
                     )
                     spawned_id = await self._start_agent(
-                        vllm_handle,
+                        llm_handle,
                         blueprint,
                         suspend_agents=suspend_agents,
                     )
@@ -1094,7 +1097,7 @@ class AgentSystemDeployment:
                         f"SUSPEND_AGENTS strategy: Retrying agent {agent_id} with suspend_agents=True"
                     )
                     spawned_id = await self._start_agent(
-                        vllm_handle,
+                        llm_handle,
                         blueprint,
                         suspend_agents=True,  # Enable suspension
                         expected_agent_id=agent_id,
@@ -1112,7 +1115,7 @@ class AgentSystemDeployment:
 
                 elif strategy == ResourceExhaustedStrategy.SCALE_DEPLOYMENT:
                     logger.warning(
-                        "SCALE_DEPLOYMENT strategy is not applicable for VLLM agents "
+                        "SCALE_DEPLOYMENT strategy is not applicable for LLM agents "
                         "(page affinity prevents simple scaling)"
                     )
                     continue
@@ -1137,7 +1140,7 @@ class AgentSystemDeployment:
                 continue
 
         # All strategies failed
-        error_msg = f"All {len(strategies)} strategies failed for VLLM agent {agent_id}"
+        error_msg = f"All {len(strategies)} strategies failed for LLM agent {agent_id}"
         logger.error(error_msg)
         raise ResourceExhausted(error_msg)
 

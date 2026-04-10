@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import Any, Type, TYPE_CHECKING
 
 from .distributed import get_polymathera
 from .distributed.state_management import SharedState, StateManager
@@ -279,13 +279,18 @@ class PolymatheraCluster:
 
 
 
-def _get_deployment_by_name(name_attr: str, app_name: str | None = None) -> serving.DeploymentHandle:
+def _get_deployment_by_name(
+    name_attr: str,
+    app_name: str | None = None,
+    deployment_class: Type[Any] | None = None,
+) -> serving.DeploymentHandle:
     """Get agent system deployment via serving."""
     try:
         names = get_deployment_names()
         handle = serving.get_deployment(
             app_name or serving.get_my_app_name(),
-            getattr(names, name_attr)
+            getattr(names, name_attr),
+            deployment_class=deployment_class,
         )
         logger.debug(f"Connected to {name_attr} deployment: {getattr(names, name_attr)}")
         return handle
@@ -296,32 +301,38 @@ def _get_deployment_by_name(name_attr: str, app_name: str | None = None) -> serv
 
 def get_agent_system(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get agent system deployment via serving."""
-    return _get_deployment_by_name("agent_system", app_name)
+    from .agents.system import AgentSystemDeployment
+    return _get_deployment_by_name("agent_system", app_name, deployment_class=AgentSystemDeployment)
 
 
 def get_llm_cluster(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get LLM deployment via serving."""
-    return _get_deployment_by_name("llm_cluster", app_name)
+    from .cluster.cluster import LLMCluster
+    return _get_deployment_by_name("llm_cluster", app_name, deployment_class=LLMCluster)
 
 
 def get_tool_manager(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get tool manager deployment via serving."""
-    return _get_deployment_by_name("tool_manager", app_name)
+    from .agents.tools import ToolManagerDeployment
+    return _get_deployment_by_name("tool_manager", app_name, deployment_class=ToolManagerDeployment)
 
 
 def get_vcm(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get VCM deployment via serving."""
-    return _get_deployment_by_name("vcm", app_name)
+    from .vcm.manager import VirtualContextManager
+    return _get_deployment_by_name("vcm", app_name, deployment_class=VirtualContextManager)
 
 
 def get_standalone_agents(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get standalone agents deployment via serving."""
-    return _get_deployment_by_name("standalone_agents", app_name)
+    from .agents.standalone import StandaloneAgentDeployment
+    return _get_deployment_by_name("standalone_agents", app_name, deployment_class=StandaloneAgentDeployment)
 
 
 def get_session_manager(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get session manager deployment via serving."""
-    return _get_deployment_by_name("session_manager", app_name)
+    from .agents.sessions import SessionManagerDeployment
+    return _get_deployment_by_name("session_manager", app_name, deployment_class=SessionManagerDeployment)
 
 
 def get_vllm_deployment(deployment_name: str, app_name: str | None = None) -> serving.DeploymentHandle:
@@ -338,6 +349,23 @@ def get_vllm_deployment(deployment_name: str, app_name: str | None = None) -> se
         return handle
     except Exception as e:
         logger.error(f"VLLM deployment '{deployment_name}' not found: {e}")
+        raise e
+
+
+def get_remote_llm_deployment(deployment_name: str, app_name: str | None = None) -> serving.DeploymentHandle:
+    """Get specific remote LLM deployment (Anthropic, OpenRouter, etc.) via serving."""
+    from .cluster.remote_deployment import RemoteLLMDeployment
+
+    try:
+        handle = serving.get_deployment(
+            app_name or serving.get_my_app_name(),
+            deployment_name,
+            deployment_class=RemoteLLMDeployment,
+        )
+        logger.info(f"Connected to remote LLM deployment: {deployment_name}")
+        return handle
+    except Exception as e:
+        logger.error(f"Remote LLM deployment '{deployment_name}' not found: {e}")
         raise e
 
 

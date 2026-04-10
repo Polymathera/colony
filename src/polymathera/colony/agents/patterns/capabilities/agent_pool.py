@@ -15,7 +15,7 @@ Usage:
     self.add_capability(pool_cap)
 
     # ActionPolicy can now use these actions:
-    # - create_agent(agent_type, capabilities, bound_pages, metadata, role)
+    # - create_agent(agent_type, capabilities, bound_pages, metadata, label, **agent_kwargs)
     # - get_agent_status(agent_ids, filter_state)
     # - assign_work(agent_id, work_unit, priority)
     # - get_work_results(agent_ids, result_type)
@@ -130,9 +130,10 @@ class AgentPoolCapability(AgentCapability):
         metadata: AgentMetadata | None = None,
         resource_requirements: AgentResourceRequirements | None = None,
         requirements: LLMClientRequirements | None = None,
-        role: str | None = None,
+        label: str | None = None,
         soft_affinity: bool = True,
         suspend_agents: bool = True,
+        **agent_kwargs,
     ) -> dict[str, Any]:
         """Spawn a new child agent in the pool.
 
@@ -150,14 +151,17 @@ class AgentPoolCapability(AgentCapability):
             metadata: Passed to child agent's metadata
             resource_requirements: CPU/memory/GPU requirements for the child agent
             requirements: LLM client requirements for the child agent
-            role: Role identifier for tracking (e.g., "analyzer", "synthesizer")
+            label: Tracking label for the child agent (e.g., "analyzer_page123").
+                Used as key in ``self.agent.child_agents[label]``.
             soft_affinity: Whether to use soft affinity for routing
             suspend_agents: Whether to suspend existing agents if resources are constrained
+            **agent_kwargs: Additional kwargs forwarded to ``Agent.bind()``.
+                Use for agent subclass fields (e.g., ``role=HypothesisRole.PROPOSER``).
 
         Returns:
             Dict with:
             - agent_id: Created agent's ID
-            - role: Role if specified
+            - label: Label if specified
             - created: Whether creation succeeded
         """
         try:
@@ -181,6 +185,7 @@ class AgentPoolCapability(AgentCapability):
                 "agent_type": agent_type,
                 "bound_pages": bound_pages or [],
                 "metadata": metadata,
+                **agent_kwargs,
             }
             if capability_blueprints:
                 bind_kwargs["capability_blueprints"] = capability_blueprints
@@ -200,9 +205,9 @@ class AgentPoolCapability(AgentCapability):
             self._agent_handles[agent_id] = handle
             self._agent_results[agent_id] = []
 
-            # Track role if provided
-            if role:
-                self.agent.child_agents[role] = agent_id
+            # Track by label if provided
+            if label:
+                self.agent.child_agents[label] = agent_id
 
             logger.info(
                 f"AgentPoolCapability: created agent {agent_id} "
@@ -211,7 +216,7 @@ class AgentPoolCapability(AgentCapability):
 
             return {
                 "agent_id": agent_id,
-                "role": role,
+                "label": label,
                 "created": True,
             }
 
@@ -219,7 +224,7 @@ class AgentPoolCapability(AgentCapability):
             logger.error(f"AgentPoolCapability: failed to create agent: {e}")
             return {
                 "agent_id": None,
-                "role": role,
+                "label": label,
                 "created": False,
                 "error": str(e),
             }

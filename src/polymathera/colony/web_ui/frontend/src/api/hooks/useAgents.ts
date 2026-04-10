@@ -24,6 +24,14 @@ export function useAgentHierarchy() {
   });
 }
 
+export function useAgentHistory(agentId: string | null) {
+  return useQuery({
+    queryKey: ["agents", agentId, "history"],
+    queryFn: () => apiFetch<Record<string, unknown>>(`/agents/${agentId}/history`),
+    enabled: !!agentId,
+  });
+}
+
 export function useSystemStats() {
   return useQuery({
     queryKey: ["agents", "stats"],

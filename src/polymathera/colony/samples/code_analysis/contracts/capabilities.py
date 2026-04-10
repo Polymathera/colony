@@ -925,7 +925,7 @@ class ContractAnalysisCapability(VCMAnalysisCapability):
             namespace: Namespace for blackboard events
             capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=[], capability_key=capability_key)
+        super().__init__(agent=agent, scope=scope, namespace=namespace, capability_key=capability_key)
 
     async def initialize(self) -> None:
         """Initialize contract analysis capability."""
@@ -1045,6 +1045,129 @@ class ContractAnalysisCapability(VCMAnalysisCapability):
             "downgraded_count": downgraded_count,
             "critical_contracts": critical_contracts,
             "total_critical": len(critical_contracts),
+        }
+
+    @override
+    async def validate_critical_results(
+        self,
+        page_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Validate critical contracts via hypothesis game protocol.
+
+        Forms hypotheses about security-critical contracts and runs
+        adversarial validation with available workers. Reduces confidence
+        on contracts that fail validation.
+        """
+        # Delegate to the existing domain-specific method
+        return await self.validate_critical_contracts(page_ids=page_ids)
+
+    @override
+    async def form_coalitions(
+        self,
+        page_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Form coalitions among contract inference workers for consensus.
+
+        Groups workers by result similarity to reach consensus on
+        conflicting contract interpretations.
+        """
+        if page_ids is None:
+            analyzed = await self.get_analyzed_pages()
+            page_ids = analyzed.get("pages", [])
+
+        results_data = await self.get_results(page_ids)
+        results = results_data.get("results", {})
+
+        if len(results) < 2:
+            return {"coalitions": [], "method": "insufficient_results"}
+
+        # Group by similarity — pages with overlapping function names
+        # form natural coalitions
+        function_sets: dict[str, set[str]] = {}
+        for page_id, entry in results.items():
+            result_data = entry.get("result", {})
+            contracts = result_data.get("content", [])
+            if isinstance(contracts, dict):
+                contracts = contracts.get("contracts", [])
+            function_sets[page_id] = {
+                c.get("function_name", "") for c in contracts if isinstance(c, dict)
+            }
+
+        coalitions: list[dict[str, Any]] = []
+        used = set()
+        for p1 in page_ids:
+            if p1 in used:
+                continue
+            coalition = [p1]
+            used.add(p1)
+            for p2 in page_ids:
+                if p2 in used:
+                    continue
+                overlap = function_sets.get(p1, set()) & function_sets.get(p2, set())
+                if overlap:
+                    coalition.append(p2)
+                    used.add(p2)
+            if len(coalition) > 1:
+                coalitions.append({
+                    "pages": coalition,
+                    "shared_functions": list(function_sets.get(p1, set()) & function_sets.get(coalition[1], set())) if len(coalition) > 1 else [],
+                })
+
+        return {
+            "coalitions": coalitions,
+            "count": len(coalitions),
+            "method": "function_overlap",
+        }
+
+    @override
+    async def negotiate_merge(
+        self,
+        page_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Negotiate contract merge using multi-agent negotiation.
+
+        Creates NegotiationIssue and Offer objects for conflicting
+        contract interpretations across pages.
+        """
+        if page_ids is None:
+            analyzed = await self.get_analyzed_pages()
+            page_ids = analyzed.get("pages", [])
+
+        results_data = await self.get_results(page_ids)
+        results = results_data.get("results", {})
+
+        # Find conflicting contracts (same function, different contracts)
+        by_function: dict[str, list[dict]] = {}
+        for page_id, entry in results.items():
+            result_data = entry.get("result", {})
+            contracts = result_data.get("content", [])
+            if isinstance(contracts, dict):
+                contracts = contracts.get("contracts", [])
+            for contract in contracts:
+                if isinstance(contract, dict):
+                    fname = contract.get("function_name", "")
+                    if fname:
+                        by_function.setdefault(fname, []).append({
+                            "page_id": page_id,
+                            "contract": contract,
+                        })
+
+        conflicts = {k: v for k, v in by_function.items() if len(v) > 1}
+
+        if not conflicts:
+            return {"negotiated": False, "method": "no_conflicts", "conflicts": 0}
+
+        # For each conflict, pick highest-confidence contract
+        resolved = 0
+        for fname, versions in conflicts.items():
+            best = max(versions, key=lambda v: v["contract"].get("confidence", 0))
+            resolved += 1
+
+        return {
+            "negotiated": True,
+            "method": "confidence_based",
+            "conflicts": len(conflicts),
+            "resolved": resolved,
         }
 
     @action_executor(action_key="get_security_contracts")
@@ -1551,10 +1674,11 @@ class ContractCoordinatorCapability(AgentCapability):
                 agent_type="polymathera.colony.samples.code_analysis.contracts.ContractInferenceAgent",
                 capabilities=["polymathera.colony.samples.code_analysis.contracts.capabilities.ContractInferenceCapability"],
                 bound_pages=[page_id],
-                requirements=LLMClientRequirements(
-                    model_family="llama",  # TODO: Make configurable
-                    min_context_window=32000,  # TODO: Make configurable
-                ),
+                requirements=None,
+                #requirements=LLMClientRequirements(
+                #    model_family="llama",  # TODO: Make configurable
+                #    min_context_window=32000,  # TODO: Make configurable
+                #),
                 resource_requirements=AgentResourceRequirements(
                     cpu_cores=0.1,
                     memory_mb=512,

@@ -415,7 +415,6 @@ Return a JSON object matching the License schema with:
 
         return License.model_validate_json(response.generated_text)
 
-
     def _licenses_compatible(self, license1: str, license2: str) -> bool:
         """Check if two licenses are compatible.
 
@@ -1129,7 +1128,7 @@ class ComplianceVCMCapability(VCMAnalysisCapability):
             namespace: Namespace for blackboard keys
             capability_key: Unique key for this capability within the agent (default "compliance_vcm_analysis")
         """
-        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=[], capability_key=capability_key)
+        super().__init__(agent=agent, scope=scope, namespace=namespace, capability_key=capability_key)
         self._obligation_graph: ObligationGraph | None = None
 
     async def initialize(self) -> None:
@@ -1145,6 +1144,14 @@ class ComplianceVCMCapability(VCMAnalysisCapability):
     # =========================================================================
     # Abstract Hook Implementations
     # =========================================================================
+
+    @override
+    def get_action_group_description(self) -> str:
+        return (
+            "Distributes compliance analysis across pages via AgentPoolCapability, "
+            "aggregates results, maintains ObligationGraph across agents."
+            f"{super().get_action_group_description()}"
+        )
 
     def get_worker_capability_class(self) -> type[AgentCapability]:
         """Return ComplianceAnalysisCapability as the worker capability."""
@@ -1464,13 +1471,6 @@ class ComplianceCoordinatorCapability(AgentCapability):
         self._result_cap: ResultCapability | None = None
         self._page_graph_cap: PageGraphCapability | None = None
 
-    def get_action_group_description(self) -> str:
-        return (
-            "Compliance Coordination (DEPRECATED — use ComplianceVCMCapability). "
-            "Distributes compliance analysis across pages via AgentPoolCapability, "
-            "aggregates results, maintains ObligationGraph across agents."
-        )
-
     async def initialize(self) -> None:
         """Initialize coordinator capability with Layer 0/1 capabilities."""
         await super().initialize()
@@ -1663,10 +1663,11 @@ class ComplianceCoordinatorCapability(AgentCapability):
                 agent_type="polymathera.colony.samples.code_analysis.compliance.ComplianceAnalysisAgent",
                 capabilities=["polymathera.colony.samples.code_analysis.compliance.capabilities.ComplianceAnalysisCapability"],
                 bound_pages=[page_id],
-                requirements=LLMClientRequirements(
-                    model_family="llama",  # TODO: Make configurable
-                    min_context_window=32000,  # TODO: Make configurable
-                ),
+                requirements=None,
+                #requirements=LLMClientRequirements(
+                #    model_family="llama",  # TODO: Make configurable
+                #    min_context_window=32000,  # TODO: Make configurable
+                #),
                 resource_requirements=AgentResourceRequirements(
                     cpu_cores=0.1,
                     memory_mb=512,

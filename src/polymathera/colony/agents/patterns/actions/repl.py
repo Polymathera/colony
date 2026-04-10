@@ -33,6 +33,7 @@ import ast
 import asyncio
 import builtins
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 from overrides import override
@@ -259,6 +260,29 @@ class PolicyPythonREPL(PolicyREPL):
     def backing_stores(self) -> dict[str, BackingStore]:
         """Get available backing stores."""
         return self._backing_stores
+
+    @staticmethod
+    def _format_exec_error(exc: BaseException) -> str:
+        """Format an execution error with the relevant traceback lines.
+
+        Includes only frames from the generated code (``<ipython-input-*>``
+        or ``<string>``), not IPython internals, so the LLM sees exactly
+        which line of its code caused the error.
+        """
+        tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        # Filter to user-code frames + the final exception line
+        relevant: list[str] = []
+        for line in tb_lines:
+            if "<ipython-input" in line or "File \"<string>\"" in line:
+                relevant.append(line.rstrip())
+                # The next line is the source code — grab it too
+            elif relevant and line.startswith("    "):
+                relevant.append(line.rstrip())
+        # Always include the exception itself (last line)
+        exc_line = f"{type(exc).__name__}: {exc}"
+        if relevant:
+            return "\n".join(relevant) + "\n" + exc_line
+        return exc_line
 
     # =========================================================================
     # IPython Shell Setup
@@ -719,7 +743,7 @@ class PolicyPythonREPL(PolicyREPL):
             return {
                 "success": exec_result.success,
                 "result": exec_result.result,
-                "error": f"{type(exec_result.error_in_exec).__name__}: {exec_result.error_in_exec}" if exec_result.error_in_exec else None,
+                "error": self._format_exec_error(exec_result.error_in_exec) if exec_result.error_in_exec else None,
                 "new_names": new_names,
                 "pending_actions": list(self._pending_actions),
             }

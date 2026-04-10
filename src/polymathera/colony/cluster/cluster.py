@@ -168,7 +168,8 @@ class LLMCluster:
         await self._discover_deployment_handles()
 
         logger.info(
-            f"LLMCluster handle discovery complete: {len(self.vllm_deployment_handles)} VLLM deployments, "
+            f"LLMCluster handle discovery complete: "
+            f"{len(self.vllm_deployment_handles)} vLLM, "
             f"{len(self.remote_deployment_handles)} remote deployments"
         )
 
@@ -245,14 +246,16 @@ class LLMCluster:
         )
 
     async def _discover_deployment_handles(self) -> None:
-        """Discover VLLM and remote deployment handles and initialize state managers.
+        """Discover all LLM deployment handles and initialize state managers.
 
         Called by:
         - deploy() when top_level=True (after manual deployment)
-        - initialize() when top_level=False (after automatic deployment)
+        - on_ready() when top_level=False (after automatic deployment)
         """
         # NOTE: Imported here (not at module level) to break circular import chain
-        from ..system import get_embedding_deployment, get_vllm_deployment
+        from ..system import get_embedding_deployment, get_vllm_deployment, get_remote_llm_deployment
+        from ..utils.retry import create_retry_with_logging
+
         # Get deployment handles for all vLLM deployments
         for dconf in self.config.vllm_deployments:
             deployment_name = dconf.get_deployment_name()
@@ -262,17 +265,13 @@ class LLMCluster:
             )
             logger.debug(f"Connected to VLLM deployment: {deployment_name}")
 
-        # Get deployment handles for all remote deployments
+        # Get deployment handles for all remote deployments.
         # Retry because remote deployments may still be starting up.
         # The retry decorator is applied to a local function (not a class method)
         # because tenacity captures _thread._local which Ray can't serialize.
-        from ..utils.retry import create_retry_with_logging
-
-        from .remote_deployment import RemoteLLMDeployment
-
         @create_retry_with_logging(logger, stop_attempts=30, wait_min=2, wait_max=2)
         async def _get_remote_handle(deployment_name: str):
-            return serving.get_deployment(self.app_name, deployment_name, deployment_class=RemoteLLMDeployment)
+            return get_remote_llm_deployment(deployment_name, self.app_name)
 
         for rconf in self.config.remote_deployments:
             deployment_name = rconf.get_deployment_name()
@@ -659,24 +658,25 @@ class LLMCluster:
     async def select_deployment(
         self,
         requirements: Any | None = None,  # LLMClientRequirements - avoid circular import
-    ) -> str:
-        """Select VLLM deployment based on requirements.
+    ) -> tuple[str, str]:
+        """Select an LLM deployment based on requirements.
 
         Public endpoint for other components (e.g., AgentSystem) to select
-        which VLLM deployment to use based on LLMClientRequirements.
+        which deployment to use based on LLMClientRequirements.
 
         Args:
             requirements: LLMClientRequirements or None
 
         Returns:
-            Deployment name to use
+            Tuple of (deployment_name, deployment_kind) where kind is
+            ``"vllm"`` or ``"remote"``.
 
         Raises:
             ValueError: If no deployment matches requirements
 
         Example:
             ```python
-            deployment_name = await llm_cluster.select_deployment(
+            deployment_name, deployment_kind = await llm_cluster.select_deployment(
                 LLMClientRequirements(
                     model_family="llama",
                     min_context_window=32000,
@@ -690,12 +690,19 @@ class LLMCluster:
 
         # Create router for deployment selection
         router = RequirementBasedRouter(
-            deployment_configs=self.config.vllm_deployments,
+            vllm_deployment_configs=self.config.vllm_deployments,
+            remote_deployment_configs=self.config.remote_deployments,
             enable_fallbacks=self.config.enable_fallbacks,
         )
 
         # Select deployment based on requirements
-        return router.select_deployment(requirements)
+        deployment_name = router.select_deployment(requirements)
+
+        # Determine kind from config
+        remote_names = {r.get_deployment_name() for r in self.config.remote_deployments}
+        kind = "remote" if deployment_name in remote_names else "vllm"
+
+        return deployment_name, kind
 
     def _select_deployment_for_request(self, request: InferenceRequest) -> str:
         """Select deployment for an inference request based on requirements.
@@ -713,7 +720,7 @@ class LLMCluster:
 
         # Create router for deployment selection (includes both vLLM and remote)
         router = RequirementBasedRouter(
-            deployment_configs=self.config.vllm_deployments,
+            vllm_deployment_configs=self.config.vllm_deployments,
             remote_deployment_configs=self.config.remote_deployments,
             enable_fallbacks=self.config.enable_fallbacks,
         )

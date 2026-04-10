@@ -141,6 +141,12 @@ class TracingCapability(AgentCapability):
             start_time=now_mono,
             start_wall=now_wall,
             status=SpanStatus.RUNNING,
+            input_summary={
+                "agent_type": self.agent.agent_type,
+                "capability_names": self.agent.get_capability_names(),
+                "parent_agent_id": getattr(self.agent.metadata, "parent_agent_id", None),
+                "bound_pages": list(self.agent.bound_pages) if hasattr(self.agent, "bound_pages") else [],
+            },
         )
         self._buffer.append(self._agent_span)
 
@@ -312,13 +318,14 @@ class TracingCapability(AgentCapability):
     def _enrich_span(self, span: Span, kind: SpanKind, ctx: HookContext, result: Any) -> None:
         """Enrich span with kind-specific data (tokens, page IDs, etc.)."""
         if kind == SpanKind.INFER:
-            # Extract token usage if available
-            usage = getattr(result, "usage", None)
-            if usage:
-                span.input_tokens = getattr(usage, "input_tokens", None)
-                span.output_tokens = getattr(usage, "output_tokens", None)
-                span.cache_read_tokens = getattr(usage, "cache_read_input_tokens", None)
-            span.model_name = getattr(result, "model", None)
+            # Extract token usage from InferenceResponse.metadata
+            # (where RemoteLLMDeployment / AnthropicLLMDeployment stores it)
+            meta = getattr(result, "metadata", None) or {}
+            if isinstance(meta, dict):
+                span.input_tokens = meta.get("input_tokens")
+                span.output_tokens = meta.get("output_tokens")
+                span.cache_read_tokens = meta.get("cache_read_tokens")
+                span.model_name = meta.get("model")
 
     async def _flush_loop(self) -> None:
         """Background task: periodically flush buffered spans to Kafka."""
@@ -345,14 +352,55 @@ class TracingCapability(AgentCapability):
         if batch:
             await self._producer.send_spans(batch)
 
+    def emit_lifecycle_event(
+        self,
+        event: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Emit a lifecycle span (stop, fail, cancel, idle_timeout, etc.).
+
+        Called from ``_run_agent_loop`` in the ``finally`` block so the
+        event appears in the trace timeline alongside action/infer spans.
+        """
+        if not self._config.enabled:
+            return
+        span = Span(
+            trace_id=self._resolve_trace_id(),
+            parent_span_id=self._agent_span.span_id if self._agent_span else None,
+            run_id=self._current_run_id,
+            agent_id=self.agent.agent_id,
+            name=f"lifecycle:{event}",
+            kind=SpanKind.LIFECYCLE,
+            status=SpanStatus.ERROR if event in ("error", "cancelled") else SpanStatus.OK,
+            output_summary=details or {},
+        )
+        span.finish()
+        self._buffer.append(span)
+
     async def shutdown(self) -> None:
-        """Stop the flush task and producer."""
+        """Stop the flush task and producer.
+
+        Finalizes the AGENT and RUN spans with the agent's actual state
+        (not hardcoded OK) so the dashboard shows the correct outcome.
+        """
+        from ..models import AgentState
         now = time.monotonic()
 
-        # Close the AGENT span
+        # Determine actual status from agent state
+        agent_state = getattr(self.agent, "state", None)
+        if agent_state == AgentState.FAILED:
+            final_status = SpanStatus.ERROR
+        else:
+            final_status = SpanStatus.OK
+        stop_reason = getattr(self.agent, "_stop_reason", "unknown")
+
+        # Close the AGENT span with actual status
         if self._agent_span and self._agent_span.end_time is None:
             self._agent_span.end_time = now
-            self._agent_span.status = SpanStatus.OK
+            self._agent_span.status = final_status
+            self._agent_span.output_summary = {"stop_reason": stop_reason}
+            if final_status == SpanStatus.ERROR:
+                self._agent_span.error = stop_reason
             self._buffer.append(self._agent_span)
 
         # Close the RUN span (re-emit with end_time; consumer deduplicates via ON CONFLICT)
@@ -368,7 +416,7 @@ class TracingCapability(AgentCapability):
                 start_time=self._start_mono,
                 start_wall=self._start_wall,
                 end_time=now,
-                status=SpanStatus.OK,
+                status=final_status,
             )
             self._buffer.append(run_close)
 

@@ -48,10 +48,13 @@ from overrides import override
 
 from ...models import AgentSuspensionState
 from ...base import AgentCapability, AgentMetadata
-from ...blackboard.protocol import VCMAnalysisProtocol
+from ...blackboard.protocol import AgentRunProtocol, VCMAnalysisProtocol
+from ...blackboard.types import BlackboardEvent
 from ...scopes import BlackboardScope, get_scope_prefix
 from ..actions import action_executor
+from ..events import event_handler, EventProcessingResult
 from ..scope import ScopeAwareResult, AnalysisScope
+from .batching import BatchingPolicy
 
 if TYPE_CHECKING:
     from ...base import Agent
@@ -84,7 +87,8 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         scope: BlackboardScope = BlackboardScope.COLONY,
         namespace: str = "vcm_analysis",
         capability_key: str = "vcm_analysis",
-        input_patterns: list[str] = [],
+        input_patterns: list[str] | None = None,
+        batching_policy: BatchingPolicy | None = None,
     ):
         """Initialize VCM analysis capability.
 
@@ -93,10 +97,23 @@ class VCMAnalysisCapability(AgentCapability, ABC):
             scope: Blackboard scope (defaults to COLONY)
             namespace: Namespace for this capability's blackboard entries (defaults to "vcm_analysis")
             capability_key: Unique key for this capability within the agent (default "vcm_analysis")
-            input_patterns: Optional list of input patterns this capability responds to (default empty)
+            input_patterns: Event patterns to subscribe to. Defaults to
+                AgentRunProtocol request + result patterns so the capability
+                receives analysis requests from ``AgentHandle.run_streamed()``
+                and child agent completion events.
+            batching_policy: Policy for cache-aware batch selection
         """
+        if input_patterns is None:
+            input_patterns = [
+                AgentRunProtocol.request_pattern(),
+                AgentRunProtocol.result_pattern(),
+            ]
         super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.blackboard_scope = scope
+        self._batching_policy = batching_policy
+
+        # Request tracking — maps request_id to request context
+        self._pending_request_id: str | None = None
 
         # Internal tracking (backed by blackboard for persistence)
         self._worker_ids: dict[str, str] = {}  # page_id -> worker_agent_id
@@ -149,19 +166,155 @@ class VCMAnalysisCapability(AgentCapability, ABC):
             logger.debug(f"VCMAnalysisCapability: restored state with {len(self._worker_ids)} workers")
 
     # =========================================================================
+    # EVENT HANDLERS — bridge AgentHandle.run_streamed() → LLM planner
+    # =========================================================================
+
+    @event_handler(pattern=AgentRunProtocol.request_pattern())
+    async def handle_analysis_request(
+        self,
+        event: BlackboardEvent,
+        repl: Any,
+    ) -> EventProcessingResult | None:
+        """Handle analysis request from ``AgentHandle.run_streamed()``.
+
+        Stores the request data as event context so the LLM planner
+        can see it and decide which action executors to call.
+        """
+        try:
+            request_id = AgentRunProtocol.parse_request_key(event.key)
+        except ValueError:
+            return None
+
+        request_data = event.value
+        if not isinstance(request_data, dict):
+            return None
+
+        self._pending_request_id = request_id
+        input_data = request_data.get("input", {})
+
+        logger.info(
+            f"VCMAnalysisCapability: received analysis request {request_id} "
+            f"(input keys: {list(input_data.keys())})"
+        )
+
+        # Store request context for the LLM planner to discover
+        return EventProcessingResult(
+            context_key="analysis_request",
+            context={
+                "request_id": request_id,
+                "input_data": input_data,
+            },
+        )
+        ### page_ids = input_data.get("page_ids", [])  # TODO: Use a symbolic selector for pages (e.g., a query or tag)
+        ### compliance_types_raw = input_data.get("compliance_types", [])
+        ### compliance_types = [ComplianceType(ct) for ct in compliance_types_raw] if compliance_types_raw else None
+        ### return EventProcessingResult(
+        ###     immediate_action=Action(
+        ###         action_id=f"start_analysis_{request_id}",
+        ###         agent_id=self.agent.agent_id,
+        ###         action_type="start_codebase_analysis",
+        ###         parameters={
+        ###             "page_ids": page_ids,
+        ###             "compliance_types": [ct.value for ct in (compliance_types or [])],
+        ###             "request_id": request_id
+        ###         }
+        ###     )
+        ### )
+
+    @event_handler(pattern=AgentRunProtocol.result_pattern())
+    async def handle_worker_result(
+        self,
+        event: BlackboardEvent,
+        repl: Any,
+    ) -> EventProcessingResult | None:
+        """Handle result from a child worker agent.
+
+        Stores the result via ``store_result`` and updates worker tracking.
+        When all workers complete, returns context so the LLM planner
+        can decide to synthesize/merge.
+        """
+        result_data = event.value
+        if not isinstance(result_data, dict):
+            return None
+
+        # Determine which worker produced this result
+        worker_agent_id = None
+        page_id = None
+        for wid, pid in self._worker_pages.items():
+            if event.key.startswith(f"result:run:"):  # TODO: Use a more robust check.
+                # Check if this result belongs to one of our workers
+                # by looking at the agent_id in the result metadata
+                result_agent_id = result_data.get("agent_id") or result_data.get("sender")
+                if result_agent_id == wid:
+                    worker_agent_id = wid
+                    page_id = pid
+                    break
+
+        if not page_id:
+            return None
+
+        logger.info(f"VCMAnalysisCapability: worker {worker_agent_id} completed page {page_id}")
+
+        # Store result
+        result_obj = result_data.get("result", result_data)
+        try:
+            await self.store_result(
+                page_id=page_id,
+                result=result_obj,
+                source_agent=worker_agent_id,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to store result for page {page_id}: {e}")
+
+        synth_cap = await self._get_synthesis_cap()
+        if synth_cap:
+            try:
+                if isinstance(result_obj, dict):
+                    scope_result = ScopeAwareResult(**result_obj)
+                elif isinstance(result_obj, ScopeAwareResult):
+                    scope_result = result_obj
+                else:
+                    scope_result = None
+                if scope_result:
+                    await synth_cap.add_result(
+                        result_id=page_id,
+                        result=scope_result,
+                    )
+            except Exception as e:
+                logger.debug(f"Incremental synthesis skipped for page {page_id}: {e}")
+
+        # Remove from active workers
+        if worker_agent_id and worker_agent_id in self._worker_pages:
+            del self._worker_pages[worker_agent_id]
+        if page_id and page_id in self._worker_ids:
+            del self._worker_ids[page_id]
+        await self._persist_state()
+
+        # Return context so LLM planner knows a result arrived
+        coverage = await self.get_analysis_coverage()
+        return EventProcessingResult(
+            context_key="worker_result",
+            context={
+                "completed_page_id": page_id,
+                "coverage": coverage,
+                "all_workers_done": len(self._worker_ids) == 0,
+            },
+        )
+
+    # =========================================================================
     # ABSTRACT HOOKS - Domain-specific subclasses implement
     # =========================================================================
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
         # TODO: Implement
-        logger.warning("serialize_suspension_state not implemented for ValidationCapability")
+        logger.warning("serialize_suspension_state not implemented for VCMAnalysisCapability")
         return state
 
     @override
     async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
         # TODO: Implement
-        logger.warning("deserialize_suspension_state not implemented for ValidationCapability")
+        logger.warning("deserialize_suspension_state not implemented for VCMAnalysisCapability")
         pass
 
     @abstractmethod
@@ -249,6 +402,28 @@ class VCMAnalysisCapability(AgentCapability, ABC):
             created_by=self.agent.agent_id,
         )
 
+    async def _get_page_graph_cap(self):
+        """Get PageGraphCapability, creating if needed."""
+        from .page_graph import PageGraphCapability
+
+        pg_cap = self.agent.get_capability_by_type(PageGraphCapability)
+        if not pg_cap:
+            pg_cap = PageGraphCapability(agent=self.agent, scope=BlackboardScope.COLONY)
+            await pg_cap.initialize()
+            self.agent.add_capability(pg_cap)
+        return pg_cap
+
+    async def _get_synthesis_cap(self):
+        """Get SynthesisCapability, creating if needed."""
+        from .synthesis import SynthesisCapability
+
+        synth_cap = self.agent.get_capability_by_type(SynthesisCapability)
+        if not synth_cap:
+            synth_cap = SynthesisCapability(agent=self.agent, scope=BlackboardScope.COLONY)
+            await synth_cap.initialize()
+            self.agent.add_capability(synth_cap)
+        return synth_cap
+
     async def _get_agent_pool_cap(self):
         """Get AgentPoolCapability, creating if needed."""
         from .agent_pool import AgentPoolCapability
@@ -332,7 +507,12 @@ class VCMAnalysisCapability(AgentCapability, ABC):
                     "scope_id": self.scope_id,
                 },
             ),
-            role=f"worker_{page_id}",
+            label=f"worker_{page_id}",
+            requirements=None,
+            #requirements=LLMClientRequirements(
+            #    model_family="llama",  # TODO: Make configurable
+            #    min_context_window=32000,  # TODO: Make configurable
+            #),
         )
 
         if result.get("created"):
@@ -371,6 +551,8 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         """Spawn multiple worker agents.
 
         LLM decides batch size, which pages, parallelism level.
+        If a ``BatchingPolicy`` was provided at construction, it is used
+        to select and order pages for cache-aware spawning.
 
         Args:
             page_ids: Pages to analyze
@@ -387,10 +569,23 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         spawned = []
         failed = []
 
-        # Limit parallelism if requested
+        # Use batching policy for cache-aware page selection if available
         pages_to_spawn = page_ids
+        if self._batching_policy:
+            try:
+                page_graph_cap = self._get_page_graph_cap()
+                if page_graph_cap:
+                    page_graph = await page_graph_cap.load_graph()
+                    pages_to_spawn = await self._batching_policy.create_batch(
+                        candidate_pages=page_ids,
+                        page_graph=page_graph,
+                        max_batch_size=max_parallel if max_parallel > 0 else len(page_ids),
+                    )
+            except Exception as e:
+                logger.warning(f"BatchingPolicy failed, using original page order: {e}")
+
         if max_parallel > 0:
-            pages_to_spawn = page_ids[:max_parallel]
+            pages_to_spawn = pages_to_spawn[:max_parallel]
 
         for page_id in pages_to_spawn:
             result = await self.spawn_worker(
@@ -935,11 +1130,31 @@ class VCMAnalysisCapability(AgentCapability, ABC):
             synthesis_goal=synthesis_goal,
         )
 
-        return {
+        synthesis_output = {
             "synthesis": result.get("synthesis"),
             "page_ids": page_ids,
             "synthesis_method": result.get("synthesis_method"),
         }
+
+        # Write final result to blackboard if there's a pending request,
+        # so AgentHandle.run_streamed() can receive it.
+        if self._pending_request_id:
+            try:
+                blackboard = await self.get_blackboard()
+                await blackboard.write(
+                    key=AgentRunProtocol.result_key(self._pending_request_id),
+                    value=synthesis_output,
+                    created_by=self.agent.agent_id,
+                )
+                logger.info(
+                    f"VCMAnalysisCapability: wrote final result for request "
+                    f"{self._pending_request_id}"
+                )
+                self._pending_request_id = None
+            except Exception as e:
+                logger.warning(f"Failed to write analysis result to blackboard: {e}")
+
+        return synthesis_output
 
     # =========================================================================
     # STATE QUERY PRIMITIVES
@@ -1347,3 +1562,127 @@ class VCMAnalysisCapability(AgentCapability, ABC):
             "reset": cleared,
             "page_ids": page_ids,
         }
+
+    # =========================================================================
+    # SCOPE COMPUTATION
+    # =========================================================================
+
+    def compute_unified_scope(
+        self,
+        results: list[ScopeAwareResult],
+    ) -> AnalysisScope:
+        """Compute a unified ``AnalysisScope`` from multiple worker results.
+
+        Default implementation: ``is_complete`` = all complete,
+        ``missing_context`` = union, ``confidence`` = average,
+        ``reasoning`` = concatenate.
+
+        Override in subclasses for domain-specific scope logic.
+        """
+        if not results:
+            return AnalysisScope()
+
+        scopes = [r.scope for r in results if r.scope]
+        if not scopes:
+            return AnalysisScope()
+
+        return AnalysisScope(
+            is_complete=all(s.is_complete for s in scopes),
+            missing_context=list(set(sum([s.missing_context for s in scopes], []))),
+            confidence=sum(s.confidence for s in scopes) / len(scopes),
+            reasoning=sum([s.reasoning for s in scopes], []),
+        )
+
+    # =========================================================================
+    # GAME PROTOCOL HOOKS — override in subclasses for domain-specific logic
+    # =========================================================================
+
+    @action_executor(action_key="validate_critical_results")
+    async def validate_critical_results(
+        self,
+        page_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Validate critical results via hypothesis game protocol.
+
+        Override in subclasses to implement domain-specific validation.
+        For example, ``ContractAnalysisCapability`` validates critical
+        contracts by forming hypotheses and running adversarial games.
+
+        Default: no-op (returns all results as-is).
+
+        Args:
+            page_ids: Pages whose results to validate (None = all analyzed)
+        """
+        return {"validated": True, "method": "no_validation"}
+
+    @action_executor(action_key="form_coalitions")
+    async def form_coalitions(
+        self,
+        page_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Form coalitions among workers for consensus-based merging.
+
+        Override in subclasses where consensus building is needed.
+        For example, ``ContractAnalysisCapability`` groups agents by
+        result similarity to reach consensus on conflicting contracts.
+
+        Default: no-op.
+
+        Args:
+            page_ids: Pages whose results to form coalitions over
+        """
+        return {"coalitions": [], "method": "no_coalitions"}
+
+    @action_executor(action_key="negotiate_merge")
+    async def negotiate_merge(
+        self,
+        page_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Negotiate result merging via multi-agent negotiation protocol.
+
+        Override in subclasses where negotiation is appropriate.
+        For example, ``ContractAnalysisCapability`` creates
+        ``NegotiationIssue`` and ``Offer`` objects for conflicting
+        contract interpretations.
+
+        Default: no-op (delegates to standard merge).
+
+        Args:
+            page_ids: Pages whose results to negotiate over
+        """
+        return {"negotiated": False, "method": "no_negotiation"}
+
+    @action_executor(action_key="detect_conflicts")
+    async def detect_conflicts(
+        self,
+        page_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Detect conflicts between results from different workers.
+
+        Override in subclasses for domain-specific conflict detection.
+        For example, ``IntentAnalysisCapability`` detects conflicting
+        intent interpretations for the same code segments.
+
+        Default: no-op (no conflicts detected).
+
+        Args:
+            page_ids: Pages whose results to check for conflicts
+        """
+        return {"conflicts": [], "count": 0, "method": "no_conflict_detection"}
+
+    @action_executor(action_key="resolve_conflicts")
+    async def resolve_conflicts(
+        self,
+        page_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve detected conflicts via consensus game or other protocol.
+
+        Override in subclasses. For example, ``IntentAnalysisCapability``
+        runs a consensus game to resolve high-severity intent conflicts.
+
+        Default: no-op.
+
+        Args:
+            page_ids: Pages whose conflicts to resolve
+        """
+        return {"resolved": 0, "method": "no_resolution"}

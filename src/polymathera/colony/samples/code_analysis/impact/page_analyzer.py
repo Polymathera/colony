@@ -182,8 +182,14 @@ class ChangeImpactAnalysisPolicy:
         )
 
         # Parse structured response
-        # TODO: Handle validation errors. LLMs are not perfect.
-        report = ChangeImpactReport.model_validate_json(response.generated_text)
+        try:
+            report = ChangeImpactReport.model_validate_json(response.generated_text)
+        except Exception as e:
+            logger.warning(
+                f"Failed to parse LLM response as ChangeImpactReport for page {page_id}: {e}. "
+                f"Response length: {len(response.generated_text)} chars"
+            )
+            report = ChangeImpactReport(source_page_id=page_id)
 
         # Set source page ID for tracking
         report.source_page_id = page_id
@@ -1064,7 +1070,8 @@ class ChangeImpactAnalysisAgent(HypothesisGameAgent):
         self,
         agent_id: str | None = None,
         page_id: str | None = None,
-        change_description: str | None = None
+        change_description: str | None = None,
+        **kwargs,
     ):
         """Initialize impact analysis agent for a SINGLE page.
 
@@ -1072,12 +1079,14 @@ class ChangeImpactAnalysisAgent(HypothesisGameAgent):
             agent_id: Unique agent ID
             page_id: Single VCM page ID to analyze
             change_description: Description of the change to analyze
+            **kwargs: Passed to HypothesisGameAgent (must include ``role``).
         """
         agent_id = agent_id or f"impact_agent_{uuid.uuid4().hex[:8]}"
         super().__init__(
             agent_id=agent_id,
             agent_type="impact_analysis",
-            bound_pages=[page_id] if page_id else []
+            bound_pages=[page_id] if page_id else [],
+            **kwargs,
         )
         # Store in metadata for capability to access
         if page_id:

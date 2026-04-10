@@ -28,7 +28,7 @@ from polymathera.colony.agents.base import Agent, AgentCapability, AgentMetadata
 from polymathera.colony.agents.patterns.actions import action_executor
 from polymathera.colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
 from polymathera.colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
-from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
+from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisRole
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
 from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, ErrorSignalProtocol, ImpactAnalysisProtocol
 from polymathera.colony.agents.patterns.capabilities import WorkingSetCapability, AgentPoolCapability
@@ -577,7 +577,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:
         """Handle child agent completion via event."""
-        agent_id = event.key.split(":")[0]
+        agent_id = event.agent_id
         page_id = None
         for pid, aid in self.page_agents.items():
             if aid == agent_id:
@@ -591,7 +591,11 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         result_data = event.value
 
         # Parse result
-        result = ScopeAwareResult[ChangeImpactReport](**result_data["result"])
+        try:
+            result = ScopeAwareResult[ChangeImpactReport](**result_data["result"])
+        except (KeyError, TypeError, Exception) as e:
+            logger.warning(f"Failed to parse result from child {agent_id}: {e}")
+            return None
         self.completed_results.append(result)
 
         # Incrementally synthesize
@@ -605,7 +609,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         await self._prefetch_for_cross_agent_feedback(result)
 
         # Remove from tracking
-        del self.page_agents[page_id]
+        self.page_agents.pop(page_id, None)
 
         # Update working set
         completed_pages = {page_id}
@@ -617,14 +621,14 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         if self.pending_pages and len(self.page_agents) < max_agents:
             await self.spawn_next_batch(self._current_changes[0].description if self._current_changes else "")
 
-        # Check if all done
+        # Check if all done — trigger finalize_analysis
         if not self.page_agents and not self.pending_pages:
             return EventProcessingResult(
                 immediate_action=Action(
-                    action_type=ActionType.CUSTOM,
-                    action_id=f"finalize_analysis_{self._pending_request_id}",
+                    action_type="finalize_analysis",
+                    action_id=f"finalize_{uuid.uuid4().hex[:8]}",
                     agent_id=self.agent.agent_id,
-                    parameters={"custom_type": "finalize_analysis"},
+                    parameters={},
                 )
             )
         return None
@@ -634,7 +638,12 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         self, event: BlackboardEvent, repl: PolicyREPL
     ) -> EventProcessingResult | None:
         """Handle child agent error via event."""
-        agent_id = event.key.split(":")[1]
+        try:
+            error_id = ErrorSignalProtocol.parse_error_key(event.key)
+        except ValueError:
+            return None
+
+        agent_id = event.agent_id or error_id
         page_id = None
         for pid, aid in self.page_agents.items():
             if aid == agent_id:
@@ -657,17 +666,17 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             logger.info(f"Retrying child {agent_id}")
             await self.blackboard.delete(ErrorSignalProtocol.error_key(agent_id))
         else:
-            # Max retries exceeded - remove from tracking
+            # Max retries exceeded — remove from tracking
             logger.error(f"Child {agent_id} ({page_id}) failed after {retry_count} retries, skipping")
-            del self.page_agents[page_id]
+            self.page_agents.pop(page_id, None)
 
             if not self.page_agents and not self.pending_pages:
                 return EventProcessingResult(
                     immediate_action=Action(
-                        action_type=ActionType.CUSTOM,
-                        action_id=f"finalize_analysis_{self._pending_request_id}",
+                        action_type="finalize_analysis",
+                        action_id=f"finalize_{uuid.uuid4().hex[:8]}",
                         agent_id=self.agent.agent_id,
-                        parameters={"custom_type": "finalize_analysis"}
+                        parameters={},
                     )
                 )
         return None
@@ -682,29 +691,17 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         page_ids: list[str],
         changes: list[CodeChange] | list[dict],
         change_description: str | None = None
-    ) -> ScopeAwareResult[ChangeImpactReport]:
-        """Analyze change impact using cache-aware agent scheduling.
-        
-        NOTE: This action executor runs the entire analysis in one call.
-        It is better for the action policy to break down large analyses
-        into smaller actions to allow the planner to intervene and adapt
-        execution to the context.
+    ) -> dict[str, Any]:
+        """Start change impact analysis by spawning worker agents.
 
-        Handles large codebases by spawning agents in batches.
-        Uses the _spawn_next_batch() pattern from CodeAnalysisCoordinatorV2:
-        1. Initialize working set from page graph (high-centrality pages first)
-        2. Spawn agents for pages with highest working set overlap
-        3. As agents complete, update working set and spawn next batch
-        4. Incrementally synthesize results as they arrive
-        5. Validate CRITICAL impacts using HypothesisGameProtocol
+        This is Phase 1 only — setup and spawn. Results are collected
+        asynchronously by the ``on_child_complete`` event handler, which
+        triggers ``finalize_analysis`` when all pages are done.
 
         Args:
             page_ids: ALL VCM page IDs to analyze
-            changes: Actual CodeChange objects describing what changed
-            change_description: Optional human-readable description (for logging)
-
-        Returns:
-            Unified impact report with multi-hop propagation
+            changes: CodeChange objects or dicts describing what changed
+            change_description: Optional human-readable description
         """
         self._current_changes = []
         for c in changes:
@@ -717,10 +714,10 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
                     logger.warning(f"Failed to parse change dict {c}: {e}")
             else:
                 logger.warning(f"Invalid change format (not CodeChange or dict): {c}")
-        change_description = change_description or self._summarize_changes(changes)
-        # TODO: Write this summary to agent memory to be used by the action policy
 
-        # Phase 1: Initialize working set from page graph
+        change_description = change_description or self._summarize_changes(changes)
+
+        # Initialize working set from page graph
         await self.working_set_cap.initialize_from_policy(
             available_pages=page_ids,
             run_context=RunContext(
@@ -728,86 +725,54 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             )
         )
 
-        # Phase 2: Get or compute dependency graph
+        # Store dependency graph for finalize_analysis
         # TODO: What the fuck is this method? Use the PageStorage.
-        dependency_graph = await self._get_or_compute_dependency_graph(page_ids)
+        self._dependency_graph = await self._get_or_compute_dependency_graph(page_ids)
 
-        # Phase 3: Set up pending pages and spawn first batch
+        # Set up pending pages and spawn first batch
         self.pending_pages = list(page_ids)
         self.completed_results = []
 
         # Spawn first batch based on working set overlap
         await self.spawn_next_batch(change_description)
 
-        # Phase 4: Process results as they arrive (event-driven)
-        # Continue until all pages processed
-        while self.pending_pages or self.page_agents:
-            # Collect results from current batch
-            batch_results = await self._collect_results()
+        return {
+            "status": "spawning",
+            "total_pages": len(page_ids),
+            "spawned": len(self.page_agents),
+            "pending": len(self.pending_pages),
+        }
 
-            for result in batch_results:
-                # Incrementally synthesize each result
-                if self.incremental_synthesizer:
-                    # TODO: This does not extract the synthesized result.
-                    result_page_id = self._get_page_id_from_result(result)
-                    await self.incremental_synthesizer.add_result(
-                        result_id=result_page_id,
-                        result=result
-                    )
-                self.completed_results.append(result)
+    @action_executor()
+    async def finalize_analysis(self) -> ScopeAwareResult[ChangeImpactReport]:
+        """Finalize impact analysis after all child agents have completed.
 
-                # Prefetch pages for cross-agent refinement
-                await self._prefetch_for_cross_agent_feedback(result)
-
-            # Stop completed agents
-            completed_agents = [
-                agent_id for page_id, agent_id in self.page_agents.items()
-                if any(
-                    self._get_page_id_from_result(r) == page_id 
-                    for r in batch_results
-                )
-            ]
-            for agent_id in completed_agents:
-                await self.agent.stop_child_agent(agent_id)
-
-            # Remove completed from tracking
-            for page_id in list(self.page_agents.keys()):
-                if self.page_agents[page_id] in completed_agents:
-                    del self.page_agents[page_id]
-
-            # Update working set with completed pages
-            completed_page_ids = {
-                self._get_page_id_from_result(r) for r in batch_results
-            }
-            if completed_page_ids and self.working_set_cap:
-                await self.working_set_cap.release_pages(page_ids=list(completed_page_ids))
-
-            # Spawn next batch if there are pending pages
-            if self.pending_pages and len(self.page_agents) < self.max_agents:
-                await self.spawn_next_batch(change_description)
-
-            # Break if nothing more to do
-            if not self.page_agents and not self.pending_pages:
-                break
-
-            # Small sleep to avoid busy-waiting
-            await asyncio.sleep(0.1)
-
-        # Phase 5: Perform multi-hop propagation using dependency graph
+        Triggered by ``on_child_complete`` when all pages are done.
+        Performs multi-hop propagation, CRITICAL impact validation,
+        and final synthesis.
+        """
+        # Multi-hop propagation using dependency graph
+        dependency_graph = getattr(self, "_dependency_graph", {})
         propagated_results = await self._propagate_impact_multi_hop(
             self.completed_results,
             dependency_graph
         )
 
-        # Phase 6: Validate CRITICAL impacts using HypothesisGameProtocol
+        # Validate CRITICAL impacts using HypothesisGameProtocol
         validated_results = await self._validate_critical_impacts(propagated_results)
 
-        # Phase 7: Use SynthesisCapability for final merge
-        # Reset synthesizer and add all validated results for proper synthesis
-        final_synthesizer = SynthesisCapability(
-            agent=self.agent,
-            scope=BlackboardScope.SESSION,
-        )
+        # Final synthesis via the agent's registered SynthesisCapability
+        from polymathera.colony.agents.patterns.capabilities.synthesis import SynthesisCapability
+        final_synthesizer = self.agent.get_capability_by_type(SynthesisCapability)
+        if not final_synthesizer:
+            logger.warning("SynthesisCapability not found on agent — skipping synthesis")
+            if validated_results:
+                unified_report = await self._merge_reports(validated_results)
+                unified_scope = self._compute_scope(validated_results)
+                cross_page_graph = await self._build_cross_page_impact_graph(validated_results)
+                unified_report.impact_graph = cross_page_graph
+                return ScopeAwareResult(content=unified_report, scope=unified_scope)
+            return ScopeAwareResult(content=ChangeImpactReport(), scope=AnalysisScope())
 
         for result in validated_results:
             result_page_id = self._get_page_id_from_result(result)
@@ -817,7 +782,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             )
 
         # Get synthesized result
-        synthesized = final_synthesizer.get_current_synthesis()
+        synthesized = await final_synthesizer.get_current_synthesis()
         if synthesized:
             unified_report = synthesized.content
             unified_scope = synthesized.scope
@@ -826,7 +791,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             unified_report = await self._merge_reports(validated_results)
             unified_scope = self._compute_scope(validated_results)
 
-        # Phase 8: Build global impact graph
+        # Build global impact graph
         cross_page_graph = await self._build_cross_page_impact_graph(validated_results)
         unified_report.impact_graph = cross_page_graph
 
@@ -893,12 +858,29 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             f"(pending: {len(self.pending_pages)}, working_set: {len(working_set)})"
         )
 
-        # Spawn agents
+        # Spawn agents and only remove successfully spawned pages from pending
         await self._spawn_page_agents(batch_pages, change_description)
 
-        # Remove from pending
+        # Track spawn failures to avoid infinite retry
+        if not hasattr(self, '_spawn_failures'):
+            self._spawn_failures: dict[str, int] = {}
+
         for page_id in batch_pages:
-            self.pending_pages.remove(page_id)
+            if page_id in self.page_agents:
+                self.pending_pages.remove(page_id)
+                self._spawn_failures.pop(page_id, None)
+            else:
+                self._spawn_failures[page_id] = self._spawn_failures.get(page_id, 0) + 1
+                if self._spawn_failures[page_id] >= 3:
+                    logger.error(
+                        f"Page {page_id} failed to spawn 3 times — removing from pending"
+                    )
+                    self.pending_pages.remove(page_id)
+                else:
+                    logger.warning(
+                        f"Page {page_id} was not spawned (attempt {self._spawn_failures[page_id]}) "
+                        f"— keeping in pending"
+                    )
 
     # ============================================================================
     # HELPER METHODS
@@ -1110,15 +1092,19 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
 
             result = await self.agent_pool_cap.create_agent(
                 agent_type="polymathera.colony.samples.code_analysis.impact.ChangeImpactAnalysisAgent",
-                capabilities=["ChangeImpactAnalysisCapability"],
+                capabilities=["polymathera.colony.samples.code_analysis.impact.page_analyzer.ChangeImpactAnalysisCapability"],
                 bound_pages=[page_id],  # Single page
-                role=role,
+                label=role,
+                role=HypothesisRole.PROPOSER,
+                requirements=None,
+                #requirements=LLMClientRequirements(
+                #    model_family="llama",  # TODO: Make configurable
+                #    min_context_window=32000,  # TODO: Make configurable
+                #),
                 metadata=AgentMetadata(
-                    page_id=page_id,
                     parent_agent_id=self.agent.agent_id,
-                    session_id=self.agent.metadata.session_id,
-                    run_id=self.agent.metadata.run_id,
                     parameters={
+                        "page_id": page_id,
                         "quality_threshold": self.agent.metadata.parameters.get("quality_threshold", 0.7),
                         "max_iterations": self.agent.metadata.parameters.get("max_iterations", 3),
                         "prefetch_depth": self.agent.metadata.parameters.get("prefetch_depth", 2),
@@ -1136,33 +1122,6 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
                 self.page_agents[page_id] = agent_id
             else:
                 logger.warning(f"Failed to create agent for page {page_id}: {result.get('error')}")
-
-    async def _collect_results(self) -> list[ScopeAwareResult[ChangeImpactReport]]:
-        """Collect local impact results from page agents.
-
-        Returns:
-            List of local impact reports (one per page)
-        """
-
-        # TODO: Replace with event-driven collection via on_child_complete()
-
-        results = []
-        timeout = 60.0
-        start_time = time.time()
-
-        while len(results) < len(self.page_agents) and time.time() - start_time < timeout:
-            messages = await self.agent.receive_messages(max_messages=5)  # TODO: What the fuck is this? This is not how we receive the results.
-
-            for message in messages:
-                msg_content = message.content
-                if msg_content.get("type") == "analysis_complete":
-                    result = ScopeAwareResult[ChangeImpactReport](**msg_content["result"])
-                    results.append(result)
-
-            if not messages:
-                await asyncio.sleep(0.1)
-
-        return results
 
     async def _propagate_impact_multi_hop(
         self,

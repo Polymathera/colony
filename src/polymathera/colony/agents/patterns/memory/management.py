@@ -746,9 +746,6 @@ class MemoryManagementAgent(Agent):
     _initializer: CollectiveMemoryInitializer | None = PrivateAttr(default=None)
     _maintainer: CollectiveMemoryMaintainer | None = PrivateAttr(default=None)
 
-    # Running state
-    _stopped: bool = PrivateAttr(default=False)
-
     async def initialize(self) -> None:
         """Initialize the memory management agent and its capabilities.
 
@@ -791,9 +788,7 @@ class MemoryManagementAgent(Agent):
         The agent runs until stop() is called. Background tasks in
         capabilities handle event processing.
         """
-        self.state = AgentState.RUNNING
-        self._running = True
-        self._stopped = False
+        await super().start()
 
         logger.info(f"MemoryManagementAgent started: {self.agent_id}")
 
@@ -803,21 +798,18 @@ class MemoryManagementAgent(Agent):
 
     @hookable
     @override
-    async def stop(self) -> None:
+    async def stop(self, reason: str = "completed") -> None:
         """Stop the memory management agent and shutdown capabilities."""
-        self._stopped = True
-        self._stop_requested = True
-
         # Shutdown capabilities (cancels background tasks)
         if self._recycler:
-            await self._recycler.shutdown()
+            await self._recycler.stop()
         if self._initializer:
-            await self._initializer.shutdown()
+            await self._initializer.stop()
+        if self._maintainer:
+            await self._maintainer.stop()
 
-        self.state = AgentState.STOPPED
-        self._running = False
-
-        logger.info(f"MemoryManagementAgent stopped: {self.agent_id}")
+        await super().stop(reason=reason)
+        logger.info(f"MemoryManagementAgent stopped: {self.agent_id} (reason={reason})")
 
     @hookable
     @override

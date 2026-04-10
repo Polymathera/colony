@@ -102,9 +102,20 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         """Spawn ClusterAnalyzer agents (strategy-specific)."""
         raise NotImplementedError
 
+    async def _get_critic_cap(self):
+        """Get CriticCapability, creating if needed."""
+        from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
+
+        critic_cap = self.agent.get_capability_by_type(CriticCapability)
+        if not critic_cap:
+            critic_cap = CriticCapability(agent=self.agent, scope=BlackboardScope.COLONY)
+            await critic_cap.initialize()
+            self.agent.add_capability(critic_cap)
+        return critic_cap
+
     @event_handler(pattern=AgentRunProtocol.result_pattern())
     async def on_child_complete(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult | None:
-        agent_id = event.key.split(":")[0]
+        agent_id = event.agent_id
         role = None
         for r, aid in self.child_agents.items():
             if aid == agent_id:
@@ -118,7 +129,14 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         result = event.value
 
         # Critique child work using CriticCapability
-        critique = await self.agent.critic_capability.critique_output( # TODO: Remove. Critiquing is now handled inside CriticCapability
+        from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
+
+        critic_cap: CriticCapability = await self._get_critic_cap()
+        if not critic_cap:
+            logger.warning("CriticCapability not found on agent — skipping critique")
+            self.cluster_analyses[role] = result
+            return None
+        critique = await critic_cap.critique_output(
             output=result,
             context=CritiqueContext(
                 producer_id=agent_id,
@@ -356,9 +374,9 @@ class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
         )
 
         try:
-            return json.loads(response.text)
+            return json.loads(response.generated_text)
         except json.JSONDecodeError:
-            return {"summary": response.text}
+            return {"summary": response.generated_text}
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
@@ -447,8 +465,6 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
                 # Create blueprint for this cluster
                 bp = ClusterAnalyzer.bind(
                     metadata=AgentMetadata(
-                        session_id=self.agent.metadata.session_id,
-                        run_id=self.agent.metadata.run_id,
                         parent_agent_id=self.agent.agent_id,
                         parameters={"cluster": cluster.model_dump()},
                     ),
@@ -512,7 +528,7 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
         job_quota = self.agent.metadata.parameters.get("job_quota", 50)  # Max pages in working set
 
         # Initialize working set manager
-        self.working_set_cap: WorkingSetCapability = await self.agent.get_capability_by_type(WorkingSetCapability)
+        self.working_set_cap: WorkingSetCapability = self.agent.get_capability_by_type(WorkingSetCapability)
 
         # Initialize agent pool capability for lifecycle management
         self.agent_pool_cap: AgentPoolCapability | None = self.agent.get_capability_by_type(AgentPoolCapability)
@@ -690,11 +706,9 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
 
             result = await self.agent_pool_cap.create_agent(
                 agent_type="polymathera.colony.samples.code_analysis.ClusterAnalyzerV2",
-                capabilities=["ClusterAnalyzerCapabilityV2"],
+                capabilities=["polymathera.colony.samples.code_analysis.basic.cluster_analyzer_v2.ClusterAnalyzerCapabilityV2"],
                 bound_pages=cluster.page_ids,
                 metadata=AgentMetadata(
-                    session_id=self.agent.metadata.session_id,
-                    run_id=self.agent.metadata.run_id,
                     parent_agent_id=self.agent.agent_id,
                     parameters={
                         "cluster": cluster.model_dump(),
@@ -702,7 +716,12 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
                         "cache_boost_factor": self.agent.metadata.parameters.get("cache_boost_factor", 1.5),
                     }
                 ),
-                role=role,
+                label=role,
+                requirements=None,
+                #requirements=LLMClientRequirements(
+                #    model_family="llama",  # TODO: Make configurable
+                #    min_context_window=32000,  # TODO: Make configurable
+                #),
             )
 
             if result.get("created"):

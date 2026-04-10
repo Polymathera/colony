@@ -24,6 +24,7 @@ class SpanKind(str, Enum):
     CHILD_SPAWN = "child_spawn"
     EVENT_PROCESS = "event_process"
     CAPABILITY = "capability"
+    LIFECYCLE = "lifecycle"
     CUSTOM = "custom"
 
 

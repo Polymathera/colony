@@ -24,6 +24,7 @@ from ..vcm.models import ContextPageId
 
 if TYPE_CHECKING:
     from .config import LLMDeploymentConfig
+    from .remote_config import RemoteLLMDeploymentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -716,7 +717,7 @@ class RequirementBasedRouter:
     Example:
         ```python
         router = RequirementBasedRouter(
-            deployment_configs=[llama_8b_config, llama_70b_config],
+            vllm_deployment_configs=[llama_8b_config, llama_70b_config],
             enable_fallbacks=True
         )
 
@@ -726,24 +727,24 @@ class RequirementBasedRouter:
 
     def __init__(
         self,
-        deployment_configs: list[LLMDeploymentConfig] | None = None,
-        remote_deployment_configs: list | None = None,
+        vllm_deployment_configs: list[LLMDeploymentConfig] | None = None,
+        remote_deployment_configs: list[RemoteLLMDeploymentConfig] | None = None,
         enable_fallbacks: bool = True,
     ):
         """Initialize requirement-based router.
 
         Args:
-            deployment_configs: List of vLLM deployment configurations
+            vllm_deployment_configs: List of vLLM deployment configurations
             remote_deployment_configs: List of remote deployment configurations
             enable_fallbacks: Whether to enable fallback routing if primary fails constraints
         """
-        self.deployment_configs = deployment_configs or []
+        self.vllm_deployment_configs = vllm_deployment_configs or []
         self.remote_deployment_configs = remote_deployment_configs or []
         self.enable_fallbacks = enable_fallbacks
 
-    def _get_all_configs(self) -> list:
+    def _get_all_configs(self) -> list[LLMDeploymentConfig | RemoteLLMDeploymentConfig]:
         """Get all deployment configs (vLLM + remote) as a flat list."""
-        return list(self.deployment_configs) + list(self.remote_deployment_configs)
+        return list(self.vllm_deployment_configs) + list(self.remote_deployment_configs)
 
     def select_deployment(
         self,
@@ -766,11 +767,11 @@ class RequirementBasedRouter:
             # No requirements, return first deployment
             if all_configs:
                 return all_configs[0].get_deployment_name()
-            raise ValueError("No deployments available")
+            raise ValueError("RequirementBasedRouter: No deployments available")
 
         # Filter by requirements
         candidates = []
-        for dconf in self.deployment_configs:
+        for dconf in self.vllm_deployment_configs:
             if self._matches_requirements(dconf, requirements):
                 candidates.append(dconf)
         for rconf in self.remote_deployment_configs:
@@ -786,7 +787,7 @@ class RequirementBasedRouter:
                 )
                 return all_configs[0].get_deployment_name()
             raise ValueError(
-                f"No deployment matches requirements: {requirements}. "
+                f"RequirementBasedRouter: No deployment matches requirements: {requirements}. "
                 f"Available: {[d.get_deployment_name() for d in all_configs]}"
             )
 

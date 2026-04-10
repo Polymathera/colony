@@ -80,6 +80,20 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
         """Initialize ClusterAnalyzerCapabilityV2."""
         await super().initialize()
 
+        parameters = self.agent.metadata.parameters or {}
+
+        # Get cluster — needed by query router below
+        cluster_data = parameters.get("cluster")
+        if not cluster_data:
+            raise ValueError("Missing cluster in metadata")
+        self.cluster = PageCluster(**cluster_data)
+
+        # Analysis state — initialized before query router which references page_keys
+        self.page_keys: dict[str, PageKey] = {}
+        self.local_analyses: dict[str, dict] = {}
+        self.query_results: list[dict] = []
+        self.cluster_summary: dict | None = None
+
         # Key generator and registry to be used by action executors
         self.key_registry = GlobalPageKeyRegistry(self.agent)
         await self.key_registry.initialize()
@@ -88,8 +102,7 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
         # Query generator to be used by action executors
         self.query_generator = DependencyQueryGenerator(max_queries=10)
 
-        parameters = self.agent.metadata.parameters or {}
-
+        # Query router — depends on self.cluster and self.page_keys
         self.query_router = await create_page_query_router2(
             agent=self,
             attention_policy_type=parameters.get("attention_policy_type", "hierarchical"),
@@ -97,25 +110,12 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
             top_n_pages_per_cluster=parameters.get("top_n_pages_per_cluster", 3),
             top_n_pages_overall=parameters.get("top_n_pages_overall", 10),
             top_n_pages=parameters.get("top_n_pages", 10),
-            cluster_id=self.cluster.cluster_id if self.cluster else None,
+            cluster_id=self.cluster.cluster_id,
             router_type=parameters.get("query_router_type", "hierarchical"),
-            page_keys=self.page_keys if self.page_keys else None,
+            page_keys=self.page_keys or None,
             working_set=parameters.get("working_set", set()),
             cache_boost_factor=parameters.get("cache_boost_factor", 1.5)
         )
-
-        # Get cluster
-        cluster_data = parameters.get("cluster")
-        if not cluster_data:
-            raise ValueError("Missing cluster in metadata")
-
-        self.cluster = PageCluster(**cluster_data)
-
-        # Analysis state
-        self.page_keys: dict[str, PageKey] = {}  # page_id → PageKey
-        self.local_analyses: dict[str, dict] = {}  # page_id → analysis
-        self.query_results: list[dict] = []  # Query results
-        self.cluster_summary: dict | None = None
 
         # Load configuration from metadata
         config_data = parameters.get("config", {})
@@ -348,7 +348,7 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
                             "top_pages": relevant_page_ids[:5] if len(relevant_page_ids) > 5 else relevant_page_ids,
                             "total_candidates": len(relevant_page_ids),
                         },
-                        "query_results_count": len(self.agent.query_results),
+                        "query_results_count": len(self.query_results),
                     },
                 },
                 metrics={"pages_found": len(relevant_pages)},
@@ -677,7 +677,7 @@ Output format (JSON):
         """Perform local analysis of single page."""
         prompt = self._build_local_analysis_prompt(page_id, str(page_key))
 
-        response: InferenceResponse = await self.infer(
+        response: InferenceResponse = await self.agent.infer(
             context_page_ids=[page_id],  # Only this page
             prompt=prompt,
             max_tokens=2000, # TODO: Make configurable

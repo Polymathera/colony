@@ -27,6 +27,7 @@ const KIND_COLORS: Record<string, string> = {
   child_spawn: "#a855f7",
   event_process: "#64748b",
   capability: "#14b8a6",
+  lifecycle: "#dc2626",
   custom: "#6b7280",
 };
 
@@ -42,6 +43,7 @@ const KIND_LABELS: Record<string, string> = {
   child_spawn: "CHILD",
   event_process: "EVT",
   capability: "CAP",
+  lifecycle: "LIFE",
   custom: "CUSTOM",
 };
 

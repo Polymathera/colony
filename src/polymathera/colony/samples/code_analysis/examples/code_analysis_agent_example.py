@@ -75,8 +75,6 @@ async def analyze_repository(
     logger.info("Spawning CodeAnalysisCoordinator...")
     coordinator_bp = CodeAnalysisCoordinator.bind(
         metadata=AgentMetadata(
-            session_id=session_id,
-            run_id=run_id,
             parameters={"repo_id": repo_id},
         ),
         bound_pages=[],  # Coordinator doesn't need pages

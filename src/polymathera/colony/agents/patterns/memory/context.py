@@ -505,7 +505,7 @@ class AgentContextEngine(AgentCapability):
         """
         cap = self.get_capability_by_scope(scope_id)
         if cap is None:
-            raise ValueError(f"Scope not found: {scope_id}")
+            raise ValueError(f"Scope not found: {scope_id}.\nAvailable scopes: {[c.scope_id for c in self._memory_capabilities]}")
 
         scope_info = await self._build_scope_info(cap)
         result = ScopeInspectionResult(

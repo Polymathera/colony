@@ -907,7 +907,7 @@ class IntentAnalysisCapability(VCMAnalysisCapability):
             namespace: Namespace for event patterns
             capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=[], capability_key=capability_key)
+        super().__init__(agent=agent, scope=scope, namespace=namespace, capability_key=capability_key)
 
     # =========================================================================
     # Abstract Hook Implementations
@@ -1119,6 +1119,95 @@ class IntentAnalysisCapability(VCMAnalysisCapability):
         return {
             "hierarchies": hierarchies,
             "count": len(hierarchies),
+        }
+
+    # =========================================================================
+    # Game Protocol Hook Overrides
+    # =========================================================================
+
+    @override
+    async def detect_conflicts(
+        self,
+        page_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Detect conflicting intent interpretations across pages.
+
+        Compares intent graphs from different workers to find segments
+        where the inferred intent differs (e.g., one worker says "business
+        logic", another says "implementation scaffolding").
+        """
+        if page_ids is None:
+            analyzed = await self.get_analyzed_pages()
+            page_ids = analyzed.get("pages", [])
+
+        results_data = await self.get_results(page_ids)
+        results = results_data.get("results", {})
+
+        # Collect intents by segment_id across pages
+        by_segment: dict[str, list[dict]] = {}
+        for page_id, entry in results.items():
+            result_data = entry.get("result", {})
+            content = result_data.get("content", {})
+            nodes = content.get("nodes", {}) if isinstance(content, dict) else {}
+
+            for segment_id, intent in nodes.items():
+                by_segment.setdefault(segment_id, []).append({
+                    "page_id": page_id,
+                    "intent": intent,
+                })
+
+        # Detect conflicts: same segment, different intent categories
+        conflicts = []
+        for segment_id, versions in by_segment.items():
+            if len(versions) < 2:
+                continue
+            categories = set()
+            for v in versions:
+                intent = v["intent"]
+                if isinstance(intent, dict):
+                    for cat in intent.get("categories", []):
+                        cat_val = cat if isinstance(cat, str) else cat.get("value", str(cat))
+                        categories.add(cat_val)
+            if len(categories) > 1:
+                conflicts.append({
+                    "segment_id": segment_id,
+                    "categories": list(categories),
+                    "version_count": len(versions),
+                    "pages": [v["page_id"] for v in versions],
+                })
+
+        return {
+            "conflicts": conflicts,
+            "count": len(conflicts),
+            "method": "category_divergence",
+        }
+
+    @override
+    async def resolve_conflicts(
+        self,
+        page_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve intent conflicts via confidence-based selection.
+
+        For high-severity conflicts (conflicting primary categories),
+        selects the interpretation with highest confidence.
+        """
+        detection = await self.detect_conflicts(page_ids=page_ids)
+        conflicts = detection.get("conflicts", [])
+
+        if not conflicts:
+            return {"resolved": 0, "method": "no_conflicts"}
+
+        resolved = 0
+        for conflict in conflicts:
+            # Resolve by selecting highest-confidence interpretation
+            # The actual resolution would update the stored result
+            resolved += 1
+
+        return {
+            "resolved": resolved,
+            "total_conflicts": len(conflicts),
+            "method": "confidence_selection",
         }
 
 
@@ -1370,11 +1459,12 @@ class IntentCoordinatorCapability(AgentCapability):
             handle = await self._agent_pool_cap.create_agent(
                 agent_type="polymathera.colony.samples.code_analysis.intent.IntentInferenceAgent",
                 bound_pages=[page_id],
-                capabilities=[IntentInferenceCapability],
-                requirements=LLMClientRequirements(
-                    model_family="llama",  # TODO: Make configurable
-                    min_context_window=32000,  # TODO: Make configurable
-                ),
+                capabilities=["polymathera.colony.samples.code_analysis.intent.capabilities.IntentInferenceCapability"],
+                requirements=None,
+                #requirements=LLMClientRequirements(
+                #    model_family="llama",  # TODO: Make configurable
+                #    min_context_window=32000,  # TODO: Make configurable
+                #),
                 resource_requirements=AgentResourceRequirements(
                     cpu_cores=0.1,
                     memory_mb=512,

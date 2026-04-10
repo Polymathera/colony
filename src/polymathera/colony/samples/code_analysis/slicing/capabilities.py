@@ -546,7 +546,7 @@ class SlicingAnalysisCapability(VCMAnalysisCapability):
             namespace: Namespace for blackboard events
             capability_key: Unique key for this capability within the agent
         """
-        super().__init__(agent=agent, scope=scope, namespace=namespace, input_patterns=[], capability_key=capability_key)
+        super().__init__(agent=agent, scope=scope, namespace=namespace, capability_key=capability_key)
         self._dependency_graph: dict[str, list[str]] = {}  # location -> dependent pages
 
     # =========================================================================
@@ -1021,11 +1021,12 @@ class SlicingCoordinatorCapability(AgentCapability):
             handle = await self._agent_pool_cap.create_agent(
                 agent_type="polymathera.colony.samples.code_analysis.slicing.ProgramSlicingAgent",
                 bound_pages=[page_id],
-                capabilities=[ProgramSlicingCapability],
-                requirements=LLMClientRequirements(
-                    model_family="llama",
-                    min_context_window=32000,
-                ),
+                capabilities=["polymathera.colony.samples.code_analysis.slicing.capabilities.ProgramSlicingCapability"],
+                requirements=None,
+                #requirements=LLMClientRequirements(
+                #    model_family="llama",  # TODO: Make configurable
+                #    min_context_window=32000,  # TODO: Make configurable
+                #),
                 resource_requirements=AgentResourceRequirements(
                     cpu_cores=0.1,
                     memory_mb=512,

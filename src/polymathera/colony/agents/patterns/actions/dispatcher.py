@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import traceback as traceback_mod
 import uuid
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -229,12 +230,14 @@ class MethodWrapperActionExecutor(ActionExecutor):
             # Validate output if schema available
             if self.output_schema and ret is not None:
                 try:
-                    # If return is not a dict, wrap it
-                    if not isinstance(ret, dict):
-                        validated = self.output_schema(value=ret)
-                    else:
+                    if isinstance(ret, self.output_schema):
+                        ret = ret.model_dump()
+                    elif isinstance(ret, dict):
                         validated = self.output_schema(**ret)
-                    ret = validated.model_dump()
+                        ret = validated.model_dump()
+                    elif isinstance(ret, BaseModel):
+                        ret = ret.model_dump()
+                    # else: leave ret as-is (primitive types)
                 except ValidationError as e:
                     logger.warning(f"Output validation failed for {self.action_key}: {e}")
 
@@ -370,11 +373,14 @@ class FunctionWrapperActionExecutor(ActionExecutor):
             # Validate output if schema available
             if self.output_schema and ret is not None:
                 try:
-                    if not isinstance(ret, dict):
-                        validated = self.output_schema(value=ret)
-                    else:
+                    if isinstance(ret, self.output_schema):
+                        ret = ret.model_dump()
+                    elif isinstance(ret, dict):
                         validated = self.output_schema(**ret)
-                    ret = validated.model_dump()
+                        ret = validated.model_dump()
+                    elif isinstance(ret, BaseModel):
+                        ret = ret.model_dump()
+                    # else: leave ret as-is (primitive types)
                 except ValidationError as e:
                     logger.warning(f"Output validation failed for {self.action_key}: {e}")
 
@@ -1118,7 +1124,16 @@ class ActionDispatcher:
             return await self._dispatch_action(action)
         except Exception as e:
             logger.exception(f"Failed to execute action {getattr(action, 'action_id', 'unknown')}")
-            result = ActionResult(success=False, completed=True, error=str(e))
+            # Capture traceback for observability — flows through to
+            # TracingCapability via ActionResult.model_dump() → output_summary.
+            tb_lines = traceback_mod.format_exception(type(e), e, e.__traceback__)
+            user_frames = [f for f in tb_lines if "site-packages" not in f]
+            result = ActionResult(
+                success=False,
+                completed=True,
+                error=f"{type(e).__name__}: {e}",
+                metadata={"traceback": "".join(user_frames[-5:])},
+            )
             action.status = ActionStatus.FAILED
             action.result = result
             return result
