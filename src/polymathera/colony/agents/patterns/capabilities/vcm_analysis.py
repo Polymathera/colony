@@ -241,7 +241,7 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         worker_agent_id = None
         page_id = None
         for wid, pid in self._worker_pages.items():
-            if event.key.startswith(f"result:run:"):  # TODO: Use a more robust check.
+            if event.key.startswith("result:run:"):  # TODO: Use a more robust check.
                 # Check if this result belongs to one of our workers
                 # by looking at the agent_id in the result metadata
                 result_agent_id = result_data.get("agent_id") or result_data.get("sender")
