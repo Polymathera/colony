@@ -6,6 +6,7 @@ state graphs for the dashboard's advanced trace analysis views.
 
 from __future__ import annotations
 
+import ast
 import difflib
 import hashlib
 import logging
@@ -98,6 +99,33 @@ def _fingerprint_prompt(prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Per-run() call line number extraction
+# ---------------------------------------------------------------------------
+
+
+_TRACED_CALL_NAMES = {"run", "signal_completion"}
+
+
+def _extract_traced_call_line_numbers(code: str) -> list[int]:
+    """Extract line numbers of traced calls (``run()``, ``signal_completion()``) via AST.
+
+    Returns line numbers in the order they appear in the source,
+    matching the sequential order of trace entries.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    line_numbers: list[int] = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in _TRACED_CALL_NAMES):
+            line_numbers.append(node.lineno)
+    return sorted(line_numbers)
+
+
+# ---------------------------------------------------------------------------
 # Span tree traversal
 # ---------------------------------------------------------------------------
 
@@ -118,10 +146,20 @@ def _find_child(
     parent_id: str,
     kind: str,
 ) -> dict[str, Any] | None:
-    """Find the first child span of a given kind under a parent."""
+    """Find the first span of a given kind under a parent (recursive).
+
+    Searches children, then grandchildren, etc. This handles the
+    case where INFER is nested under a child PLAN span rather than
+    being a direct child of the top-level PLAN span.
+    """
     for child in children_map.get(parent_id, []):
         if child.get("kind") == kind:
             return child
+    # Recurse into children (e.g., PLAN → PLAN → INFER)
+    for child in children_map.get(parent_id, []):
+        found = _find_child(children_map, child["span_id"], kind)
+        if found is not None:
+            return found
     return None
 
 
@@ -162,6 +200,20 @@ def _extract_iterations(
         prompt = input_summary.get("prompt", "")
         generated_code = output_summary.get("response", "")
 
+        # Extract per-run() call trace from ACTION span metadata
+        run_call_trace = None
+        if action_span:
+            action_metadata = action_output.get("metadata", {})
+            if isinstance(action_metadata, dict):
+                raw_trace = action_metadata.get("run_call_trace")
+                if raw_trace and isinstance(raw_trace, list):
+                    line_numbers = _extract_traced_call_line_numbers(generated_code)
+                    run_call_trace = []
+                    for i, entry in enumerate(raw_trace):
+                        enriched = dict(entry)
+                        enriched["line_number"] = line_numbers[i] if i < len(line_numbers) else None
+                        run_call_trace.append(enriched)
+
         iterations.append({
             "step_index": len(iterations),
             "agent_step_span_id": step_id,
@@ -176,6 +228,7 @@ def _extract_iterations(
             "output_tokens": infer_span.get("output_tokens"),
             "mode": _extract_mode(prompt),
             "start_wall": step_span.get("start_wall"),
+            "run_call_trace": run_call_trace,
         })
 
     return iterations

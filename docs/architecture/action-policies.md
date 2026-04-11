@@ -11,14 +11,14 @@ Action policies that dynamically adapt can be categorized along two dimensions (
 
 1. **Planning Pipeline Structure**: How much structure and guidance is provided to the LLM in its planning process?
     - *None*: LLM decides the action plan with no scaffolding. This is the most flexible but also the most difficult for the LLM to get right.
-    - *Optional*: **Planning capabilities** are provided but it is left up to the LLM to use them.
-    - *Full*: The action policy follows a pre-programmed planning pipeline or sequence.
+    - *Optional*: **Planning capabilities** (e.g., cache analysis, plan learning, plan coordination, plan evaluation, replanning) are provided to the agent but it is left up to the LLM to invoke them.
+    - *Full*: The action policy follows a pre-programmed planning pipeline or sequence that invokes planning capabilities in a structured manner.
 2. **Execution Mode**: How expressive is the plan execution flow produced by the LLM?
-    - *Turing-complete*: LLM generates code that can express any logic, including loops and conditionals.
-    - *Action Sequence*: LLM selects from a fixed set of actions with no internal control flow. Data flow is mediated by the agent memory or a policy-specific mechanism (e.g., `PolicyPythonREPL`).
+    - *Turing-complete*: LLM generates code that can express any logic (including loops and conditionals) composing all public methods and properties of all agent capabilities.
+    - *Action Sequence*: LLM selects from all actions exported by all agent capabilities with no internal *control flow*. *Data flow* is mediated by the agent memory or other policy-specific mechanism (e.g., `PolicyPythonREPL`).
 
 !!! info "Planning Capabilities vs. Domain Capabilities"
-    Planning capabilities (cache analysis, plan learning, plan coordination, plan evaluation, replanning) are orthogonal to domain capabilities (page analysis, code synthesis, hypothesis testing). Both can be exposed to the LLM as `@action_executor` methods, but planning capabilities are more likely to be used in structured planning pipelines while domain capabilities may be more useful for flexible code generation.
+    Planning capabilities (cache analysis, plan learning, plan coordination, plan evaluation, replanning) are orthogonal to domain capabilities (page analysis, code synthesis, hypothesis testing). Both expose `@action_executor` methods to the action policy, but planning capabilities are only enabled during **planning mode** whereas domain capabilities can be used during **execution mode** and planning mode.
 
 
 Moving right adds structure; moving up adds expressiveness. The same capabilities work across all positions in this space.

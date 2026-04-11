@@ -2,6 +2,16 @@
 
 export type TraceViewMode = "tree" | "timeline" | "diff" | "fsm" | "flow";
 
+export interface RunCallTraceEntry {
+  call_index: number;
+  action_key: string;
+  success: boolean;
+  error: string | null;
+  output_preview: string;
+  blocked: boolean;
+  line_number: number | null;
+}
+
 export interface CodegenIteration {
   step_index: number;
   agent_step_span_id: string;
@@ -16,6 +26,7 @@ export interface CodegenIteration {
   output_tokens: number | null;
   mode: string;
   start_wall: number | null;
+  run_call_trace: RunCallTraceEntry[] | null;
 }
 
 export interface PromptDiffSection {

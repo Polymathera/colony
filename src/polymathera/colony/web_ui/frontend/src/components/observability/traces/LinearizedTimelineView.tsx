@@ -3,6 +3,7 @@ import { useCodegenIterations } from "@/api/hooks/useTraceAnalysis";
 import { Badge } from "@/components/shared/Badge";
 import { MetricCard } from "@/components/shared/MetricCard";
 import { CodeBlock } from "./CodeBlock";
+import type { RunCallTraceEntry } from "./types";
 import { cn, formatTokens } from "@/lib/utils";
 import type { CodegenIteration } from "./types";
 
@@ -98,6 +99,18 @@ function IterationCard({
   const success = iteration.success === true;
   const failed = iteration.success === false;
 
+  // Build line annotations from per-run() call trace
+  const lineAnnotations = useMemo(() => {
+    if (!iteration.run_call_trace) return undefined;
+    const map = new Map<number, RunCallTraceEntry>();
+    for (const entry of iteration.run_call_trace) {
+      if (entry.line_number !== null) {
+        map.set(entry.line_number, entry);
+      }
+    }
+    return map.size > 0 ? map : undefined;
+  }, [iteration.run_call_trace]);
+
   return (
     <div
       className={cn(
@@ -120,11 +133,13 @@ function IterationCard({
           {iteration.mode.toUpperCase()}
         </Badge>
 
-        {iteration.success !== null && (
+        {iteration.success !== null ? (
           <Badge variant={success ? "success" : "error"}>
             {success ? "\u2713 Success" : "\u2717 Failed"}
           </Badge>
-        )}
+        ) : iteration.action_span_id === null ? (
+          <Badge variant="warning">NOT EXECUTED</Badge>
+        ) : null}
 
         {isStuck && (
           <Badge variant="warning">STUCK</Badge>
@@ -148,7 +163,7 @@ function IterationCard({
       {/* Generated code */}
       {iteration.generated_code && (
         <div className="px-3 py-2">
-          <CodeBlock code={iteration.generated_code} maxHeight="240px" />
+          <CodeBlock code={iteration.generated_code} maxHeight="240px" lineAnnotations={lineAnnotations} />
         </div>
       )}
 

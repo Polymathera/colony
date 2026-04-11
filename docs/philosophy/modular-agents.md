@@ -94,6 +94,43 @@ Most agent frameworks treat the LLM as the complete behavior: prompt in, actions
 A major problem with this naive architecture is the **lack of modularity and composability**. LLMs are general-purpose reasoning engines that can be applied to a wide variety of tasks, but they are not good at maintaining complex, long-term reasoning processes on their own, especially if those processes run in parallel or interleaved with each other.
 
 
+!!! info "What Is An Agent?"
+    Arbitrarily complex agents can be built from two ingredients: 1) the ability to recursively spawn agents dynamically (see [Agents All The Way Down](./agents-all-the-way-down.md)), and 2) an atomic agent architecture.
+
+
+The first step in enhancing agent modularity is to isolate the LLM from the tools: the LLM interacts with the tools only through a structured tool framework, rather than directly generating actions. This expands the agent design space by adding many degrees of freedom:
+
+- The LLM can be prompted with a static or dynamic (introspected) view of the tool framework.
+- The LLM can generate one method call at a time, or generate larger **code blocks** that interact with multiple tools and contain complex logic.
+
+
+!!! info "Colony's Approach: *The LLM as a code generator*"
+    Colony treats the LLM as a **code generator** that generates code to be executed by the agent, rather than the direct source of behavior. The LLM generates code that interacts with tools through a structured tool framework, rather than directly generating actions. This allows Colony to leverage the LLM's reasoning capabilities while providing structure, modularity, and reliability through the tool framework and `AgentCapabilities`. The LLM is a code generator that receives or introspects a "*view*" of a tool framework (the codebase) and generates code that interacts with those tools through the tool framework.
+
+<div style="margin:1.5rem 0;">
+<svg class="ci-svg" viewBox="0 0 520 260" xmlns="http://www.w3.org/2000/svg" style="max-width:520px;">
+  <rect class="r-llm-naive" x="60" y="10" width="400" height="56" rx="8" ry="8" stroke-width="1.6"/>
+  <text class="t-title" x="260" y="40" text-anchor="middle">LLM</text>
+  <rect class="r-cap-cache" x="60" y="75" width="400" height="56" rx="8" ry="8" stroke-width="1.6"/>
+  <text class="t-title" x="260" y="105" text-anchor="middle">Code Base</text>
+
+  <!-- Tools row -->
+  <rect class="r-tool-naive" x="60"  y="140" width="88" height="50" rx="6" ry="6" stroke-width="1.2"/>
+  <text class="t-body" x="104" y="170" text-anchor="middle">Tool 1</text>
+  <rect class="r-tool-naive" x="158" y="140" width="88" height="50" rx="6" ry="6" stroke-width="1.2"/>
+  <text class="t-body" x="202" y="170" text-anchor="middle">Tool 2</text>
+  <rect class="r-tool-naive" x="256" y="140" width="88" height="50" rx="6" ry="6" stroke-width="1.2"/>
+  <text class="t-body" x="300" y="170" text-anchor="middle">Tool 3</text>
+  <text class="t-muted" x="362" y="170" text-anchor="middle">...</text>
+  <rect class="r-tool-naive" x="372" y="140" width="88" height="50" rx="6" ry="6" stroke-width="1.2"/>
+  <text class="t-body" x="416" y="170" text-anchor="middle">Tool N</text>
+
+  <!-- Caption -->
+  <text class="t-muted" x="260" y="245" text-anchor="middle" font-style="italic">The LLM as a code generator.</text>
+</svg>
+</div>
+
+
 !!! info "Colony's Approach: *Intuition is a cross-cutting ingredient infused into all cognitive processes*"
     The LLM provides raw reasoning power -- remarkable **leaps of insight**, but also confabulation, laziness, and drift. By design, Colony provides structure -- sequencing, verification, and correction of those intuitions into reliable behavior. Colony enforces the most useful cognitive processes, general reasoning tasks and multi-agent collaboration patterns by factoring them out into `AgentCapabilities` and treating the LLM as the source of **intuition** to be infused in all those capabilities. Colony then uses an LLM-powered `ActionPolicy` to compose (or *weave*) all these deliberative, reflective, and meta-cognitive processes that the LLM alone cannot sustain over long reasoning chains.
 

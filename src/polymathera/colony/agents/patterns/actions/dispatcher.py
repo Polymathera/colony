@@ -1309,10 +1309,17 @@ class ActionDispatcher:
         action.status = ActionStatus.IN_PROGRESS
         result_dict = await self.repl.execute(code)
 
+        # Pick up per-run() call trace if the code generation policy stored it
+        metadata: dict[str, Any] = {}
+        run_call_trace = self.repl.namespace.get("_run_call_trace")
+        if run_call_trace:
+            metadata["run_call_trace"] = list(run_call_trace)
+
         result = ActionResult(
             success=result_dict["success"],
             output=result_dict,
             error=result_dict.get("error"),
+            metadata=metadata,
         )
 
         action.status = ActionStatus.COMPLETED if result.success else ActionStatus.FAILED

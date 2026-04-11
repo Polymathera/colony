@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import { cn } from "@/lib/utils";
+import type { RunCallTraceEntry } from "./types";
 
 /* Lightweight Python syntax highlighting via regex.
    Not a full parser — just enough to distinguish keywords, strings,
@@ -57,13 +58,25 @@ export function CodeBlock({
   code,
   maxHeight,
   className,
+  lineAnnotations,
 }: {
   code: string;
   maxHeight?: string;
   className?: string;
+  lineAnnotations?: Map<number, RunCallTraceEntry>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [expandedAnnotations, setExpandedAnnotations] = useState<Set<number>>(() => new Set());
+
+  const toggleAnnotation = useCallback((lineNum: number) => {
+    setExpandedAnnotations((prev) => {
+      const next = new Set(prev);
+      if (next.has(lineNum)) next.delete(lineNum);
+      else next.add(lineNum);
+      return next;
+    });
+  }, []);
 
   const lines = code.split("\n");
   const needsTruncation = !expanded && lines.length > MAX_COLLAPSED_LINES;
@@ -92,16 +105,67 @@ export function CodeBlock({
       >
         <pre className="p-3 text-[11px] leading-relaxed font-mono">
           <code>
-            {displayLines.map((line, i) => (
-              <div key={i} className="flex">
-                <span className="select-none text-muted-foreground/40 w-8 text-right pr-3 shrink-0">
-                  {i + 1}
-                </span>
-                <span className="text-foreground/85 whitespace-pre-wrap break-all">
-                  {highlightPython(line)}
-                </span>
-              </div>
-            ))}
+            {displayLines.map((line, i) => {
+              const lineNum = i + 1;
+              const annotation = lineAnnotations?.get(lineNum);
+              const isAnnotationExpanded = annotation && expandedAnnotations.has(lineNum);
+              return (
+                <div key={i}>
+                  <div
+                    className={cn(
+                      "flex",
+                      annotation && (annotation.success
+                        ? "bg-emerald-950/20 border-l-2 border-l-emerald-500/40"
+                        : "bg-red-950/20 border-l-2 border-l-red-500/40"),
+                    )}
+                  >
+                    <span className="select-none text-muted-foreground/40 w-8 text-right pr-3 shrink-0">
+                      {lineNum}
+                    </span>
+                    <span className="text-foreground/85 whitespace-pre-wrap break-all flex-1">
+                      {highlightPython(line)}
+                    </span>
+                    {annotation && (
+                      <button
+                        className={cn(
+                          "shrink-0 ml-2 text-[9px] font-mono px-1 rounded cursor-pointer hover:opacity-80",
+                          annotation.success
+                            ? "text-emerald-400 bg-emerald-500/10"
+                            : "text-red-400 bg-red-500/10",
+                        )}
+                        onClick={() => toggleAnnotation(lineNum)}
+                      >
+                        {annotation.success ? "\u2713" : annotation.blocked ? "BLOCKED" : "\u2717"}
+                        {" "}
+                        {annotation.action_key.split(".").pop()}
+                        {" "}
+                        {isAnnotationExpanded ? "\u25B4" : "\u25BE"}
+                      </button>
+                    )}
+                  </div>
+                  {isAnnotationExpanded && annotation && (
+                    <div className={cn(
+                      "ml-11 mr-2 mb-1 rounded px-2 py-1 text-[10px] font-mono",
+                      annotation.success
+                        ? "bg-emerald-950/30 text-emerald-300/80"
+                        : "bg-red-950/30 text-red-300/80",
+                    )}>
+                      {annotation.error && (
+                        <div className="text-red-400 break-all">{annotation.error}</div>
+                      )}
+                      {annotation.output_preview && (
+                        <div className="text-muted-foreground break-all mt-0.5">
+                          {annotation.output_preview}
+                        </div>
+                      )}
+                      {!annotation.error && !annotation.output_preview && (
+                        <div className="text-muted-foreground/50 italic">No output</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </code>
         </pre>
       </div>

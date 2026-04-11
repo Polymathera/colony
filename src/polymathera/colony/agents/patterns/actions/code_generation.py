@@ -59,6 +59,7 @@ from .policies import (
     EventDrivenActionPolicy,
 )
 from ..planning.context import PlanningContextBuilder
+from ..hooks import hookable
 from .code_constraints import (
     CodeGenerator,
     FreeFormCodeGenerator,
@@ -71,6 +72,8 @@ from .code_constraints import (
     DeterministicRecovery,
     RuntimeGuardrail,
     NoGuardrail,
+    CompletionValidator,
+    NoOpCompletionValidator,
 )
 
 
@@ -284,6 +287,7 @@ def _build_codegen_step_summary(
     errors: list[str],
     mode_before: str,
     mode_after: str,
+    run_call_trace: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a structured summary for one generated-code iteration."""
     planning_actions = [key for key in actions_called if key in planning_action_keys]
@@ -308,6 +312,7 @@ def _build_codegen_step_summary(
         "errors": list(errors),
         "mode_before": mode_before,
         "mode_after": mode_after,
+        "run_call_trace": list(run_call_trace) if run_call_trace else [],
     }
 
 
@@ -500,6 +505,24 @@ def format_planning_context_for_codegen(
         )
         parts.append("\n".join(error_lines))
 
+    # Completion rejection feedback
+    if exec_ctx:
+        rejection = exec_ctx.custom_data.get("last_completion_rejection")
+        if rejection:
+            rejection_lines = [
+                "## Completion Rejected",
+                f"Your previous signal_completion() was rejected: {rejection['reason']}",
+            ]
+            if rejection.get("suggestions"):
+                rejection_lines.append("Suggestions:")
+                for s in rejection["suggestions"]:
+                    rejection_lines.append(f"- {s}")
+            rejection_lines.append(
+                "Do NOT call signal_completion() again until you have addressed "
+                "the issues above."
+            )
+            parts.append("\n".join(rejection_lines))
+
     # -- Instructions --
     parts.append(_build_instructions_section(mode, planning_context))
 
@@ -556,7 +579,7 @@ def _build_instructions_section(mode: str, planning_context: PlanningContext) ->
 3. Read task parameters from `params` — do NOT hardcode file paths, thresholds, or config values.
 4. Check `result.success` before using `result.output`.
 5. Store important results: `results["key"] = value`.
-6. When all goals are achieved, call `signal_complete()`.
+6. When all goals are achieved, call `await signal_completion()` (validated before accepting).
 
 ## Namespace
 - `await run("action_key", param1=val1, ...)` — execute a capability action, returns ActionResult
@@ -568,7 +591,7 @@ def _build_instructions_section(mode: str, planning_context: PlanningContext) ->
 - `switch_mode("planning"|"execution")` — switch which capabilities appear in the prompt
 - `pages` — current working set page IDs (list[str])
 - `goals` — agent's current goals (list[str])
-- `signal_complete()` — signal all goals achieved
+- `await signal_completion()` — signal all goals achieved (validated before accepting)
 - `log(msg)` — structured logging
 - Standard library: json, re, math, itertools, functools, collections, asyncio
 
@@ -649,6 +672,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         skill_library: SkillLibrary | None = None,
         recovery_strategy: RecoveryStrategy | None = None,
         runtime_guardrail: RuntimeGuardrail | None = None,
+        completion_validator: CompletionValidator | None = None,
         max_retries: int = 2,
         code_timeout: float = 30.0,
         max_code_iterations: int = 50,
@@ -667,6 +691,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self._skill_library = skill_library or NoOpSkillLibrary()
         self._recovery_strategy = recovery_strategy or DeterministicRecovery()
         self._runtime_guardrail = runtime_guardrail or NoGuardrail()
+        self._completion_validator = completion_validator or NoOpCompletionValidator()
 
         # Execution tracking — PlanExecutionContext is the structured state.
         self._execution_context = PlanExecutionContext()
@@ -675,6 +700,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self._recovered_code: str | None = None
         self._consecutive_failures: int = 0
         self._call_history: list[str] = []
+        self._run_call_trace: list[dict[str, Any]] = []
         self._had_internal_failures: bool = False
         self._internal_errors: list[str] = []
         self._browser: CapabilityBrowser | None = None
@@ -783,6 +809,15 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             )
             if not decision.allowed:
                 logger.warning(f"Guardrail blocked '{action_key}': {decision.reason}")
+                self._run_call_trace.append({
+                    "call_index": len(self._run_call_trace),
+                    "action_key": action_key,
+                    "success": False,
+                    "error": f"Blocked: {decision.reason}"[:200],
+                    "output_preview": "",
+                    "blocked": True,
+                })
+                ns["_run_call_trace"] = self._run_call_trace
                 return ActionResult(
                     success=False,
                     error=f"Blocked by guardrail: {decision.reason}. {decision.suggestion}",
@@ -810,6 +845,19 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             resolved_action_key = str(action.action_type)
             self._call_history.append(resolved_action_key)
 
+            # Per-call trace for timeline view annotations.
+            # Stored both on the policy and in the REPL namespace so
+            # _execute_repl_code can include it in the ActionResult.
+            self._run_call_trace.append({
+                "call_index": len(self._run_call_trace),
+                "action_key": resolved_action_key,
+                "success": result.success,
+                "error": (result.error or "")[:200] if not result.success else None,
+                "output_preview": str(result.output)[:200] if result.output is not None else "",
+                "blocked": False,
+            })
+            ns["_run_call_trace"] = self._run_call_trace
+
             # Mode transitions based on action results:
             # - should_replan returning should_replan=True → back to planning mode
             # - First domain action in planning mode → switch to execution mode
@@ -836,10 +884,53 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             """
             return await self._browser(query)
 
-        # signal_complete() — signal that all goals are achieved
-        def signal_complete():
-            """Signal that all goals are achieved. Call this when done."""
-            self._complete_signaled = True
+        # signal_completion() — signal that all goals are achieved (validated)
+        async def signal_completion():
+            """Signal that all goals are achieved. Call this when done.
+
+            Validates completion against the configured CompletionValidator.
+            If validation fails, completion is rejected and the rejection
+            reason appears in the next iteration's prompt.
+            """
+            goals = list(self.agent.metadata.goals or [])
+            repl_results = ns.get("results", {})
+
+            validation = await self._completion_validator.validate(
+                agent=self.agent,
+                goals=goals,
+                results=repl_results,
+                execution_context=self._execution_context,
+            )
+
+            if validation.allowed:
+                self._complete_signaled = True
+                log(f"Completion validated: {validation.reason}")
+                self._run_call_trace.append({
+                    "call_index": len(self._run_call_trace),
+                    "action_key": "signal_completion",
+                    "success": True,
+                    "error": None,
+                    "output_preview": f"Completion accepted: {validation.reason}"[:200],
+                    "blocked": False,
+                })
+                ns["_run_call_trace"] = self._run_call_trace
+            else:
+                log(f"Completion REJECTED: {validation.reason}")
+                if validation.suggestions:
+                    log(f"Suggestions: {'; '.join(validation.suggestions)}")
+                self._run_call_trace.append({
+                    "call_index": len(self._run_call_trace),
+                    "action_key": "signal_completion",
+                    "success": False,
+                    "error": f"Rejected: {validation.reason}"[:200],
+                    "output_preview": "; ".join(validation.suggestions)[:200] if validation.suggestions else "",
+                    "blocked": False,
+                })
+                ns["_run_call_trace"] = self._run_call_trace
+                self._execution_context.custom_data["last_completion_rejection"] = {
+                    "reason": validation.reason,
+                    "suggestions": validation.suggestions,
+                }
 
         def switch_mode(mode: str):
             """Switch between planning and execution modes.
@@ -861,7 +952,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         # Install into namespace
         ns["run"] = run
         ns["browse"] = browse
-        ns["signal_complete"] = signal_complete
+        ns["signal_completion"] = signal_completion
         ns["switch_mode"] = switch_mode
         ns["log"] = log
         ns["results"] = {}
@@ -964,6 +1055,9 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
 
         # Check completion
         if self._complete_signaled:
+            logger.warning(
+                "CodeGenerationActionPolicy: policy complete signaled by generated code"
+            )
             state.custom["policy_complete"] = True
             return None
 
@@ -1009,6 +1103,9 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             mode=self._mode,
             error_history=self._error_history if self._error_history else None,
         )
+
+        # Clear completion rejection after it's been rendered into the prompt
+        self._execution_context.custom_data.pop("last_completion_rejection", None)
 
         # --- Dimension 1: Code Generation (or use recovered code) ---
         if self._recovered_code:
@@ -1081,6 +1178,11 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
 
         # Reset call history for this code execution (Dimension 5 tracking)
         self._call_history.clear()
+        self._run_call_trace = []
+        # Also reset in REPL namespace so _execute_repl_code sees empty trace
+        # if the code block has no run() calls
+        if self._action_dispatcher and self._action_dispatcher.repl:
+            self._action_dispatcher.repl.namespace["_run_call_trace"] = self._run_call_trace
         self._had_internal_failures = False
         self._internal_errors.clear()
 
@@ -1101,12 +1203,15 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             description=f"Code generation step {self._code_iteration_count}",
         )
 
+    @hookable
     @override
     async def execute_iteration(
         self,
         state: ActionPolicyExecutionState
     ) -> ActionPolicyIterationResult:
         """Execute one iteration with transaction wrapper and retry logic.
+
+        This method is @hookable so memory capabilities can observe iterations.
 
         Wraps the parent's execute_iteration with:
         1. REPL namespace snapshot (restore on failure)
@@ -1167,6 +1272,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 errors=step_errors,
                 mode_before=mode_before,
                 mode_after=self._mode,
+                run_call_trace=list(self._run_call_trace),
             )
 
         # Check if code execution failed
@@ -1289,6 +1395,7 @@ async def create_code_generation_action_policy(
     skill_library: SkillLibrary | None = None,
     recovery_strategy: RecoveryStrategy | None = None,
     runtime_guardrail: RuntimeGuardrail | None = None,
+    completion_validator: CompletionValidator | None = None,
     max_retries: int = 2,
     code_timeout: float = 30.0,
     max_code_iterations: int = 50,
@@ -1302,7 +1409,7 @@ async def create_code_generation_action_policy(
     Uses ``PlanningContextBuilder`` to build structured planning context
     including memories, agent identity, constraints, and action descriptions.
 
-    Each of the five constraint dimensions accepts an implementation of the
+    Each of the six constraint dimensions accepts an implementation of the
     corresponding abstract class. Pass ``None`` for defaults::
 
         policy = await create_code_generation_action_policy(
@@ -1339,6 +1446,7 @@ async def create_code_generation_action_policy(
         skill_library=skill_library,
         recovery_strategy=recovery_strategy,
         runtime_guardrail=runtime_guardrail,
+        completion_validator=completion_validator,
         max_retries=max_retries,
         code_timeout=code_timeout,
         max_code_iterations=max_code_iterations,

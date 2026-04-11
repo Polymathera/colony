@@ -304,6 +304,8 @@ class TracingCapability(AgentCapability):
                     summary["output"] = self._get_str_field(output, max_chars)
                 if dumped.get("metrics"):
                     summary["metrics"] = dumped["metrics"]
+                if dumped.get("metadata"):
+                    summary["metadata"] = dumped["metadata"]
             else:
                 summary["result"] = self._get_str_field(result, max_chars)
         elif kind == SpanKind.INFER and self._config.capture_infer_inputs:

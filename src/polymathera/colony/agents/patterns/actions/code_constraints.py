@@ -3,9 +3,9 @@
 Each dimension of the constrained code generation design space is
 represented by an abstract class that users can implement to customize
 how the ``CodeGenerationActionPolicy`` generates, validates, reuses,
-recovers from, and guards generated code.
+recovers from, guards, and validates completion of generated code.
 
-The five dimensions:
+The six dimensions:
 
 1. **CodeGenerator** — controls HOW code is produced (free-form, grammar-
    constrained, skeleton-with-holes).
@@ -17,6 +17,8 @@ The five dimensions:
    transactional rollback).
 5. **RuntimeGuardrail** — enforces constraints DURING execution (capability
    boundaries, temporal ordering, resource limits).
+6. **CompletionValidator** — validates whether the agent should be allowed
+   to signal completion (goal achievement check, LLM evaluation).
 
 ``CodeGenerationActionPolicy`` accepts an implementation of each. Default
 implementations are provided for common configurations. Users can mix
@@ -44,7 +46,7 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ...base import Agent, AgentCapability
-    from ...models import ActionResult
+    from ...models import ActionResult, PlanExecutionContext
 
 logger = logging.getLogger(__name__)
 
@@ -849,4 +851,166 @@ def _extract_code(response: Any) -> str:
         text = text[:-3].strip()
 
     return text
+
+
+# ============================================================================
+# Dimension 6: Completion Validation
+# ============================================================================
+
+
+@dataclass
+class CompletionValidationResult:
+    """Result of completion validation."""
+
+    allowed: bool
+    """Whether completion is allowed."""
+    reason: str
+    """Why completion was allowed/rejected."""
+    suggestions: list[str] = field(default_factory=list)
+    """What to do if rejected."""
+
+
+class CompletionValidator(ABC):
+    """Validates whether the agent should be allowed to signal completion.
+
+    Called when generated code invokes ``signal_complete()``. Inspects
+    goals, accumulated results, and execution history to determine
+    whether all objectives have been achieved.
+
+    Library users implement this to define domain-specific completion
+    criteria. The validator is plugged into ``CodeGenerationActionPolicy``
+    as the 6th dimension.
+
+    Example implementations:
+    - ``NoOpCompletionValidator``: Allow all completions (default).
+    - ``RuleBasedCompletionValidator``: Check domain work done + results non-empty.
+    - ``LLMCompletionValidator``: Ask the LLM to evaluate goal achievement.
+    """
+
+    @abstractmethod
+    async def validate(
+        self,
+        agent: Agent,
+        goals: list[str],
+        results: dict[str, Any],
+        execution_context: PlanExecutionContext,
+    ) -> CompletionValidationResult:
+        """Validate whether completion should be allowed.
+
+        Args:
+            agent: The agent attempting to complete.
+            goals: The agent's stated goals.
+            results: Accumulated results dict from the REPL namespace.
+            execution_context: ``PlanExecutionContext`` with action history.
+
+        Returns:
+            CompletionValidationResult with allowed/reason/suggestions.
+        """
+        ...
+
+
+class NoOpCompletionValidator(CompletionValidator):
+    """Allow all completions — no validation (default)."""
+
+    async def validate(self, agent, goals, results, execution_context: PlanExecutionContext):
+        return CompletionValidationResult(allowed=True, reason="No validation configured")
+
+
+class RuleBasedCompletionValidator(CompletionValidator):
+    """Check that domain work was done and results are non-empty.
+
+    Rejects completion if:
+    - No successful domain actions have been executed
+    - The results dict is empty
+    """
+
+    async def validate(self, agent, goals, results, execution_context: PlanExecutionContext):
+        if not goals:
+            return CompletionValidationResult(allowed=True, reason="No goals defined")
+
+        step_summaries = execution_context.custom_data.get("codegen_step_summaries", {})
+        has_domain_work = any(
+            info.get("domain_actions") and not info.get("had_failures")
+            for info in step_summaries.values()
+        )
+        if not has_domain_work:
+            return CompletionValidationResult(
+                allowed=False,
+                reason="No successful domain actions have been executed yet.",
+                suggestions=["Execute domain actions before signaling completion."],
+            )
+
+        if not results:
+            return CompletionValidationResult(
+                allowed=False,
+                reason="No results have been stored.",
+                suggestions=["Store action results in the results dict before completing."],
+            )
+
+        return CompletionValidationResult(
+            allowed=True,
+            reason=f"Domain work completed with {len(results)} result(s).",
+        )
+
+
+class LLMCompletionValidator(CompletionValidator):
+    """Ask the LLM to evaluate whether goals have been achieved.
+
+    Constructs a prompt with goals, results summary, and execution
+    history, then asks the LLM for a structured yes/no assessment.
+    Falls open on LLM error (allows completion).
+    """
+
+    async def validate(self, agent, goals, results, execution_context: PlanExecutionContext):
+        goals_text = "\n".join(f"- {g}" for g in goals)
+        results_text = "\n".join(
+            f"- {k}: {str(v)[:300]}" for k, v in list(results.items())[:20]
+        )
+
+        step_summaries = execution_context.custom_data.get("codegen_step_summaries", {})
+        history_text = "\n".join(
+            f"- {info.get('step_kind', '?')}: "
+            f"{', '.join(info.get('actions_called', []))}"
+            f" ({'success' if not info.get('had_failures') else 'failed'})"
+            for info in list(step_summaries.values())[-10:]
+        )
+
+        prompt = f"""Evaluate whether the following goals have been achieved based on the results and execution history.
+
+Goals:
+{goals_text}
+
+Results collected:
+{results_text}
+
+Execution history (last 10 steps):
+{history_text}
+
+Answer with EXACTLY one of:
+- COMPLETE: <reason why goals are achieved>
+- INCOMPLETE: <reason why goals are NOT achieved> | SUGGESTIONS: <suggestion1>; <suggestion2>"""
+
+        try:
+            response = await agent.infer(prompt=prompt, max_tokens=256, temperature=0.1)
+            text = response.generated_text if hasattr(response, "generated_text") else str(response)
+
+            if text.strip().startswith("COMPLETE"):
+                reason = text.split(":", 1)[1].strip() if ":" in text else "Goals achieved"
+                return CompletionValidationResult(allowed=True, reason=reason)
+            else:
+                parts = text.split("|")
+                reason = parts[0].replace("INCOMPLETE:", "").strip()
+                suggestions = []
+                if len(parts) > 1:
+                    sug_text = parts[1].replace("SUGGESTIONS:", "").strip()
+                    suggestions = [s.strip() for s in sug_text.split(";") if s.strip()]
+                return CompletionValidationResult(
+                    allowed=False, reason=reason, suggestions=suggestions,
+                )
+        except Exception as e:
+            logger.warning("LLM completion validation failed: %s", e)
+            return CompletionValidationResult(
+                allowed=True,
+                reason=f"Validation failed ({e}), allowing completion",
+            )
 
