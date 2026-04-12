@@ -81,7 +81,7 @@ from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions import action_executor
 from ..hooks import hookable
 from ..events import event_handler, EventProcessingResult
-from ...models import Action, PolicyREPL
+from ...models import Action, PolicyREPL, AgentSuspensionState
 from .acl import ACLMessage, Performative
 
 
@@ -869,6 +869,12 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         if self._blackboard is not None:
             return  # Already initialized
         self._blackboard = await self.get_blackboard()
+
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        return state
+
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        pass
 
     def _get_result_key(self) -> str:
         """Get blackboard key for game result."""

@@ -28,6 +28,9 @@ _CLUSTER_NAMES = {
     "LoadedContextPage",
     "PageAffinityRouter",
     "VLLMDeployment",
+    "RemoteLLMDeployment",
+    "AnthropicLLMDeployment",
+    "OpenRouterLLMDeployment",
 }
 
 _DEPLOYMENT_NAMES = {
@@ -41,6 +44,9 @@ __all__ = [
     "LLMClusterState",
     # Deployments
     "VLLMDeployment",
+    "RemoteLLMDeployment",
+    "AnthropicLLMDeployment",
+    "OpenRouterLLMDeployment",
     # Routing
     "ContextAwareRouter",
     "PageAffinityRouter",

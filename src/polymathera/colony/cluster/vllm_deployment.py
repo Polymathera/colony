@@ -272,6 +272,8 @@ class VLLMDeployment(AgentManagerBase):
         """
         logger.info(f"Initializing VLLMDeployment with model {self.model_name}")
 
+        await super().initialize()  # Initialize AgentManagerBase (capabilities, etc.)
+
         # Generate client ID
         import ray
         self.client_id = LLMClientId(f"vllm-{ray.get_runtime_context().get_actor_id()}")
@@ -1158,7 +1160,7 @@ class VLLMDeployment(AgentManagerBase):
 
     @serving.endpoint
     @inference_circuit
-    async def infer_with_context_composition(
+    async def infer_with_suffix(
         self,
         base_page_id: ContextPageId,
         request: InferenceRequest,
@@ -1208,7 +1210,7 @@ class VLLMDeployment(AgentManagerBase):
             # 10 concurrent agents - all safe!
             async def run_agent(agent_id: int):
                 suffix = tokenize(f"Agent {agent_id}: analyze this code...")
-                return await vllm.infer_with_context_composition(
+                return await vllm.infer_with_suffix(
                     base_page_id="file.py",
                     suffix_tokens=suffix,
                     request=InferenceRequest(request_id=f"agent-{agent_id}", prompt="")

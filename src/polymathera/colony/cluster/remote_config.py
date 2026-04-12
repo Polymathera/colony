@@ -124,6 +124,17 @@ class RemoteLLMDeploymentConfig(BaseModel):
         ge=1,
         description="Maximum concurrent API requests per replica"
     )
+    throttle_rps: float = Field(
+        default=1.0,
+        gt=0,
+        description="Approximate request spacing per replica (token bucket refill rate). "
+                    "Not a precise rate limit — just reduces 429 frequency."
+    )
+    throttle_burst: int = Field(
+        default=5,
+        ge=1,
+        description="Burst allowance before throttling kicks in"
+    )
 
     # Scaling configuration (mirrors LLMDeploymentConfig)
     num_replicas: int = Field(

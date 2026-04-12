@@ -110,20 +110,82 @@ $$O(N \log N + c \cdot N^2 / R) \approx O(N \log N) \text{ when } R \approx N$$
 
 where $R$ is the number of reasoning rounds. Deep reasoning tasks inherently require many rounds ($R$ grows with task complexity), so the quadratic startup cost is amortized away.
 
-```mermaid
-graph TD
-    R1[Round 1: O&lpar;N^2&rpar; - Full routing] --> G1[Page Graph: Sparse]
-    G1 --> R2[Round 2: Cheaper routing via graph]
-    R2 --> G2[Page Graph: Denser]
-    G2 --> R3[Round 3: Even cheaper]
-    R3 --> G3[Page Graph: Stabilizing]
-    G3 --> RN["Round N: O(N log N) amortized"]
 
-    style R1 fill:#ff9999
-    style R2 fill:#ffcc99
-    style R3 fill:#ffff99
-    style RN fill:#99ff99
-```
+<style>
+/* ── modular agents Diagrams ── */
+.ci-svg { width: 100%; display: block; }
+.ci-svg text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+
+/* Naive diagram */
+.ci-svg .r-llm-naive  { fill: #fffbeb; stroke: #f59e0b; }
+.ci-svg .r-tool-naive  { fill: #f9fafb; stroke: #9ca3af; }
+.ci-svg .t-title       { font-size: 14px; font-weight: 600; fill: #1e1b4b; }
+.ci-svg .t-body        { font-size: 11.5px; fill: #374151; }
+.ci-svg .t-detail      { font-size: 10.5px; fill: #6b7280; }
+.ci-svg .t-muted       { font-size: 11px; fill: #9ca3af; }
+.ci-svg .r-policy      { fill: #f5f3ff; stroke: #8b5cf6; }
+
+/* LLM infusion arrows */
+.ci-svg .arrow-infuse  { stroke: #f59e0b; stroke-width: 1.2; fill: none; stroke-dasharray: 4 3; }
+@keyframes infusePulse { to { stroke-dashoffset: -14; } }
+.ci-svg .arrow-infuse  { animation: infusePulse 1.2s linear infinite; }
+.ci-svg .arrow-compose { stroke: #8b5cf6; stroke-width: 1.4; fill: none; }
+
+/* ── Dark mode ── */
+[data-md-color-scheme="slate"] .ci-svg .t-title      { fill: #e0e7ff; }
+[data-md-color-scheme="slate"] .ci-svg .t-body       { fill: #cbd5e1; }
+[data-md-color-scheme="slate"] .ci-svg .t-detail     { fill: #94a3b8; }
+[data-md-color-scheme="slate"] .ci-svg .t-muted      { fill: #64748b; }
+[data-md-color-scheme="slate"] .ci-svg .r-llm-naive  { fill: #422006; stroke: #d97706; }
+[data-md-color-scheme="slate"] .ci-svg .r-tool-naive { fill: #1e1b4b; stroke: #52525b; }
+[data-md-color-scheme="slate"] .ci-svg .r-policy     { fill: #1e1b4b; stroke: #6d28d9; }
+</style>
+
+<div style="margin:1.5rem 0;">
+<svg class="ci-svg" viewBox="0 0 600 720" xmlns="http://www.w3.org/2000/svg" style="max-width:520px;">
+  <defs>
+    <marker id="ci-ah-purple" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#8b5cf6"/>
+    </marker>
+    <marker id="ci-ah-amber" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#f59e0b"/>
+    </marker>
+  </defs>
+
+  <rect class="r-llm-naive" x="200" y="0" width="400" height="56" rx="8" ry="8" stroke-width="1.6"/>
+  <text class="t-title" x="400" y="35" text-anchor="middle">Round 1: O(N^2) - Full routing</text>
+  <line class="arrow-compose" x1="400" y1="55" x2="400" y2="100" marker-end="url(#ci-ah-purple)"/>
+
+  <rect class="r-tool-naive" x="200"  y="100" width="400" height="56" rx="6" ry="6" stroke-width="1.2"/>
+  <text class="t-title" x="400" y="135" text-anchor="middle">Page Graph: Sparse</text>
+  <line class="arrow-compose" x1="400" y1="155" x2="400" y2="200" marker-end="url(#ci-ah-purple)"/>
+
+  <rect class="r-llm-naive" x="200" y="200" width="400" height="56" rx="8" ry="8" stroke-width="1.6"/>
+  <text class="t-title" x="400" y="235" text-anchor="middle">Round 2: Cheaper routing via graph</text>
+  <line class="arrow-compose" x1="400" y1="255" x2="400" y2="300" marker-end="url(#ci-ah-purple)"/>
+
+  <rect class="r-tool-naive" x="200"  y="300" width="400" height="56" rx="6" ry="6" stroke-width="1.2"/>
+  <text class="t-title" x="400" y="335" text-anchor="middle">Page Graph: Denser</text>
+  <line class="arrow-compose" x1="400" y1="355" x2="400" y2="400" marker-end="url(#ci-ah-purple)"/>
+
+  <rect class="r-llm-naive" x="200" y="400" width="400" height="56" rx="8" ry="8" stroke-width="1.6"/>
+  <text class="t-title" x="400" y="435" text-anchor="middle">Round 3: Even cheaper</text>
+  <line class="arrow-compose" x1="400" y1="455" x2="400" y2="500" marker-end="url(#ci-ah-purple)"/>
+
+  <rect class="r-tool-naive" x="200"  y="500" width="400" height="56" rx="6" ry="6" stroke-width="1.2"/>
+  <text class="t-title" x="400" y="535" text-anchor="middle">Page Graph: Stabilizing</text>
+  <line class="arrow-compose" x1="400" y1="555" x2="400" y2="600" marker-end="url(#ci-ah-purple)"/>
+
+  <rect class="r-llm-naive" x="200" y="600" width="400" height="56" rx="8" ry="8" stroke-width="1.6"/>
+  <text class="t-title" x="400" y="635" text-anchor="middle">Round 100: O(N log N) amortized</text>
+
+
+  <!-- Caption -->
+  <text class="t-muted" x="400" y="700" text-anchor="middle" font-style="italic">Evolution of the page graph over inference rounds</text>
+</svg>
+</div>
+
+
 
 !!! tip "The Working Set Conjecture"
     Colony hypothesizes that working set drift (measured by Jaccard similarity between page sets at different time steps) exhibits **episodic behavior**: periods of high stability interspersed with sharp transitions as agents shift focus. Cache-aware scheduling exploits this by accumulating out-of-working-set queries during stable episodes and batching page replacements at transition points.

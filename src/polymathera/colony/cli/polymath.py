@@ -227,6 +227,7 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "MergeCapability",
             "WorkingSetCapability",
             "AgentPoolCapability",
+            "PageGraphCapability",
         ],
         "worker_capabilities": [
             "ProgramSlicingCapability",
@@ -264,6 +265,7 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "MergeCapability",
             "WorkingSetCapability",
             "AgentPoolCapability",
+            "PageGraphCapability",
         ],
         "worker_capabilities": [
             "ComplianceAnalysisCapability",
@@ -303,6 +305,7 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "SynthesisCapability",
             "WorkingSetCapability",
             "AgentPoolCapability",
+            "PageGraphCapability",
         ],
         "worker_capabilities": [
             "IntentInferenceCapability",
@@ -343,6 +346,7 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "SynthesisCapability",
             "WorkingSetCapability",
             "AgentPoolCapability",
+            "PageGraphCapability",
         ],
         "worker_capabilities": [
             "ContractInferenceCapability",
@@ -439,6 +443,34 @@ EXTRA_CAPABILITIES_REGISTRY: dict[str, dict[str, str]] = {
         "path": "polymathera.colony.agents.patterns.memory.working.WorkingMemoryCapability",
         "description": "Token-bounded working memory with compaction.",
     },
+    "PageGraphCapability": {
+        "path": "polymathera.colony.agents.patterns.capabilities.page_graph.PageGraphCapability",
+        "description": "Page relationship graph traversal, centrality, clustering.",
+    },
+    "WorkingSetCapability": {
+        "path": "polymathera.colony.agents.patterns.capabilities.working_set.WorkingSetCapability",
+        "description": "Cluster-wide working set management for VCM pages.",
+    },
+    "AgentPoolCapability": {
+        "path": "polymathera.colony.agents.patterns.capabilities.agent_pool.AgentPoolCapability",
+        "description": "Dynamic pool of worker agents with lifecycle management.",
+    },
+    "ResultCapability": {
+        "path": "polymathera.colony.agents.patterns.capabilities.result.ResultCapability",
+        "description": "Cluster-wide result storage and retrieval.",
+    },
+    "SynthesisCapability": {
+        "path": "polymathera.colony.agents.patterns.capabilities.synthesis.SynthesisCapability",
+        "description": "Incremental synthesis with refinement and validation.",
+    },
+    "MergeCapability": {
+        "path": "polymathera.colony.agents.patterns.capabilities.merge.MergeCapability",
+        "description": "Result merging with configurable merge policies.",
+    },
+    "CriticCapability": {
+        "path": "polymathera.colony.agents.patterns.capabilities.critique.CriticCapability",
+        "description": "Critique outputs for quality and correctness.",
+    },
     "SessionMemoryCapability": {
         "path": "polymathera.colony.agents.patterns.memory.session_memory.SessionMemoryCapability",
         "description": "Session-level memory tracking for cross-session continuity.",
@@ -520,6 +552,8 @@ class RemoteDeploymentYAMLConfig:
     system_prompt: str | None = None
     ttl: str = "1h"  # "5m" or "1h"
     max_concurrent_requests: int = 10
+    throttle_rps: float = 1.0
+    throttle_burst: int = 5
     num_replicas: int = 1
 
 
@@ -1314,6 +1348,8 @@ async def run_integration_test(
             system_prompt=rd.system_prompt,
             ttl=rd.ttl,
             max_concurrent_requests=rd.max_concurrent_requests,
+            throttle_rps=rd.throttle_rps,
+            throttle_burst=rd.throttle_burst,
             num_replicas=rd.num_replicas,
         ))
 
@@ -1590,10 +1626,19 @@ async def run_integration_test(
             },
         )
 
-        # Resolve extra capabilities (with warnings for unknown names)
+        # Resolve capabilities: merge registry-declared coordinator capabilities
+        # with user-specified extras.  Domain-specific capabilities (e.g.
+        # IntentAnalysisCapability) are added by the agent class in initialize(),
+        # so we only pull in infrastructure caps from coordinator_capabilities
+        # that are in EXTRA_CAPABILITIES_REGISTRY.
         # ConsciousnessCapability is always included — agents need identity context for planning.
+        registry_coord_caps = [
+            cap for cap in reg.get("coordinator_capabilities", [])
+            if cap in EXTRA_CAPABILITIES_REGISTRY
+        ]
         all_extra_caps = list(set(
             ["ConsciousnessCapability"]
+            + registry_coord_caps
             + analysis.extra_capabilities
             + config.hierarchy.extra_capabilities
         ))

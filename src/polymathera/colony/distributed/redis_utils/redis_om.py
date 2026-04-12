@@ -661,6 +661,7 @@ class DistributedStateSubscriber:
     def __init__(self, redis_client: RedisClient, channel_key: str):
         self.redis_client = redis_client
         self.channel_key = channel_key
+        self._pubsub_client: Redis | None = None
         self._subscriber: PubSub | None = None
         self._listener_task: asyncio.Task | None = None
         self._callback: Callable[
@@ -673,9 +674,17 @@ class DistributedStateSubscriber:
     ):
         """Start listening for state updates."""
         if self._subscriber is None:
-            # Create Redis connection for Pub/Sub
-            async with self.redis_client.get_redis_connection() as conn:
-                self._subscriber = conn.pubsub()
+            # PubSub requires a long-lived Redis connection (it subscribes and
+            # listens forever).  Don't use get_redis_connection() — that is a
+            # context manager for *transient* operations which closes the
+            # connection on exit.  Instead, create a dedicated Redis client
+            # from the pool and keep it alive for the subscriber's lifetime.
+            ### async with self.redis_client.get_redis_connection() as conn:
+            ###     self._subscriber = conn.pubsub()
+            self._pubsub_client = Redis(
+                connection_pool=self.redis_client._redis_pool()
+            )
+            self._subscriber = self._pubsub_client.pubsub()
 
             # Start listener in background
             await self._subscriber.subscribe(self.channel_key)
@@ -693,6 +702,12 @@ class DistributedStateSubscriber:
         if self._subscriber:
             await self._subscriber.unsubscribe()
             await self._subscriber.close()
+            self._subscriber = None
+        # Close the dedicated PubSub Redis client, returning its
+        # connection to the pool.
+        if hasattr(self, "_pubsub_client") and self._pubsub_client:
+            await self._pubsub_client.aclose()
+            self._pubsub_client = None
         if self.redis_client:
             await self.redis_client.cleanup()
 
@@ -1074,6 +1089,7 @@ class RedisOM:
         all_or_nothing: bool,
         update_if_exists: bool = True,
         model_cls: type[BaseModel] | None = None,  # Optional model class for index definitions
+        owner_id: str | None = None,  # Lock owner — if None, locked items are skipped
     ) -> list[ItemCheckinResult]:
         """
         Internal method for batch saving items with version control.
@@ -1086,6 +1102,8 @@ class RedisOM:
         - all_or_nothing: If True, either all items are updated or none are
         - update_if_exists: Whether to update items that already exist
         - model_cls: Optional model class for index definitions
+        - owner_id: Lock owner ID. If an item is locked and owner_id doesn't
+          match (or is None), the save is skipped for that item.
         """
         if not items:
             return []

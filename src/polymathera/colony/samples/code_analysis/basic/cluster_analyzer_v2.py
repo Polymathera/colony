@@ -593,7 +593,7 @@ Output format (JSON):
             logger.error(f"Blackboard write failed: {e}", exc_info=True)
             return ActionResult(success=False, error=str(e))
 
-    @action_executor(action_key=ActionType.ESCALATE_ERROR)
+    @action_executor(action_key="escalate_error")
     async def escalate_error(
         self,
         error_message: str,

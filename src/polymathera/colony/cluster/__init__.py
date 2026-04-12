@@ -74,9 +74,6 @@ from .registry import (
     QuantizationMethod,
 )
 from .remote_config import RemoteLLMDeploymentConfig
-from .remote_deployment import RemoteLLMDeployment
-from .anthropic_deployment import AnthropicLLMDeployment
-from .openrouter_deployment import OpenRouterLLMDeployment
 from .embedding import (
     RemoteEmbeddingConfig,
     GeminiEmbeddingDeployment,
@@ -87,9 +84,12 @@ from .routing import ContextAwareRouter, PageAffinityRouter
 
 # VLLMDeployment and EmbeddingDeployment depend on vllm (GPU optional dep).
 # Lazy-loaded via __getattr__ so CPU-only environments work.
-_VLLM_NAMES = {
+_LLM_NAMES = {
     "VLLMDeployment": ".vllm_deployment",
     "EmbeddingDeployment": ".embedding",
+    "RemoteLLMDeployment": ".remote_deployment",
+    "AnthropicLLMDeployment": ".anthropic_deployment",
+    "OpenRouterLLMDeployment": ".openrouter_deployment",
 }
 
 __all__ = [
@@ -135,11 +135,11 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name in _VLLM_NAMES:
-        mod = _importlib.import_module(_VLLM_NAMES[name], __name__)
+    if name in _LLM_NAMES:
+        mod = _importlib.import_module(_LLM_NAMES[name], __name__)
         return getattr(mod, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__():
-    return list(globals()) + list(_VLLM_NAMES)
+    return list(globals()) + list(_LLM_NAMES)

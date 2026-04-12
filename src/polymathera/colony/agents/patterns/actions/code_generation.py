@@ -74,6 +74,7 @@ from .code_constraints import (
     NoGuardrail,
     CompletionValidator,
     NoOpCompletionValidator,
+    LLMCompletionValidator,
 )
 
 
@@ -579,7 +580,7 @@ def _build_instructions_section(mode: str, planning_context: PlanningContext) ->
 3. Read task parameters from `params` — do NOT hardcode file paths, thresholds, or config values.
 4. Check `result.success` before using `result.output`.
 5. Store important results: `results["key"] = value`.
-6. When all goals are achieved, call `await signal_completion()` (validated before accepting).
+6. Only when all goals are achieved, call `await signal_completion()` (validated before accepting).
 
 ## Namespace
 - `await run("action_key", param1=val1, ...)` — execute a capability action, returns ActionResult
@@ -691,7 +692,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self._skill_library = skill_library or NoOpSkillLibrary()
         self._recovery_strategy = recovery_strategy or DeterministicRecovery()
         self._runtime_guardrail = runtime_guardrail or NoGuardrail()
-        self._completion_validator = completion_validator or NoOpCompletionValidator()
+        self._completion_validator = completion_validator or LLMCompletionValidator() # NoOpCompletionValidator()
 
         # Execution tracking — PlanExecutionContext is the structured state.
         self._execution_context = PlanExecutionContext()

@@ -157,7 +157,11 @@ The Colony dashboard starts automatically with `colony-env up` at [localhost:808
 - **Agents** — list registered agents, view state, capabilities, and details
 - **Sessions** — browse sessions and their agent runs with token usage
 - **VCM** — page table, working set, and virtual context statistics
+- **Logs** — centralized logging of agent actions, system events, and errors
 - **Traces** — detailed tracing of agent actions, VCM operations, and system events for debugging and performance analysis
+- And more...
+
+![traces](./docs/guides/images/dashboard-traces-timeline.png)
 
 ```bash
 # Run the agent colony

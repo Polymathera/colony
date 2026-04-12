@@ -14,6 +14,7 @@ import logging
 import os
 from typing import Any
 
+from ..distributed.ray_utils.rate_limit import RateLimitConfig, TokenBucketRateLimiter
 from .remote_config import RemoteLLMDeploymentConfig, get_pricing_for_model
 from .remote_deployment import APIResponse, RemoteLLMDeployment
 
@@ -44,6 +45,10 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         super().__init__(config)
         self._client = None  # anthropic.AsyncAnthropic
         self._pricing = get_pricing_for_model(config.model_name)
+        self._rate_limiter = TokenBucketRateLimiter(RateLimitConfig(
+            requests_per_second=config.throttle_rps,
+            burst_size=config.throttle_burst,
+        ))
 
     async def _initialize_client(self) -> None:
         """Initialize the Anthropic async client."""
@@ -145,6 +150,11 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
                         )
                 else:
                     logger.debug(f"  msg[{i}]: {str(content)[:200]!r}...")
+
+        # Throttle request rate to reduce 429s.  The SDK retries
+        # rate-limit errors internally with exponential backoff, so we
+        # don't add our own retry loop — this just spaces out requests.
+        await self._rate_limiter.acquire()
 
         response = await self._client.messages.create(**kwargs)
 

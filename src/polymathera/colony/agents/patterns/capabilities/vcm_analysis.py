@@ -125,30 +125,34 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         pending = len(self._pending_work)
         return (
             f"Distributed VCM Analysis — composable primitives for distributed page analysis "
-            f"({analyzed} active workers, {pending} pending).\n"
-            "Action groups: worker lifecycle (spawn/terminate/status), work assignment "
-            "(assign/prioritize/queue), result collection (get/merge/synthesize/detect contradictions), "
-            "state queries (coverage/issues/outstanding queries), iteration (revisit/clear/reset).\n"
-            "Example strategy choices:\n"
-            "1. **Cluster-Based**: For related pages that benefit from being analyzed together\n"
-            "- Use page_graph.get_clusters() to find clusters\n"
-            "- Spawn workers with cache_affine=True for each cluster\n"
-            "- Merge results after each cluster completes\n"
-            "- Good when: Pages have clear dependency structure\n"
-            "2. **Query-Driven Continuous**: For exploratory analysis guided by questions\n"
-            "- Check get_outstanding_queries() for pending questions\n"
-            "- Spawn workers for pages that might answer top queries\n"
-            "- Detect contradictions as results come in\n"
-            "- Good when: Analysis is question-driven, not coverage-driven\n"
-            "3. **Opportunistic with Revisits**: For fast initial pass with refinement\n"
-            "- Spawn workers for all pages (with max_parallel limit)\n"
-            "- Check get_pages_with_issues() for low-confidence results\n"
-            "- Mark issues for revisit with new context\n"
-            "- Good when: Need fast initial results, can refine later\n"
-            "**Cache-awareness is EMERGENT from your choices:**\n"
-            "- Set cache_affine=True to place workers near cached pages\n"
-            "- Use working_set.request_pages() before spawn_workers() to pre-warm cache\n"
-            "- Use page_graph.get_clusters() to find pages that benefit from co-location\n"
+            f"({analyzed} active workers, {pending} pending).\n\n"
+
+            "**What pages are.** Pages are fixed-size token chunks (~20k–40k tokens) "
+            "identified by UUID — NOT file paths. A page may contain fragments from "
+            "multiple related files. Call `get_unanalyzed_pages()` to discover all "
+            "pages that still need analysis (sourced from the page graph). Do NOT "
+            "guess page IDs or use file paths as page IDs.\n\n"
+
+            "**How analysis works.** You spawn worker agents, each of which loads one "
+            "VCM page into LLM KV cache and performs inference over that page's token "
+            "context. Workers write results to the blackboard; you collect, merge, "
+            "detect contradictions, and synthesize into a unified output.\n\n"
+
+            "**Strategy choices** (decide based on the analysis goal and current state):\n"
+            "1. **Cluster-Based**: Use page graph clusters to batch related pages. "
+            "Spawn workers with `cache_affine=True` for cache locality. "
+            "Good when pages have clear dependency structure.\n"
+            "2. **Query-Driven**: Check `get_outstanding_queries()` for pending "
+            "questions, spawn workers for pages likely to answer them, detect "
+            "contradictions as results arrive. Good for exploratory analysis.\n"
+            "3. **Coverage with Revisits**: Spawn workers for all unanalyzed pages "
+            "(with `max_parallel` limit), then revisit low-confidence results. "
+            "Good for fast initial coverage with iterative refinement.\n\n"
+
+            "**Cache awareness.** `cache_affine=True` places workers on replicas "
+            "where the page is already in KV cache, avoiding expensive reloads. "
+            "The page graph's cluster and traversal actions help identify pages "
+            "that share cache locality."
         )
 
     async def initialize(self) -> None:
@@ -237,18 +241,10 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         if not isinstance(result_data, dict):
             return None
 
-        # Determine which worker produced this result
-        worker_agent_id = None
-        page_id = None
-        for wid, pid in self._worker_pages.items():
-            if event.key.startswith("result:run:"):  # TODO: Use a more robust check.
-                # Check if this result belongs to one of our workers
-                # by looking at the agent_id in the result metadata
-                result_agent_id = result_data.get("agent_id") or result_data.get("sender")
-                if result_agent_id == wid:
-                    worker_agent_id = wid
-                    page_id = pid
-                    break
+        # Determine which worker produced this result.
+        # BlackboardEvent.agent_id identifies who wrote to the blackboard.
+        worker_agent_id = event.agent_id
+        page_id = self._worker_pages.get(worker_agent_id) if worker_agent_id else None
 
         if not page_id:
             return None
@@ -573,14 +569,12 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         pages_to_spawn = page_ids
         if self._batching_policy:
             try:
-                page_graph_cap = self._get_page_graph_cap()
-                if page_graph_cap:
-                    page_graph = await page_graph_cap.load_graph()
-                    pages_to_spawn = await self._batching_policy.create_batch(
-                        candidate_pages=page_ids,
-                        page_graph=page_graph,
-                        max_batch_size=max_parallel if max_parallel > 0 else len(page_ids),
-                    )
+                page_graph = await self.agent.load_page_graph()
+                pages_to_spawn = await self._batching_policy.create_batch(
+                    candidate_pages=page_ids,
+                    page_graph=page_graph,
+                    max_batch_size=max_parallel if max_parallel > 0 else len(page_ids),
+                )
             except Exception as e:
                 logger.warning(f"BatchingPolicy failed, using original page order: {e}")
 
@@ -717,9 +711,11 @@ class VCMAnalysisCapability(AgentCapability, ABC):
             collect_results=collect_results,
         )
 
+        page_id = self._worker_pages.get(worker_id)
+
         if result.get("terminated"):
             # Remove from tracking
-            page_id = self._worker_pages.pop(worker_id, None)
+            self._worker_pages.pop(worker_id, None)
             if page_id:
                 self._worker_ids.pop(page_id, None)
             await self._persist_state()
@@ -729,7 +725,7 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         return {
             "terminated": result.get("terminated", False),
             "worker_id": worker_id,
-            "page_id": self._worker_pages.get(worker_id),
+            "page_id": page_id,
             "final_results": result.get("final_results", []),
         }
 
@@ -1190,21 +1186,33 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         self,
         from_set: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Get pages not yet analyzed.
+        """Get VCM page UUIDs not yet analyzed.
+
+        Call with no arguments to discover all pages from the page graph
+        and filter to those that have not been analyzed yet.  This is the
+        primary entry point for discovering work.
 
         Args:
-            from_set: Set of pages to check (if None, uses all known pages)
+            from_set: Subset of page UUIDs to check. If None, discovers
+                all available pages from the page graph automatically.
 
         Returns:
-            Dict with list of unanalyzed page IDs.
+            Dict with pages (list of UUID strings), count, from_total.
         """
         analyzed = await self.get_analyzed_pages()
         analyzed_set = set(analyzed.get("pages", []))
 
         if from_set is None:
-            # Get all pages from working set or pending work
-            from_set = list(self._worker_ids.keys())
-            from_set.extend([item["page_id"] for item in self._pending_work])
+            # All pages originate from the page graph. Use
+            # PageGraphCapability.compute_centrality to get the full
+            # list sorted by importance (highest centrality first).
+            try:
+                pg_cap = await self._get_page_graph_cap()
+                centrality = await pg_cap.compute_centrality(page_ids=None)
+                from_set = centrality.get("sorted_pages", [])
+            except Exception as e:
+                logger.warning(f"Failed to get pages from PageGraphCapability: {e}")
+                from_set = []
 
         unanalyzed = [p for p in from_set if p not in analyzed_set]
 
@@ -1377,16 +1385,17 @@ class VCMAnalysisCapability(AgentCapability, ABC):
             Dict with coverage statistics.
         """
         analyzed = await self.get_analyzed_pages()
+        unanalyzed = await self.get_unanalyzed_pages()
         pending = await self.get_pending_work()
         issues = await self.get_pages_with_issues()
 
         analyzed_count = analyzed.get("count", 0)
-        pending_count = pending.get("count", 0)
-        total = analyzed_count + pending_count
+        total = analyzed_count + unanalyzed.get("count", 0)
 
         return {
             "analyzed": analyzed_count,
-            "pending": pending_count,
+            "unanalyzed": unanalyzed.get("count", 0),
+            "pending_work": pending.get("count", 0),
             "total": total,
             "coverage_pct": (analyzed_count / total * 100) if total > 0 else 0,
             "pages_with_issues": issues.get("count", 0),

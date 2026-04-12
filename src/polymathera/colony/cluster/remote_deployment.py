@@ -41,6 +41,8 @@ from .models import (
 )
 from .remote_config import RemoteLLMDeploymentConfig
 from .routing import TargetClientRouter
+from ..agents.base import AgentManagerBase
+from .config import LLMDeploymentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +86,17 @@ class APIResponse:
 
 
 
-@serving.deployment
-class RemoteLLMDeployment:
+@serving.deployment(
+    autoscaling_config={
+        "min_replicas": 1,
+        "max_replicas": 10,
+        "target_queue_length": 5,
+    },
+    ray_actor_options={
+        "num_gpus": 0,  # Default to single GPU, override in production
+    },
+)
+class RemoteLLMDeployment(AgentManagerBase):
     """Remote LLM deployment — drop-in replacement for VLLMDeployment.
 
     Each replica manages a LIMITED number of cached pages on the remote API,
@@ -99,7 +110,14 @@ class RemoteLLMDeployment:
     - _initialize_client() -> None
     """
 
-    def __init__(self, config: RemoteLLMDeploymentConfig):
+    def __init__(
+        self,
+        config: RemoteLLMDeploymentConfig,
+        deployment_config: LLMDeploymentConfig | None = None,
+    ):
+        # Initialize AgentManagerBase
+        super().__init__(deployment_config=deployment_config)
+
         self.config = config
 
         # Page tracking (Layer 3 — same as VLLMDeployment)
@@ -140,6 +158,8 @@ class RemoteLLMDeployment:
 
         Called automatically by the serving framework after deployment.
         """
+        await super().initialize()  # Initialize AgentManagerBase (capabilities, etc.)
+
         import ray
 
         logger.info(
@@ -221,6 +241,12 @@ class RemoteLLMDeployment:
             f"RemoteLLMDeployment {self.client_id} initialized "
             f"(capacity={self.max_cached_tokens} tokens, ttl={self.config.ttl})"
         )
+
+    @serving.on_app_ready
+    async def on_ready(self):
+        """Discover sibling deployment handles after all deployments are started."""
+        # TODO: Discover other deployment handles
+        logger.info(f"RemoteLLMDeployment {self.client_id} handle discovery complete")
 
     async def get_replica_metadata(self) -> dict[str, Any]:
         """Report metadata for proxy routing (called by serving framework)."""
@@ -405,7 +431,7 @@ class RemoteLLMDeployment:
             return False
 
     @serving.endpoint
-    async def infer_with_context_composition(
+    async def infer_with_suffix(
         self,
         base_page_id: ContextPageId,
         request: InferenceRequest,
@@ -415,7 +441,7 @@ class RemoteLLMDeployment:
         """Inference using cached page prefix + task-specific suffix.
 
         This is the PRIMARY API for context composition, identical in signature
-        to VLLMDeployment.infer_with_context_composition().
+        to VLLMDeployment.infer_with_suffix().
 
         Multiple agents using the same page share the cached prefix at 0.1x cost
         (analogous to vLLM sharing base KV blocks via APC).
@@ -989,3 +1015,7 @@ class RemoteLLMDeployment:
             Message dict suitable for _call_api()
         """
         ...
+
+    async def cleanup(self):
+        """Cleanup resources on shutdown."""
+        # TODO: Implement any necessary cleanup, such as closing Redis connections

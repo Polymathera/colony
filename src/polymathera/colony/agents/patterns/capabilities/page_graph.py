@@ -78,12 +78,34 @@ class PageGraphCapability(AgentCapability):
 
     def get_action_group_description(self) -> str:
         return (
-            "Page Graph — graph-based traversal and relationship management over VCM pages. "
-            "Provides cache-aware traversal (BFS/DFS respecting working set), clustering for "
-            "batch scheduling, and centrality metrics for page prioritization. "
-            "Agnostic to relationship semantics — you decide how to use edges. "
-            "Graph is loaded lazily from PageStorage and cached in memory. "
-            "Use get_clusters for batch planning and compute_centrality for page importance ranking."
+            "Page Graph — a directed graph over VCM pages used to coordinate "
+            "multi-agent context traversal for cache-efficient distributed analysis.\n\n"
+
+            "**VCM page model.** The codebase is split into **pages** — fixed-size "
+            "token chunks (~20k–40k tokens each) identified by UUID. A source file "
+            "may span multiple pages; a page may combine fragments from related files. "
+            "Inference is autoregressive: `_agent.infer(prompt=\"<your query>\", "
+            "context_page_ids=[page_id])` loads the page's tokens into KV cache as a "
+            "prefix, then appends and generates from your prompt. Because vLLM caches "
+            "prefix KV blocks, multiple agents sharing the same page prefix pay only "
+            "for their unique prompt suffixes — this is why cache locality matters.\n\n"
+
+            "**Graph structure.** Edges are of two kinds: (1) **static edges** created "
+            "during initial paging (imports, calls, inheritance, type references) and "
+            "(2) **learned edges** (`discovered_dependency`) created at runtime when "
+            "cross-page queries succeed, with weights updated via exponential moving "
+            "average. The graph evolves as agents analyze more pages, encoding which "
+            "pages actually need each other.\n\n"
+
+            "**Role in multi-agent coordination.** When multiple agents analyze a "
+            "large codebase, the page graph guides which pages each agent should visit "
+            "next. Graph traversal, centrality analysis, and clustering let agents "
+            "partition work along natural code boundaries and prioritize high-connectivity "
+            "pages. Spawning workers with `cache_affine=True` places them on replicas "
+            "where the target page is already cached, so graph-guided traversals "
+            "naturally exploit KV cache locality across the fleet. Recording query "
+            "resolutions strengthens learned edges, improving future traversals for "
+            "all agents."
         )
 
     async def _get_page_graph(self) -> nx.DiGraph:

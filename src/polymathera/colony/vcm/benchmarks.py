@@ -82,7 +82,7 @@ class ContextCompositionBenchmarks:
     """Benchmarks for context composition patterns.
 
     These benchmarks measure the performance characteristics of the
-    infer_with_context_composition() API under realistic agent workload patterns.
+    infer_with_suffix() API under realistic agent workload patterns.
     """
 
     def __init__(self, vllm_deployment_handle, base_page_tokens: list[int], num_tokens_in_base: int = 10000):
@@ -146,7 +146,7 @@ class ContextCompositionBenchmarks:
 
             req_start = time.time()
             try:
-                response = await self.vllm.infer_with_context_composition(
+                response = await self.vllm.infer_with_suffix(
                     base_page_id=base_page.page_id,
                     suffix_tokens=suffix,
                     request=request,
@@ -228,7 +228,7 @@ class ContextCompositionBenchmarks:
 
             req_start = time.time()
             try:
-                response = await self.vllm.infer_with_context_composition(
+                response = await self.vllm.infer_with_suffix(
                     base_page_id=base_page.page_id,
                     suffix_tokens=suffix,
                     request=request,
@@ -394,7 +394,7 @@ class ContextCompositionBenchmarks:
 
                 req_start = time.time()
                 try:
-                    await self.vllm.infer_with_context_composition(
+                    await self.vllm.infer_with_suffix(
                         base_page_id=base_page.page_id,
                         suffix_tokens=suffix_tokens,
                         request=request,

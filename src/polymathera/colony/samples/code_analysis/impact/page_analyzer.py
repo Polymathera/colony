@@ -1082,9 +1082,10 @@ class ChangeImpactAnalysisAgent(HypothesisGameAgent):
             **kwargs: Passed to HypothesisGameAgent (must include ``role``).
         """
         agent_id = agent_id or f"impact_agent_{uuid.uuid4().hex[:8]}"
+        agent_type = kwargs.pop("agent_type", "impact_analysis")
         super().__init__(
             agent_id=agent_id,
-            agent_type="impact_analysis",
+            agent_type=agent_type,
             bound_pages=[page_id] if page_id else [],
             **kwargs,
         )
