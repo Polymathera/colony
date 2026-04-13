@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useEffect, useRef } from "react";
 import { useCodegenIterations } from "@/api/hooks/useTraceAnalysis";
 import { Badge } from "@/components/shared/Badge";
 import { MetricCard } from "@/components/shared/MetricCard";
@@ -92,9 +92,12 @@ function SummaryStats({ iterations }: { iterations: CodegenIteration[] }) {
 function IterationCard({
   iteration,
   isStuck,
+  onNavigateToSpan,
 }: {
   iteration: CodegenIteration;
   isStuck: boolean;
+  /** Navigate to the ACTION span for this iteration in the tree view. */
+  onNavigateToSpan?: (spanId: string) => void;
 }) {
   const success = iteration.success === true;
   const failed = iteration.success === false;
@@ -113,6 +116,9 @@ function IterationCard({
 
   return (
     <div
+      data-action-span-id={iteration.action_span_id ?? undefined}
+      data-step-span-id={iteration.agent_step_span_id}
+      data-infer-span-id={iteration.infer_span_id ?? undefined}
       className={cn(
         "rounded-lg border bg-card overflow-hidden",
         isStuck && "ring-1 ring-amber-500/40",
@@ -163,7 +169,16 @@ function IterationCard({
       {/* Generated code */}
       {iteration.generated_code && (
         <div className="px-3 py-2">
-          <CodeBlock code={iteration.generated_code} maxHeight="240px" lineAnnotations={lineAnnotations} />
+          <CodeBlock
+            code={iteration.generated_code}
+            maxHeight="240px"
+            lineAnnotations={lineAnnotations}
+            onNavigateToSpan={
+              onNavigateToSpan && iteration.action_span_id
+                ? () => onNavigateToSpan(iteration.action_span_id!)
+                : undefined
+            }
+          />
         </div>
       )}
 
@@ -187,16 +202,36 @@ function IterationCard({
 export function LinearizedTimelineView({
   traceId,
   agentId,
+  onNavigateToSpan,
+  scrollToSpanId,
+  onScrollComplete,
 }: {
   traceId: string;
   agentId: string | null;
+  /** Switch to tree view and select this span. */
+  onNavigateToSpan?: (spanId: string) => void;
+  /** When set, scroll to the iteration whose action/infer/step span matches. */
+  scrollToSpanId?: string | null;
+  /** Called after scroll completes so parent can clear the pending ID. */
+  onScrollComplete?: () => void;
 }) {
   const { data: iterations, isLoading } = useCodegenIterations(traceId, agentId);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const stuckSteps = useMemo(
     () => detectStuckRanges(iterations ?? []),
     [iterations],
   );
+
+  // Scroll to the iteration matching scrollToSpanId after render.
+  useEffect(() => {
+    if (!scrollToSpanId || !iterations || !containerRef.current) return;
+    const el = containerRef.current.querySelector(
+      `[data-action-span-id="${scrollToSpanId}"], [data-step-span-id="${scrollToSpanId}"], [data-infer-span-id="${scrollToSpanId}"]`
+    );
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    onScrollComplete?.();
+  }, [scrollToSpanId, iterations, onScrollComplete]);
 
   if (isLoading) {
     return (
@@ -216,7 +251,7 @@ export function LinearizedTimelineView({
   }
 
   return (
-    <div className="space-y-4 overflow-auto" style={{ height: "calc(100vh - 360px)" }}>
+    <div ref={containerRef} className="space-y-4 overflow-auto" style={{ height: "calc(100vh - 360px)" }}>
       <SummaryStats iterations={iterations} />
 
       {stuckSteps.size > 0 && (
@@ -235,6 +270,7 @@ export function LinearizedTimelineView({
             key={it.step_index}
             iteration={it}
             isStuck={stuckSteps.has(it.step_index)}
+            onNavigateToSpan={onNavigateToSpan}
           />
         ))}
       </div>

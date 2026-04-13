@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useTraces, useTraceSpans, useTraceStream } from "@/api/hooks/useTraces";
 import { DataTable } from "../shared/DataTable";
 import { Badge } from "../shared/Badge";
@@ -175,19 +175,17 @@ function SpanTimingBar({
   span,
   traceStart,
   traceDuration,
-  zoom,
 }: {
   span: TraceSpan;
   traceStart: number;
   traceDuration: number;
-  zoom: number;
 }) {
   if (traceDuration <= 0) return null;
 
-  const offset = ((span.start_wall - traceStart) / traceDuration) * 100 * zoom;
+  const offset = ((span.start_wall - traceStart) / traceDuration) * 100;
   const width =
     span.duration_ms !== null
-      ? Math.max(0.5, (span.duration_ms / 1000 / traceDuration) * 100 * zoom)
+      ? Math.max(0.5, (span.duration_ms / 1000 / traceDuration) * 100)
       : 1.5; // Running/incomplete spans get a thin marker
 
   const color = KIND_COLORS[span.kind] ?? KIND_COLORS.custom;
@@ -196,7 +194,7 @@ function SpanTimingBar({
   const isIncomplete = span.duration_ms === null && !isRunning;
 
   return (
-    <div className="relative h-4 w-full rounded bg-muted/30" style={{ minWidth: `${100 * zoom}%` }}>
+    <div className="relative h-4 w-full rounded bg-muted/30">
       <div
         className={cn(
           "absolute top-0 h-full rounded",
@@ -206,7 +204,7 @@ function SpanTimingBar({
         )}
         style={{
           left: `${Math.min(offset, 99)}%`,
-          width: `${Math.max(0.3, Math.min(width, 100 * zoom - offset))}%`,
+          width: `${Math.max(0.3, Math.min(width, 100 - offset))}%`,
           backgroundColor: isError ? `${color}` : color,
           opacity: isError ? 1 : isIncomplete ? 0.4 : 0.7,
         }}
@@ -219,7 +217,6 @@ function WaterfallRow({
   node,
   traceStart,
   traceDuration,
-  zoom,
   isSelected,
   isCollapsed,
   onClick,
@@ -228,7 +225,6 @@ function WaterfallRow({
   node: SpanTreeNode;
   traceStart: number;
   traceDuration: number;
-  zoom: number;
   isSelected: boolean;
   isCollapsed: boolean;
   onClick: () => void;
@@ -241,69 +237,62 @@ function WaterfallRow({
 
   return (
     <div
+      data-span-id={span.span_id}
       className={cn(
-        "flex items-center gap-2 border-b px-2 py-1 transition-colors cursor-pointer hover:bg-muted/50",
+        "flex items-center border-b px-2 py-1 transition-colors cursor-pointer hover:bg-muted/50",
         isSelected && "bg-primary/10 border-primary/20"
       )}
       onClick={onClick}
     >
-      {/* Left: fixed-width name column with tree indentation */}
-      <div
-        className="flex items-center gap-1 shrink-0 w-[220px] overflow-hidden"
-        style={{ paddingLeft: indent }}
-      >
-        {/* Collapse/expand toggle */}
-        <button
-          className={cn(
-            "w-4 h-4 flex items-center justify-center text-[10px] text-muted-foreground shrink-0",
-            hasChildren && "hover:text-foreground"
-          )}
-          onClick={(e) => {
-            if (hasChildren) {
-              e.stopPropagation();
-              onToggle();
-            }
-          }}
+      {/* Left: fixed-width name + duration column */}
+      <div className="flex items-center gap-1 shrink-0 w-[280px]">
+        <div
+          className="flex items-center gap-1 flex-1 overflow-hidden"
+          style={{ paddingLeft: indent }}
         >
-          {hasChildren ? (isCollapsed ? "\u25B6" : "\u25BC") : ""}
-        </button>
-        <SpanKindBadge kind={span.kind} />
-        {span.kind === "action" && span.status !== "running" && (
-          <span className={cn(
-            "text-[10px] shrink-0 font-bold",
-            span.output_summary?.success === true ? "text-emerald-400" : "text-red-400"
-          )}>
-            {span.output_summary?.success === true ? "\u2713" : "\u2717"}
+          {/* Collapse/expand toggle */}
+          <button
+            className={cn(
+              "w-4 h-4 flex items-center justify-center text-[10px] text-muted-foreground shrink-0",
+              hasChildren && "hover:text-foreground"
+            )}
+            onClick={(e) => {
+              if (hasChildren) {
+                e.stopPropagation();
+                onToggle();
+              }
+            }}
+          >
+            {hasChildren ? (isCollapsed ? "\u25B6" : "\u25BC") : ""}
+          </button>
+          <SpanKindBadge kind={span.kind} />
+          {span.kind === "action" && span.status !== "running" && (
+            <span className={cn(
+              "text-[10px] shrink-0 font-bold",
+              span.output_summary?.success === true ? "text-emerald-400" : "text-red-400"
+            )}>
+              {span.output_summary?.success === true ? "\u2713" : "\u2717"}
+            </span>
+          )}
+          {span.status === "error" && span.kind !== "action" && (
+            <span className="text-[10px] text-red-400 shrink-0">ERR</span>
+          )}
+          <span className="text-xs font-medium truncate">
+            {span.name}
           </span>
-        )}
-        {span.status === "error" && span.kind !== "action" && (
-          <span className="text-[10px] text-red-400 shrink-0">ERR</span>
-        )}
-        <span className="text-xs font-medium truncate">
-          {span.name}
+        </div>
+        <span className="shrink-0 w-14 text-right font-mono text-xs text-muted-foreground">
+          {formatDurationMs(span.duration_ms)}
         </span>
       </div>
 
-      {/* Middle: timing bar — indented by depth for visual nesting */}
+      {/* Right: timing bar — width driven by zoom, scrolls with parent */}
       <div className="flex-1 min-w-0" style={{ paddingLeft: barIndent }}>
         <SpanTimingBar
           span={span}
           traceStart={traceStart}
           traceDuration={traceDuration}
-          zoom={zoom}
         />
-      </div>
-
-      {/* Right: duration + tokens */}
-      <div className="flex items-center gap-2 shrink-0 text-xs text-muted-foreground">
-        <span className="w-14 text-right font-mono">
-          {formatDurationMs(span.duration_ms)}
-        </span>
-        {(span.input_tokens || span.output_tokens) && (
-          <span className="w-16 text-right font-mono text-[10px]">
-            {span.input_tokens ?? 0}/{span.output_tokens ?? 0}
-          </span>
-        )}
       </div>
     </div>
   );
@@ -341,7 +330,14 @@ function TextModal({
   );
 }
 
-function SpanDetail({ span }: { span: TraceSpan }) {
+function SpanDetail({
+  span,
+  onNavigateToTimeline,
+}: {
+  span: TraceSpan;
+  /** Switch to timeline view, scrolling to the iteration that contains this span. */
+  onNavigateToTimeline?: (spanId: string) => void;
+}) {
   const [modalContent, setModalContent] = useState<{ title: string; text: string } | null>(null);
 
   const inferPrompt = span.kind === "infer" ? (span.input_summary?.prompt as string | undefined) : undefined;
@@ -403,6 +399,17 @@ function SpanDetail({ span }: { span: TraceSpan }) {
             {span.error}
           </p>
         </div>
+      )}
+
+      {/* Cross-navigation to timeline view */}
+      {onNavigateToTimeline &&
+        (span.kind === "action" || span.kind === "infer" || span.kind === "agent_step") && (
+        <button
+          className="w-full rounded border border-blue-800/40 bg-blue-950/20 px-3 py-2 text-xs font-medium text-blue-300 hover:bg-blue-950/40 transition-colors"
+          onClick={() => onNavigateToTimeline(span.span_id)}
+        >
+          Show in timeline view
+        </button>
       )}
 
       {/* LLM details */}
@@ -744,6 +751,12 @@ function TraceWaterfallView({
   const [viewMode, setViewMode] = useState<TraceViewMode>("tree");
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
+  // Pending scroll target — set by cross-navigation, consumed by useEffect after render.
+  const [pendingScrollSpanId, setPendingScrollSpanId] = useState<string | null>(null);
+  // Target action_span_id to scroll to in timeline view after switching.
+  const [pendingTimelineSpanId, setPendingTimelineSpanId] = useState<string | null>(null);
+  const waterfallRef = useRef<HTMLDivElement>(null);
+
   const toggleCollapsed = useCallback((spanId: string) => {
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -767,6 +780,45 @@ function TraceWaterfallView({
   const selectedSpan = selectedSpanId
     ? allSpans.find((s) => s.span_id === selectedSpanId) ?? null
     : null;
+
+  // --- Cross-view navigation ---
+
+  /** Timeline → Tree: switch to tree view, expand ancestors, select + scroll to the span. */
+  const navigateToSpanInTree = useCallback((spanId: string) => {
+    const parentOf = new Map<string, string>();
+    for (const s of allSpans) {
+      if (s.parent_span_id) parentOf.set(s.span_id, s.parent_span_id);
+    }
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      let cur = parentOf.get(spanId);
+      while (cur) {
+        next.delete(cur);
+        cur = parentOf.get(cur);
+      }
+      return next;
+    });
+    setSelectedSpanId(spanId);
+    setPendingScrollSpanId(spanId);
+    setViewMode("tree");
+  }, [allSpans]);
+
+  /** Tree → Timeline: switch to timeline view, scroll to the iteration. */
+  const navigateToTimeline = useCallback((spanId: string) => {
+    setPendingTimelineSpanId(spanId);
+    setViewMode("timeline");
+  }, []);
+
+  // After the tree view renders with the new selection, scroll to it.
+  useEffect(() => {
+    if (pendingScrollSpanId && viewMode === "tree" && waterfallRef.current) {
+      const el = waterfallRef.current.querySelector(
+        `[data-span-id="${pendingScrollSpanId}"]`
+      );
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+      setPendingScrollSpanId(null);
+    }
+  }, [pendingScrollSpanId, viewMode, flat]); // flat changes when collapse state updates
 
   // Compute trace time window
   const { traceStart, traceDuration } = useMemo(() => {
@@ -812,14 +864,14 @@ function TraceWaterfallView({
             <span className="text-[10px] text-muted-foreground">Zoom</span>
             <input
               type="range"
-              min={1}
+              min={0.1}
               max={20}
-              step={0.5}
+              step={0.1}
               value={zoom}
               onChange={(e) => setZoom(parseFloat(e.target.value))}
               className="w-24 h-1 accent-primary"
             />
-            <span className="text-[10px] font-mono text-muted-foreground w-6">{zoom}x</span>
+            <span className="text-[10px] font-mono text-muted-foreground w-8">{zoom}x</span>
           </div>
         )}
       </div>
@@ -843,43 +895,50 @@ function TraceWaterfallView({
       {viewMode === "tree" && (
         <div className="flex gap-0 rounded-lg border overflow-hidden" style={{ height: "calc(100vh - 360px)" }}>
           {/* Left: waterfall */}
-          <div className={cn("h-full overflow-auto", selectedSpan ? "w-3/5" : "w-full")}>
+          <div ref={waterfallRef} className={cn("h-full overflow-auto", selectedSpan ? "w-3/5" : "w-full")}>
             {flat.length === 0 ? (
               <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                 No spans recorded
               </div>
             ) : (
-              flat.map((node) => (
-                <WaterfallRow
-                  key={node.span.span_id}
-                  node={node}
-                  traceStart={traceStart}
-                  traceDuration={traceDuration}
-                  zoom={zoom}
-                  isSelected={node.span.span_id === selectedSpanId}
-                  isCollapsed={collapsed.has(node.span.span_id)}
-                  onClick={() =>
-                    setSelectedSpanId(
-                      node.span.span_id === selectedSpanId ? null : node.span.span_id
-                    )
-                  }
-                  onToggle={() => toggleCollapsed(node.span.span_id)}
-                />
-              ))
+              <div style={{ minWidth: `calc(280px + ${100 * zoom}%)` }}>
+                {flat.map((node) => (
+                  <WaterfallRow
+                    key={node.span.span_id}
+                    node={node}
+                    traceStart={traceStart}
+                    traceDuration={traceDuration}
+                    isSelected={node.span.span_id === selectedSpanId}
+                    isCollapsed={collapsed.has(node.span.span_id)}
+                    onClick={() =>
+                      setSelectedSpanId(
+                        node.span.span_id === selectedSpanId ? null : node.span.span_id
+                      )
+                    }
+                    onToggle={() => toggleCollapsed(node.span.span_id)}
+                  />
+                ))}
+              </div>
             )}
           </div>
 
           {/* Right: detail panel */}
           {selectedSpan && (
             <div className="w-2/5 border-l overflow-auto bg-card">
-              <SpanDetail span={selectedSpan} />
+              <SpanDetail span={selectedSpan} onNavigateToTimeline={navigateToTimeline} />
             </div>
           )}
         </div>
       )}
 
       {viewMode === "timeline" && (
-        <LinearizedTimelineView traceId={traceId} agentId={selectedAgentId} />
+        <LinearizedTimelineView
+          traceId={traceId}
+          agentId={selectedAgentId}
+          onNavigateToSpan={navigateToSpanInTree}
+          scrollToSpanId={pendingTimelineSpanId}
+          onScrollComplete={() => setPendingTimelineSpanId(null)}
+        />
       )}
 
       {viewMode === "diff" && (

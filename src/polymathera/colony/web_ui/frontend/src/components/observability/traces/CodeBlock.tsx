@@ -59,11 +59,14 @@ export function CodeBlock({
   maxHeight,
   className,
   lineAnnotations,
+  onNavigateToSpan,
 }: {
   code: string;
   maxHeight?: string;
   className?: string;
   lineAnnotations?: Map<number, RunCallTraceEntry>;
+  /** Called when the user clicks the "show in tree" button on an annotation. */
+  onNavigateToSpan?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -160,6 +163,14 @@ export function CodeBlock({
                       )}
                       {!annotation.error && !annotation.output_preview && (
                         <div className="text-muted-foreground/50 italic">No output</div>
+                      )}
+                      {onNavigateToSpan && (
+                        <button
+                          className="mt-1 text-[9px] text-blue-400 hover:text-blue-300 underline underline-offset-2 cursor-pointer"
+                          onClick={(e) => { e.stopPropagation(); onNavigateToSpan(); }}
+                        >
+                          Show in tree view
+                        </button>
                       )}
                     </div>
                   )}

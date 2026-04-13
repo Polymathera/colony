@@ -161,6 +161,10 @@ The Colony dashboard starts automatically with `colony-env up` at [localhost:808
 - **Traces** — detailed tracing of agent actions, VCM operations, and system events for debugging and performance analysis
 - And more...
 
+#### Tree View
+![traces](./docs/guides/images/dashboard-traces-tab.png)
+
+#### Timeline View
 ![traces](./docs/guides/images/dashboard-traces-timeline.png)
 
 ```bash
