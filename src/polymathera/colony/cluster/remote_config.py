@@ -55,7 +55,7 @@ ANTHROPIC_PRICING: dict[str, dict[str, float]] = {
         "cache_write_5m": 0.325,    # 1.25x input
         "cache_write_1h": 0.52,     # 2.0x input
     },
-    "claude-haiku-4-5": {
+    "minimax/minimax-m2.7": {
         "input": 0.30,
         "output": 1.2,
         "cache_read": 0.03,         # 0.1x input
