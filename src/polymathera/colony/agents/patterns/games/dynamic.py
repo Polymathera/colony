@@ -28,6 +28,7 @@ import uuid
 from typing import Any
 
 from ...base import AgentCapability
+from ...models import AgentSuspensionState
 from ...blackboard.protocol import GameInvitationProtocol
 from ...blackboard.types import BlackboardEvent
 from ...scopes import BlackboardScope, get_scope_prefix
@@ -104,6 +105,22 @@ class DynamicGameCapability(AgentCapability):
             "Use ``create_game`` to initiate a new game and invite other agents. "
             "Games are automatically cleaned up when they reach terminal state."
         )
+
+    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
+        """Serialize capability-specific state.
+
+        Args:
+            state: AgentSuspensionState to populate with serialized state
+        """
+        return state
+
+    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
+        """Restore capability-specific state from suspension.
+
+        Args:
+            state: AgentSuspensionState to restore from
+        """
+        pass
 
     # ------------------------------------------------------------------
     # Event handler — process game invitations
