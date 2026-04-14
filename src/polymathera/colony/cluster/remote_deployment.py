@@ -980,7 +980,7 @@ class RemoteLLMDeployment(AgentManagerBase):
         messages: dict[str, Any],
         max_tokens: int = 1024,
         temperature: float = 0.7,
-        top_p: float = 0.95,
+        top_p: float | None = None,
         json_schema: dict[str, Any] | None = None,
     ) -> APIResponse:
         """Call the remote LLM API.

@@ -214,7 +214,7 @@ class InferenceRequest(BaseModel):
     )
     max_tokens: int = 1024
     temperature: float = 0.7
-    top_p: float = 0.95
+    top_p: float | None = None
     json_schema: dict[str, Any] | None = Field(
         default=None,
         description="JSON schema for structured output generation (vLLM guided decoding)"

@@ -20,26 +20,47 @@ logger = logging.getLogger(__name__)
 # Used for cost estimation in InferenceResponse.metadata.
 # Format: {model_name_prefix: {input, output, cache_read, cache_write_5m, cache_write_1h}}
 ANTHROPIC_PRICING: dict[str, dict[str, float]] = {
-    "claude-sonnet-4": {
+    "claude-sonnet-4-6": {
         "input": 3.0,
         "output": 15.0,
         "cache_read": 0.30,       # 0.1x input
         "cache_write_5m": 3.75,   # 1.25x input
         "cache_write_1h": 6.0,    # 2.0x input
     },
-    "claude-opus-4": {
-        "input": 15.0,
-        "output": 75.0,
-        "cache_read": 1.50,       # 0.1x input
-        "cache_write_5m": 18.75,  # 1.25x input
-        "cache_write_1h": 30.0,   # 2.0x input
+    "claude-opus-4-6": {
+        "input": 5.0,
+        "output": 25.0,
+        "cache_read": 0.50,       # 0.1x input
+        "cache_write_5m": 6.25,   # 1.25x input
+        "cache_write_1h": 10.0,   # 2.0x input
     },
-    "claude-haiku-4": {
-        "input": 0.80,
-        "output": 4.0,
-        "cache_read": 0.08,       # 0.1x input
-        "cache_write_5m": 1.0,    # 1.25x input
-        "cache_write_1h": 1.6,    # 2.0x input
+    "claude-haiku-4-5": {
+        "input": 1.00,
+        "output": 5.0,
+        "cache_read": 0.1,         # 0.1x input
+        "cache_write_5m": 1.25,    # 1.25x input
+        "cache_write_1h": 2.0,     # 2.0x input
+    },
+    "xiaomi/mimo-v2-pro": {
+        "input": 1.00,
+        "output": 3.0,
+        "cache_read": 0.1,         # 0.1x input
+        "cache_write_5m": 1.25,    # 1.25x input
+        "cache_write_1h": 2.0,     # 2.0x input
+    },
+    "deepseek/deepseek-v3.2": {
+        "input": 0.26,
+        "output": 0.38,
+        "cache_read": 0.026,         # 0.1x input
+        "cache_write_5m": 0.325,    # 1.25x input
+        "cache_write_1h": 0.52,     # 2.0x input
+    },
+    "claude-haiku-4-5": {
+        "input": 0.30,
+        "output": 1.2,
+        "cache_read": 0.03,         # 0.1x input
+        "cache_write_5m": 0.375,    # 1.25x input
+        "cache_write_1h": 0.6,     # 2.0x input
     },
 }
 

@@ -13,6 +13,7 @@ import logging
 import os
 from typing import Any
 
+from ..distributed.ray_utils.rate_limit import RateLimitConfig, TokenBucketRateLimiter
 from .remote_config import RemoteLLMDeploymentConfig, get_pricing_for_model
 from .remote_deployment import APIResponse, RemoteLLMDeployment
 
@@ -45,6 +46,10 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         self._client = None  # openai.AsyncOpenAI
         self._pricing = get_pricing_for_model(config.model_name)
         self._is_claude_model = "claude" in config.model_name.lower()
+        self._rate_limiter = TokenBucketRateLimiter(RateLimitConfig(
+            requests_per_second=config.throttle_rps,
+            burst_size=config.throttle_burst,
+        ))
 
     async def _initialize_client(self) -> None:
         """Initialize the OpenAI async client pointed at OpenRouter."""
@@ -77,7 +82,7 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         messages: dict[str, Any],
         max_tokens: int = 1024,
         temperature: float = 0.7,
-        top_p: float = 0.95,
+        top_p: float | None = None,
         json_schema: dict[str, Any] | None = None,
     ) -> APIResponse:
         """Call the OpenRouter API (OpenAI-compatible).
@@ -92,13 +97,16 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         Returns:
             Normalized APIResponse with usage data
         """
+        # Some models reject having both temperature and top_p.
+        # Only include top_p when explicitly overridden from the default.
         kwargs: dict[str, Any] = {
             "model": self.config.model_name,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "top_p": top_p,
             "messages": messages["messages"],
         }
+        if top_p is not None:
+            kwargs["top_p"] = top_p
 
         # Add extra headers for OpenRouter
         extra_headers: dict[str, str] = {}
@@ -141,6 +149,7 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
                         f"  msg[{i}] role={role}: {str(content)[:200]!r}..."
                     )
 
+        await self._rate_limiter.acquire()
         response = await self._client.chat.completions.create(**kwargs)
 
         # Extract usage information

@@ -68,7 +68,15 @@ cluster:
   # --- Remote LLM deployments (no GPUs required) ---
   remote_deployments:
     # Anthropic Claude — uses prefix caching for VCM page text
-    - model_name: "claude-sonnet-4-20250514"
+    #- model_name: "claude-opus-4-6"
+    #  provider: "anthropic"
+    #  api_key_env_var: "ANTHROPIC_API_KEY"
+    #  max_cached_pages: 50
+    #  max_cached_tokens: 2000000
+    #  ttl: "1h"                # Prefix cache TTL ("5m" or "1h")
+    #  num_replicas: 1
+
+    - model_name: "claude-sonnet-4-6"
       provider: "anthropic"
       api_key_env_var: "ANTHROPIC_API_KEY"
       max_cached_pages: 50
@@ -76,8 +84,26 @@ cluster:
       ttl: "1h"                # Prefix cache TTL ("5m" or "1h")
       num_replicas: 1
 
+    # - model_name: "claude-haiku-4-5"
+    #   provider: "anthropic"
+    #   api_key_env_var: "ANTHROPIC_API_KEY"
+    #   max_cached_pages: 50
+    #   max_cached_tokens: 2000000
+    #   ttl: "1h"                # Prefix cache TTL ("5m" or "1h")
+    #   num_replicas: 1
+
     # OpenRouter — OpenAI-compatible API, supports many providers
-    # - model_name: "anthropic/claude-sonnet-4"
+    # - model_name: "deepseek/deepseek-v3.2"
+    #   provider: "openrouter"
+    #   api_key_env_var: "OPENROUTER_API_KEY"
+    #   num_replicas: 1
+
+    # - model_name: "minimax/minimax-m2.7"
+    #   provider: "openrouter"
+    #   api_key_env_var: "OPENROUTER_API_KEY"
+    #   num_replicas: 1
+
+    # - model_name: "xiaomi/mimo-v2-pro"
     #   provider: "openrouter"
     #   api_key_env_var: "OPENROUTER_API_KEY"
     #   num_replicas: 1

@@ -78,7 +78,7 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         messages: dict[str, Any],
         max_tokens: int = 1024,
         temperature: float = 0.7,
-        top_p: float = 0.95,
+        top_p: float | None = None,
         json_schema: dict[str, Any] | None = None,
     ) -> APIResponse:
         """Call the Anthropic Messages API.
@@ -100,9 +100,10 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
             "model": self.config.model_name,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "top_p": top_p,
             "messages": messages["messages"],
         }
+        if top_p is not None:
+            kwargs["top_p"] = top_p
 
         # Add system prompt if present
         if "system" in messages:
