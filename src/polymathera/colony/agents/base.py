@@ -3281,7 +3281,7 @@ class AgentManagerBase:
             self.max_gpu_memory_mb = deployment_config.max_gpu_memory_mb_per_replica
         else:
             # Defaults if no config provided
-            self.max_agents = 100
+            self.max_agents = 20
             self.max_cpu_cores = 8.0
             self.max_memory_mb = 16384  # 16GB
             self.max_gpu_cores = 0.0

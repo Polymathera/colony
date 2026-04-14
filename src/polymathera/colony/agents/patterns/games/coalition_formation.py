@@ -263,7 +263,7 @@ class CoalitionFormationProtocol(GameProtocolCapability[CoalitionFormationData, 
         Args:
             agent: Owning agent
         """
-        super().__init__(agent, game_type="coalition_formation")
+        super().__init__(agent=agent, game_type="coalition_formation")
 
     def get_action_group_description(self) -> str:
         return (

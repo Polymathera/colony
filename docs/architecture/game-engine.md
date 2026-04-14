@@ -40,7 +40,7 @@ async def run_hypothesis_game(
 ) -> CapabilityResultFuture: ...
 ```
 
-Roles: `HypothesisProposerAgent`, `HypothesisSkepticAgent`, `HypothesisGrounderAgent`, `HypothesisArbiterAgent`, coordinated by `HypothesisCoordinatorAgent`.
+Roles: proposer, skeptic, grounder, arbiter.  Agents join dynamically via `DynamicGameCapability`.
 
 ### Bidding / Contract Game
 
@@ -88,7 +88,7 @@ async def run_negotiation_game(
 ) -> CapabilityResultFuture: ...
 ```
 
-Roles: `NegotiationParticipantAgent`, `NegotiationMediatorAgent`, coordinated by `NegotiationCoordinatorAgent`.
+Roles: coordinator, participant, mediator.  Agents join dynamically via `DynamicGameCapability`.
 
 ### Consensus Game
 Agents vote or provide evidence; a meta-agent aggregates using configurable voting rules. Used for final decisions where multiple independent analyses must be reconciled.
@@ -267,10 +267,50 @@ Agent mental states are structured and inspectable:
 - Only `common=True` propositions appear in final confirmed reports
 - This prevents individual agent biases from propagating to system output
 
-## Integration with Action Policies
+## Dynamic Game Participation
 
-!!! bug "Game invocation from action policies"
-    Currently, games are started by an **owner agent** using actions such as `run_negotiation_game` which allows the owner agent to specify the game parameters and spawn participant agents. However, these participants have exclusive roles as game players and are disposed of after the game concludes. This is a limitation -- ideally, any agent should be able to participate in games as part of its normal reasoning process, and the insights from games should inform the agent's ongoing decision-making rather than being siloed in a separate "game mode". So, we need an **ad-hoc game invocation mechanism** that allows existing agents to decide to enter a game protocol at any point during their action policy execution, and to have the game outcomes directly influence their reasoning and planning.
+Any agent with `DynamicGameCapability` can create, join, and leave games at runtime without extending game-specific base classes.
+
+### How It Works
+
+1. **`DynamicGameCapability`** listens at colony scope for `GameInvitationProtocol` events
+2. A coordinator writes a `GameInvitation` to the blackboard with `game_type`, `participants` (agent_id → role mapping), and `game_config`
+3. Each invited agent's `DynamicGameCapability` auto-creates the appropriate `GameProtocolCapability` subclass (via `GameProtocolRegistry`), initializes it, and adds it to the agent
+4. The protocol's action executors immediately appear in the agent's action policy
+5. When the game reaches terminal state, the protocol capability is automatically cleaned up
+
+```python
+# Any agent can create a game:
+await dynamic_cap.create_game(
+    game_type="hypothesis_game",
+    participants={"agent-1": "proposer", "agent-2": "skeptic", "agent-3": "arbiter"},
+    game_config={"use_llm_reasoning": True},
+    initial_data={"hypothesis": hypothesis.model_dump()},
+)
+
+# Invited agents auto-join — no game-specific agent classes needed.
+# Each gets HypothesisGameProtocol added as a capability at runtime.
+```
+
+### Concurrent Games
+
+An agent can participate in multiple games simultaneously.  Each game gets its own `GameProtocolCapability` instance with `capability_key = "{game_type}:{game_id}"`, preventing collisions.
+
+### Game Protocol Registry
+
+`GameProtocolRegistry` maps `game_type` strings to `GameProtocolCapability` subclasses:
+
+| Game Type | Protocol Class |
+|-----------|---------------|
+| `hypothesis_game` | `HypothesisGameProtocol` |
+| `negotiation` | `NegotiationGameProtocol` |
+| `consensus_game` | `ConsensusGameProtocol` |
+| `contract_net` | `ContractNetGameCapability` |
+| `coalition_formation` | `CoalitionFormationProtocol` |
+
+Custom game types can be registered at startup: `GameProtocolRegistry.instance().register("my_game", MyGameProtocol)`.
+
+## Integration with Action Policies
 
 Games are invoked by action policies just like any other `AgentCapability`. The `CacheAwareActionPolicy` can delegate to a game protocol when it detects a situation requiring multi-agent deliberation:
 

@@ -766,6 +766,25 @@ function TraceWaterfallView({
     });
   }, []);
 
+  // Ctrl+wheel zoom on the timeline (horizontal only).
+  // Must use a non-passive listener to preventDefault() the browser's
+  // native Ctrl+Wheel page zoom.  React's onWheel is passive and can't
+  // prevent it.
+  useEffect(() => {
+    const el = waterfallRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      setZoom((prev) => {
+        const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        return Math.min(50, Math.max(0.1, +(prev * factor).toFixed(2)));
+      });
+    };
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, [viewMode]); // re-attach when switching to/from tree view
+
   // Merge REST + streamed spans (streamed overrides for live updates)
   const allSpans = useMemo(() => {
     const merged = new Map<string, TraceSpan>();
@@ -860,19 +879,9 @@ function TraceWaterfallView({
           )}
         </div>
         {viewMode === "tree" && (
-          <div className="flex items-center gap-2 shrink-0">
-            <span className="text-[10px] text-muted-foreground">Zoom</span>
-            <input
-              type="range"
-              min={0.1}
-              max={20}
-              step={0.1}
-              value={zoom}
-              onChange={(e) => setZoom(parseFloat(e.target.value))}
-              className="w-24 h-1 accent-primary"
-            />
-            <span className="text-[10px] font-mono text-muted-foreground w-8">{zoom}x</span>
-          </div>
+          <span className="text-[10px] text-muted-foreground shrink-0">
+            Ctrl+Scroll to zoom timeline ({zoom.toFixed(1)}x)
+          </span>
         )}
       </div>
 

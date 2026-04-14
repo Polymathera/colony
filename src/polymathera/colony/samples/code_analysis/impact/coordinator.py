@@ -1095,7 +1095,7 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
                 capabilities=["polymathera.colony.samples.code_analysis.impact.page_analyzer.ChangeImpactAnalysisCapability"],
                 bound_pages=[page_id],  # Single page
                 label=role,
-                role=HypothesisRole.PROPOSER,
+                #role=HypothesisRole.PROPOSER,
                 requirements=None,
                 #requirements=LLMClientRequirements(
                 #    model_family="llama",  # TODO: Make configurable

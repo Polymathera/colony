@@ -18,7 +18,7 @@ multi-agent framework. It demonstrates:
 
 4. **Capability Composition** — Agents are composed from reusable capabilities
    (WorkingSetCapability, AgentPoolCapability, PageGraphCapability,
-   MergeCapability, CriticCapability, HypothesisGameProtocol, etc.) that
+   MergeCapability, CriticCapability, DynamicGameCapability, etc.) that
    provide @action_executor methods and @event_handler hooks.
 
 Prerequisites:
@@ -191,7 +191,7 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
             "ChangeImpactAnalysisCapability",
             "MergeCapability",
             "GroundingCapability",
-            "HypothesisGameProtocol",  # via HypothesisGameAgent base class
+            "DynamicGameCapability",  # via HypothesisGameAgent base class
         ],
         "extra_metadata_keys": ["changes", "change_description"],
         "self_concept": {
@@ -310,7 +310,7 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
         "worker_capabilities": [
             "IntentInferenceCapability",
             "MergeCapability",
-            "ConsensusGameProtocol",
+            "DynamicGameCapability",
         ],
         "extra_metadata_keys": ["granularity"],
         "self_concept": {
@@ -351,7 +351,7 @@ ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
         "worker_capabilities": [
             "ContractInferenceCapability",
             "MergeCapability",
-            "HypothesisGameProtocol",
+            "DynamicGameCapability",
         ],
         "extra_metadata_keys": ["formalism"],
         "self_concept": {
@@ -470,6 +470,10 @@ EXTRA_CAPABILITIES_REGISTRY: dict[str, dict[str, str]] = {
     "CriticCapability": {
         "path": "polymathera.colony.agents.patterns.capabilities.critique.CriticCapability",
         "description": "Critique outputs for quality and correctness.",
+    },
+    "DynamicGameCapability": {
+        "path": "polymathera.colony.agents.patterns.games.dynamic.DynamicGameCapability",
+        "description": "Dynamic game participation — join/leave games at runtime via blackboard invitations.",
     },
     "SessionMemoryCapability": {
         "path": "polymathera.colony.agents.patterns.memory.session_memory.SessionMemoryCapability",

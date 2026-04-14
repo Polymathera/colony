@@ -413,7 +413,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
             capability_key: Unique key for this capability within the agent (default: "negotiation_game_protocol")
         """
         super().__init__(
-            agent,
+            agent=agent,
             scope=scope,
             game_type=_NEGOTIATION_GAME_TYPE,
             game_id=game_id,
@@ -1004,9 +1004,9 @@ class NegotiationGameProtocol(GameProtocolCapability):
         game_state = game_event.game_state
         game_data = NegotiationGameData(**game_state.game_data)
 
-        logger.info(f"Game {self.game_id} started. Role: {self.role.value}")
+        logger.info(f"Game {self.game_id} started. Role: {self.role}")
 
-        if self.role == NegotiationRole.COORDINATOR:
+        if self.role == NegotiationRole.COORDINATOR.value:
             # Coordinator started the game - verify ownership
             if game_event.agent_id != self.agent.agent_id:
                 logger.warning(
@@ -1016,13 +1016,13 @@ class NegotiationGameProtocol(GameProtocolCapability):
             # Coordinator monitors but doesn't make offers
             return None
 
-        elif self.role == NegotiationRole.PARTICIPANT:
+        elif self.role == NegotiationRole.PARTICIPANT.value:
             # Check if we should make the initial offer
             if self._should_make_initial_offer(game_data):
                 return await self._create_make_offer_action(game_data, is_initial=True)
             return None
 
-        elif self.role == NegotiationRole.MEDIATOR:
+        elif self.role == NegotiationRole.MEDIATOR.value:
             # Mediator waits for deadlock
             logger.info(f"Mediator {self.agent.agent_id} waiting for deadlock")
             return None
@@ -1041,7 +1041,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
 
         logger.info(
             f"Game {self.game_id} move. Phase: {phase.value}, "
-            f"Agent: {game_event.agent_id}, Role: {self.role.value}"
+            f"Agent: {game_event.agent_id}, Role: {self.role}"
         )
 
         # Check if game is terminal
@@ -1127,7 +1127,7 @@ class NegotiationGameProtocol(GameProtocolCapability):
         game_data: NegotiationGameData
     ) -> EventProcessingResult | None:
         """Handle MEDIATION phase."""
-        if self.role != NegotiationRole.MEDIATOR:
+        if self.role != NegotiationRole.MEDIATOR.value:
             return None
 
         # Mediator checks for deadlock and finds a middle ground solution.

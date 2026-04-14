@@ -193,7 +193,7 @@ class ContractNetGameCapability(GameProtocolCapability[ContractGameData, Contrac
             agent: Owning agent
             reputation_tracker: Optional reputation tracker for bid scoring
         """
-        super().__init__(agent, game_type="contract_net")
+        super().__init__(agent=agent, game_type="contract_net")
         self.reputation_tracker = reputation_tracker
 
     def get_action_group_description(self) -> str:

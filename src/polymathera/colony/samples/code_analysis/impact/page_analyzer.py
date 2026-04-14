@@ -46,6 +46,7 @@ import logging
 import time
 import uuid
 from typing import Any
+from pydantic import Field
 from overrides import override
 
 from polymathera.colony.agents.patterns import (
@@ -67,7 +68,7 @@ from polymathera.colony.agents.models import (
     PolicyREPL,
     AgentSuspensionState,
 )
-from polymathera.colony.agents.patterns.games.hypothesis.agents import HypothesisGameAgent
+from polymathera.colony.agents.patterns.games.dynamic import DynamicGameCapability
 
 from .types import (
     CodeChange,
@@ -1055,50 +1056,29 @@ class ChangeImpactAnalysisCapability(AgentCapability):
             self.changes = [CodeChange(**c) for c in changes_data]
 
 
-class ChangeImpactAnalysisAgent(HypothesisGameAgent):
+class ChangeImpactAnalysisAgent(Agent):
     """Agent that analyzes change impact for a SINGLE VCM page.
 
     The actual analysis logic lives in ChangeImpactAnalysisCapability.
     Actions are invoked through the action routing system via @action_executor.
     Events are handled through @event_handler decorators on capabilities.
 
-    NOTE: This agent extends HypothesisGameAgent to participate in
-    hypothesis games for collaborative impact analysis.
+    Game participation (e.g., hypothesis games) is handled dynamically
+    via ``DynamicGameCapability`` — the coordinator writes a game
+    invitation to the blackboard, and this agent auto-joins.
     """
+    analysis_capability: ChangeImpactAnalysisCapability | None = Field(default=None)
 
-    def __init__(
-        self,
-        agent_id: str | None = None,
-        page_id: str | None = None,
-        change_description: str | None = None,
-        **kwargs,
-    ):
-        """Initialize impact analysis agent for a SINGLE page.
-
-        Args:
-            agent_id: Unique agent ID
-            page_id: Single VCM page ID to analyze
-            change_description: Description of the change to analyze
-            **kwargs: Passed to HypothesisGameAgent (must include ``role``).
-        """
-        agent_id = agent_id or f"impact_agent_{uuid.uuid4().hex[:8]}"
-        agent_type = kwargs.pop("agent_type", "impact_analysis")
+    def __init__(self, **kwargs):
+        """Initialize impact analysis agent for a SINGLE page."""
         super().__init__(
-            agent_id=agent_id,
-            agent_type=agent_type,
-            bound_pages=[page_id] if page_id else [],
+            agent_id=kwargs.pop("agent_id", f"change_impact_analysis_agent_{uuid.uuid4().hex[:8]}"),
             **kwargs,
         )
-        # Store in metadata for capability to access
-        if page_id:
-            self.metadata["page_id"] = page_id
-        if change_description:
-            self.metadata["change_description"] = change_description
-
-        self.analysis_capability: ChangeImpactAnalysisCapability | None = None
 
     async def initialize(self) -> None:
         """Initialize agent and attach capabilities."""
+        self.add_capability_blueprints([DynamicGameCapability.bind()])
         await super().initialize()
 
         await self.action_policy.use_capability_blueprints([

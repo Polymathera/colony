@@ -86,7 +86,6 @@ from ..state import (
 from ..roles import GameRole, HYPOTHESIS_GAME_ROLES
 from ...models import Hypothesis
 from ....patterns.capabilities.validation import ValidationResult, ValidationCapability
-from ....patterns.capabilities.agent_pool import AgentPoolCapability
 from ....models import (
     Action,
     AgentMetadata,
@@ -324,7 +323,7 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
             evaluation_strategy: Strategy for hypothesis evaluation (optional)
         """
         super().__init__(
-            agent,
+            agent=agent,
             game_type=_HYPOTHESIS_GAME_TYPE,
             game_id=game_id,
             role=role,
@@ -474,79 +473,10 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
         """
         return self.agent.get_capability_by_type(ValidationCapability)
 
-    def _get_agent_pool(self) -> AgentPoolCapability | None:
-        """Get AgentPoolCapability for spawning participants."""
-        return self.agent.get_capability_by_type(AgentPoolCapability)
-
     def _get_tracking_capability(self):
         """Get HypothesisTrackingCapability if available."""
         from .tracking import HypothesisTrackingCapability
         return self.agent.get_capability_by_type(HypothesisTrackingCapability)
-
-    # =========================================================================
-    # Agent Spawning via AgentPoolCapability
-    # =========================================================================
-
-    async def spawn_game_participants(
-        self,
-        participants: dict[str, str],  # agent_id -> role
-    ) -> list[str]:
-        """Spawn game participants using AgentPoolCapability.
-
-        Replaces custom spawn_game_agents() method in agents.py.
-
-        Args:
-            participants: Mapping of agent_id to role
-
-        Returns:
-            List of spawned agent IDs
-        """
-        pool = self._get_agent_pool()
-        if not pool:
-            raise RuntimeError(
-                "AgentPoolCapability required for spawning participants. "
-                "Add AgentPoolCapability to the coordinator agent."
-            )
-
-        spawned = []
-        role_to_agent_type = {
-            "proposer": "polymathera.colony.agents.patterns.games.hypothesis.agents.HypothesisProposerAgent",
-            "skeptic": "polymathera.colony.agents.patterns.games.hypothesis.agents.HypothesisSkepticAgent",
-            "grounder": "polymathera.colony.agents.patterns.games.hypothesis.agents.HypothesisGrounderAgent",
-            "arbiter": "polymathera.colony.agents.patterns.games.hypothesis.agents.HypothesisArbiterAgent",
-        }
-
-        for agent_id, role in participants.items():
-            if agent_id == self.agent.agent_id:
-                continue  # Don't spawn self
-
-            agent_type = role_to_agent_type.get(role)
-            if not agent_type:
-                logger.warning(f"Unknown role {role} for agent {agent_id}")
-                continue
-
-            result = await pool.create_agent(
-                agent_type=agent_type,
-                metadata=AgentMetadata(
-                    parameters={
-                        "game_id": self.game_id,
-                    },
-                ),
-                label=role,
-                role=role,
-                requirements=None,
-                #requirements=LLMClientRequirements(
-                #    model_family="llama",  # TODO: Make configurable
-                #    min_context_window=32000,  # TODO: Make configurable
-                #),
-            )
-            if result.get("created"):
-                spawned.append(result["agent_id"])
-                logger.info(f"Spawned {role} agent: {result['agent_id']}")
-            else:
-                logger.error(f"Failed to spawn {role}: {result.get('error')}")
-
-        return spawned
 
     @override
     @action_executor(exclude_from_planning=True)
@@ -917,9 +847,9 @@ class HypothesisGameProtocol(GameProtocolCapability[HypothesisGameData, Hypothes
         game_event: GameEvent
     ) -> EventProcessingResult | None:
         """Handle game started event."""
-        logger.info(f"Game {self.game_id} started. Role: {self.role.value}")
+        logger.info(f"Game {self.game_id} started. Role: {self.role}")
 
-        if self.role == HypothesisRole.PROPOSER:
+        if self.role == HypothesisRole.PROPOSER.value:
             # Proposer should submit initial hypothesis
             # (Usually already done by coordinator in start_game)
             return None

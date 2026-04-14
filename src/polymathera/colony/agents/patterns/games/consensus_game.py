@@ -176,7 +176,7 @@ class ConsensusGameProtocol(GameProtocolCapability[ConsensusGameData, ConsensusG
             agent: Owning agent
             voting_method: Voting aggregation method
         """
-        super().__init__(agent, game_id=game_id, role=role, game_type="consensus_game")
+        super().__init__(agent=agent, game_id=game_id, role=role, game_type="consensus_game")
         self.voting_method = voting_method
 
     def get_action_group_description(self) -> str:

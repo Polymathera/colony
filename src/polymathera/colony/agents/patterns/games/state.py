@@ -67,6 +67,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from enum import Enum
+from collections.abc import Awaitable, Callable
 from typing import Any, Generic, TypeVar
 from overrides import override
 from contextlib import asynccontextmanager
@@ -472,6 +473,35 @@ class GameOutcome(BaseModel):
     )
 
 
+class GameInvitation(BaseModel):
+    """Invitation to join a game, written to colony-scoped blackboard.
+
+    ``DynamicGameCapability`` listens for these events and auto-joins
+    when the owning agent is listed in ``participants``.
+    """
+
+    game_id: str = Field(description="Unique game identifier")
+    game_type: str = Field(
+        description="Type of game (e.g., 'hypothesis_game', 'negotiation')"
+    )
+    creator_agent_id: str = Field(
+        description="Agent who created the invitation"
+    )
+    participants: dict[str, str] = Field(
+        description="Agent ID -> role mapping for invited agents"
+    )
+    game_config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Game-specific constructor kwargs for the protocol "
+                    "(e.g., strategy, voting_method, use_llm_reasoning)",
+    )
+    initial_data: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Initial game data (hypothesis, issue, task, etc.)",
+    )
+    created_at: float = Field(default_factory=lambda: time.time())
+
+
 class GameState(BaseModel):
     """State of a running game instance.
 
@@ -820,7 +850,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         namespace: str = "games",
         input_patterns: list[str] = [GameStateProtocol.state_pattern()],
         game_id: str | None = None,
-        role: str | None = None,
+        role: TRole | None = None,
         use_llm_reasoning: bool = False,
         llm_temperature: float = 0.3,
         llm_max_tokens: int = 500,
@@ -846,7 +876,19 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         # Use game_id as scope_id so all participants share the namespace
         self.game_id = game_id
         self.game_type = game_type
-        self.role: TRole = TRole(role)
+        # Accept TRole enum or string; store as string since the rest of
+        # the codebase (role_permissions, game state, blackboard keys) uses
+        # string role values.
+        if role is None:
+            self.role: str | None = None  # Will look up from game state when available
+        elif isinstance(role, Enum):
+            self.role = role.value
+        elif isinstance(role, str):
+            self.role = role
+        else:
+            raise TypeError(
+                f"role must be a TRole enum or str, got {type(role).__name__}"
+            )
 
         # LLM reasoning configuration
         self.llm_config = LLMReasoningConfig(
@@ -854,6 +896,10 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
             temperature=llm_temperature,
             max_tokens=llm_max_tokens,
         )
+
+        # Terminal callbacks — invoked when the game reaches a terminal state.
+        # Used by DynamicGameCapability to auto-cleanup game protocols.
+        self._on_terminal_callbacks: list[Callable[[str], Awaitable[None]]] = []
 
     def get_action_group_description(self) -> str:
         return (
@@ -983,6 +1029,15 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         if game_state.is_terminal():
             outcome = game_state.outcome
             logger.info(f"Game {game_state.game_id} completed: {outcome}")
+            # Notify terminal callbacks (used by DynamicGameCapability for cleanup)
+            for cb in self._on_terminal_callbacks:
+                try:
+                    await cb(game_state.game_id)
+                except Exception:
+                    logger.warning(
+                        "Terminal callback failed for game %s",
+                        game_state.game_id, exc_info=True,
+                    )
             return EventProcessingResult(
                 context_key="game_outcome",
                 context=outcome, # Must be BaseModel serializable
@@ -1532,7 +1587,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         Returns:
             EventProcessingResult containing Action to execute, or None
         """
-        logger.info(f"Game {self.game_id} started. Role: {self.role.value}")
+        logger.info(f"Game {self.game_id} started. Role: {self.role}")
         return None
 
     async def _handle_game_move(
@@ -1572,7 +1627,7 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
 
         logger.debug(
             f"Game {self.game_id} move. Phase: {game_state.phase.value}, "
-            f"Agent: {game_event.agent_id}, Role: {self.role.value}"
+            f"Agent: {game_event.agent_id}, Role: {self.role}"
         )
 
         if game_state.is_terminal():

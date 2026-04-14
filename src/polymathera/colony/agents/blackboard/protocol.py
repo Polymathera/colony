@@ -468,6 +468,43 @@ class GameStateProtocol(BlackboardProtocol):
         return parsed.get("state", "")
 
 
+class GameInvitationProtocol(BlackboardProtocol):
+    """Protocol for game invitation events at colony scope.
+
+    Written by a coordinator to invite agents into a game.
+    ``DynamicGameCapability`` listens for these events and
+    auto-joins when the agent is listed as a participant.
+
+    Key types:
+
+    - ``game_invitation:{game_id}`` — invitation for a specific game
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    # --- Key construction ---
+
+    @staticmethod
+    def invitation_key(game_id: str) -> str:
+        """Key for a game invitation."""
+        return ScopeUtils.format_key(game_invitation=game_id)
+
+    # --- Pattern construction ---
+
+    @staticmethod
+    def invitation_pattern() -> str:
+        """Pattern matching all game invitation events."""
+        return ScopeUtils.pattern_key(game_invitation=None)
+
+    # --- Key parsing ---
+
+    @staticmethod
+    def parse_invitation_key(key: str) -> str:
+        """Extract game_id from an invitation key."""
+        parsed = ScopeUtils.parse_key("", key)
+        return parsed.get("game_invitation", "")
+
+
 class CritiqueProtocol(BlackboardProtocol):
     """Protocol for critique request/response exchange.
 

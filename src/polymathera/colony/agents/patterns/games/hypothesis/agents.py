@@ -1,86 +1,28 @@
 """Hypothesis Game for hallucination control.
 
-As specified in MULTI_AGENT_GAME_ENGINE.md:
-"Hypothesis game: one agent proposes a solution, others try to refute or refine."
-
 Game structure (Extensive Form):
 - Roles: Proposer, Skeptic(s), Grounder(s), Arbiter
 - Phases: PROPOSE → CHALLENGE → GROUND → DEFEND → ARBITRATE → TERMINAL
 - Purpose: Combat hallucination through structured challenge and evidence requirements
 
-The game ensures:
-- Every claim must have supporting evidence
-- Claims can be challenged by skeptics
-- Challenges must be addressed with evidence or revision
-- Final acceptance requires arbiter validation
-
-Architecture:
-
-┌────────────────────────────────────────────────────────────────────┐
-│                     HypothesisGameProtocol                         │
-│                       (AgentCapability)                            │
-├────────────────────────────────────────────────────────────────────┤
-│  OWNS:                                                             │
-│  • Game rules (valid moves, phase transitions)                     │
-│  • @action_executor methods (start_game, submit_move)              │
-│  • Blackboard I/O (load/save game state, emit events)              │
-│  • Role-based permission validation                                │
-│                                                                    │
-│  • @event_handler for processing game events                       │
-│  • Decision logic (rule-based or supports LLM-based action policy) │
-│  • Action creation for game moves                                  │
-└────────────────────────────────────────────────────────────────────┘
-                              │
-                              │ provides executors
-                              │ emits events, writes to agent memory
-                              ▼
-┌────────────────────────────────────────────────────────────────────┐
-│                     EventDrivenActionPolicy                        │
-│                        (ActionPolicy)                              │
-├────────────────────────────────────────────────────────────────────┤
-│  OWNS:                                                             │
-│  • EventDrivenActionPolicy (e.g., CacheAwareActionPolicy)          │
-│  • Decision logic (when to challenge, defend, accept) if not       │
-│    overridden by HypothesisGameProtocol event handler (by          │
-│    returning immediate actions)                                    │
-│  • The protocol's @event_handler enriches planning context         │
-│    and can return immediate actions for rule-based decisions       │
-│                                                                    │
-│  DOES NOT:                                                         │
-│  • Define game rules                                               │
-│  • Directly manipulate game state                                  │
-│                                                                    │
-└────────────────────────────────────────────────────────────────────┘
-
-This implements ideas from:
-- Wooldridge's agent communication and coordination
-- Shoham & Leyton-Brown's game-theoretic foundations
-- Epistemic logic for belief tracking
+Game participation is handled dynamically via ``DynamicGameCapability`` —
+agents no longer need to extend game-specific base classes.  A coordinator
+writes a ``GameInvitation`` to the colony blackboard, and any agent with
+``DynamicGameCapability`` that is listed as a participant auto-joins.
 """
 
 from __future__ import annotations
 
-import importlib
 import uuid
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field
 from logging import getLogger
 
 from ....base import Agent, CapabilityResultFuture
-from ..state import GameOutcome
+from ..state import GameInvitation, GameOutcome
 from ...models import Hypothesis
-from ....models import AgentMetadata
 from ...actions import action_executor
-from .capabilities import (
-    HypothesisGameProtocol,
-    HypothesisRole
-)
-
-
-def _resolve_class(fully_qualified_name: str) -> type:
-    """Resolve a class from its fully qualified name."""
-    module_path, class_name = fully_qualified_name.rsplit(".", 1)
-    module = importlib.import_module(module_path)
-    return getattr(module, class_name)
+from ..dynamic import DynamicGameCapability
+from .capabilities import HypothesisGameProtocol
 
 logger = getLogger(__name__)
 
@@ -93,12 +35,10 @@ logger = getLogger(__name__)
 class HypothesisGameConfig(BaseModel):
     """Configuration for a hypothesis game instance.
 
-    Used to configure agents participating in a hypothesis game.
-    Serializable to pass between spawned agents.
+    Used as structured input for ``GameInvitation.game_config``.
     """
 
     game_id: str = Field(description="Unique game identifier")
-    role: str = Field(description="Role in the game: proposer, skeptic, grounder, arbiter")
     hypothesis: Hypothesis = Field(description="The hypothesis being validated")
     use_llm_reasoning: bool = Field(
         default=False,
@@ -111,175 +51,6 @@ class HypothesisGameConfig(BaseModel):
 
 
 # ============================================================================
-# Role-Specific Agent Classes
-# ============================================================================
-
-
-class HypothesisGameAgent(Agent):
-    """Agent configured for hypothesis game role.
-
-    Automatically sets up HypothesisGameProtocol capability with
-    CacheAwareActionPolicy. The protocol handles all game logic
-    via @event_handler methods.
-    """
-
-    role: HypothesisRole = Field(description="Role in the hypothesis game")
-    _game_config: HypothesisGameConfig | None = PrivateAttr(default=None)
-
-    async def initialize(self) -> None:
-        """Initialize hypothesis game agent."""
-        await super().initialize()
-
-        self._game_config = HypothesisGameConfig(
-            **self.metadata.parameters.get("game_config", {})
-        )
-        # Set up game protocol with role and LLM config
-        capability = HypothesisGameProtocol(
-            self,
-            game_id=self._game_config.game_id,
-            role=self.role.value,
-            use_llm_reasoning=self._game_config.use_llm_reasoning,
-        )
-        await capability.initialize()
-        self.add_capability(capability)
-
-        # Use CacheAwareActionPolicy - the protocol's @event_handler
-        # methods will handle all game logic
-        from ...actions import create_default_action_policy
-
-        self.action_policy = await create_default_action_policy(agent=self)
-
-        logger.info(
-            f"HypothesisGameAgent {self.agent_id} initialized as {self.role.value} "
-            f"for game {self._game_config.game_id}"
-        )
-
-
-class HypothesisProposerAgent(HypothesisGameAgent):
-    """Agent configured for hypothesis proposer role.
-
-    Automatically sets up HypothesisGameProtocol capability with proposer role.
-    """
-
-    pass
-
-
-class HypothesisSkepticAgent(HypothesisGameAgent):
-    """Agent configured for hypothesis skeptic role.
-
-    Challenges unsupported claims in the hypothesis.
-    """
-
-    pass
-
-
-class HypothesisGrounderAgent(HypothesisGameAgent):
-    """Agent configured for hypothesis grounder role.
-
-    Provides evidence to support or refute claims.
-    """
-
-    pass
-
-
-class HypothesisArbiterAgent(HypothesisGameAgent):
-    """Agent configured for hypothesis arbiter role.
-
-    Makes final judgment on hypothesis validity.
-    """
-
-    pass
-
-
-class HypothesisCoordinatorAgent(Agent):
-    """Agent that coordinates hypothesis validation game.
-
-    The coordinator:
-    1. Spawns participant agents (proposer, skeptics, grounders, arbiter)
-    2. Starts the game via HypothesisGameProtocol.start_game()
-    3. Monitors game events
-    """
-
-    _game_config: HypothesisGameConfig | None = PrivateAttr(default=None)
-    _child_agent_ids: list[str] = PrivateAttr(default_factory=list)
-
-    async def initialize(self) -> None:
-        """Initialize coordinator agent."""
-        await super().initialize()
-
-        self._game_config = HypothesisGameConfig(
-            **self.metadata.parameters.get("game_config", {})
-        )
-        capability = HypothesisGameProtocol(self, game_id=self._game_config.game_id)
-        await capability.initialize()
-        self.add_capability(capability)
-
-        # Spawn other game agents
-        await self.spawn_game_agents()
-
-        # Start the game
-        await capability.start_game(
-            participants=self._game_config.participants,
-            initial_data={"hypothesis": self._game_config.hypothesis.model_dump()},
-            game_id=self._game_config.game_id,
-        )
-
-        logger.info(
-            f"HypothesisCoordinatorAgent {self.agent_id} initialized "
-            f"and started game {self._game_config.game_id}"
-        )
-
-    async def spawn_game_agents(self) -> list[str]:
-        """Spawn participant agents for this game."""
-        agent_ids = []
-        participants = self._game_config.participants
-
-        # Get role -> capabilities mapping from metadata
-        role_capabilities: dict[str, list[str]] = self.metadata.get("role_capabilities", {})
-
-        role_to_agent_class = {
-            "proposer": HypothesisProposerAgent,
-            "skeptic": HypothesisSkepticAgent,
-            "grounder": HypothesisGrounderAgent,
-            "arbiter": HypothesisArbiterAgent,
-        }
-
-        for agent_id, role in participants.items():
-            if agent_id == self.agent_id:
-                continue  # Don't spawn self
-
-            agent_cls = role_to_agent_class.get(role)
-            if not agent_cls:
-                continue
-
-            child_config = HypothesisGameConfig(
-                game_id=self._game_config.game_id,
-                role=role,
-                hypothesis=self._game_config.hypothesis,
-                use_llm_reasoning=self._game_config.use_llm_reasoning,
-                participants=participants,
-            )
-
-            agent_caps = role_capabilities.get(role, [])
-            cap_blueprints = [_resolve_class(name).bind() for name in agent_caps]
-
-            # TODO: Pass LLMClientRequirements and other deployment parameters to spawn_child_agents
-            spawned_id = await self.spawn_child_agents(
-                blueprints=[agent_cls.bind(
-                    agent_id=agent_id,
-                    capability_blueprints=cap_blueprints,
-                    metadata=AgentMetadata(parameters={"game_config": child_config.model_dump()}),
-                )],
-                return_handles=False,
-            )[0]
-            agent_ids.append(spawned_id)
-
-        self._child_agent_ids = agent_ids
-        logger.info(f"Spawned {len(agent_ids)} hypothesis game agents: {agent_ids}")
-        return agent_ids
-
-
-# ============================================================================
 # Public API Functions
 # ============================================================================
 
@@ -289,7 +60,6 @@ async def run_hypothesis_game(
     *,
     owner: Agent,
     hypothesis: Hypothesis,
-    capabilities: dict[str, list[str]] | None = None,
     proposer_id: str | None = None,
     skeptic_ids: list[str] | None = None,
     grounder_ids: list[str] | None = None,
@@ -299,19 +69,15 @@ async def run_hypothesis_game(
     num_skeptics: int = 2,
     num_grounders: int = 1,
 ) -> CapabilityResultFuture:
-    """Run a complete hypothesis validation game.
+    """Run a complete hypothesis validation game via DynamicGameCapability.
 
-    This is the primary entry point for launching hypothesis games.
-    It spawns coordinator and all participant agents, starts the game,
-    and returns a result handle for monitoring.
-
-    Can be used as a standalone function or as an `action_executor` in any
-    action policy, enabling composition of multi-agent patterns.
+    Writes a ``GameInvitation`` to the colony blackboard.  All participant
+    agents must have ``DynamicGameCapability`` — they will auto-join and
+    receive ``HypothesisGameProtocol`` at runtime.
 
     Args:
-        owner: Parent agent spawning the game
+        owner: Parent agent (must have DynamicGameCapability)
         hypothesis: Hypothesis to validate
-        capabilities: Optional dict mapping role -> list of capability class paths
         proposer_id: Optional proposer agent ID
         skeptic_ids: Optional list of skeptic agent IDs
         grounder_ids: Optional list of grounder agent IDs
@@ -323,39 +89,11 @@ async def run_hypothesis_game(
 
     Returns:
         CapabilityResultFuture handle for monitoring/awaiting completion
-
-    Example:
-        ```python
-        from polymathera.colony.agents.games.hypothesis_game import (
-            run_hypothesis_game,
-        )
-        from polymathera.colony.agents.patterns import Hypothesis
-
-        hypothesis = Hypothesis(
-            hypothesis_id="hyp_001",
-            statement="The function handles all edge cases correctly",
-            supporting_evidence=["test_case_1", "test_case_2"],
-        )
-
-        result = await run_hypothesis_game(
-            owner=my_agent,
-            hypothesis=hypothesis,
-            use_llm_reasoning=True,
-        )
-
-        outcome = await result.wait(timeout=60.0)
-        if outcome and outcome.success:
-            print("Hypothesis validated!")
-        else:
-            print("Hypothesis rejected")
-        ```
     """
     game_id = game_id or f"hypothesis_game_{uuid.uuid4().hex[:8]}"
-    capabilities = capabilities or {}
 
     # Build participants mapping
     participants: dict[str, str] = {}
-    coordinator_id = f"{game_id}_coordinator"
 
     proposer_id = proposer_id or f"{game_id}_proposer"
     participants[proposer_id] = "proposer"
@@ -373,29 +111,20 @@ async def run_hypothesis_game(
     arbiter_id = arbiter_id or f"{game_id}_arbiter"
     participants[arbiter_id] = "arbiter"
 
-    # Create coordinator config
-    config = HypothesisGameConfig(
-        game_id=game_id,
-        role="coordinator",
-        hypothesis=hypothesis,
-        use_llm_reasoning=use_llm_reasoning,
+    # Write game invitation via DynamicGameCapability
+    dynamic_cap = owner.get_capability_by_type(DynamicGameCapability)
+    if dynamic_cap is None:
+        raise RuntimeError(
+            "Owner agent must have DynamicGameCapability to create games. "
+            "Add it via agent.add_capability_blueprints([DynamicGameCapability.bind()])"
+        )
+
+    await dynamic_cap.create_game(
+        game_type="hypothesis_game",
         participants=participants,
-    )
-
-    coordinator_caps = capabilities.get("coordinator", [])
-    cap_blueprints = [_resolve_class(name).bind() for name in coordinator_caps]
-
-    # Spawn coordinator agent
-    await owner.spawn_child_agents(
-        blueprints=[HypothesisCoordinatorAgent.bind(
-            agent_id=coordinator_id,
-            capability_blueprints=cap_blueprints,
-            metadata=AgentMetadata(parameters={
-                "game_config": config.model_dump(),
-                "role_capabilities": capabilities,
-            }),
-        )],
-        return_handles=False,
+        game_config={"use_llm_reasoning": use_llm_reasoning},
+        initial_data={"hypothesis": hypothesis.model_dump()},
+        game_id=game_id,
     )
 
     # Create result handle using the same game_id scope
@@ -404,14 +133,13 @@ async def run_hypothesis_game(
     result = await game_protocol.get_result_future()
 
     logger.info(
-        f"Spawned hypothesis game {game_id} with {len(skeptic_ids)} skeptics, "
-        f"{len(grounder_ids)} grounders"
+        "Hypothesis game %s created with %d skeptics, %d grounders",
+        game_id, len(skeptic_ids), len(grounder_ids),
     )
 
     return result
 
 
-# Legacy function for backward compatibility
 async def ground_hypothesis(
     hypothesis: Hypothesis,
     agent: Agent,
@@ -419,15 +147,7 @@ async def ground_hypothesis(
 ) -> tuple[bool, Hypothesis, GameOutcome]:
     """Validate hypothesis using hypothesis game (legacy API).
 
-    For new code, use `run_hypothesis_game` instead.
-
-    Args:
-        hypothesis: Hypothesis to validate
-        agent: Agent instance
-        use_llm: Whether to use LLM reasoning
-
-    Returns:
-        (accepted, final_hypothesis, outcome) tuple
+    For new code, use ``run_hypothesis_game`` instead.
     """
     result = await run_hypothesis_game(
         owner=agent,
@@ -454,4 +174,3 @@ async def ground_hypothesis(
             pass
 
     return (outcome.success, final_hypothesis, outcome)
-

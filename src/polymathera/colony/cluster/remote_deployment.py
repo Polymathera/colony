@@ -244,8 +244,8 @@ class RemoteLLMDeployment(AgentManagerBase):
 
     @serving.on_app_ready
     async def on_ready(self):
-        """Discover sibling deployment handles after all deployments are started."""
-        # TODO: Discover other deployment handles
+        """Discover sibling deployment handles after all deployments are started: LLMCluster, VCM, AgentSystem, ToolManager, ConsciousnessManager."""
+        await self.discover_handles()
         logger.info(f"RemoteLLMDeployment {self.client_id} handle discovery complete")
 
     async def get_replica_metadata(self) -> dict[str, Any]:
