@@ -83,15 +83,55 @@ function buildSpanTree(spans: TraceSpan[]): SpanTreeNode[] {
 
   for (const span of sorted) {
     const node = byId.get(span.span_id)!;
-    if (span.parent_span_id && byId.has(span.parent_span_id)) {
+    if (!span.parent_span_id) {
+      roots.push(node);
+    } else if (byId.has(span.parent_span_id)) {
       const parent = byId.get(span.parent_span_id)!;
       node.depth = parent.depth + 1;
       parent.children.push(node);
     } else {
-      roots.push(node);
+      // Parent hasn't arrived yet (distributed timing).  Create a
+      // placeholder root so the child isn't orphaned.  If another
+      // orphan references the same missing parent, reuse the
+      // placeholder.  When the real parent arrives via SSE, the merge
+      // replaces the placeholder by span_id.
+      const placeholder: TraceSpan = {
+        span_id: span.parent_span_id,
+        trace_id: span.trace_id,
+        parent_span_id: null,
+        run_id: span.run_id,
+        agent_id: span.agent_id,
+        name: "(waiting for parent span...)",
+        kind: "unknown",
+        start_wall: Number.MAX_SAFE_INTEGER,  // sort to bottom
+        duration_ms: null,
+        status: "running",
+        error: null,
+        input_summary: {},
+        output_summary: {},
+        input_tokens: null,
+        output_tokens: null,
+        cache_read_tokens: null,
+        model_name: null,
+        context_page_ids: null,
+        tags: [],
+        metadata: {},
+      };
+      const placeholderNode: SpanTreeNode = {
+        span: placeholder,
+        children: [],
+        depth: 0,
+      };
+      byId.set(span.parent_span_id, placeholderNode);
+      roots.push(placeholderNode);
+      // Now attach the orphan to its placeholder parent
+      node.depth = 1;
+      placeholderNode.children.push(node);
     }
   }
 
+  // Sort roots by start_wall so placeholders (MAX_SAFE_INTEGER) appear last
+  roots.sort((a, b) => a.span.start_wall - b.span.start_wall);
   return roots;
 }
 

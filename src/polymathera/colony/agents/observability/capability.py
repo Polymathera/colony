@@ -231,6 +231,10 @@ class TracingCapability(AgentCapability):
                 status=SpanStatus.RUNNING,
                 input_summary=self._summarize_input(ctx, kind),
             )
+            # Buffer the RUNNING span immediately so child spans can
+            # find their parent in the DB.  The consumer upserts, so
+            # the completion update below overwrites this entry.
+            self._buffer.append(span)
             with span_context(span):
                 try:
                     result = await proceed()
@@ -314,6 +318,18 @@ class TracingCapability(AgentCapability):
             generated = getattr(result, "generated_text", None)
             if generated and isinstance(generated, str):
                 summary["response"] = generated[:max_infer]
+        elif kind == SpanKind.EVENT_PROCESS:
+            # get_next_event returns BlackboardEvent or None
+            if result is None:
+                summary["event_received"] = False
+            else:
+                summary["event_received"] = True
+                summary["event_key"] = self._get_str_field(
+                    getattr(result, "key", None), max_chars
+                )
+                summary["event_scope"] = self._get_str_field(
+                    getattr(result, "scope_id", None), max_chars
+                )
 
         return summary
 

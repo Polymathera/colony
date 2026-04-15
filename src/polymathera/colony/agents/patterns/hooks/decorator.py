@@ -177,8 +177,11 @@ def hookable(func: Callable[P, R]) -> Callable[P, R]:
         if hook_registry is None:
             return await func(self, *args, **kwargs)
 
-        # Build join point identifier
-        join_point = f"{type(self).__name__}.{func.__name__}"
+        # Build join point identifier from the defining class, not the
+        # runtime type.  func.__qualname__ is "ClassName.method_name" as set
+        # at decoration time, so super() calls get their own distinct name.
+        join_point = func.__qualname__
+        # join_point = f"{type(self).__name__}.{func.__name__}"
 
         # Get matching hooks
         before_hooks, around_hooks, after_hooks = hook_registry.get_hooks(
