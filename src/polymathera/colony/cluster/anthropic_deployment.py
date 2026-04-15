@@ -14,7 +14,6 @@ import logging
 import os
 from typing import Any
 
-from ..distributed.ray_utils.rate_limit import RateLimitConfig, TokenBucketRateLimiter
 from .remote_config import RemoteLLMDeploymentConfig, get_pricing_for_model
 from .remote_deployment import APIResponse, RemoteLLMDeployment
 
@@ -45,11 +44,6 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         super().__init__(config)
         self._client = None  # anthropic.AsyncAnthropic
         self._pricing = get_pricing_for_model(config.model_name)
-        self._rate_limiter = TokenBucketRateLimiter(RateLimitConfig(
-            requests_per_second=config.throttle_rps,
-            burst_size=config.throttle_burst,
-        ))
-
     async def _initialize_client(self) -> None:
         """Initialize the Anthropic async client."""
         try:
@@ -67,10 +61,28 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
                 f"Set it with: export {self.config.api_key_env_var}=your-key"
             )
 
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        import httpx
+
+        self._client = anthropic.AsyncAnthropic(
+            api_key=api_key,
+            max_retries=2,
+            timeout=httpx.Timeout(
+                connect=10.0,
+                read=self.config.api_timeout_seconds,
+                write=30.0,
+                pool=30.0,  # Don't wait forever for a connection from the pool
+            ),
+            http_client=httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_connections=self.config.max_concurrent_requests * 2,
+                    max_keepalive_connections=self.config.max_concurrent_requests,
+                    keepalive_expiry=30.0,
+                ),
+            ),
+        )
         logger.info(
             f"Initialized Anthropic client for model {self.config.model_name} "
-            f"(ttl={self.config.ttl})"
+            f"(ttl={self.config.ttl}, pool={self.config.max_concurrent_requests * 2})"
         )
 
     async def _call_api(
@@ -152,11 +164,9 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
                 else:
                     logger.debug(f"  msg[{i}]: {str(content)[:200]!r}...")
 
-        # Throttle request rate to reduce 429s.  The SDK retries
-        # rate-limit errors internally with exponential backoff, so we
-        # don't add our own retry loop — this just spaces out requests.
-        await self._rate_limiter.acquire()
-
+        # Timeout is configured on the httpx client (see _initialize_client),
+        # NOT via asyncio.wait_for — cancelling a mid-flight httpx request
+        # can leave the connection in a dirty state, exhausting the pool.
         response = await self._client.messages.create(**kwargs)
 
         # Extract usage information

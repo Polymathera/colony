@@ -2723,7 +2723,7 @@ class Agent(BaseModel):
         logger.warning(
             f"\n"
             f"              ╔══════════════════════════════════════╗\n"
-            f"              ║  📡 agent.infer() → manager          ║\n"
+            f"              ║  📡 agent.infer({self.agent_id}) → manager ║\n"
             f"              ║  prompt_len={len(prompt or ''):<24} ║\n"
             f"              ║  pages={str(context_page_ids)[:30]:<30}║\n"
             f"              ╚══════════════════════════════════════╝"
@@ -4277,7 +4277,7 @@ class AgentManagerBase:
         )
 
         logger.warning(
-            f"              📡 agent_infer: submitting to LLM cluster — "
+            f"              📡 agent_infer({agent_id}): submitting to LLM cluster — "
             f"request_id={request.request_id}, pages={len(context_page_ids or [])}"
         )
 
@@ -4285,7 +4285,7 @@ class AgentManagerBase:
         response = await self._llm_cluster_handle.infer(request)
 
         logger.warning(
-            f"              📡 agent_infer: LLM cluster responded — "
+            f"              📡 agent_infer({agent_id}): LLM cluster responded — "
             f"len={len(response.generated_text) if hasattr(response, 'generated_text') else '?'}"
         )
         return response

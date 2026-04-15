@@ -556,8 +556,9 @@ class RemoteDeploymentYAMLConfig:
     system_prompt: str | None = None
     ttl: str = "1h"  # "5m" or "1h"
     max_concurrent_requests: int = 10
-    throttle_rps: float = 1.0
-    throttle_burst: int = 5
+    throttle_rps: float = 10.0
+    throttle_burst: int = 10
+    api_timeout_seconds: float = 120.0
     num_replicas: int = 1
 
 
@@ -1354,6 +1355,7 @@ async def run_integration_test(
             max_concurrent_requests=rd.max_concurrent_requests,
             throttle_rps=rd.throttle_rps,
             throttle_burst=rd.throttle_burst,
+            api_timeout_seconds=rd.api_timeout_seconds,
             num_replicas=rd.num_replicas,
         ))
 

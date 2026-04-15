@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..distributed.ray_utils import serving
+from ..distributed.ray_utils.rate_limit import RateLimitConfig, TokenBucketRateLimiter
 from ..vcm.events import (
     PageEvent,
     PageEvictedEvent,
@@ -137,9 +138,13 @@ class RemoteLLMDeployment(AgentManagerBase):
             kv_cache_capacity_tokens=self.max_cached_tokens
         )
 
-        # Concurrency control
+        # Concurrency tracking (no semaphore — let the API provider's own
+        # rate limits and the httpx connection pool control throughput).
         self._active_requests = 0
-        self._request_semaphore = asyncio.Semaphore(config.max_concurrent_requests)
+        self._rate_limiter = TokenBucketRateLimiter(RateLimitConfig(
+            requests_per_second=config.throttle_rps,
+            burst_size=config.throttle_burst,
+        ))
 
         # TTL configuration
         self.ttl_seconds = config.get_ttl_seconds()
@@ -309,7 +314,11 @@ class RemoteLLMDeployment(AgentManagerBase):
                 suffix_text="Acknowledged.",
                 system_prompt=self.config.system_prompt,
             )
-            response = await self._call_api(messages, max_tokens=1)
+            self._active_requests += 1
+            try:
+                response = await self._call_api(messages, max_tokens=1)
+            finally:
+                self._active_requests -= 1
 
             # Track locally (Layer 3)
             now = time.time()
@@ -498,19 +507,18 @@ class RemoteLLMDeployment(AgentManagerBase):
             system_prompt=self.config.system_prompt,
         )
 
-        # Call API with concurrency control
-        async with self._request_semaphore:
-            self._active_requests += 1
-            try:
-                response = await self._call_api(
-                    messages,
-                    max_tokens=request.max_tokens,
-                    temperature=request.temperature,
-                    top_p=request.top_p,
-                    json_schema=request.json_schema,
-                )
-            finally:
-                self._active_requests -= 1
+        await self._throttle()
+        self._active_requests += 1
+        try:
+            response = await self._call_api(
+                messages,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                json_schema=request.json_schema,
+            )
+        finally:
+            self._active_requests -= 1
 
         latency_ms = (time.time() - start_time) * 1000
 
@@ -627,19 +635,18 @@ class RemoteLLMDeployment(AgentManagerBase):
                 system_prompt=self.config.system_prompt,
             )
 
-            # Call API with concurrency control
-            async with self._request_semaphore:
-                self._active_requests += 1
-                try:
-                    response = await self._call_api(
-                        messages,
-                        max_tokens=request.max_tokens,
-                        temperature=request.temperature,
-                        top_p=request.top_p,
-                        json_schema=request.json_schema,
-                    )
-                finally:
-                    self._active_requests -= 1
+            await self._throttle()
+            self._active_requests += 1
+            try:
+                response = await self._call_api(
+                    messages,
+                    max_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    json_schema=request.json_schema,
+                )
+            finally:
+                self._active_requests -= 1
 
             latency_ms = (time.time() - start_time) * 1000
 
@@ -885,7 +892,11 @@ class RemoteLLMDeployment(AgentManagerBase):
                         suffix_text="Acknowledge.",
                         system_prompt=self.config.system_prompt,
                     )
-                    await self._call_api(messages, max_tokens=1)
+                    self._active_requests += 1
+                    try:
+                        await self._call_api(messages, max_tokens=1)
+                    finally:
+                        self._active_requests -= 1
                     entry.last_access = time.time()
                     entry.ttl_expiry = time.time() + self.ttl_seconds
                     refreshed += 1
@@ -964,6 +975,10 @@ class RemoteLLMDeployment(AgentManagerBase):
         except Exception as e:
             logger.warning(f"Failed to emit page event: {e}")
             return False
+
+    async def _throttle(self) -> None:
+        """Rate-limit before acquiring a semaphore slot."""
+        await self._rate_limiter.acquire()
 
     # -------------------------------------------------------------------------
     # Abstract methods (subclass-specific)

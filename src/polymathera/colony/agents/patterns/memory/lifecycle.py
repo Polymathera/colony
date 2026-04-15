@@ -256,7 +256,7 @@ class MemoryLifecycleHooks(AgentCapability):
         await blackboard.write(
             key=LifecycleSignalProtocol.created_key(agent_id),
             value=creation_data.model_dump(),
-            agent_id=agent_id,
+            created_by=agent_id,
             tags={"agent_created", "memory_init_pending"},
             metadata={
                 "agent_type": agent.agent_type,

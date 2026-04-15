@@ -13,7 +13,6 @@ import logging
 import os
 from typing import Any
 
-from ..distributed.ray_utils.rate_limit import RateLimitConfig, TokenBucketRateLimiter
 from .remote_config import RemoteLLMDeploymentConfig, get_pricing_for_model
 from .remote_deployment import APIResponse, RemoteLLMDeployment
 
@@ -46,11 +45,6 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         self._client = None  # openai.AsyncOpenAI
         self._pricing = get_pricing_for_model(config.model_name)
         self._is_claude_model = "claude" in config.model_name.lower()
-        self._rate_limiter = TokenBucketRateLimiter(RateLimitConfig(
-            requests_per_second=config.throttle_rps,
-            burst_size=config.throttle_burst,
-        ))
-
     async def _initialize_client(self) -> None:
         """Initialize the OpenAI async client pointed at OpenRouter."""
         try:
@@ -68,9 +62,25 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
                 f"Set it with: export {self.config.api_key_env_var}=your-key"
             )
 
+        import httpx
+
         self._client = openai.AsyncOpenAI(
             base_url=OPENROUTER_BASE_URL,
             api_key=api_key,
+            max_retries=2,
+            timeout=httpx.Timeout(
+                connect=10.0,
+                read=self.config.api_timeout_seconds,
+                write=30.0,
+                pool=30.0,
+            ),
+            http_client=httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_connections=self.config.max_concurrent_requests * 2,
+                    max_keepalive_connections=self.config.max_concurrent_requests,
+                    keepalive_expiry=30.0,
+                ),
+            ),
         )
         logger.info(
             f"Initialized OpenRouter client for model {self.config.model_name} "
@@ -149,7 +159,9 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
                         f"  msg[{i}] role={role}: {str(content)[:200]!r}..."
                     )
 
-        await self._rate_limiter.acquire()
+        # Timeout is configured on the httpx client (see _initialize_client),
+        # NOT via asyncio.wait_for — cancelling a mid-flight httpx request
+        # can leave the connection in a dirty state, exhausting the pool.
         response = await self._client.chat.completions.create(**kwargs)
 
         # Extract usage information

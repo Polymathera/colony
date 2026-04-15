@@ -48,7 +48,7 @@ class LogQueryStore:
             offset: Pagination offset
 
         Returns:
-            List of log record dicts, newest first.
+            List of log record dicts, chronological order (oldest first).
         """
         conditions = []
         params: list[Any] = []
@@ -99,7 +99,7 @@ class LogQueryStore:
         query = f"""
             SELECT * FROM logs
             WHERE {where}
-            ORDER BY timestamp DESC
+            ORDER BY timestamp ASC
             LIMIT ${idx} OFFSET ${idx + 1}
         """
         params.extend([limit, offset])

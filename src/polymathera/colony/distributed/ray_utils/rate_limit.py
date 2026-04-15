@@ -1,7 +1,10 @@
+"""Token-bucket rate limiter for API throttling."""
+
 import asyncio
 import logging
+import time
+
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -14,43 +17,40 @@ class RateLimitConfig:
 
 
 class TokenBucketRateLimiter:
-    """Token bucket rate limiter with burst handling
+    """Token bucket rate limiter with burst handling.
 
-    Other options:
-    1. Fixed Window Rate Limiting
-    2. Sliding Window Rate Limiting
-    3. Leaky Bucket Algorithm
+    Uses a short lock only to read/update token count, never sleeps
+    while holding the lock.  This prevents serialization when many
+    callers wait concurrently.
     """
 
     def __init__(self, config: RateLimitConfig):
         self.config = config
-        self.tokens = config.burst_size
-        self.last_update = datetime.utcnow()
-        self.lock = asyncio.Lock()
+        self._tokens = float(config.burst_size)
+        self._last_update = time.monotonic()
+        self._lock = asyncio.Lock()
 
-    async def acquire(self, requested_tokens: int = 1):
-        """Acquire a rate limit token"""
-        async with self.lock:
-            await self._replenish_tokens()
+    async def acquire(self, requested_tokens: int = 1) -> None:
+        """Wait until a token is available, then consume it."""
+        while True:
+            async with self._lock:
+                self._replenish()
+                if self._tokens >= requested_tokens:
+                    self._tokens -= requested_tokens
+                    return
+                # Calculate how long to wait for enough tokens
+                deficit = requested_tokens - self._tokens
+                wait_time = deficit / self.config.requests_per_second
 
-            while self.tokens <= 0:
-                wait_time = self._calculate_wait_time(requested_tokens)
-                await asyncio.sleep(wait_time)
-                await self._replenish_tokens()
+            # Sleep OUTSIDE the lock so other callers can proceed
+            await asyncio.sleep(wait_time)
 
-            self.tokens -= requested_tokens
-
-    async def _replenish_tokens(self):
-        """Replenish tokens based on time passed"""
-        now = datetime.utcnow()
-        time_passed = (now - self.last_update).total_seconds()
-        self.tokens = min(
-            self.config.burst_size,
-            self.tokens + time_passed * self.config.requests_per_second,
+    def _replenish(self) -> None:
+        """Add tokens based on elapsed time (call while holding lock)."""
+        now = time.monotonic()
+        elapsed = now - self._last_update
+        self._tokens = min(
+            float(self.config.burst_size),
+            self._tokens + elapsed * self.config.requests_per_second,
         )
-        self.last_update = now
-
-    def _calculate_wait_time(self, requested_tokens: int = 1) -> float:
-        """Calculate wait time until next token"""
-        tokens_needed = requested_tokens - self.tokens
-        return tokens_needed / self.config.requests_per_second
+        self._last_update = now
