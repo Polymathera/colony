@@ -42,7 +42,7 @@ from ...base import Agent, ActionPolicy, ActionPolicyIterationResult, AgentCapab
 from ...blackboard import BlackboardEvent
 from ...blackboard.protocol import ActionPolicyProtocol
 from ...scopes import BlackboardScope
-from ..hooks import hookable
+from ....distributed.hooks import hookable
 from .dispatcher import ActionDispatcher, ActionGroup, SchemaDetail, pydantic_model_to_str
 from ..planning import (
     ActionPlanner,

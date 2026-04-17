@@ -171,15 +171,15 @@ class ColonyConnection:
                 min_size=2, max_size=10,
             )
             # Ensure spans table exists
-            from polymathera.colony.agents.observability.migrations import ensure_schema
+            from polymathera.colony.distributed.observability.migrations import ensure_schema
             await ensure_schema(self._db_pool)
 
             # Create query store
-            from polymathera.colony.agents.observability.store import SpanQueryStore
+            from polymathera.colony.distributed.observability.store import SpanQueryStore
             self._span_query_store = SpanQueryStore(self._db_pool)
 
             # Start Kafka→PG consumer
-            from polymathera.colony.agents.observability.consumer import SpanConsumer
+            from polymathera.colony.distributed.observability.consumer import SpanConsumer
             self._span_consumer = SpanConsumer(
                 kafka_bootstrap=kafka_bootstrap,
                 db_pool=self._db_pool,
@@ -187,8 +187,8 @@ class ColonyConnection:
             await self._span_consumer.start()
 
             # Log consumer + query store (same pattern as spans)
-            from polymathera.colony.agents.observability.log_consumer import LogConsumer
-            from polymathera.colony.agents.observability.log_store import LogQueryStore
+            from polymathera.colony.distributed.observability.log_consumer import LogConsumer
+            from polymathera.colony.distributed.observability.log_store import LogQueryStore
             self._log_query_store = LogQueryStore(self._db_pool)
             self._log_consumer = LogConsumer(
                 kafka_bootstrap=kafka_bootstrap,

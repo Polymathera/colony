@@ -24,7 +24,7 @@ from ...models import (
     ActionSharedDataDependency,
 )
 from ...base import Agent, ActionPolicy
-from ..hooks import hookable
+from ....distributed.hooks import hookable, tracing
 from ...blackboard.backend import ConcurrentModificationError
 from .repl import PolicyPythonREPL, REPLCapability, get_repl_guidance
 
@@ -730,6 +730,10 @@ class ActionGroup(BaseModel):
 
 
 
+@tracing(
+    publish_key=lambda self: self.agent.agent_id,
+    subscribe_key=lambda self: self.agent.agent_id
+)
 class ActionDispatcher:
     """Dispatch and execute actions within agent context with dataflow support.
 
@@ -1125,7 +1129,7 @@ class ActionDispatcher:
         except Exception as e:
             logger.exception(f"Failed to execute action {getattr(action, 'action_id', 'unknown')}")
             # Capture traceback for observability — flows through to
-            # TracingCapability via ActionResult.model_dump() → output_summary.
+            # AgentTracingFacility via ActionResult.model_dump() → output_summary.
             tb_lines = traceback_mod.format_exception(type(e), e, e.__traceback__)
             user_frames = [f for f in tb_lines if "site-packages" not in f]
             result = ActionResult(

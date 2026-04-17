@@ -28,8 +28,6 @@ from .scope import (
 
 # ---------------------------------------------------------------------------
 # ALL imports are deferred via __getattr__ to break circular dependencies:
-#   base.py → patterns.hooks.decorator → patterns/__init__.py
-#     → capabilities → working_set → base.py
 # ---------------------------------------------------------------------------
 
 __all__ = [
@@ -129,16 +127,6 @@ __all__ = [
     # Consciousness
     "ConsciousnessCapability",
     "SystemDocumentation",
-    # Hooks
-    "hookable",
-    "register_hook",
-    "auto_register_hooks",
-    "Pointcut",
-    "HookType",
-    "ErrorMode",
-    "HookContext",
-    "RegisteredHook",
-    "AgentHookRegistry",
     # Event processing
     "event_handler",
     "EventProcessingResult",
@@ -271,16 +259,6 @@ _LAZY_IMPORTS = {
     # .capabilities.consciousness
     "ConsciousnessCapability": ".capabilities.consciousness",
     "SystemDocumentation": ".capabilities.consciousness",
-    # .hooks
-    "hookable": ".hooks",
-    "register_hook": ".hooks",
-    "auto_register_hooks": ".hooks",
-    "Pointcut": ".hooks",
-    "HookType": ".hooks",
-    "ErrorMode": ".hooks",
-    "HookContext": ".hooks",
-    "RegisteredHook": ".hooks",
-    "AgentHookRegistry": ".hooks",
     # .events
     "event_handler": ".events",
     "EventProcessingResult": ".events",

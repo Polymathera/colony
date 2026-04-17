@@ -19,6 +19,7 @@ Colony is a multi-agent programming model where `AgentCapabilities` are very *lo
 
 ```python
 # Each capability declares what it can do
+@tracing(subscribe_key=lambda self: self.agent.agent_id)
 class MemoryConsolidationCapability(AgentCapability):
     @action_executor  # "conscious" -- LLM decides to invoke
     async def consolidate_memories(self, context: ActionContext) -> ActionResult:
@@ -36,7 +37,7 @@ class MemoryConsolidationCapability(AgentCapability):
         # Background memory consolidation
         ...
 
-    @register_hook(  # "subconscious" -- runs automatically via hooks
+    @hook_handler(  # "subconscious" -- runs automatically via hooks
         pointcut=Pointcut.pattern("*.execute_iteration"),
         hook_type=HookType.AFTER,
     )
@@ -159,6 +160,7 @@ This separation matters because LLM attention is expensive. Subconscious process
     Any Colony's `AgentCapability` exports `@action_executors` for **conscious cognitive processes** (deliberate actions interleaved with reasoning) and can run **subconscious cognitive processes** (consolidation, rehearsal, concept formation) in the background.
 
 ```python
+@tracing(subscribe_key=lambda self: self.agent.agent_id)
 class AnalysisCapability(AgentCapability):
     # Conscious: LLM planner chooses when to invoke
     @action_executor()
@@ -167,7 +169,7 @@ class AnalysisCapability(AgentCapability):
         ...
 
     # Subconscious: runs in the background via hooks
-    @register_hook(
+    @hook_handler(
         pointcut=Pointcut.pattern("ActionDispatcher.dispatch"),
         hook_type=HookType.AFTER,
     )

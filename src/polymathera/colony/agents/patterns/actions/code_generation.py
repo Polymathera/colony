@@ -59,7 +59,7 @@ from .policies import (
     EventDrivenActionPolicy,
 )
 from ..planning.context import PlanningContextBuilder
-from ..hooks import hookable
+from ....distributed.hooks import hookable
 from .code_constraints import (
     CodeGenerator,
     FreeFormCodeGenerator,

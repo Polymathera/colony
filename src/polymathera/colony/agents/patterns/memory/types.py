@@ -22,8 +22,7 @@ from typing import TYPE_CHECKING, Any, Callable, Awaitable, Literal
 
 from pydantic import BaseModel, Field
 
-from ..hooks.types import HookContext
-from ..hooks.pointcuts import Pointcut
+from ....distributed.hooks import Pointcut, HookContext
 
 if TYPE_CHECKING:
     from ...blackboard.types import BlackboardEntry

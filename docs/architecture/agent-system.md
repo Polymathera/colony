@@ -17,7 +17,7 @@ The framework provides structure (lifecycle, capabilities, blackboard access), b
 - **VCM access**: Read virtual context pages
 - **Inference submission**: Submit requests to vLLM replicas
 - **Capability management**: Add, remove, and query `AgentCapability` instances
-- **Hook registry**: Per-agent `AgentHookRegistry` for AOP interception
+- **Hook registry**: `HookRegistry` for AOP interception
 - **Session tracking**: Every `run()` call creates an `AgentRun` tracked in the session
 
 ## Agent Lifecycle States
@@ -110,7 +110,7 @@ Capabilities provide:
 
 - **Action executors**: Methods decorated with `@action_executor` that the `ActionPolicy` can invoke (conscious cognitive processes)
 - **Hookables**: Methods marked `@hookable` that other components can intercept
-- **Hooks** (*method call interceptors*): Hooks the capability registers on other components (via `register_hook()`)
+- **Hooks** (*method call interceptors*): Hooks the capability registers on other components (via `hook_handler()`)
 - **Event streams**: Capabilities can publish events to their scoped blackboard, which other agents can subscribe to (e.g., for game protocols or parent-child communication)
 - **Event handlers**: Capabilities can subscribe to events from other capabilities or agents, enabling reactive behavior and emergent coordination patterns
 - **Services** or **background processes**: Subconscious *cognitive* processes (consolidation, rehearsal)
@@ -185,6 +185,7 @@ The policy manages which capabilities are active via `use_agent_capabilities()` 
 The agent's main execution loop calls `run_step()` repeatedly. Each step invokes the action policy, which gathers context from capabilities, asks the LLM what to do next, and dispatches the chosen action:
 
 ```python
+@tracing(publish_key=lambda self: self.agent_id)
 class Agent:
     @hookable
     async def run_step(self) -> None:

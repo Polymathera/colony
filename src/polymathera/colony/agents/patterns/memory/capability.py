@@ -46,7 +46,7 @@ Example:
         SummarizingTransformer,
     )
     from polymathera.colony.agents import MemoryScope
-    from polymathera.colony.agents.patterns.hooks import Pointcut
+    from polymathera.colony.distributed.hooks import Pointcut
 
     # STM subscribes to working memory and consolidates inputs
     stm = MemoryCapability(
@@ -116,7 +116,7 @@ from ...blackboard.types import BlackboardEntry, BlackboardEvent
 from ....vcm.models import MmapConfig
 from ....vcm.sources import BuilInContextPageSourceType
 from ..actions import action_executor
-from ..hooks.types import HookContext, HookType, ErrorMode
+from ....distributed.hooks import HookContext, HookType, ErrorMode
 from .types import (
     MemoryQuery,
     MemorySubscription,

@@ -82,8 +82,9 @@ graph TB
 
 ```python
 # Memory observes agent behavior
+@tracing(subscribe_key=lambda self: self.agent.agent_id)
 class EpisodicMemoryCapability(AgentCapability):
-    @register_hook(Pointcut.pattern("ActionDispatcher.dispatch"), HookType.AFTER)
+    @hook_handler(Pointcut.pattern("ActionDispatcher.dispatch"), HookType.AFTER)
     async def on_action_complete(self, action: str, result: ActionResult):
         if self._is_episode_boundary(result):
             await self._store_episode(result)

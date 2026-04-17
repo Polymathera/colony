@@ -16,6 +16,7 @@ Agents don't hardcode their behavior. The LLM planner is given context and decid
 ```python
 from polymathera.colony.agents.base import Agent, AgentCapability, ActionPolicy
 
+@tracing(publish_key=lambda self: self.agent_id)
 class Agent:
     @hookable
     async def run_step(self) -> None:
@@ -41,6 +42,7 @@ Capabilities are pluggable modules attached to agents. They:
 Examples: `MemoryCapability`, `ReflectionCapability`, `HypothesisGameProtocol`, `CriticCapability`.
 
 ```python
+@tracing(publish_key=lambda self: self.agent.agent_id)
 class MyCapability(AgentCapability):
     @action_executor()
     async def analyze(self, query: str, max_depth: int = 5) -> dict:

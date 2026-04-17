@@ -69,7 +69,7 @@ from .protocols import (
     PeriodicMemoryIngestPolicyTrigger,
     CompositeMemoryIngestPolicyTrigger,
 )
-from ..hooks import Pointcut
+from ....distributed.hooks import Pointcut
 
 logger = logging.getLogger(__name__)
 

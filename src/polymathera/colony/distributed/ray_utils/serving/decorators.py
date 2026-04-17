@@ -750,7 +750,7 @@ def deployment(
         if enable_kafka_logs:
             @initialize_deployment
             async def __attach_kafka_logs__(self):
-                from polymathera.colony.agents.observability.log_setup import attach_kafka_log_handler
+                from polymathera.colony.distributed.observability.log_setup import attach_kafka_log_handler
                 await attach_kafka_log_handler()
 
             WrappedDeployment.__attach_kafka_logs__ = __attach_kafka_logs__

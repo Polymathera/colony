@@ -50,7 +50,7 @@ Usage:
         MemoryProducerConfig,
         SummarizingTransformer,
     )
-    from polymathera.colony.agents.patterns.hooks import Pointcut
+    from polymathera.colony.distributed.hooks import Pointcut
 
     agent_id = agent.agent_id
 

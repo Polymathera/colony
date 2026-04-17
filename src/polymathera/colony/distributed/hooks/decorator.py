@@ -1,7 +1,21 @@
 """Decorators for the hook system.
 
 - `@hookable`: Mark methods as interceptable (join points)
-- `@register_hook`: Declaratively register a method as a hook handler
+- `@hook_handler`: Declaratively register a method as a hook handler
+- `@tracing`: Inject methods to specify domain keys for hook registries
+- `install_hook_handlers()`: Auto-register all @hook_handler methods on an object
+- `uninstall_hook_handlers()`: Remove all hook handlers owned by an object
+
+Example usage:
+```python
+from polymathera.colony.distributed.hooks import hook_handler, hookable, tracing
+
+@tracing(subscribe_key=lambda self: self.agent_id)
+class MyCapability(AgentCapability):
+    @hookable
+    async def process(self, data: dict) -> dict:
+        return {"processed": data}
+```
 """
 
 from __future__ import annotations
@@ -13,7 +27,7 @@ from typing import Any, Callable, TypeVar, ParamSpec
 
 from .types import HookContext, HookType, ErrorMode, RegisteredHook
 from .pointcuts import Pointcut
-from .registry import AgentHookRegistry
+from .registry import HookRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +39,7 @@ R = TypeVar("R")
 _HOOK_REGISTRATION_ATTR = "_hook_registration"
 
 
-def register_hook(
+def hook_handler(
     pointcut: Pointcut,
     hook_type: HookType = HookType.AFTER,
     priority: int = 0,
@@ -34,7 +48,7 @@ def register_hook(
     """Decorator to declaratively register a method as a hook handler.
 
     The decorated method will be automatically registered as a hook when
-    the owning capability is initialized (via `_auto_register_hooks()`).
+    the owning capability is initialized (via `_install_hooks()`).
 
     Args:
         pointcut: Determines which methods/instances match
@@ -45,7 +59,7 @@ def register_hook(
     Example:
         ```python
         class TokenTrackerCapability(AgentCapability):
-            @register_hook(
+            @hook_handler(
                 pointcut=Pointcut.pattern("*.infer"),
                 hook_type=HookType.AFTER,
                 priority=100,
@@ -83,8 +97,8 @@ def register_hook(
     return decorator
 
 
-def discover_hook_handlers(obj: Any) -> list[tuple[Callable, dict]]:
-    """Discover methods decorated with @register_hook on an object.
+def _discover_hook_handlers(obj: Any) -> list[tuple[Callable, dict]]:
+    """Discover methods decorated with @hook_handler on an object.
 
     Args:
         obj: Object to scan for hook handlers
@@ -107,38 +121,120 @@ def discover_hook_handlers(obj: Any) -> list[tuple[Callable, dict]]:
     return handlers
 
 
-def auto_register_hooks(obj: Any, owner: Any = None) -> list[str]:
-    """Auto-register all @register_hook decorated methods on an object.
+def tracing(
+    publish_key: Callable[[Any], str] = None,
+    subscribe_key: Callable[[Any], str] = None,
+) -> Callable[[type], type]:
+    """Class decorator to inject get_hookable_*_domain_key methods for hookable publishers and listeners."""
+    
+    def decorator(cls: type) -> type:
+        if publish_key is not None:
+            setattr(
+                cls,
+                "get_hookable_publication_domain_key",
+                lambda self: publish_key(self),
+            )
+        if subscribe_key is not None:
+            setattr(
+                cls,
+                "get_hooks_subscription_domain_key",
+                lambda self: subscribe_key(self),
+            )
+        return cls
+
+    return decorator
+
+
+def install_hook_handlers(listener: Any) -> list[str]:
+    """Install all @hook_handler decorated methods on an object.
+
+    The listener's class needs to be decorated with @tracing(subscribe_key=...) to specify the domain key identifying the domain (i.e., the set of hookable methods and hook handlers
+    handling them).
 
     Args:
-        obj: Object with hook handler methods (typically an AgentCapability)
-        owner: Owner for lifecycle management (defaults to obj)
+        listener: The object containing the hook handlers. It is used for lifecycle
+                management. When `listener` is garbage collected or explicitly removed,
+                the hook handlers owned by it can be removed by calling `uninstall_hook_handlers(listener)`.
 
     Returns:
         List of registered hook IDs
     """
-    hook_registry = _get_hook_registry(obj)
+    domain_key = _get_hooks_subscription_domain_key(listener)
+    hook_registry = get_hook_registry(domain_key)
     if hook_registry is None:
         return []
 
-    owner = owner or obj
     hook_ids = []
 
-    for handler, reg_info in discover_hook_handlers(obj):
+    for handler, reg_info in _discover_hook_handlers(listener):
         hook_id = hook_registry.register(
             pointcut=reg_info["pointcut"],
             handler=handler,
             hook_type=reg_info["hook_type"],
             priority=reg_info["priority"],
             on_error=reg_info["on_error"],
-            owner=owner,
+            owner=listener,
         )
         hook_ids.append(hook_id)
         logger.debug(
-            f"Auto-registered hook {hook_id} from {type(obj).__name__}.{handler.__name__}"
+            f"Auto-registered hook {hook_id} from {type(listener).__name__}.{handler.__name__}"
         )
 
     return hook_ids
+
+
+def uninstall_hook_handlers(listener: Any) -> int:
+    """Remove all hook handlers owned by a listener.
+
+    This should be called when a listener (e.g., a capability) is removed from the agent,
+    to clean up its hook handlers.
+
+    The listener's class needs to be decorated with @tracing(subscribe_key=...) to specify the domain key identifying the domain (i.e., the set of hookable methods and hook handlers
+    handling them).
+
+    Args:
+        listener: The object that owns the hook handlers to remove
+
+    Returns:
+        The number of hook handlers removed
+    """
+    domain_key = _get_hooks_subscription_domain_key(listener)
+    hook_registry = get_hook_registry(domain_key)
+    if hook_registry is None:
+        return 0
+    return hook_registry.uninstall_hook_handlers(listener)
+
+
+def _get_hookable_publication_domain_key(obj: Any) -> Any:
+    """Get the domain key that contains the hook registry that a hookable method publishes to.
+
+    Args:
+        obj: The publisher object to find the domain key for
+
+    Returns:
+        The domain key or None if no hook registry is available
+    """
+    if not hasattr(obj, "get_hookable_publication_domain_key"):
+        raise ValueError(
+            f"Publisher object of type {type(obj).__name__} does not implement get_hookable_publication_domain_key()"
+        )
+    return obj.get_hookable_publication_domain_key()
+
+
+def _get_hooks_subscription_domain_key(obj: Any) -> Any:
+    """Get the domain key that contains the hook registry for a hook to subscribe to.
+
+    Args:
+        obj: The listener object to find the domain key for
+
+    Returns:
+        The domain key or None if no hook registry is available
+    """
+    if not hasattr(obj, "get_hooks_subscription_domain_key"):
+        raise ValueError(
+            f"Listener object of type {type(obj).__name__} does not implement get_hooks_subscription_domain_key()"
+        )
+    return obj.get_hooks_subscription_domain_key()
 
 
 def hookable(func: Callable[P, R]) -> Callable[P, R]:
@@ -171,7 +267,8 @@ def hookable(func: Callable[P, R]) -> Callable[P, R]:
     @functools.wraps(func)
     async def wrapper(self: Any, *args: P.args, **kwargs: P.kwargs) -> R:
         # Find the owning agent
-        hook_registry = _get_hook_registry(self)
+        domain_key = _get_hookable_publication_domain_key(self)
+        hook_registry = get_hook_registry(domain_key)
 
         # If no hook registry, execute directly
         if hook_registry is None:
@@ -216,29 +313,22 @@ def hookable(func: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
-def _get_hook_registry(obj: Any) -> AgentHookRegistry | None:
-    """Get the hook registry from an object.
+_hook_registries: dict[str, HookRegistry] = {}
 
-    Looks for:
-    1. obj itself if it has _hook_registry
-    2. obj.agent (for capabilities, policies, etc.)
+
+def get_hook_registry(domain_key: str) -> HookRegistry | None:
+    """Get or create the hook registry for a given domain key.
 
     Args:
-        obj: The object to get the hook registry from
+        domain_key: The key identifying the domain (i.e., the set of hookable
+                    methods and hooks handling them).
 
     Returns:
         The hook registry instance or None
     """
-    # Check if obj itself is an Agent (has _hook_registry attribute)
-    if hasattr(obj, "_hook_registry"):
-        return obj._hook_registry
-
-    # Check for agent attribute (capabilities, policies, dispatchers, etc.)
-    agent = getattr(obj, "agent", None)
-    if agent is not None and hasattr(agent, "_hook_registry"):
-        return agent._hook_registry
-
-    return None
+    if domain_key not in _hook_registries:
+        _hook_registries[domain_key] = HookRegistry(domain_key=domain_key)
+    return _hook_registries[domain_key]
 
 
 async def _execute_hook_chain(

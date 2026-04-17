@@ -16,6 +16,8 @@ The guiding principle: Agent control flow should be driven by reasoning LLMs
 given sufficient context, not hardcoded.
 """
 from __future__ import annotations
+
+import os
 import asyncio
 import logging
 import time
@@ -46,7 +48,6 @@ from .blueprint import (
 )
 from .blackboard import EnhancedBlackboard, BlackboardEvent
 from .blackboard.types import KeyPatternFilter, EventFilter
-from .patterns.hooks.decorator import hookable
 from .sessions.models import AgentRun, AgentRunConfig, AgentRunEvent, RunStatus, RunResourceUsage
 from ..distributed import get_polymathera
 from ..distributed.state_management import StateManager
@@ -54,7 +55,16 @@ from ..distributed.ray_utils import serving
 from .routing import AgentAffinityRouter, SoftPageAffinityRouter
 from ..vcm.page_storage import PageStorage, PageStorageConfig
 from ..cluster.config import LLMDeploymentConfig
-from .patterns.hooks import AgentHookRegistry, Pointcut, HookType, ErrorMode, auto_register_hooks
+from ..distributed.hooks import (
+    tracing,
+    hookable,
+    install_hook_handlers,
+    uninstall_hook_handlers,
+    get_hook_registry,
+    HookRegistry,
+)
+from ..distributed.observability import TracingFacility, TracingConfig
+
 
 if TYPE_CHECKING:
     from .patterns.memory.types import CapabilityMemoryRequirements
@@ -72,6 +82,10 @@ class ResourceExhausted(Exception):
     pass
 
 
+@tracing(
+    publish_key=lambda self: self.agent.agent_id,
+    subscribe_key=lambda self: self.agent.agent_id
+)
 class ActionPolicy(ABC):
     """Abstract base class for action policies.
 
@@ -161,6 +175,10 @@ class ActionPolicy(ABC):
         return capability_providers
 
 
+@tracing(
+    publish_key=lambda self: self.agent.agent_id,
+    subscribe_key=lambda self: self.agent.agent_id
+)
 class AgentCapability(ABC):
     """Base class for agent capabilities that agents furnish to their own action policies and to other agents.
 
@@ -575,72 +593,17 @@ class AgentCapability(ABC):
         )
         return request_id
 
-    def register_hook(
-        self,
-        pointcut: Pointcut,
-        handler: Any,
-        hook_type: HookType = HookType.AFTER,
-        priority: int = 0,
-        on_error: ErrorMode = ErrorMode.FAIL_FAST,
-    ) -> str:
-        """Register a hook on the owning agent.
-
-        Convenience method for capabilities to register hooks. The hook
-        is automatically removed when this capability is removed from
-        the agent (via `agent.remove_capability()`).
-
-        Note: This method is not available in detached mode since there
-        is no agent context to register hooks on.
-
-        Args:
-            pointcut: Determines which methods/instances match
-            handler: The hook function to execute
-            hook_type: BEFORE, AFTER, or AROUND
-            priority: Higher values run first
-            on_error: How to handle errors during execution
-
-        Returns:
-            Hook ID for later removal
-
-        Raises:
-            RuntimeError: If called in detached mode
-
-        Example:
-            ```python
-            async def initialize(self):
-                self.register_hook(
-                    pointcut=Pointcut.pattern("*.infer"),
-                    handler=self._track_tokens,
-                    hook_type=HookType.AFTER,
-                )
-            ```
-        """
-        if self._agent is None:
-            raise RuntimeError(
-                "Cannot register hooks in detached mode. "
-                "Hooks require an agent context."
-            )
-
-        return self._agent.hooks.register(
-            pointcut=pointcut,
-            handler=handler,
-            hook_type=hook_type,
-            priority=priority,
-            on_error=on_error,
-            owner=self,
-        )
-
     async def initialize(self) -> None:
         """Initialize the capability.
 
         Base implementation auto-registers any methods decorated with
-        `@register_hook`. Subclasses should call `await super().initialize()`
+        `@hook_handler`. Subclasses should call `await super().initialize()`
         to enable declarative hook registration.
 
         Example:
             ```python
             class MyCapability(AgentCapability):
-                @register_hook(
+                @hook_handler(
                     pointcut=Pointcut.pattern("*.process"),
                     hook_type=HookType.AFTER,
                 )
@@ -653,10 +616,10 @@ class AgentCapability(ABC):
                     # ... additional initialization
             ```
         """
-        self._auto_register_hooks()
+        self.install_hook_handlers()
 
-    def _auto_register_hooks(self) -> list[str]:
-        """Auto-register all @register_hook decorated methods.
+    def install_hook_handlers(self) -> list[str]:
+        """Install all @hook_handler decorated methods.
 
         Called by `initialize()`. Can also be called manually if needed.
 
@@ -668,7 +631,17 @@ class AgentCapability(ABC):
         if self._agent is None:
             # No hooks in detached mode
             return []
-        return auto_register_hooks(self, owner=self)
+        return install_hook_handlers(listener=self)
+
+    def uninstall_hooks(self) -> None:
+        """Uninstall all hooks.
+
+        In detached mode, does nothing (no hooks can be registered).
+        """
+        if self._agent is None:
+            # No hooks in detached mode
+            return
+        uninstall_hook_handlers(listener=self)
 
     @abstractmethod
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
@@ -1657,6 +1630,10 @@ def check_isolation(method):
     return wrapper
 
 
+@tracing(
+    publish_key=lambda self: self.agent_id,
+    subscribe_key=lambda self: self.agent_id
+)
 class Agent(BaseModel):
     """Base agent class representing an autonomous computational entity.
 
@@ -1738,7 +1715,10 @@ class Agent(BaseModel):
     _suspend_reason: str | None = PrivateAttr(default=None)
     _resumption_condition: ResumptionCondition | None = PrivateAttr(default=None)
     _manager: AgentManagerBase | None = PrivateAttr(default=None)
-    _hook_registry: AgentHookRegistry | None = PrivateAttr(default=None)
+    _tracing_facility: TracingFacility | None = PrivateAttr(default=None)
+
+    # Tracing config (set externally, e.g., by AgentSystemConfig)
+    _tracing_config: TracingConfig | None = PrivateAttr(default=None)
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -1795,17 +1775,15 @@ class Agent(BaseModel):
         self._manager = manager
 
     @property
-    def hooks(self) -> AgentHookRegistry:
+    def hooks(self) -> HookRegistry:
         """Get the hook registry for this agent.
 
         The registry is lazily created on first access.
 
         Returns:
-            AgentHookRegistry for registering hooks
+            HookRegistry for registering hooks
         """
-        if self._hook_registry is None:
-            self._hook_registry = AgentHookRegistry(self)
-        return self._hook_registry
+        return get_hook_registry(self.agent_id)
 
     def add_capability_blueprints(
         self,
@@ -1889,8 +1867,8 @@ class Agent(BaseModel):
             The removed capability, or None if not found
         """
         capability = self._capabilities.pop(capability_name, None)
-        if capability is not None and self._hook_registry is not None:
-            self._hook_registry.remove_hooks_by_owner(capability)
+        if capability is not None:
+            capability.uninstall_hooks()
         return capability
 
     def get_capability(self, capability_name: str) -> AgentCapability | None:
@@ -2103,6 +2081,41 @@ class Agent(BaseModel):
             await self.initialize_memory_hierarchy(**self.memory_config)
 
         await self._create_action_policy()
+
+        # Initialize tracing config from environment
+        self._init_tracing_config()
+
+        # Add AgentTracingFacility if tracing is enabled
+        if self._tracing_config and self._tracing_config.enabled:
+            try:
+                from .observability import AgentTracingFacility
+                self._tracing_facility = AgentTracingFacility(agent=self, config=self._tracing_config)
+                await self._tracing_facility.initialize()
+            except Exception as e:
+                logger.warning(f"Failed to initialize tracing for agent {self.agent_id}: {e}")
+
+    def _init_tracing_config(self) -> None:
+        """Initialize tracing config from environment variables."""
+        tracing_enabled = os.environ.get("TRACING_ENABLED", "").lower() in ("true", "1", "yes")
+        if tracing_enabled:
+            self._tracing_config = TracingConfig(
+                enabled=True,
+                kafka_bootstrap=os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092"),
+                kafka_topic=os.environ.get("KAFKA_SPANS_TOPIC", "colony.spans"),
+            )
+
+    async def emit_lifecycle_stop_event(self, stop_reason: str, error_msg: str | None = None, iteration: int | None = None) -> None:
+        """Emit a lifecycle stop event for this agent."""
+        # Finalize tracing spans with actual agent state
+        if self._tracing_facility:
+            from .observability import AgentTracingFacility
+            tracing_facility: AgentTracingFacility = self._tracing_facility
+            tracing_facility.emit_lifecycle_event(stop_reason, {
+                "error": error_msg,
+                "iterations": iteration,
+                "agent_state": str(self.state),
+            })
+            await tracing_facility.shutdown()  # Shutdown because agent is stopped. Ensure spans are flushed
 
     async def _create_action_policy(self) -> None:
         if self.action_policy:
@@ -3293,9 +3306,6 @@ class AgentManagerBase:
         self._used_gpu_cores: float = 0.0
         self._used_gpu_memory_mb: int = 0
 
-        # Tracing config (set externally, e.g., by AgentSystemConfig)
-        self._tracing_config = None  # TracingConfig | None
-
         # Set by deployment initialize
         self._vcm_handle: serving.DeploymentHandle | None = None
         self._llm_cluster_handle: serving.DeploymentHandle | None = None
@@ -3319,21 +3329,6 @@ class AgentManagerBase:
         self._tool_manager_handle = get_tool_manager()
         self._llm_cluster_handle = get_llm_cluster()
         self._vcm_handle = get_vcm()
-
-        # Initialize tracing config from environment
-        self._init_tracing_config()
-
-    def _init_tracing_config(self) -> None:
-        """Initialize tracing config from environment variables."""
-        import os
-        tracing_enabled = os.environ.get("TRACING_ENABLED", "").lower() in ("true", "1", "yes")
-        if tracing_enabled:
-            from .observability.config import TracingConfig
-            self._tracing_config = TracingConfig(
-                enabled=True,
-                kafka_bootstrap=os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092"),
-                kafka_topic=os.environ.get("KAFKA_SPANS_TOPIC", "colony.spans"),
-            )
 
     @serving.endpoint(
         router_class=SoftPageAffinityRouter,
@@ -3477,16 +3472,6 @@ class AgentManagerBase:
 
             # Initialize agent
             await agent.initialize()
-
-            # Add TracingCapability if tracing is enabled
-            if self._tracing_config and self._tracing_config.enabled:
-                try:
-                    from .observability.capability import TracingCapability
-                    tracing_cap = TracingCapability(agent=agent, config=self._tracing_config)
-                    await tracing_cap.initialize()
-                    agent.add_capability(tracing_cap, events_only=True)
-                except Exception as e:
-                    logger.warning(f"Failed to initialize tracing for agent {agent_id}: {e}")
 
             # Store agent
             if agent_id in self._agents:
@@ -3948,15 +3933,7 @@ class AgentManagerBase:
             )
 
             # Finalize tracing spans with actual agent state
-            from .observability.capability import TracingCapability
-            tracing_cap = agent.get_capability_by_type(TracingCapability)
-            if tracing_cap:
-                tracing_cap.emit_lifecycle_event(stop_reason, {
-                    "error": error_msg,
-                    "iterations": iteration,
-                    "agent_state": str(agent.state),
-                })
-                await tracing_cap.shutdown()
+            await agent.emit_lifecycle_stop_event(stop_reason, error_msg, iteration)
 
             # Update AgentRun status in session system
             await self._finalize_agent_run(agent, stop_reason, error_msg)

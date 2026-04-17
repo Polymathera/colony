@@ -15,16 +15,18 @@ from .types import (
 )
 from .pointcuts import Pointcut
 
-if TYPE_CHECKING:
-    from ...base import Agent
 
 logger = logging.getLogger(__name__)
 
 
-class AgentHookRegistry:
-    """Per-agent registry for hooks.
+class HookRegistry:
+    """Registry for hooks associated with one domain key.
 
-    Each agent has its own hook registry. Hooks registered on an agent
+    A domain is a group of hook handlers or listeners that can be
+    assigned to any group of hookable methods (e.g., all capabilities
+    of an agent) that they send notifications to.
+
+    Each agent can have its own hook registry. Hook handlers registered on an agent
     apply to all components of that agent (capabilities, policies, etc.)
     but not to other agents.
 
@@ -48,20 +50,21 @@ class AgentHookRegistry:
         ```
     """
 
-    def __init__(self, agent: Agent):
+    def __init__(self, domain_key: str):
         """Initialize the registry.
 
         Args:
-            agent: The agent this registry belongs to
+            domain_key: The key identifying the domain (i.e., the set of hookable
+                        methods and hooks handling them).
         """
-        self._agent_ref = weakref.ref(agent)
+        self._domain_key = domain_key
         self._hooks: list[RegisteredHook] = []
         self._cache: dict[tuple[str, int], list[RegisteredHook]] = {}
 
     @property
-    def agent(self) -> Agent | None:
-        """Get the owning agent (may be None if garbage collected)."""
-        return self._agent_ref()
+    def domain_key(self) -> str:
+        """Get the domain key."""
+        return self._domain_key
 
     def register(
         self,
@@ -122,31 +125,31 @@ class AgentHookRegistry:
             return True
         return False
 
-    def remove_hooks_by_owner(self, owner: Any) -> int:
-        """Remove all hooks registered by a specific owner.
+    def uninstall_hook_handlers(self, listener: Any) -> int:
+        """Remove all hook handlers registered by a specific listener.
 
         This is called when a capability or other component is removed
-        from the agent, to clean up its hooks.
+        from the agent, to clean up its hook handlers.
 
         Args:
-            owner: The object that registered the hooks
+            listener: The object that registered the hook handlers
 
         Returns:
-            Number of hooks removed
+            Number of hook handlers removed
         """
-        owner_id = id(owner)
+        listener_id = id(listener)
         before_count = len(self._hooks)
 
         self._hooks = [
             h
             for h in self._hooks
-            if h.owner_ref is None or id(h.owner_ref()) != owner_id
+            if h.owner_ref is None or id(h.owner_ref()) != listener_id
         ]
 
         removed = before_count - len(self._hooks)
         if removed > 0:
             self._cache.clear()
-            logger.debug(f"Removed {removed} hooks owned by {type(owner).__name__}")
+            logger.debug(f"Removed {removed} hook handlers owned by {type(listener).__name__}")
         return removed
 
     def get_hooks(

@@ -41,7 +41,7 @@ from ...scopes import MemoryScope, ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions import action_executor
 from ..events import event_handler, EventProcessingResult
 from .lifecycle import AgentTerminationEvent, AgentCreationEvent
-from ..hooks.decorator import hookable
+from ....distributed.hooks import hookable
 from ...blackboard.protocol import LifecycleSignalProtocol
 
 logger = logging.getLogger(__name__)

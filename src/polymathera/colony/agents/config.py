@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..distributed.ray_utils import serving
-from .observability.config import TracingConfig
+from ..distributed.observability.config import TracingConfig
 
 
 @dataclass

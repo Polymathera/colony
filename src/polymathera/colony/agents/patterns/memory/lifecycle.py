@@ -6,7 +6,7 @@ This module provides lifecycle hooks that:
 3. Emit termination events for MemoryManagementAgent to recycle
 
 These hooks integrate the memory system with agent lifecycle events using
-the hook system defined in `polymathera.colony.agents.patterns.hooks`.
+the hook system defined in `polymathera.colony.distributed.hooks`.
 
 Example:
     ```python
@@ -36,9 +36,12 @@ from ...models import AgentSuspensionState
 from ...scopes import MemoryScope, BlackboardScope, get_scope_prefix
 from ...blackboard.types import BlackboardEvent, KeyPatternFilter
 from ....distributed.ray_utils import serving
-from ..hooks.types import HookContext, HookType
-from ..hooks.pointcuts import Pointcut
-from ..hooks.decorator import register_hook
+from ....distributed.hooks import (
+    HookContext,
+    HookType,
+    Pointcut,
+    hook_handler,
+)
 from .context import AgentContextEngine
 from .working import WorkingMemoryCapability
 from ...blackboard.protocol import LifecycleSignalProtocol
@@ -54,7 +57,7 @@ class MemoryLifecycleHooks(AgentCapability):
     2. Consolidate all memories before agent shutdown
     3. Emit termination events for MemoryManagementAgent
 
-    The hooks use the declarative `@register_hook` decorator which
+    The hooks use the declarative `@hook_handler` decorator which
     auto-registers during `initialize()`.
     """
 
@@ -90,7 +93,7 @@ class MemoryLifecycleHooks(AgentCapability):
     async def initialize(self) -> None:
         """Initialize lifecycle hooks.
 
-        This auto-registers all @register_hook decorated methods.
+        This auto-registers all @hook_handler decorated methods.
         """
         await super().initialize()
         logger.info(f"MemoryLifecycleHooks initialized for {self.agent.agent_id}")
@@ -143,7 +146,7 @@ class MemoryLifecycleHooks(AgentCapability):
     # Lifecycle Hooks
     # -------------------------------------------------------------------------
 
-    @register_hook(
+    @hook_handler(
         pointcut=Pointcut.pattern("Agent.start"),
         hook_type=HookType.AFTER,
         priority=100,  # Run after agent starts
@@ -165,7 +168,7 @@ class MemoryLifecycleHooks(AgentCapability):
 
         return result
 
-    @register_hook(
+    @hook_handler(
         pointcut=Pointcut.pattern("*.task_complete"),  # TODO: Make sure this pointcut exists.
         hook_type=HookType.AFTER,
         priority=50,
@@ -189,7 +192,7 @@ class MemoryLifecycleHooks(AgentCapability):
 
         return result
 
-    @register_hook(
+    @hook_handler(
         pointcut=Pointcut.pattern("Agent.stop"),
         hook_type=HookType.BEFORE,
         priority=100,  # Run early before agent stops

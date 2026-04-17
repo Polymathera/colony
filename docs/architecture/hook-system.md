@@ -4,17 +4,18 @@
     Create a new article on aspect-oriented programming (AOP) principles in Colony (hook system and agent capabilities) to allow cross-cutting concerns like observability, memory capture, and rate limiting to be modularly implemented without polluting core agent logic.
 
 
-Colony uses aspect-oriented programming (AOP) to handle cross-cutting concerns, most importantly, **observability** -- token tracking, rate limiting, agent memory capture, checkpointing, and retry logic -- without polluting core agent logic. The hook system is implemented in `polymathera.colony.agents.patterns.hooks`.
+Colony uses aspect-oriented programming (AOP) to handle cross-cutting concerns, most importantly, **observability** -- token tracking, rate limiting, agent memory capture, checkpointing, and retry logic -- without polluting core agent logic. The hook system is implemented in `polymathera.colony.distributed.hooks`.
 
 ## Core Concepts
 
 ### `@hookable` Decorator
 
-The `hookable` decorator (in `polymathera.colony.agents.patterns.hooks.decorator`) marks a method as an interception point. When a hookable method is called, it checks the owning agent's hook registry for matching hooks and executes them in the appropriate order.
+The `hookable` decorator (in `polymathera.colony.distributed.hooks.decorator`) marks a method as an interception point. When a hookable method is called, it checks the owning agent's hook registry for matching hooks and executes them in the appropriate order.
 
 ```python
-from polymathera.colony.agents.patterns.hooks.decorator import hookable
+from polymathera.colony.distributed.hooks.decorator import hookable
 
+@tracing(publish_key=lambda self: self.agent.agent_id)
 class MyCapability(AgentCapability):
     @hookable
     async def analyze(self, data: dict) -> AnalysisResult:
@@ -24,7 +25,7 @@ class MyCapability(AgentCapability):
 
 ### Hook Types
 
-Defined in `polymathera.colony.agents.patterns.hooks.types.HookType`:
+Defined in `polymathera.colony.distributed.hooks.types.HookType`:
 
 | Type | Execution | Use Case |
 |------|-----------|----------|
@@ -34,7 +35,7 @@ Defined in `polymathera.colony.agents.patterns.hooks.types.HookType`:
 
 ### `HookContext`
 
-Every hook handler receives a `HookContext` (in `polymathera.colony.agents.patterns.hooks.types`):
+Every hook handler receives a `HookContext` (in `polymathera.colony.distributed.hooks.types`):
 
 ```python
 @dataclass
@@ -50,13 +51,14 @@ class HookContext:
 
 #### Declarative Registration
 
-`AgentCapabilities` can declare hooks using the `@register_hook` decorator. These are auto-discovered and registered with the capability's parent agent during initialization. A hook declaration includes a pointcut, type, and optional priority:
+`AgentCapabilities` can declare **hooks** (*handlers*) using the `@hook_handler` decorator. These are auto-discovered and registered with the capability's parent agent during initialization. A hook declaration includes a pointcut, type, and optional priority:
 
 ```python
-from polymathera.colony.agents.patterns.hooks.decorator import register_hook
+from polymathera.colony.distributed.hooks import hook_handler, tracing
 
+@tracing(subscribe_key=lambda self: self.agent.agent_id)
 class TokenTrackingCapability(AgentCapability):
-    @register_hook(
+    @hook_handler(
         pointcut=Pointcut.pattern("*.infer"),
         hook_type=HookType.AFTER,
         priority=100,
@@ -67,7 +69,7 @@ class TokenTrackingCapability(AgentCapability):
         return result
 ```
 
-The `auto_register_hooks` function (called by `AgentCapability.initialize`) scans a capability for methods decorated with `@register_hook` and registers them with the agent's registry.
+The `install_hook_handlers` function (called by `AgentCapability.initialize`) scans a capability for methods decorated with `@hook_handler` and registers them with the agent's registry.
 
 Alternatively, an arbitrary **handler function** can be directly registered as a hook by calling an agent's `registry.register` method:
 
@@ -80,15 +82,19 @@ registry.register(
 )
 ```
 
-#### `AgentHookRegistry`
+#### `HookRegistry`
 
-Each agent has its own `AgentHookRegistry` (in `polymathera.colony.agents.patterns.hooks.registry`). Hooks registered on one agent do not affect other agents.
+Each agent has its own `HookRegistry` (in `polymathera.colony.distributed.hooks.registry`). Hooks registered on one agent do not affect other agents.
 
 ```python
-class AgentHookRegistry:
-    """Per-agent registry for hooks.
+class HookRegistry:
+    """Registry for hooks associated with one domain key.
 
-    Each agent has its own hook registry. Hooks registered on an agent
+    A domain is a group of hook handlers or listeners that can be
+    assigned to any group of hookable methods (e.g., all capabilities
+    of an agent) that they send notifications to.
+
+    Each agent can have its own hook registry. Hook handlers registered on an agent
     apply to all components of that agent (capabilities, policies, etc.)
     but not to other agents.
     """
@@ -97,7 +103,7 @@ class AgentHookRegistry:
 
 #### `RegisteredHook`
 
-A `RegisteredHook` (in `polymathera.colony.agents.patterns.hooks.types`) bundles the hook configuration:
+A `RegisteredHook` (in `polymathera.colony.distributed.hooks.types`) bundles the hook configuration:
 
 - `hook_id`: Unique identifier
 - `pointcut`: Which methods to intercept
@@ -110,7 +116,7 @@ A `RegisteredHook` (in `polymathera.colony.agents.patterns.hooks.types`) bundles
 
 ## Pointcut Expressions
 
-`Pointcut` (in `polymathera.colony.agents.patterns.hooks.pointcuts`) determines which method invocations a hook intercepts. Pointcuts match against both the join point string (e.g., `"MyCapability.analyze"`) and the actual instance.
+`Pointcut` (in `polymathera.colony.distributed.hooks.pointcuts`) determines which method invocations a hook intercepts. Pointcuts match against both the join point string (e.g., `"MyCapability.analyze"`) and the actual instance.
 
 #### Pattern Matching
 
@@ -163,7 +169,7 @@ AroundHookHandler = Callable[[HookContext, Callable[[], Awaitable[Any]]], Awaita
 
 ## Error Handling
 
-`ErrorMode` (in `polymathera.colony.agents.patterns.hooks.types`) controls hook failure behavior:
+`ErrorMode` (in `polymathera.colony.distributed.hooks.types`) controls hook failure behavior:
 
 ```python
 class ErrorMode(str, Enum):

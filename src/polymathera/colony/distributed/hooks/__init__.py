@@ -11,7 +11,7 @@ Key concepts:
 
 Example:
     ```python
-    from polymathera.colony.agents.patterns.hooks import hookable, Pointcut, HookType
+    from polymathera.colony.distributed.hooks import hookable, Pointcut, HookType
 
     class MyCapability(AgentCapability):
         @hookable
@@ -48,8 +48,15 @@ from .pointcuts import (
     OrPointcut,
     NotPointcut,
 )
-from .registry import AgentHookRegistry
-from .decorator import hookable, register_hook, auto_register_hooks
+from .registry import HookRegistry
+from .decorator import (
+    tracing,
+    hookable,
+    hook_handler,
+    install_hook_handlers,
+    uninstall_hook_handlers,
+    get_hook_registry,
+)
 
 __all__ = [
     # Types
@@ -67,10 +74,13 @@ __all__ = [
     "OrPointcut",
     "NotPointcut",
     # Registry
-    "AgentHookRegistry",
+    "HookRegistry",
     # Decorators
+    "tracing",
     "hookable",
-    "register_hook",
-    "auto_register_hooks",
+    "hook_handler",
+    "install_hook_handlers",
+    "uninstall_hook_handlers",
+    "get_hook_registry",
 ]
 

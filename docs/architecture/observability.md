@@ -60,7 +60,7 @@ Colony provides built-in distributed observability for long-running multi-agent 
   <text class="title" x="145" y="42" text-anchor="middle">Agent / Deployment</text>
 
   <rect class="box r-cap" x="36" y="54" width="218" height="36"/>
-  <text class="body" x="145" y="70" text-anchor="middle">TracingCapability</text>
+  <text class="body" x="145" y="70" text-anchor="middle">AgentTracingFacility</text>
   <text class="detail" x="145" y="83" text-anchor="middle">SpanProducer</text>
 
   <rect class="box r-cap" x="36" y="98" width="218" height="36"/>
@@ -128,9 +128,9 @@ Colony provides built-in distributed observability for long-running multi-agent 
 
 ## Traces
 
-Traces capture structured execution spans (LLM calls, agent steps, tool invocations) with parent-child relationships, token counts, and timing data. See the [`TracingCapability`](../../src/polymathera/colony/agents/observability/capability.py) for details.
+Traces capture structured execution spans (LLM calls, agent steps, tool invocations) with parent-child relationships, token counts, and timing data. See the [`AgentTracingFacility`](../../src/polymathera/colony/agents/observability/facility.py) for details.
 
-**Pipeline:** `TracingCapability` → `SpanProducer` → Kafka (`colony.spans`) → `SpanConsumer` → PostgreSQL `spans` table → `SpanQueryStore` → Dashboard Traces tab.
+**Pipeline:** `AgentTracingFacility` → `SpanProducer` → Kafka (`colony.spans`) → `SpanConsumer` → PostgreSQL `spans` table → `SpanQueryStore` → Dashboard Traces tab.
 
 ## Logs
 

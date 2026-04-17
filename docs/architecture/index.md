@@ -102,7 +102,7 @@ A framework for structured multi-agent deliberation. Four game types -- hypothes
 
 ### [Observability](observability.md)
 
-Distributed tracing and persistent logging for long-running sessions. Traces capture structured execution spans (LLM calls, agent steps) via `TracingCapability`. Logs capture all Python logging under `polymathera.colony` via `KafkaLogHandler`. Both flow through Kafka to PostgreSQL for durable, queryable post-mortem debugging -- even after agents stop.
+Distributed tracing and persistent logging for long-running sessions. Traces capture structured execution spans (LLM calls, agent steps) via `AgentTracingFacility`. Logs capture all Python logging under `polymathera.colony` via `KafkaLogHandler`. Both flow through Kafka to PostgreSQL for durable, queryable post-mortem debugging -- even after agents stop.
 
 ### [Training](training.md)
 
@@ -120,4 +120,4 @@ Coming soon.
 | `EnhancedBlackboard` | `polymathera.colony.agents.blackboard` | Redis-backed shared state with events and OCC |
 | `MemoryCapability` | `polymathera.colony.agents.patterns.memory` | Manages one memory scope with ingestion, retrieval, maintenance |
 | `GameProtocolCapability` | `polymathera.colony.agents.patterns.games` | Structured multi-agent deliberation protocol |
-| `AgentHookRegistry` | `polymathera.colony.agents.patterns.hooks` | Per-agent hook registration and dispatch |
+| `HookRegistry` | `polymathera.colony.distributed.hooks` | Per-agent hook registration and dispatch |
