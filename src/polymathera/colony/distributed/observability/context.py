@@ -21,7 +21,6 @@ _current_span: ContextVar[Span | None] = ContextVar("current_span", default=None
 # Current trace_id (= session_id) — set once per agent lifetime
 _current_trace_id: ContextVar[str | None] = ContextVar("current_trace_id", default=None)
 
-
 def get_current_span() -> Span | None:
     """Get the current span from context."""
     return _current_span.get()
@@ -30,6 +29,11 @@ def get_current_span() -> Span | None:
 def set_current_span(span: Span) -> Token[Span | None]:
     """Set the current span. Returns token for resetting."""
     return _current_span.set(span)
+
+
+def reset_current_span(token: Token[Span | None]) -> None:
+    """Reset the current span to the value before set_current_span."""
+    _current_span.reset(token)
 
 
 def get_current_trace_id() -> str | None:

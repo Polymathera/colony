@@ -54,6 +54,8 @@ async def get_trace_spans(
     trace_id: str,
     run_id: str | None = Query(None),
     kind: str | None = Query(None),
+    ring: str | None = Query(None, description="Filter by Ring level: USER or KERNEL"),
+    service_name: str | None = Query(None, description="Filter by service name"),
     limit: int = Query(5000, le=10000),
     colony: ColonyConnection = Depends(get_colony),
 ) -> list[dict[str, Any]]:
@@ -62,7 +64,10 @@ async def get_trace_spans(
     if store is None:
         return []
     try:
-        return await store.get_spans(trace_id, run_id=run_id, kind=kind, limit=limit)
+        return await store.get_spans(
+            trace_id, run_id=run_id, kind=kind,
+            ring=ring, service_name=service_name, limit=limit,
+        )
     except Exception as e:
         logger.warning("Failed to get spans for trace %s: %s", trace_id, e)
         return []

@@ -8,6 +8,7 @@ import os
 from typing import Any, Callable, Type
 
 from .models import AutoscalingConfig, DeploymentRequest, DeploymentResponse, LoggingConfig, RequestRouter
+from ...observability.context import set_current_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -649,6 +650,11 @@ def deployment(
                     ctx = ExecutionContext(ring=Ring.KERNEL, origin="legacy_request")
 
                 with restore_execution_context(ctx):
+                    # Propagate trace_id into the contextvar so that
+                    # TracingFacility hooks on this actor can read it.
+                    if ctx.trace_id:
+                        set_current_trace_id(ctx.trace_id)
+
                     try:
                         # Validate method exists and is an endpoint
                         if request.method_name not in self._endpoints:
@@ -660,7 +666,6 @@ def deployment(
                         # Enforce ring-level access control
                         endpoint_ring = self._endpoint_rings.get(request.method_name, Ring.USER)
                         if endpoint_ring == Ring.USER:
-                            # USER endpoints require tenant context
                             ctx.validate()
                         if ctx.ring == Ring.KERNEL and endpoint_ring == Ring.USER:
                             raise PermissionError(

@@ -106,6 +106,7 @@ class SpanConsumer:
                 input_summary, output_summary,
                 input_tokens, output_tokens, cache_read_tokens,
                 model_name, context_page_ids,
+                ring, service_name,
                 tags, metadata
             ) VALUES (
                 $1, $2, $3, $4,
@@ -115,7 +116,8 @@ class SpanConsumer:
                 $13, $14,
                 $15, $16, $17,
                 $18, $19,
-                $20, $21
+                $20, $21,
+                $22, $23
             )
             ON CONFLICT (span_id) DO UPDATE SET
                 end_wall = EXCLUDED.end_wall,
@@ -125,7 +127,9 @@ class SpanConsumer:
                 output_summary = EXCLUDED.output_summary,
                 input_tokens = EXCLUDED.input_tokens,
                 output_tokens = EXCLUDED.output_tokens,
-                cache_read_tokens = EXCLUDED.cache_read_tokens
+                cache_read_tokens = EXCLUDED.cache_read_tokens,
+                ring = COALESCE(EXCLUDED.ring, spans.ring),
+                service_name = COALESCE(EXCLUDED.service_name, spans.service_name)
             """,
             data.get("span_id"),
             data.get("trace_id"),
@@ -146,6 +150,8 @@ class SpanConsumer:
             data.get("cache_read_tokens"),
             data.get("model_name"),
             data.get("context_page_ids"),
+            data.get("ring"),
+            data.get("service_name"),
             data.get("tags", []),
             json.dumps(data.get("metadata", {})),
         )

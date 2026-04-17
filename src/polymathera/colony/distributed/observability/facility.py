@@ -85,6 +85,11 @@ class TracingFacility(ABC):
             self._config.enabled = False
             return
 
+        # Register this buffer as the global so serving-layer spans
+        # (CLIENT/SERVER) can piggyback on the same flush pipeline.
+        from .producer import register_global_span_buffer
+        register_global_span_buffer(self._buffer)
+
         # Register AROUND hooks
         self._register_hooks()
 
@@ -179,7 +184,7 @@ class TracingFacility(ABC):
         return ""
 
     @abstractmethod
-    def get_root_span_id(self) -> str:
+    def get_root_span_id(self) -> str | None:
         return None
 
     def _make_around_handler(self, kind: SpanKind) -> Callable:
@@ -187,9 +192,20 @@ class TracingFacility(ABC):
 
         async def handler(ctx: HookContext, proceed: Callable) -> Any:
             trace_id = self.resolve_trace_id()
+            if trace_id is None:
+                # No active trace — skip span creation (e.g., KERNEL infra calls
+                # on deployment actors).  Just execute the method directly.
+                return await proceed()
+
             parent = get_current_span()
-            # If no parent from contextvars, use the AGENT span as parent
+            # If no parent from contextvars, use the root span as parent
             parent_id = parent.span_id if parent else self.get_root_span_id()
+            if parent_id is None:
+                # No parent available — this call doesn't originate from a
+                # traced context (e.g., VCM page loading).  Skip to avoid
+                # creating orphaned root-level spans in the trace.
+                return await proceed()
+
             span = Span(
                 span_id=generate_span_id(),
                 trace_id=trace_id,

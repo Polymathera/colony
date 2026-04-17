@@ -94,6 +94,7 @@ class ExecutionContext:
 
     # Tracing
     trace_id: str | None = None
+    parent_span_id: str | None = None  # for cross-service span linking
 
     # Audit
     origin: str | None = None
@@ -120,6 +121,7 @@ class ExecutionContext:
             "session_id": self.session_id,
             "run_id": self.run_id,
             "trace_id": self.trace_id,
+            "parent_span_id": self.parent_span_id,
             "origin": self.origin,
         }
 

@@ -20,6 +20,8 @@ class SpanQueryStore:
         trace_id: str,
         run_id: str | None = None,
         kind: str | None = None,
+        ring: str | None = None,
+        service_name: str | None = None,
         limit: int = 5000,
     ) -> list[dict[str, Any]]:
         """Query spans for a trace with optional filters."""
@@ -35,6 +37,16 @@ class SpanQueryStore:
         if kind is not None:
             query += f" AND kind = ${idx}"
             params.append(kind)
+            idx += 1
+
+        if ring is not None:
+            query += f" AND ring = ${idx}"
+            params.append(ring)
+            idx += 1
+
+        if service_name is not None:
+            query += f" AND service_name = ${idx}"
+            params.append(service_name)
             idx += 1
 
         query += f" ORDER BY start_wall ASC LIMIT ${idx}"

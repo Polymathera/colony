@@ -203,6 +203,8 @@ export interface TraceSpan {
   cache_read_tokens: number | null;
   model_name: string | null;
   context_page_ids: string[] | null;
+  ring: string | null;
+  service_name: string | null;
   tags: string[];
   metadata: Record<string, unknown>;
 }

@@ -14,7 +14,14 @@ Public API:
 """
 
 from .config import TracingConfig
-from .context import get_current_span, get_current_trace_id, span_context, set_current_trace_id, set_current_span
+from .context import (
+    span_context,
+    get_current_span,
+    set_current_span,
+    reset_current_span,
+    get_current_trace_id,
+    set_current_trace_id,
+)
 from .models import Span, SpanKind, SpanStatus, generate_span_id
 from .producer import SpanProducer
 from .facility import TracingFacility
@@ -25,11 +32,12 @@ __all__ = [
     "SpanStatus",
     "generate_span_id",
     "TracingConfig",
-    "get_current_span",
-    "get_current_trace_id",
     "span_context",
-    "set_current_trace_id",
+    "get_current_span",
     "set_current_span",
+    "reset_current_span",
+    "get_current_trace_id",
+    "set_current_trace_id",
     "SpanProducer",
     "TracingFacility",
 ]

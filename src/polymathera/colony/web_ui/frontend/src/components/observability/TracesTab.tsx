@@ -28,7 +28,11 @@ const KIND_COLORS: Record<string, string> = {
   event_process: "#64748b",
   capability: "#14b8a6",
   lifecycle: "#dc2626",
+  // Cluster-layer
+  api_call: "#e11d48",
+  deployment: "#0891b2",
   custom: "#6b7280",
+  unknown: "#6b7280",
 };
 
 const KIND_LABELS: Record<string, string> = {
@@ -44,7 +48,11 @@ const KIND_LABELS: Record<string, string> = {
   event_process: "EVT",
   capability: "CAP",
   lifecycle: "LIFE",
+  // Cluster-layer
+  api_call: "API",
+  deployment: "DEPLOY",
   custom: "CUSTOM",
+  unknown: "...",
 };
 
 /* ── Helpers ─────────────────────────────────────────────────── */
@@ -114,6 +122,8 @@ function buildSpanTree(spans: TraceSpan[]): SpanTreeNode[] {
         cache_read_tokens: null,
         model_name: null,
         context_page_ids: null,
+        ring: null,
+        service_name: null,
         tags: [],
         metadata: {},
       };
@@ -790,6 +800,7 @@ function TraceWaterfallView({
   const [zoom, setZoom] = useState(1);
   const [viewMode, setViewMode] = useState<TraceViewMode>("tree");
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [ringFilter, setRingFilter] = useState<string>("all");
 
   // Pending scroll target — set by cross-navigation, consumed by useEffect after render.
   const [pendingScrollSpanId, setPendingScrollSpanId] = useState<string | null>(null);
@@ -833,7 +844,13 @@ function TraceWaterfallView({
     return Array.from(merged.values());
   }, [restSpans, streamedSpans]);
 
-  const tree = useMemo(() => buildSpanTree(allSpans), [allSpans]);
+  // Apply ring filter before building tree (filter allSpans, keep parents intact)
+  const filteredSpans = useMemo(() => {
+    if (ringFilter === "all") return allSpans;
+    return allSpans.filter((s) => !s.ring || s.ring === ringFilter);
+  }, [allSpans, ringFilter]);
+
+  const tree = useMemo(() => buildSpanTree(filteredSpans), [filteredSpans]);
   const flat = useMemo(() => flattenTree(tree, collapsed), [tree, collapsed]);
 
   const selectedSpan = selectedSpanId
@@ -919,9 +936,20 @@ function TraceWaterfallView({
           )}
         </div>
         {viewMode === "tree" && (
-          <span className="text-[10px] text-muted-foreground shrink-0">
-            Ctrl+Scroll to zoom timeline ({zoom.toFixed(1)}x)
-          </span>
+          <div className="flex items-center gap-3 shrink-0">
+            <select
+              className="rounded border border-border bg-background px-2 py-1 text-[10px] font-mono"
+              value={ringFilter}
+              onChange={(e) => setRingFilter(e.target.value)}
+            >
+              <option value="all">All rings</option>
+              <option value="USER">USER only</option>
+              <option value="KERNEL">KERNEL only</option>
+            </select>
+            <span className="text-[10px] text-muted-foreground">
+              Ctrl+Scroll to zoom ({zoom.toFixed(1)}x)
+            </span>
+          </div>
         )}
       </div>
 

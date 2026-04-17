@@ -14,6 +14,7 @@ import logging
 import os
 from typing import Any
 
+from ..distributed.hooks import hookable
 from .remote_config import RemoteLLMDeploymentConfig, get_pricing_for_model
 from .remote_deployment import APIResponse, RemoteLLMDeployment
 
@@ -85,6 +86,7 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
             f"(ttl={self.config.ttl}, pool={self.config.max_concurrent_requests * 2})"
         )
 
+    @hookable
     async def _call_api(
         self,
         messages: dict[str, Any],

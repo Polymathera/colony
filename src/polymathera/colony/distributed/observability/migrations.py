@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS spans (
     cache_read_tokens INTEGER,
     model_name TEXT,
     context_page_ids TEXT[],
+    ring TEXT,
+    service_name TEXT,
     tags TEXT[] DEFAULT '{}',
     metadata JSONB DEFAULT '{}'
 );

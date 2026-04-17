@@ -2,11 +2,13 @@
 
 import logging
 import uuid
+from dataclasses import replace
 from typing import Any, Type
 
 import ray
 
 from .decorators import DeploymentConfig
+from .context import require_execution_context
 from .models import (
     DeploymentRequest,
     DeploymentResponse,
@@ -14,6 +16,7 @@ from .models import (
     ApplicationRegistry,
     RequestRouter,
 )
+from ...observability.context import get_current_span
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +170,6 @@ class DeploymentHandle:
             Raises:
                 Exception: If the deployment method raised an error.
             """
-            from .context import require_execution_context
-
             # Capture execution context from contextvars
             ctx = require_execution_context()
             if ctx.ring.name == "KERNEL":
@@ -178,6 +179,15 @@ class DeploymentHandle:
                     f"tenant={ctx.tenant_id}, colony={ctx.colony_id}, "
                     f"session={ctx.session_id}, origin={ctx.origin}"
                 )
+
+            # Propagate the caller's current span ID so that hooks on the
+            # remote side can parent under it.  No Span object is created
+            # here — the linkage travels through ExecutionContext.parent_span_id
+            # which is restored by __handle_request__ on the receiving actor.
+            ctx_for_request = ctx
+            parent = get_current_span()
+            if parent:
+                ctx_for_request = replace(ctx, parent_span_id=parent.span_id)
 
             # Get endpoint router class and kwargs
             router_class = self._get_endpoint_router_class(method_name)
@@ -203,7 +213,7 @@ class DeploymentHandle:
                 args=args,
                 kwargs=kwargs,
                 routing_hints=routing_hints,
-                execution_context=ctx,
+                execution_context=ctx_for_request,
             )
 
             # Send request to proxy actor

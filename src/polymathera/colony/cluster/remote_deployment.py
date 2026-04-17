@@ -19,6 +19,8 @@ from typing import Any
 
 from ..distributed.ray_utils import serving
 from ..distributed.ray_utils.rate_limit import RateLimitConfig, TokenBucketRateLimiter
+from ..distributed.hooks import tracing, hookable
+from ..distributed.observability import TracingConfig
 from ..vcm.events import (
     PageEvent,
     PageEvictedEvent,
@@ -87,6 +89,10 @@ class APIResponse:
 
 
 
+@tracing(
+    publish_key=lambda self: f"deployment:{getattr(self, '_deployment_id', 'remote')}",
+    subscribe_key=lambda self: f"deployment:{getattr(self, '_deployment_id', 'remote')}",
+)
 @serving.deployment(
     autoscaling_config={
         "min_replicas": 1,
@@ -94,7 +100,7 @@ class APIResponse:
         "target_queue_length": 5,
     },
     ray_actor_options={
-        "num_gpus": 0,  # Default to single GPU, override in production
+        "num_gpus": 0,
     },
 )
 class RemoteLLMDeployment(AgentManagerBase):
@@ -156,6 +162,10 @@ class RemoteLLMDeployment(AgentManagerBase):
 
         # Tokenizer for decode fallback (when page.text is None)
         self.tokenizer = None
+
+        # Tracing
+        self._deployment_id = config.get_deployment_name()
+        self._tracing_facility = None
 
     @serving.initialize_deployment
     async def initialize(self) -> None:
@@ -242,6 +252,19 @@ class RemoteLLMDeployment(AgentManagerBase):
             self.redis_client = None
             self.redis_om = None
 
+        # Initialize distributed tracing
+        import os
+        tracing_enabled = os.environ.get("TRACING_ENABLED", "").lower() in ("true", "1", "yes")
+        if tracing_enabled:
+            from .observability import ClusterTracingFacility
+            self._tracing_facility = ClusterTracingFacility(
+                config=TracingConfig(enabled=True),
+                owner=self,
+                service_name="RemoteLLMDeployment",
+                deployment_name=self._deployment_id,
+            )
+            await self._tracing_facility.initialize()
+
         logger.info(
             f"RemoteLLMDeployment {self.client_id} initialized "
             f"(capacity={self.max_cached_tokens} tokens, ttl={self.config.ttl})"
@@ -265,6 +288,7 @@ class RemoteLLMDeployment(AgentManagerBase):
         router_class=TargetClientRouter,
         router_kwargs={"strip_routing_params": ["target_client_id"]}
     )
+    @hookable
     async def load_page(self, page: VirtualContextPage) -> bool:
         """Load a context page by creating a prefix cache entry on the remote API.
 
@@ -440,6 +464,7 @@ class RemoteLLMDeployment(AgentManagerBase):
             return False
 
     @serving.endpoint
+    @hookable
     async def infer_with_suffix(
         self,
         base_page_id: ContextPageId,
@@ -576,6 +601,7 @@ class RemoteLLMDeployment(AgentManagerBase):
         return current_state
 
     @serving.endpoint
+    @hookable
     async def infer(self, request: InferenceRequest) -> InferenceResponse:
         """Perform inference with automatic context page loading.
 

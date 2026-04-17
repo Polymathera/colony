@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 class SpanKind(str, Enum):
     """Colony-specific span types."""
 
+    # Agent-layer
     RUN = "run"
     AGENT = "agent"
     AGENT_STEP = "agent_step"
@@ -26,6 +27,10 @@ class SpanKind(str, Enum):
     CAPABILITY = "capability"
     LIFECYCLE = "lifecycle"
     CUSTOM = "custom"
+
+    # Cluster-layer
+    API_CALL = "api_call"      # external HTTP call (Anthropic, OpenRouter)
+    DEPLOYMENT = "deployment"  # deployment replica lifecycle
 
 
 class SpanStatus(str, Enum):
@@ -77,6 +82,10 @@ class Span(BaseModel):
     cache_read_tokens: int | None = None
     model_name: str | None = None
     context_page_ids: list[str] | None = None
+
+    # Distributed context
+    ring: str | None = None          # "KERNEL" or "USER" (from ExecutionContext.ring)
+    service_name: str | None = None  # deployment name, "agent", "vcm", etc.
 
     # Metadata
     tags: list[str] = Field(default_factory=list)

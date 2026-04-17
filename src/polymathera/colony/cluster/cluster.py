@@ -12,6 +12,8 @@ from typing import Any
 from ..distributed import get_polymathera
 from ..distributed.state_management import StateManager
 from ..distributed.ray_utils import serving
+from ..distributed.hooks import tracing, hookable
+from ..distributed.observability.models import SpanKind
 from .config import ClusterConfig
 from .models import (
     ClusterStatistics,
@@ -25,6 +27,10 @@ from ..vcm.models import VirtualContextPage, ContextPageId
 logger = logging.getLogger(__name__)
 
 
+@tracing(
+    publish_key=lambda self: "deployment:llm_cluster",
+    subscribe_key=lambda self: "deployment:llm_cluster",
+)
 @serving.deployment(
     autoscaling_config={
         "min_replicas": 1,
@@ -151,6 +157,21 @@ class LLMCluster:
             state_type=LLMClusterState,
             state_key=cluster_state_key,
         )
+
+        # Initialize distributed tracing
+        import os
+        tracing_enabled = os.environ.get("TRACING_ENABLED", "").lower() in ("true", "1", "yes")
+        if tracing_enabled:
+            from ..distributed.observability import TracingConfig
+            from .observability import ClusterTracingFacility
+            self._tracing_facility = ClusterTracingFacility(
+                config=TracingConfig(enabled=True),
+                owner=self,
+                service_name="LLMCluster",
+                deployment_name="llm_cluster",
+                pointcuts=[("*.infer", SpanKind.INFER)],
+            )
+            await self._tracing_facility.initialize()
 
         logger.info("LLMCluster deployment initialized (awaiting app ready for handle discovery)")
 
@@ -335,6 +356,7 @@ class LLMCluster:
         logger.info(f"LLM cluster '{self.app_name}' shut down successfully")
 
     @serving.endpoint
+    @hookable
     async def infer(self, request: InferenceRequest) -> InferenceResponse:
         """Perform inference using the cluster.
 

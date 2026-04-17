@@ -2188,6 +2188,7 @@ def run(
             tenant_id=test_config.tenant_id,
             session_id=test_config.session_id,
             run_id=test_config.run_id,
+            trace_id=test_config.session_id,  # session_id IS the trace boundary
             origin="cli",
         ):
             test_results = asyncio.run(run_integration_test(

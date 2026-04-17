@@ -4,12 +4,39 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from collections import deque
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .models import Span
 
 logger = logging.getLogger(__name__)
+
+# Module-level global span buffer shared across the process.
+# TracingFacility instances register their buffer here so that
+# lightweight callers (DeploymentHandle, __handle_request__)
+# can buffer spans without owning a full TracingFacility.
+_global_span_buffer: deque | None = None
+
+
+def get_global_span_buffer() -> deque:
+    """Get the global span buffer.
+
+    Raises RuntimeError if no TracingFacility has registered one.
+    """
+    if _global_span_buffer is None:
+        raise RuntimeError("No global span buffer registered")
+    return _global_span_buffer
+
+
+def register_global_span_buffer(buffer: deque) -> None:
+    """Register a deque as the global span buffer.
+
+    Called by TracingFacility.initialize() so that serving-layer
+    spans can piggyback on the same flush pipeline.
+    """
+    global _global_span_buffer
+    _global_span_buffer = buffer
 
 
 class SpanProducer:

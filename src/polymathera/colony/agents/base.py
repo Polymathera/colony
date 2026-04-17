@@ -2063,6 +2063,21 @@ class Agent(BaseModel):
             # TODO: How to restore this on resumption from suspension?
             self.child_agents: dict[str, str] = {}  # role -> agent_id
 
+        # Initialize tracing FIRST so that _current_span is set to AGENT span
+        # before any deployment calls (page storage, memory hierarchy, etc.).
+        # DeploymentHandle.call_method() reads _current_span to propagate
+        # parent_span_id to remote hooks.
+        self._init_tracing_config()
+
+        # Add AgentTracingFacility if tracing is enabled
+        if self._tracing_config and self._tracing_config.enabled:
+            try:
+                from .observability import AgentTracingFacility
+                self._tracing_facility = AgentTracingFacility(agent=self, config=self._tracing_config)
+                await self._tracing_facility.initialize()
+            except Exception as e:
+                logger.warning(f"Failed to initialize tracing for agent {self.agent_id}: {e}")
+
         # Reconstruct or create PageStorage
         vcm_handle = get_vcm()
         config: PageStorageConfig | None = await vcm_handle.get_page_storage_config()
@@ -2081,18 +2096,6 @@ class Agent(BaseModel):
             await self.initialize_memory_hierarchy(**self.memory_config)
 
         await self._create_action_policy()
-
-        # Initialize tracing config from environment
-        self._init_tracing_config()
-
-        # Add AgentTracingFacility if tracing is enabled
-        if self._tracing_config and self._tracing_config.enabled:
-            try:
-                from .observability import AgentTracingFacility
-                self._tracing_facility = AgentTracingFacility(agent=self, config=self._tracing_config)
-                await self._tracing_facility.initialize()
-            except Exception as e:
-                logger.warning(f"Failed to initialize tracing for agent {self.agent_id}: {e}")
 
     def _init_tracing_config(self) -> None:
         """Initialize tracing config from environment variables."""

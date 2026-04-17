@@ -108,6 +108,12 @@ class AgentTracingFacility(TracingFacility):
             },
         )
 
+        # Set AGENT span as current so that deployment calls during the
+        # rest of agent initialization (capability init, memory hierarchy
+        # setup, etc.) create CLIENT spans that parent under AGENT.
+        from ...distributed.observability.context import set_current_span
+        set_current_span(self._agent_span)
+
         logger.info(
             "AgentTracingFacility initialized (trace_id=%s, agent=%s, agent_span=%s)",
             self._trace_id, self.get_agent_id(), self._agent_span.span_id,
@@ -244,7 +250,7 @@ class AgentTracingFacility(TracingFacility):
         return self.agent.agent_id
 
     @override
-    def get_root_span_id(self) -> str:
+    def get_root_span_id(self) -> str | None:
         return self._agent_span.span_id if self._agent_span else None
 
     def emit_lifecycle_event(
