@@ -639,6 +639,12 @@ def deployment(
                 """
                 from .context import Ring, ExecutionContext, restore_execution_context
 
+                logger.debug(
+                    f"[TRACE] __handle_request__ ENTER: {request.method_name} "
+                    f"correlation_id={request.correlation_id} "
+                    f"on {self.__class__.__name__}"
+                )
+
                 # Restore execution context from request
                 ctx = request.execution_context
                 if not isinstance(ctx, ExecutionContext):

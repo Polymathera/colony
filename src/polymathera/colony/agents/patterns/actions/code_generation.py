@@ -946,9 +946,12 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             log(f"Mode → {mode.upper()} (explicit switch)")
 
         # log() — structured logging
+        _LOG_MAX_CHARS = 500
+
         def log(msg: str):
             """Log a message visible in the execution trace."""
-            logger.info(f"[CodeGen:{self.agent.agent_id}] {msg}")
+            truncated = msg[:_LOG_MAX_CHARS] + "..." if len(msg) > _LOG_MAX_CHARS else msg
+            logger.info(f"[CodeGen:{self.agent.agent_id}] {truncated}")
 
         # Install into namespace
         ns["run"] = run

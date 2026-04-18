@@ -94,6 +94,7 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         temperature: float = 0.7,
         top_p: float | None = None,
         json_schema: dict[str, Any] | None = None,
+        request_id: str | None = None,
     ) -> APIResponse:
         """Call the Anthropic Messages API.
 
@@ -169,7 +170,15 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         # Timeout is configured on the httpx client (see _initialize_client),
         # NOT via asyncio.wait_for — cancelling a mid-flight httpx request
         # can leave the connection in a dirty state, exhausting the pool.
+        logger.debug(
+            f"[TRACE] AnthropicLLMDeployment._call_api: BEFORE messages.create() "
+            f"request_id={request_id} model={self.config.model_name} max_tokens={max_tokens}"
+        )
         response = await self._client.messages.create(**kwargs)
+        logger.debug(
+            f"[TRACE] AnthropicLLMDeployment._call_api: AFTER messages.create() "
+            f"request_id={request_id} model={self.config.model_name}"
+        )
 
         # Extract usage information
         usage = response.usage

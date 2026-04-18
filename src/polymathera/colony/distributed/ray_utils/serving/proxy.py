@@ -242,10 +242,14 @@ class DeploymentProxyRayActor:
             try:
                 await asyncio.sleep(5.0)  # Check every 5 seconds
 
+                # Read replica state under lock, but release BEFORE scaling.
+                # _scale_to_target acquires the lock itself.  Holding it here
+                # while scaling would deadlock (asyncio.Lock is not reentrant).
                 async with self._replica_lock:
                     target_replicas = await self.autoscaler.check_and_scale(self.replicas)
-                    if target_replicas is not None:
-                        await self._scale_to_target(target_replicas)
+
+                if target_replicas is not None:
+                    await self._scale_to_target(target_replicas)
 
             except asyncio.CancelledError:
                 break
@@ -388,9 +392,18 @@ class DeploymentProxyRayActor:
                 f"Executing request {request.request_id} on replica {replica.replica_id}"
             )
             # Call the replica's actor method
+            logger.debug(
+                f"[TRACE] Proxy: BEFORE __handle_request__.remote() "
+                f"correlation_id={request.correlation_id} "
+                f"method={request.method_name} "
+                f"replica={replica.replica_id} deployment={self.deployment_name} "
+                f"in_flight={replica.in_flight_requests}"
+            )
             response = await replica.actor_handle.__handle_request__.remote(request)
             logger.debug(
-                f"Completed request {request.request_id} on replica {replica.replica_id}"
+                f"[TRACE] Proxy: AFTER __handle_request__.remote() "
+                f"correlation_id={request.correlation_id} "
+                f"method={request.method_name}"
             )
 
             # Record metrics

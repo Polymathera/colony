@@ -30,7 +30,7 @@ Colony is a framework for building *tightly-coupled, self-improving, self-aware 
 
 Most agent frameworks treat context as something to retrieve or manage. Colony treats it as something to be *brought to life*. Certain domains require *reasoning deep and wide*. Examples include:
 - *Scientific research*: synthesizing novel insights from a vast literature requires complex integration
-- *Cyber-physical systems*: understanding the full context of a complex system (code, physical environment, requirements, regulations, components, sensors, actuators, sourcing) is essential for architecting solutions and identifying edge cases, failure modes, scaling bottlenecks, and security risks.
+- *Cyber-physical system design*: understanding the full context of a complex system (code, physical environment, requirements, regulations, components, sensors, actuators, sourcing) is essential for architecting solutions and identifying edge cases, failure modes, scaling bottlenecks, and security risks.
 - *Systemic vulnerability analysis*: identifying security risks in a complex system by reasoning over a large attack surface and many potential interactions.
 - *Business intelligence*: making strategic decisions based on a wide range of internal and external data, where relevant information may be siloed and require cross-domain reasoning
 - *Economic modeling*: simulating and understanding complex economic systems with many interacting agents and factors and long supply chains

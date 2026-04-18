@@ -144,9 +144,9 @@ class RemoteLLMDeployment(AgentManagerBase):
             kv_cache_capacity_tokens=self.max_cached_tokens
         )
 
-        # Concurrency tracking (no semaphore — let the API provider's own
-        # rate limits and the httpx connection pool control throughput).
+        # Concurrency control
         self._active_requests = 0
+        self._request_semaphore = asyncio.Semaphore(config.max_concurrent_requests)
         self._rate_limiter = TokenBucketRateLimiter(RateLimitConfig(
             requests_per_second=config.throttle_rps,
             burst_size=config.throttle_burst,
@@ -338,11 +338,22 @@ class RemoteLLMDeployment(AgentManagerBase):
                 suffix_text="Acknowledged.",
                 system_prompt=self.config.system_prompt,
             )
-            self._active_requests += 1
-            try:
-                response = await self._call_api(messages, max_tokens=1)
-            finally:
-                self._active_requests -= 1
+            logger.debug(
+                f"[TRACE] RemoteLLMDeployment.load_page: BEFORE _throttle+_call_api "
+                f"request_id={page.page_id} active={self._active_requests} "
+                f"page_size={page.size}"
+            )
+            await self._throttle()
+            async with self._request_semaphore:
+                self._active_requests += 1
+                try:
+                    response = await self._call_api(messages, max_tokens=1, request_id=page.page_id)
+                finally:
+                    self._active_requests -= 1
+            logger.debug(
+                f"[TRACE] RemoteLLMDeployment.load_page: AFTER _call_api "
+                f"request_id={page.page_id}"
+            )
 
             # Track locally (Layer 3)
             now = time.time()
@@ -532,18 +543,28 @@ class RemoteLLMDeployment(AgentManagerBase):
             system_prompt=self.config.system_prompt,
         )
 
+        logger.debug(
+            f"[TRACE] infer_with_suffix: BEFORE _throttle "
+            f"request_id={request.request_id} active={self._active_requests}"
+        )
         await self._throttle()
-        self._active_requests += 1
-        try:
-            response = await self._call_api(
-                messages,
-                max_tokens=request.max_tokens,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                json_schema=request.json_schema,
-            )
-        finally:
-            self._active_requests -= 1
+        logger.debug(
+            f"[TRACE] infer_with_suffix: AFTER _throttle, BEFORE _call_api "
+            f"request_id={request.request_id} active={self._active_requests}"
+        )
+        async with self._request_semaphore:
+            self._active_requests += 1
+            try:
+                response = await self._call_api(
+                    messages,
+                    max_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    json_schema=request.json_schema,
+                    request_id=request.request_id,
+                )
+            finally:
+                self._active_requests -= 1
 
         latency_ms = (time.time() - start_time) * 1000
 
@@ -617,11 +638,19 @@ class RemoteLLMDeployment(AgentManagerBase):
         """
         serving.ensure_context(request.request_id, request.syscontext)
 
+        logger.debug(
+            f"[TRACE] RemoteLLMDeployment.infer ENTER: "
+            f"request_id={request.request_id} active={self._active_requests}"
+        )
         start_time = time.time()
         page_faults = []
 
         try:
             # Update state: increment pending requests
+            logger.debug(
+                f"[TRACE] RemoteLLMDeployment.infer: BEFORE write_transaction "
+                f"request_id={request.request_id}"
+            )
             async for dep_state in self.state_manager.write_transaction():
                 client_state = dep_state.client_states.get(self.client_id)
                 if client_state:
@@ -634,6 +663,11 @@ class RemoteLLMDeployment(AgentManagerBase):
                             logger.warning(
                                 f"Page fault: {page_id} not loaded in {self.client_id}"
                             )
+
+            logger.debug(
+                f"[TRACE] RemoteLLMDeployment.infer: AFTER write_transaction "
+                f"request_id={request.request_id} page_faults={len(page_faults)}"
+            )
 
             # Build prompt from loaded page texts + request prompt
             page_context_parts = []
@@ -661,18 +695,28 @@ class RemoteLLMDeployment(AgentManagerBase):
                 system_prompt=self.config.system_prompt,
             )
 
+            logger.debug(
+                f"[TRACE] infer: BEFORE _throttle "
+                f"request_id={request.request_id} active={self._active_requests}"
+            )
             await self._throttle()
-            self._active_requests += 1
-            try:
-                response = await self._call_api(
-                    messages,
-                    max_tokens=request.max_tokens,
-                    temperature=request.temperature,
-                    top_p=request.top_p,
-                    json_schema=request.json_schema,
-                )
-            finally:
-                self._active_requests -= 1
+            logger.debug(
+                f"[TRACE] infer: AFTER _throttle, BEFORE _call_api "
+                f"request_id={request.request_id} active={self._active_requests}"
+            )
+            async with self._request_semaphore:
+                self._active_requests += 1
+                try:
+                    response = await self._call_api(
+                        messages,
+                        max_tokens=request.max_tokens,
+                        temperature=request.temperature,
+                        top_p=request.top_p,
+                        json_schema=request.json_schema,
+                        request_id=request.request_id,
+                    )
+                finally:
+                    self._active_requests -= 1
 
             latency_ms = (time.time() - start_time) * 1000
 
@@ -918,11 +962,17 @@ class RemoteLLMDeployment(AgentManagerBase):
                         suffix_text="Acknowledge.",
                         system_prompt=self.config.system_prompt,
                     )
-                    self._active_requests += 1
-                    try:
-                        await self._call_api(messages, max_tokens=1)
-                    finally:
-                        self._active_requests -= 1
+                    logger.debug(
+                        f"[TRACE] _keepalive: BEFORE _throttle+_call_api "
+                        f"request_id=keepalive:{page_key} active={self._active_requests}"
+                    )
+                    await self._throttle()
+                    async with self._request_semaphore:
+                        self._active_requests += 1
+                        try:
+                            await self._call_api(messages, max_tokens=1, request_id=f"keepalive:{page_key}")
+                        finally:
+                            self._active_requests -= 1
                     entry.last_access = time.time()
                     entry.ttl_expiry = time.time() + self.ttl_seconds
                     refreshed += 1
@@ -1023,6 +1073,7 @@ class RemoteLLMDeployment(AgentManagerBase):
         temperature: float = 0.7,
         top_p: float | None = None,
         json_schema: dict[str, Any] | None = None,
+        request_id: str | None = None,
     ) -> APIResponse:
         """Call the remote LLM API.
 

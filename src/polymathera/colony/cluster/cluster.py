@@ -393,7 +393,15 @@ class LLMCluster:
         )
 
         # Route and execute inference
+        logger.debug(
+            f"[TRACE] LLMCluster.infer: BEFORE deployment_handle.infer() "
+            f"request_id={request.request_id} deployment={deployment_name}"
+        )
         response = await deployment_handle.infer(request)
+        logger.debug(
+            f"[TRACE] LLMCluster.infer: AFTER deployment_handle.infer() "
+            f"request_id={request.request_id}"
+        )
 
         # Update cluster state
         await self._update_cluster_state(request, response)

@@ -206,6 +206,16 @@ class DeploymentHandle:
                 if router_kwargs and routing_hints is not None:
                     routing_hints.router_kwargs = router_kwargs
 
+            # Extract correlation_id from payload for end-to-end tracking
+            correlation_id = None
+            for a in args:
+                if hasattr(a, "request_id"):
+                    correlation_id = a.request_id
+                    break
+                if hasattr(a, "page_id"):
+                    correlation_id = a.page_id
+                    break
+
             # Create request with routing hints and execution context
             request = DeploymentRequest(
                 request_id=str(uuid.uuid4()),
@@ -214,12 +224,23 @@ class DeploymentHandle:
                 kwargs=kwargs,
                 routing_hints=routing_hints,
                 execution_context=ctx_for_request,
+                correlation_id=correlation_id,
             )
 
             # Send request to proxy actor
+            logger.debug(
+                f"[TRACE] DeploymentHandle: BEFORE .remote() "
+                f"deployment={self.deployment_name}.{method_name} "
+                f"correlation_id={request.correlation_id}"
+            )
             try:
                 response: DeploymentResponse = await self._proxy_actor_handle.handle_request.remote(
                     request
+                )
+                logger.debug(
+                    f"[TRACE] DeploymentHandle: AFTER .remote() "
+                    f"deployment={self.deployment_name}.{method_name} "
+                    f"correlation_id={request.correlation_id}"
                 )
             except Exception as e:
                 logger.error(

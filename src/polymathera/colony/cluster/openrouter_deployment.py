@@ -96,6 +96,7 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         temperature: float = 0.7,
         top_p: float | None = None,
         json_schema: dict[str, Any] | None = None,
+        request_id: str | None = None,
     ) -> APIResponse:
         """Call the OpenRouter API (OpenAI-compatible).
 

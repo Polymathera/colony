@@ -185,6 +185,11 @@ class DeploymentRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     """Optional metadata for routing and monitoring."""
 
+    correlation_id: str | None = None
+    """Application-level correlation ID extracted from payload at creation time.
+    Allows tracking a request through the entire serving chain (handle → proxy →
+    replica) without inspecting the payload at each hop."""
+
     execution_context: ExecutionContext | None = None
     """ExecutionContext carrying identity (colony_id, tenant_id, session_id, run_id),
     privilege (Ring), and audit (origin). Captured from contextvars by DeploymentHandle,
