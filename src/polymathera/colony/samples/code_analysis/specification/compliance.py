@@ -337,6 +337,8 @@ class SpecificationComplianceCapability(AgentCapability):
         infer_contracts: bool = True,
         check_invariants: bool = True,
         trace_requirements: bool = True,
+        temperature: float = 0.1,
+        max_tokens: int = 2000,
         capability_key: str = "specification_compliance_capability",
     ):
         """Initialize specification compliance capability.
@@ -349,12 +351,16 @@ class SpecificationComplianceCapability(AgentCapability):
             infer_contracts: Whether to infer contracts from code
             check_invariants: Whether to check invariants
             trace_requirements: Whether to trace requirements
+            temperature: LLM temperature for inference calls
+            max_tokens: Max tokens for LLM responses
             capability_key: Unique key for this capability within the agent (default: "specification_compliance_capability")
         """
         super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.infer_contracts = infer_contracts
         self.check_invariants = check_invariants
         self.trace_requirements = trace_requirements
+        self.temperature = temperature
+        self.max_tokens = max_tokens
         self.obligation_graph: ObligationGraph | None = None
 
         # Layer 0/1 capability reference for page graph operations
@@ -394,15 +400,31 @@ class SpecificationComplianceCapability(AgentCapability):
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
-        # TODO: Implement
-        logger.warning("serialize_suspension_state not implemented for SpecificationComplianceCapability")
+        """Serialize capability configuration.
+
+        The obligation_graph is backed by the blackboard and does not need
+        separate serialization — it is reconstructed via _ensure_obligation_graph().
+        """
+        state = await super().serialize_suspension_state(state)
+
+        state.custom_data["_spec_compliance_state"] = {
+            "infer_contracts": self.infer_contracts,
+            "check_invariants": self.check_invariants,
+            "trace_requirements": self.trace_requirements,
+        }
+
         return state
 
     @override
     async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
-        # TODO: Implement
-        logger.warning("deserialize_suspension_state not implemented for SpecificationComplianceCapability")
-        pass
+        """Restore capability configuration from suspension."""
+        await super().deserialize_suspension_state(state)
+
+        custom_state = state.custom_data.get("_spec_compliance_state", {})
+        if custom_state:
+            self.infer_contracts = custom_state.get("infer_contracts", True)
+            self.check_invariants = custom_state.get("check_invariants", True)
+            self.trace_requirements = custom_state.get("trace_requirements", True)
 
     @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_compliance_request(
@@ -584,57 +606,22 @@ Output ONLY the contract specifications in the format above."""
         response = await self.agent.infer(
             context_page_ids=[page_id],
             prompt=prompt,
-            temperature=0.1,
-            max_tokens=2000,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             json_schema={"type": "array", "items": FunctionContract.model_json_schema()}  # Structured output
         )
 
-        # Parse structured response directly
+        # Parse structured response
         import json
-        contracts_data = json.loads(response.generated_text)
-        return [FunctionContract(**c) for c in contracts_data]
-
-    def _parse_contracts(self, response: str, file_path: str) -> list[FunctionContract]:
-        """Parse contracts from LLM response.
-
-        Args:
-            response: LLM response
-            file_path: Source file
-
-        Returns:
-            List of function contracts
-        """
-        # Reuse contract parsing logic from contracts.py
-        # This is simplified
-        contracts = []
-
-        lines = response.split("\n")
-        current_contract = None
-
-        for line in lines:
-            if line.startswith("FUNCTION:"):
-                if current_contract:
-                    contracts.append(current_contract)
-                func_name = line.split("FUNCTION:")[1].strip()
-                current_contract = FunctionContract(
-                    function_name=func_name,
-                    file_path=file_path,
-                    line_number=0
-                )
-            elif line.startswith("PRECONDITIONS:") and current_contract:
-                # Parse preconditions
-                pass
-            elif line.startswith("POSTCONDITIONS:") and current_contract:
-                # Parse postconditions
-                pass
-            elif line.startswith("INVARIANTS:") and current_contract:
-                # Parse invariants
-                pass
-
-        if current_contract:
-            contracts.append(current_contract)
-
-        return contracts
+        try:
+            contracts_data = json.loads(response.generated_text)
+            return [FunctionContract(**c) for c in contracts_data]
+        except Exception as e:
+            logger.warning(
+                f"Failed to parse inferred contracts from page {page_id}: {e}. "
+                f"Response length: {len(response.generated_text)} chars"
+            )
+            return []
 
     async def _check_specification(
         self,
@@ -661,13 +648,20 @@ Output ONLY the contract specifications in the format above."""
         response = await self.agent.infer(
             context_page_ids=code_page_ids,
             prompt=prompt,
-            temperature=0.2,
-            max_tokens=2500,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             json_schema=SpecComplianceResult.model_json_schema()  # Structured output
         )
 
         # Parse structured response directly
-        result = SpecComplianceResult.model_validate_json(response.generated_text)  # TODO: Handle validation errors. LLMs are not perfect.
+        try:
+            result = SpecComplianceResult.model_validate_json(response.generated_text)
+        except Exception as e:
+            logger.warning(f"Failed to parse LLM response as SpecComplianceResult: {e}")
+            result = SpecComplianceResult(
+                spec_id=spec.spec_id,
+                compliance_level=ComplianceLevel.UNKNOWN,
+            )
 
         # Check invariants if enabled
         if self.check_invariants and spec.contracts:
@@ -883,58 +877,71 @@ RECOMMENDATIONS:
         Returns:
             Obligation graph data
         """
-        # Add specifications as requirements
-        for spec in specifications:
-            await self.obligation_graph.add_requirement(
-                requirement_id=spec.spec_id,
-                description=spec.description,
-                metadata={
-                    "type": spec.spec_type.value,
-                    "priority": spec.priority,
-                    "source": spec.source
-                }
-            )
+        graph = await self._ensure_obligation_graph()
 
-        # Add evidence as artifacts
+        # Add specifications as requirement nodes, track node IDs
+        req_node_ids: dict[str, str] = {}  # spec_id -> node_id
+        for spec in specifications:
+            node = await graph.add_requirement(
+                content={"spec_id": spec.spec_id, "type": spec.spec_type.value, "source": spec.source},
+                title=spec.spec_id,
+                description=spec.description,
+                tags=[spec.spec_type.value, spec.priority],
+            )
+            req_node_ids[spec.spec_id] = node.node_id
+
+        # Add evidence as artifact nodes and link to requirements
         for result in results:
+            req_node_id = req_node_ids.get(result.spec_id)
+            if not req_node_id:
+                continue
+
             for evidence in result.evidence:
-                await self.obligation_graph.add_artifact(
-                    artifact_id=evidence.evidence_id,
-                    artifact_type=evidence.evidence_type,
-                    metadata={
-                        "location": evidence.location,
-                        "supports": evidence.supports_compliance
-                    }
+                artifact_node = await graph.add_artifact(
+                    content={"evidence_id": evidence.evidence_id, "type": evidence.evidence_type},
+                    location={"location": evidence.location},
+                    title=evidence.evidence_id,
+                    description=evidence.content,
+                    tags=[evidence.evidence_type],
                 )
 
-                # Link to requirement
                 relationship = ComplianceRelationship.SATISFIES if evidence.supports_compliance else ComplianceRelationship.VIOLATES
-                await self.obligation_graph.link(
-                    requirement_id=result.spec_id,
-                    artifact_id=evidence.evidence_id,
+                await graph.link(
+                    requirement_id=req_node_id,
+                    artifact_id=artifact_node.node_id,
                     relationship=relationship,
                     evidence=[evidence.content],
-                    confidence=evidence.confidence
+                    confidence=evidence.confidence,
                 )
 
-        # Add missing controls
+        # Add missing controls as MISSING links
         for thread in threads:
+            req_node_id = req_node_ids.get(thread.requirement_id)
+            if not req_node_id:
+                continue
             for missing in thread.missing_controls:
-                await self.obligation_graph.link(
-                    requirement_id=thread.requirement_id,
-                    artifact_id=f"missing_{missing}",
+                # Create a placeholder artifact for the missing control
+                missing_node = await graph.add_artifact(
+                    content={"missing_control": missing},
+                    title=f"missing_{missing}",
+                    description=f"Missing control: {missing}",
+                    tags=["missing"],
+                )
+                await graph.link(
+                    requirement_id=req_node_id,
+                    artifact_id=missing_node.node_id,
                     relationship=ComplianceRelationship.MISSING,
-                    confidence=0.9
+                    confidence=0.9,
                 )
 
         # Return graph summary
-        compliance_status = await self.obligation_graph.get_compliance_status()
+        compliance_status = await graph.get_compliance_status()
         return {
             "requirements": len(specifications),
             "artifacts": sum(len(r.evidence) for r in results),
             "satisfied": compliance_status.get("satisfied", 0),
             "partial": compliance_status.get("partial", 0),
-            "missing": compliance_status.get("missing", 0)
+            "missing": compliance_status.get("missing", 0),
         }
 
     def _determine_overall_compliance(

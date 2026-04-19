@@ -104,6 +104,12 @@ class DynamicGameCapability(AgentCapability):
             "appear in your available actions for the duration of the game.\n\n"
             "Use ``create_game`` to initiate a new game and invite other agents. "
             "Games are automatically cleaned up when they reach terminal state."
+            "**Recommended: use ``run_game_from_template``** for easy game creation. "
+            "Templates: hypothesis_validation, negotiated_merge, consensus_vote, "
+            "contract_allocation. Levels: quick, standard, thorough, adversarial.\n\n"
+            "Advanced: use ``create_game`` for custom games with full control over "
+            "roles, participants, and config. Games are automatically cleaned up "
+            "when they reach terminal state."
         )
 
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
@@ -423,4 +429,136 @@ class DynamicGameCapability(AgentCapability):
         return {
             "games": dict(self._active_games),
             "count": len(self._active_games),
+        }
+
+    # ------------------------------------------------------------------
+    # Template-based game creation (LLM-friendly)
+    # ------------------------------------------------------------------
+
+    @action_executor()
+    async def run_game_from_template(
+        self,
+        template: str,
+        level: str = "standard",
+        subject: dict[str, Any] | None = None,
+        participant_agent_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Create and launch a game from a predefined template.
+
+        This is the recommended way for LLM planners to create games.
+        One call handles spawning, role assignment, and invitation.
+
+        Available templates:
+        - **hypothesis_validation** — validate a claim via propose/challenge/arbitrate.
+          Use for CRITICAL findings needing adversarial scrutiny.
+        - **negotiated_merge** — resolve conflicting results via negotiation.
+          Use when agents disagree on severity or classification.
+        - **consensus_vote** — reach group agreement via voting.
+          Use for multi-option decisions requiring group input.
+        - **contract_allocation** — assign tasks via competitive bidding.
+          Use to match tasks to agents by capability or cache affinity.
+
+        Scrutiny levels (each increases team size and rigor):
+        - **quick** — minimal team (2-3), fast, 1 round
+        - **standard** — balanced team (3-4), default scrutiny
+        - **thorough** — larger team (4-6), deeper challenge/evidence
+        - **adversarial** — maximum scrutiny (5-8), multiple challengers
+
+        Args:
+            template: Template name (see above).
+            level: Scrutiny level (see above). Default: "standard".
+            subject: What the game is about. Template-specific:
+                - hypothesis_validation: {"claim": str, "evidence": list, "confidence": float}
+                - negotiated_merge: {"issue": str, "options": list, "constraints": dict}
+                - consensus_vote: {"proposal": str, "options": list}
+                - contract_allocation: {"tasks": list, "requirements": dict}
+            participant_agent_ids: Existing agent IDs to invite instead
+                of spawning new ones. Must have DynamicGameCapability.
+                Roles are assigned in template order.
+
+        Returns:
+            Dict with:
+            - game_id: Created game identifier
+            - game_type: Underlying game protocol type
+            - template: Template used
+            - level: Level used
+            - participants: agent_id -> role mapping
+            - spawned_agents: List of newly created agent IDs (empty if reusing)
+        """
+        from .templates import get_template, INITIAL_DATA_BUILDERS
+
+        tmpl = get_template(template)
+        tmpl_level = tmpl.get_level(level)
+
+        # Build participants: either spawn or assign to provided agents
+        spawned_agents: list[str] = []
+        participants: dict[str, str] = {}
+
+        if participant_agent_ids:
+            # Assign provided agents to roles round-robin
+            role_list = []
+            for role_name, count in tmpl_level.roles.items():
+                role_list.extend([role_name] * count)
+
+            for i, agent_id in enumerate(participant_agent_ids):
+                if i < len(role_list):
+                    participants[agent_id] = role_list[i]
+                # Extra agents beyond template size are ignored
+        else:
+            # Spawn new agents
+            spawn_result = await self.spawn_game_participants(
+                roles=dict(tmpl_level.roles),
+                role_capabilities=dict(tmpl_level.role_capabilities),
+            )
+
+            if spawn_result.get("error"):
+                return {
+                    "error": spawn_result["error"],
+                    "template": template,
+                    "level": level,
+                }
+
+            # Map spawned agent IDs to roles
+            for role_name, agent_ids in spawn_result.get("agents", {}).items():
+                for agent_id in agent_ids:
+                    participants[agent_id] = role_name
+                    spawned_agents.append(agent_id)
+
+        # Include self as proposer/coordinator if not already assigned
+        # (the creating agent often wants to participate)
+        if self.agent.agent_id not in participants:
+            # Find the "lead" role for this template
+            lead_roles = {"hypothesis_validation": "proposer", "negotiated_merge": "negotiator",
+                          "consensus_vote": "proposer_consensus", "contract_allocation": "coordinator"}
+            lead_role = lead_roles.get(template)
+            if lead_role and lead_role in tmpl_level.roles:
+                participants[self.agent.agent_id] = lead_role
+
+        # Build initial_data from subject
+        initial_data: dict[str, Any] = {}
+        if subject:
+            builder = INITIAL_DATA_BUILDERS.get(template)
+            if builder:
+                if template == "hypothesis_validation":
+                    initial_data = builder(subject, self.agent.agent_id)
+                else:
+                    initial_data = builder(subject)
+            else:
+                initial_data = subject
+
+        # Create the game
+        game_result = await self.create_game(
+            game_type=tmpl.game_type,
+            participants=participants,
+            game_config=dict(tmpl_level.game_config),
+            initial_data=initial_data,
+        )
+
+        return {
+            "game_id": game_result["game_id"],
+            "game_type": tmpl.game_type,
+            "template": template,
+            "level": level,
+            "participants": participants,
+            "spawned_agents": spawned_agents,
         }

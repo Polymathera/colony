@@ -120,32 +120,34 @@ class ChangeImpactAnalysisPolicy:
         self,
         agent: Agent,
         blackboard: EnhancedBlackboard,
-        namespace: str = "impact_analysis",
         max_depth: int = 5,
         include_tests: bool = True,
-        include_docs: bool = True
+        include_docs: bool = True,
+        temperature: float = 0.2,
+        max_tokens: int = 3000,
     ):
         """Initialize impact analysis policy.
 
         Args:
             agent: Agent instance for LLM inference via VCM
             blackboard: Blackboard for storing results
-            namespace: Namespace for scoping keys in the blackboard
             max_depth: Maximum depth for impact propagation
             include_tests: Whether to analyze test impact
             include_docs: Whether to analyze documentation impact
+            temperature: LLM temperature for inference calls
+            max_tokens: Max tokens for LLM responses
         """
         self.agent = agent
         self.blackboard = blackboard
-        self.namespace = namespace
         self.max_depth = max_depth
         self.include_tests = include_tests
         self.include_docs = include_docs
+        self.temperature = temperature
+        self.max_tokens = max_tokens
 
         # Initialize causality timeline for temporal analysis
         self.timeline = CausalityTimeline(
             blackboard=blackboard,
-            namespace=namespace
         )
 
     # NOTE: Multi-page analysis is handled by ChangeImpactAnalysisCoordinator
@@ -177,8 +179,8 @@ class ChangeImpactAnalysisPolicy:
         response = await self.agent.infer(
             context_page_ids=[page_id],  # Single page only
             prompt=prompt,
-            temperature=0.2,
-            max_tokens=3000,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             json_schema=ChangeImpactReport.model_json_schema()
         )
 
@@ -566,7 +568,6 @@ Focus on semantic and behavioral impacts, not just syntactic dependencies."""
         # Create a NEW timeline for this report, not the shared one
         timeline = CausalityTimeline(
             blackboard=self.blackboard,
-            namespace=f"impact_analysis_{uuid.uuid4().hex[:8]}"
         )
 
         # Add change events
@@ -683,7 +684,6 @@ class ChangeImpactAnalysisCapability(AgentCapability):
 
     Also uses FeedbackLoopPredictor for cache-aware prefetching.
     """
-
 
     def __init__(
         self,
@@ -929,7 +929,7 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         if not self.feedback_predictor or not self.page_id:
             return
 
-        pages_to_prefetch = self.feedback_predictor.predict_self_critique_pages(self.page_id)
+        pages_to_prefetch = await self.feedback_predictor.predict_self_critique_pages(self.page_id)
 
         # TODO: Parallelize prefetching with asyncio.gather()
         # Request prefetch with low priority (background loading)

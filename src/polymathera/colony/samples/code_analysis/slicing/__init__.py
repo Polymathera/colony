@@ -7,7 +7,6 @@ from .capabilities import (
     ProgramSlicingCapability,
     SliceMergePolicy,
     SlicingAnalysisCapability,
-    SlicingCoordinatorCapability,
 )
 from .types import (
     SliceType,
@@ -29,6 +28,5 @@ __all__ = [
     "ProgramSlicingCapability",
     "SliceMergePolicy",
     "SlicingAnalysisCapability",
-    "SlicingCoordinatorCapability",
 ]
 

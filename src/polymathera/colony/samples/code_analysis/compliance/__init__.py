@@ -7,7 +7,6 @@ from .agents import (
 from .capabilities import (
     ComplianceVCMCapability,
     ComplianceMergePolicy,
-    ComplianceCoordinatorCapability,
     ComplianceAnalysisCapability,
 )
 from .types import (
@@ -28,7 +27,6 @@ __all__ = [
     "ComplianceAnalysisCoordinator",
     "ComplianceVCMCapability",
     "ComplianceMergePolicy",
-    "ComplianceCoordinatorCapability",
     "ComplianceAnalysisCapability",
     "ComplianceType",
     "ComplianceSeverity",

@@ -7,7 +7,6 @@ from .capabilities import (
     ContractInferenceCapability,
     ContractMergePolicy,
     ContractAnalysisCapability,
-    ContractCoordinatorCapability,
 )
 from .types import (
      ContractType,
@@ -25,7 +24,6 @@ __all__ = [
     "ContractInferenceCapability",
     "ContractMergePolicy",
     "ContractAnalysisCapability",
-    "ContractCoordinatorCapability",
     "ContractType",
     "FormalismLevel",
     "Contract",

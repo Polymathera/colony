@@ -126,7 +126,8 @@ class FeedbackLoopPredictor:
         self,
         agent: Agent,
         prefetch_depth: int = 2,
-        prefetch_test_pages: bool = True
+        prefetch_test_pages: bool = True,
+        max_prefetch: int = 5,
     ):
         """Initialize feedback loop predictor.
 
@@ -134,10 +135,12 @@ class FeedbackLoopPredictor:
             agent: Agent instance
             prefetch_depth: Max hops to look for related pages
             prefetch_test_pages: Include test pages in predictions
+            max_prefetch: Maximum pages to return per prediction
         """
         self.agent = agent
         self.prefetch_depth = prefetch_depth
         self.prefetch_test_pages = prefetch_test_pages
+        self.max_prefetch = max_prefetch
 
     async def predict_self_critique_pages(self, page_id: str) -> list[str]:
         """Predict pages needed during self-critique.
@@ -161,19 +164,19 @@ class FeedbackLoopPredictor:
 
         # Get imports (predecessors in dependency graph)
         predecessors = list(page_graph.predecessors(page_id))
-        predicted.extend(predecessors[:self.prefetch_depth])  # TODO: That is not the prefetch depth.
+        predicted.extend(predecessors[:self.prefetch_depth])
 
         # Get test pages if enabled
         if self.prefetch_test_pages:
             for node in page_graph.nodes():
                 node_data = page_graph.nodes[node]
                 # Check if this is a test page that tests our page
-                if node_data.get("is_test", False):  # TODO: Where is this attribute added?
+                if node_data.get("is_test", False):
                     # Check if test has edge to our page
                     if page_graph.has_edge(node, page_id):
                         predicted.append(node)
 
-        return predicted[:5]  # Limit to avoid over-prefetching - TODO: Make configurable.
+        return predicted[:self.max_prefetch]  # Limit to avoid over-prefetching
 
     async def predict_hypothesis_game_pages(self, page_id: str, role: str) -> list[str]:
         """Predict pages needed for hypothesis game roles.
@@ -202,7 +205,7 @@ class FeedbackLoopPredictor:
             # Proposer needs evidence - tests and docs
             for node in page_graph.nodes():
                 node_data = page_graph.nodes[node]
-                if node_data.get("is_test", False) or node_data.get("is_doc", False):  # TODO: Where is this attribute added?
+                if node_data.get("is_test", False) or node_data.get("is_doc", False):
                     if page_graph.has_edge(node, page_id):
                         predicted.append(node)
 
@@ -215,7 +218,7 @@ class FeedbackLoopPredictor:
             # Grounder needs documentation pages
             for node in page_graph.nodes():
                 node_data = page_graph.nodes[node]
-                if node_data.get("is_doc", False):  # TODO: Where is this attribute added?
+                if node_data.get("is_doc", False):
                     predicted.append(node)
 
         elif role == "arbiter":
@@ -224,10 +227,10 @@ class FeedbackLoopPredictor:
                 page_graph.nodes(),
                 key=lambda n: page_graph.degree(n),
                 reverse=True
-            )[:5]  # TODO: Make configurable.
+            )[:self.max_prefetch]
             predicted.extend(central_nodes)
 
-        return predicted[:5]  # Limit to avoid over-prefetching - TODO: Make this configurable.
+        return predicted[:self.max_prefetch]  # Limit to avoid over-prefetching
 
     async def predict_cross_agent_pages(self, source_page: str) -> list[str]:
         """Predict pages that might need refinement based on this result.
@@ -261,7 +264,7 @@ class FeedbackLoopPredictor:
             if len(shared) >= 2:  # At least 2 shared dependencies
                 predicted.append(node)
 
-        return predicted[:10]  # Limit to avoid over-prefetching
+        return predicted[:self.max_prefetch]  # Limit to avoid over-prefetching
 
     async def predict_gap_filling_pages(
         self,
@@ -293,5 +296,5 @@ class FeedbackLoopPredictor:
             if missing_component.lower() in file_path.lower():
                 predicted.append(node)
 
-        return predicted[:5]  # TODO: Make this configurable.
+        return predicted[:self.max_prefetch]
 

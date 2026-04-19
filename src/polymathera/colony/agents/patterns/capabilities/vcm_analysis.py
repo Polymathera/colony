@@ -338,6 +338,19 @@ class VCMAnalysisCapability(AgentCapability, ABC):
             MergePolicy implementation appropriate for this domain.
         """
 
+    def get_extra_capability_classes(self) -> list[Type[AgentCapability]]:
+        """Return additional capability classes to attach to spawned workers.
+
+        Override in subclasses to provide extra capabilities beyond the
+        primary worker capability (e.g., DynamicGameCapability, MergeCapability).
+        These are passed to AgentPoolCapability.create_agent() alongside
+        the worker capability from get_worker_capability_class().
+
+        Returns:
+            List of additional capability classes. Default: empty list.
+        """
+        return []
+
     def get_analysis_parameters(self, **kwargs) -> dict[str, Any]:
         """Return domain-specific parameters for worker analysis.
 
@@ -491,9 +504,13 @@ class VCMAnalysisCapability(AgentCapability, ABC):
         worker_cap_cls = self.get_worker_capability_class()
         worker_cap_fqn = f"{worker_cap_cls.__module__}.{worker_cap_cls.__qualname__}"
 
+        capability_fqns = [worker_cap_fqn]
+        for extra_cls in self.get_extra_capability_classes():
+            capability_fqns.append(f"{extra_cls.__module__}.{extra_cls.__qualname__}")
+
         result = await pool_cap.create_agent(
             agent_type=self.get_worker_agent_type(),
-            capabilities=[worker_cap_fqn],
+            capabilities=capability_fqns,
             bound_pages=bound_pages,
             metadata=AgentMetadata(
                 parameters={

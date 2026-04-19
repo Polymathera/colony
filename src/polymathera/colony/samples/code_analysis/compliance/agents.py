@@ -59,13 +59,9 @@ class ComplianceAnalysisAgent(Agent):
         """Initialize agent and configure capabilities."""
         # Extract and set up capability classes
         self.add_capability_blueprints([
-            ComplianceVCMCapability.bind(
-                scope=BlackboardScope.AGENT,
-                namespace="compliance_analysis_vcm",
-            ),
+            ComplianceAnalysisCapability.bind(),
             MergeCapability.bind(
-                scope=BlackboardScope.AGENT,
-                namespace="compliance_analysis_merge",
+                merge_policy=ComplianceMergePolicy(),
             ),
         ])
 

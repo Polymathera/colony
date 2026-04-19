@@ -51,7 +51,6 @@ from polymathera.colony.agents.models import Action, ActionType, AgentMetadata, 
 from polymathera.colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
 from polymathera.colony.cluster.models import LLMClientRequirements
 from polymathera.colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
-from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
 
 from .types import (
     Contract,
@@ -95,6 +94,8 @@ class ContractInferenceCapability(AgentCapability):
         input_patterns: list[str] = [AgentRunProtocol.request_pattern()],
         formalism: FormalismLevel = FormalismLevel.SEMI_FORMAL,
         use_examples: bool = True,
+        temperature: float = 0.2,
+        max_tokens: int = 3000,
         capability_key: str = "contract_inference_capability",
     ):
         """Initialize contract inference capability.
@@ -106,11 +107,15 @@ class ContractInferenceCapability(AgentCapability):
             input_patterns: List of input patterns to listen for
             formalism: Target formalism level
             use_examples: Whether to use examples for learning
+            temperature: LLM temperature for inference calls
+            max_tokens: Max tokens for LLM responses
             capability_key: Unique key for this capability within the agent
         """
         super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.formalism = formalism
         self.use_examples = use_examples
+        self.temperature = temperature
+        self.max_tokens = max_tokens
 
     def get_action_group_description(self) -> str:
         return (
@@ -127,15 +132,20 @@ class ContractInferenceCapability(AgentCapability):
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
-        # TODO: Implement
-        logger.warning("serialize_suspension_state not implemented for ContractInferenceCapability")
+        state = await super().serialize_suspension_state(state)
+        state.custom_data["_contract_inference_state"] = {
+            "formalism": self.formalism if isinstance(self.formalism, str) else self.formalism.value,
+            "use_examples": self.use_examples,
+        }
         return state
 
     @override
     async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
-        # TODO: Implement
-        logger.warning("deserialize_suspension_state not implemented for ContractInferenceCapability")
-        pass
+        await super().deserialize_suspension_state(state)
+        custom_state = state.custom_data.get("_contract_inference_state", {})
+        if custom_state:
+            self.formalism = custom_state.get("formalism", FormalismLevel.SEMI_FORMAL)
+            self.use_examples = custom_state.get("use_examples", True)
 
     # -------------------------------------------------------------------------
     # Event Handlers
@@ -293,13 +303,20 @@ class ContractInferenceCapability(AgentCapability):
         response = await self.agent.infer(
             context_page_ids=[page_id],  # Single page
             prompt=prompt,
-            temperature=0.2,
-            max_tokens=3000,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             json_schema=ContractInferenceResult.model_json_schema()
         )
 
         # Parse structured response
-        result = ContractInferenceResult.model_validate_json(response.generated_text)
+        try:
+            result = ContractInferenceResult.model_validate_json(response.generated_text)
+        except Exception as e:
+            logger.warning(f"Failed to parse LLM response as ContractInferenceResult: {e}")
+            result = ContractInferenceResult(
+                content=[],
+                scope=AnalysisScope(confidence=0.0, reasoning=[f"LLM response parsing failed: {e}"]),
+            )
 
         # Validate against test cases if provided
         if test_cases and result.content:
@@ -1278,596 +1295,6 @@ class ContractAnalysisCapability(VCMAnalysisCapability):
         }
 
 
-# =============================================================================
-# DEPRECATED: ContractCoordinatorCapability
-# =============================================================================
-# This class is superseded by ContractAnalysisCapability which extends
-# VCMAnalysisCapability. The new design provides atomic, composable primitives
-# that the LLM planner can compose into arbitrary workflows.
-#
-# Migration:
-#   Old: ContractCoordinatorCapability with prescribed workflow
-#   New: ContractAnalysisCapability with composable primitives
-#
-# TODO: Remove this class after migration is complete.
-# =============================================================================
 
-class ContractCoordinatorCapability(AgentCapability):
-    """DEPRECATED: Use ContractAnalysisCapability instead.
-
-    This capability:
-    - Spawns worker agents via AgentHandle
-    - Collects results via event handlers
-    - Orchestrates game protocols for validation and task allocation (hypothesis, negotiation, coalition)
-    - Merges final results
-    """
-
-
-    def __init__(
-        self,
-        agent: Agent,
-        scope: BlackboardScope = BlackboardScope.COLONY,
-        namespace: str = "contract_inference",
-        input_patterns: list[str] = [
-            AgentRunProtocol.request_pattern(),
-            AgentRunProtocol.result_pattern()
-        ],
-        max_agents: int = 10,
-        batching_policy: BatchingPolicy | None = None,
-        capability_key: str = "contract_coordinator"
-    ):
-        """Initialize coordinator capability.
-
-        Args:
-            agent: Agent using this capability
-            scope_id: Blackboard scope ID
-            namespace: Namespace for event patterns
-            input_patterns: List of input patterns for the capability
-            max_agents: Maximum worker agents to spawn
-            batching_policy: Policy for cache-aware batch selection
-        """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
-        self.namespace = namespace
-        self.max_agents = max_agents
-        self._worker_handles: dict[str, Any] = {}  # page_id -> AgentHandle
-        self._pending_results: dict[str, ScopeAwareResult] = {}
-        self._task_graph: TaskGraph | None = None
-        self._hypothesis_explorer: HypothesisDrivenExplorer | None = None
-        self._batching_policy = batching_policy
-
-        # Layer 0/1 capability references (initialized in initialize())
-        self._agent_pool_cap: AgentPoolCapability | None = None
-        self._result_cap: ResultCapability | None = None
-        self._page_graph_cap: PageGraphCapability | None = None
-
-    def get_action_group_description(self) -> str:
-        return (
-            "Contract Coordination (DEPRECATED — use ContractAnalysisCapability). "
-            "Distributes contract inference across pages with game-based validation "
-            "(hypothesis, negotiation, coalition). Merges via SynthesisCapability."
-        )
-
-    def _get_merge_capability(self) -> MergeCapability | None:
-        """Get MergeCapability from agent."""
-        return self.agent.get_capability_by_type(MergeCapability)
-
-    def _get_synthesis_capability(self) -> SynthesisCapability | None:
-        """Get SynthesisCapability from agent."""
-        return self.agent.get_capability_by_type(SynthesisCapability)
-
-    async def initialize(self) -> None:
-        """Initialize coordinator capability."""
-        await super().initialize()
-        blackboard = await self.get_blackboard()
-        self._task_graph = TaskGraph(
-            blackboard=blackboard,
-            namespace=self.namespace
-        )
-        self._hypothesis_explorer = HypothesisDrivenExplorer(
-            agent=self.agent,
-            query_processor=None
-        )
-
-        # Initialize Layer 0/1 capabilities for cache-aware multi-agent execution
-        # AgentPoolCapability for agent lifecycle management
-        self._agent_pool_cap = self.agent.get_capability_by_type(AgentPoolCapability)
-        if not self._agent_pool_cap:
-            self._agent_pool_cap = AgentPoolCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-                #max_agents=self.max_agents,
-            )
-            await self._agent_pool_cap.initialize()
-            self.agent.add_capability(self._agent_pool_cap)
-
-        # ResultCapability for cluster-wide result visibility
-        self._result_cap = self.agent.get_capability_by_type(ResultCapability)
-        if not self._result_cap:
-            self._result_cap = ResultCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-            )
-            await self._result_cap.initialize()
-            self.agent.add_capability(self._result_cap)
-
-        # PageGraphCapability for standardized graph operations
-        self._page_graph_cap = self.agent.get_capability_by_type(PageGraphCapability)
-        if not self._page_graph_cap:
-            self._page_graph_cap = PageGraphCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-            )
-            await self._page_graph_cap.initialize()
-            self.agent.add_capability(self._page_graph_cap)
-
-    @override
-    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
-        # TODO: Implement
-        logger.warning("serialize_suspension_state not implemented for ContractInferenceCapability")
-        return state
-
-    @override
-    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
-        # TODO: Implement
-        logger.warning("deserialize_suspension_state not implemented for ContractInferenceCapability")
-        pass
-
-    # -------------------------------------------------------------------------
-    # Event Handlers
-    # -------------------------------------------------------------------------
-
-    @event_handler(pattern=AgentRunProtocol.request_pattern())
-    async def handle_analysis_request(
-        self,
-        event: BlackboardEvent,
-        repl: PolicyREPL,
-    ) -> EventProcessingResult | None:
-        """Handle analysis request from AgentHandle.run()."""
-        request_data = event.value
-        if not request_data:
-            return None
-
-        input_data = request_data.get("input", {})
-        request_id = request_data.get("request_id")
-        self._pending_request_id = request_id
-
-        page_ids = input_data.get("page_ids", [])
-        function_names = input_data.get("function_names")
-
-        repl.set("request_id", request_id)
-
-        return EventProcessingResult(
-            immediate_action=Action(
-                action_id=f"infer_contracts_{request_id}",
-                agent_id=self.agent.agent_id,
-                action_type=ActionType.CAPABILITY_ACTION,  # TODO: FIXME: This does not exist
-                capability=self.get_capability_name(),
-                action_key="analyze_codebase",
-                parameters={
-                    "page_ids": page_ids,
-                    "function_names": function_names,
-                    "request_id": request_id,
-                },
-            )
-        )
-
-    @event_handler(pattern=AgentRunProtocol.result_pattern())
-    async def handle_worker_result(
-        self,
-        event: BlackboardEvent,
-        _repl: PolicyREPL,
-    ) -> EventProcessingResult | None:
-        """Handle result from worker agent.
-
-        Stores results via ResultCapability for cluster-wide visibility
-        and tracks progress for incremental synthesis.
-        """
-        # Extract page_id from the event (workers write to their own result keys)
-        for page_id, handle in self._worker_handles.items():
-            if event.key.startswith(f"{handle.agent_id}:result:"):
-                result = ScopeAwareResult[list[FunctionContract]](**event.value)
-                self._pending_results[page_id] = result
-
-                # Store result via ResultCapability for cluster-wide visibility
-                if self._result_cap:
-                    await self._result_cap.store_partial(
-                        result_id=f"contract:{page_id}",
-                        result={
-                            "page_id": page_id,
-                            "contracts": [c.model_dump() for c in result.content] if result.content else [],
-                            "scope": result.scope.model_dump() if result.scope else {},
-                        },
-                        source_agent=handle.agent_id,
-                        source_pages=[page_id],
-                        result_type="contract_inference",
-                    )
-
-                # Update synthesis incrementally
-                synthesis_cap = self._get_synthesis_capability()
-                if synthesis_cap:
-                    update = await synthesis_cap.add_result(
-                        result_id=f"page_{page_id}",
-                        result=result
-                    )
-
-                    # Check if synthesis improved
-                    if update.current_synthesis:
-                        logger.info(f"Synthesis progress: {update.progress:.1%}")
-
-                logger.info(f"Collected result from worker for page {page_id}")
-
-                # Check if all results collected
-                if len(self._pending_results) >= len(self._worker_handles):
-                    return EventProcessingResult(
-                        immediate_action=Action(
-                            action_id=f"finalize_analysis_{self._pending_request_id}",
-                            agent_id=self.agent.agent_id,
-                            action_type=ActionType.CAPABILITY_ACTION,  # TODO: FIXME: This does not exist
-                            capability=self.get_capability_name(),
-                            action_key="finalize_analysis",
-                            parameters={"request_id": self._pending_request_id},
-                        )
-                    )
-                return None
-
-        return None
-
-    # -------------------------------------------------------------------------
-    # Action Executors
-    # -------------------------------------------------------------------------
-
-    async def negotiate_contract_merge(
-        self,
-        my_contracts: list[FunctionContract],
-        other_contracts: list[FunctionContract],
-        function_key: str
-    ) -> FunctionContract:
-        """Negotiate with other agents to merge contracts.
-
-        Args:
-            my_contracts: This agent's contracts
-            other_contracts: Other agents' contracts
-            function_key: Function being negotiated
-
-        Returns:
-            Agreed-upon contract
-        """
-        # Create negotiation issue
-        issue = NegotiationIssue(
-            issue_id=f"contract_merge:{function_key}:{self.agent_id}",  # TODO: Add NegotiationIssue.get_issue_id(function_key, agent_id) method?
-            description=f"Merge contracts for {function_key}",
-            parties=[self.agent_id],  # Will add other parties
-            constraints={"must_be_sound": True}
-        )
-
-        # Create offer based on confidence
-        my_confidence = sum(c.confidence for contract in my_contracts 
-                           for c in contract.preconditions + contract.postconditions)
-
-        offer = Offer(
-            offer_id=f"{issue.issue_id}::{self.agent_id}",
-            proposer=self.agent_id,
-            terms={"contracts": [c.model_dump() for c in my_contracts]},
-            utility=my_confidence,
-            justification=f"Confidence: {my_confidence:.2f}"
-        )
-        # TODO: Implement offer exchange via messages
-        # In real implementation, would exchange offers via messages
-        # For now, return highest confidence contract
-        return my_contracts[0] if my_contracts else None
-
-    @action_executor(action_key="analyze_codebase")
-    async def analyze_codebase(
-        self,
-        page_ids: list[str],
-        function_names: list[str] | None = None,
-        request_id: str | None = None,
-    ) -> ScopeAwareResult[list[FunctionContract]]:
-        """Analyze entire codebase using agent team.
-
-        Uses BatchingPolicy for cache-aware batch selection and AgentPoolCapability
-        for agent lifecycle management.
-
-        Args:
-            page_ids: All VCM page IDs to analyze
-            function_names: Optional specific functions to focus on
-            request_id: Request ID for result routing
-
-        Returns:
-            Complete contract inference result
-        """
-        # Use BatchingPolicy for cache-aware batch selection if available
-        if self._batching_policy and self._page_graph_cap:
-            page_graph = await self._page_graph_cap.load_graph()
-            batch_page_ids = await self._batching_policy.create_batch(
-                candidate_pages=page_ids,
-                page_graph=page_graph,
-                max_batch_size=self.max_agents,
-            )
-        else:
-            # Fallback to simple truncation
-            batch_page_ids = page_ids[:self.max_agents]
-
-        # Spawn worker agents using AgentPoolCapability
-        await self._spawn_workers(batch_page_ids)
-
-        # Run workers via AgentHandle and collect results
-        results = await self._run_workers_and_collect(function_names)
-
-        # Validate via hypothesis games
-        validated_results = await self._validate_via_hypothesis_games(results)
-
-        # Merge via coalition formation
-        final_result = await self._merge_via_coalition_formation(validated_results)
-
-        # Write result for AgentHandle.run() to receive
-        if request_id:
-            blackboard = await self.get_blackboard()
-            await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id),
-                value=final_result.model_dump(),
-                created_by=self.agent.agent_id,
-            )
-
-        return final_result
-
-    async def _allocate_tasks_via_contract_net(self, tasks: list[Task]) -> None:
-        """Allocate tasks to agents using contract net protocol.
-
-        Args:
-            tasks: Tasks to allocate
-        """
-        if not self.blackboard:
-            return
-
-        protocol = ContractNetProtocol(self.blackboard)
-
-        for task in tasks:
-            # In real implementation, would have pool of available agents
-            # For now, just mark as allocated
-            task.assigned_agent = f"contract_agent_{task.task_id}"
-            task.status = TaskStatus.IN_PROGRESS
-            await self.task_graph.update_task(task)
-
-    @action_executor(action_key="finalize_analysis")
-    async def finalize_analysis(
-        self,
-        request_id: str | None = None,
-    ) -> ScopeAwareResult[list[FunctionContract]]:
-        """Finalize analysis after all worker results collected."""
-        results = list(self._pending_results.values())
-
-        # TODO: What the fuck is this? This completely ignores the
-        # synthesis result built incrementally in handle_worker_result
-
-        # Validate and merge
-        validated_results = await self._validate_via_hypothesis_games(results)
-        final_result = await self._merge_via_coalition_formation(validated_results)
-
-        # Write result
-        if request_id:
-            blackboard = await self.get_blackboard()
-            await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id),
-                value=final_result.model_dump(),
-                created_by=self.agent.agent_id,
-            )
-
-        # Cleanup
-        self._pending_results.clear()
-        self._worker_handles.clear()
-
-        return final_result
-
-    async def _spawn_workers(self, page_ids: list[str]) -> None:
-        """Spawn worker agents for pages using AgentPoolCapability.
-
-        Uses AgentPoolCapability for standardized agent lifecycle management,
-        enabling cache-aware agent placement and resource optimization.
-        """
-        if not self._agent_pool_cap:
-            raise RuntimeError("AgentPoolCapability not initialized")
-
-        for page_id in page_ids:
-            # Use AgentPoolCapability for standardized agent creation
-            handle = await self._agent_pool_cap.create_agent(
-                agent_type="polymathera.colony.samples.code_analysis.contracts.ContractInferenceAgent",
-                capabilities=["polymathera.colony.samples.code_analysis.contracts.capabilities.ContractInferenceCapability"],
-                bound_pages=[page_id],
-                requirements=None,
-                #requirements=LLMClientRequirements(
-                #    model_family="llama",  # TODO: Make configurable
-                #    min_context_window=32000,  # TODO: Make configurable
-                #),
-                resource_requirements=AgentResourceRequirements(
-                    cpu_cores=0.1,
-                    memory_mb=512,
-                    gpu_cores=0.0,
-                    gpu_memory_mb=0
-                ),
-                metadata=AgentMetadata(parameters={
-                    "page_id": page_id,
-                    "formalism": "semi_formal"
-                }),
-            )
-            self._worker_handles[page_id] = handle
-
-    async def _run_workers_and_collect(
-        self,
-        function_names: list[str] | None = None,
-        timeout = 60.0  # Overall timeout
-    ) -> list[ScopeAwareResult[list[FunctionContract]]]:
-        """Run workers and collect results.
-
-        Returns:
-            List of collected results
-        """
-        results = []
-
-        # TODO: What the fuck is this? First, this is sequential and synchronous!!!
-        # Second, this waits for the result synchronously whereas we already have
-        # an event handler handle_worker_result.
-        for page_id, handle in self._worker_handles.items():
-            try:
-                # protocol=AgentRunProtocol: worker's ContractInferenceCapability uses AgentRunProtocol
-                # scope=AGENT: worker's ContractInferenceCapability uses AGENT scope
-                # namespace="contract_inference": must match worker's ContractInferenceCapability namespace
-                run = await handle.run(
-                    input_data={
-                        "page_ids": [page_id],
-                        "function_names": function_names,
-                    },
-                    timeout=timeout,
-                    protocol=AgentRunProtocol,
-                    scope=BlackboardScope.AGENT,
-                    namespace=self.namespace,  # "contract_inference" — matches worker
-                )
-                if run.output_data:
-                    result = ScopeAwareResult[list[FunctionContract]](**run.output_data)
-                    results.append(result)
-            except Exception as e:
-                logger.error(f"Worker for page {page_id} failed: {e}")
-
-        return results
-
-    async def _validate_via_hypothesis_games(
-        self,
-        results: list[ScopeAwareResult[list[FunctionContract]]]
-    ) -> list[ScopeAwareResult[list[FunctionContract]]]:
-        """Validate critical contracts using hypothesis games.
-
-        Args:
-            results: Results to validate
-
-        Returns:
-            Validated results
-        """
-        if not self._hypothesis_explorer or not results:
-            return results
-
-        # Form hypotheses about critical contracts (security-related)
-        for result in results:
-            for contract in result.content:
-                # Check if contract is critical (e.g., security-related)
-                is_critical = any(
-                    "security" in str(cond.description).lower()
-                    for cond in contract.preconditions + contract.postconditions
-                )
-                if is_critical and len(self._worker_handles) >= 3:
-                    # Form hypothesis
-                    hypothesis = await self._hypothesis_explorer.form_hypothesis(result)
-
-                    # Run hypothesis game with subset of agents (agent_ids)
-                    if hypothesis.confidence <= 0.7:
-                        # Run game (simplified)
-                        validated = await self._run_hypothesis_game(
-                            hypothesis,
-                        )
-                        if not validated:
-                            # Remove or mark contract as low confidence
-                            contract.confidence *= 0.5
-
-        return results
-
-    async def _run_hypothesis_game(
-        self,
-        hypothesis: Hypothesis,
-    ) -> bool:
-        """Run hypothesis game to validate contract.
-
-        Args:
-            hypothesis: Hypothesis to validate
-
-        Returns:
-            True if hypothesis validated
-        """
-        # TODO: Use run_hypothesis_game utility function from negotiation module
-        game_agent_ids = list(self.page_agents.values())[:4]
-        if len(game_agent_ids) >= 3:
-            # Assign roles
-            proposer_id = game_agent_ids[0]
-            skeptic_ids = game_agent_ids[1:2]
-            arbiter_id = game_agent_ids[2]
-
-        # Send game invitations
-        await self.agent.send_message(  # TODO: This is not how we send messages.
-            target_agent_id=proposer_id,
-            message={
-                "type": "hypothesis_game",
-                "hypothesis": hypothesis.model_dump(),
-                "role": "proposer"
-            }
-        )
-
-        for skeptic_id in skeptic_ids:
-            await self.agent.send_message(  # TODO: This is not how we send messages.
-                target_agent_id=skeptic_id,
-                message={
-                    "type": "hypothesis_game",
-                    "hypothesis": hypothesis.model_dump(),
-                    "role": "skeptic"
-                }
-            )
-
-        # Simplified validation
-        return hypothesis.confidence > 0.7
-
-    async def _merge_via_coalition_formation(
-        self,
-        results: list[ScopeAwareResult[list[FunctionContract]]]
-    ) -> ScopeAwareResult[list[FunctionContract]]:
-        """Merge results using coalition formation for consensus.
-
-        Args:
-            results: Results to merge
-
-        Returns:
-            Final merged result
-        """
-        # TODO: This should be part of the ContractMergePolicy, not here.
-        if not results:
-            return ScopeAwareResult(
-                content=[],
-                scope=AnalysisScope()
-            )
-
-        # TODO: There is no coalition formation here yet. Just a direct merge.
-
-        merge_cap = self._get_merge_capability()
-        if merge_cap is None:
-            raise RuntimeError("ContractCoordinatorCapability requires MergeCapability")
-
-        return await merge_cap.merge_results(results, MergeContext())
-
-    def _get_optimal_coalitions(
-        self,
-        results: list[ScopeAwareResult[list[FunctionContract]]]
-    ) -> None:
-        """Form coalitions among agents based on result similarity.
-        """
-        # Form coalitions based on result similarity
-        agent_ids = list(self.page_agents.values())  # These are agent_id strings now
-
-        if len(agent_ids) > 1:
-            # Calculate characteristic function based on result agreement
-            characteristic_function = {}
-
-            for r in range(1, min(len(agent_ids) + 1, 5)):  # Limit coalition size
-                for subset in itertools.combinations(range(len(agent_ids)), r):
-                    coalition_key = ",".join(str(i) for i in sorted(subset))
-
-                    # Value = agreement level among coalition members
-                    coalition_results = [results[i] for i in subset if i < len(results)]
-                    if coalition_results:
-                        # Simplified: value = average confidence
-                        value = sum(r.scope.confidence for r in coalition_results) / len(coalition_results)
-                        characteristic_function[coalition_key] = value
-
-            # Find optimal coalition structure
-            optimal_structure = find_optimal_coalition_structure(
-                agent_ids,
-                characteristic_function
-            )
-
-            logger.info(f"Formed coalitions: {optimal_structure}")
-
+# ContractCoordinatorCapability has been removed.
+# Use ContractAnalysisCapability (VCMAnalysisCapability subclass) instead.

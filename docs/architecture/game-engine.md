@@ -292,6 +292,154 @@ await dynamic_cap.create_game(
 # Each gets HypothesisGameProtocol added as a capability at runtime.
 ```
 
+### Game Templates
+
+`run_game_from_template` is the recommended way for LLM planners to create games. It replaces the multi-step `spawn_game_participants` + `create_game` flow with a single call that handles spawning, role assignment, and invitation.
+
+```python
+# Validate a CRITICAL finding with adversarial scrutiny:
+result = await dynamic_cap.run_game_from_template(
+    template="hypothesis_validation",
+    level="thorough",
+    subject={"claim": "SQL injection in auth module", "confidence": 0.6},
+)
+
+# Resolve a merge conflict between two agents:
+result = await dynamic_cap.run_game_from_template(
+    template="negotiated_merge",
+    level="standard",
+    subject={"issue": "Disagreement on vulnerability severity"},
+)
+
+# Reuse existing workers instead of spawning:
+result = await dynamic_cap.run_game_from_template(
+    template="hypothesis_validation",
+    level="standard",
+    subject={"claim": "Function has no side effects"},
+    participant_agent_ids=["worker-1", "worker-2", "worker-3"],
+)
+```
+
+#### Available Templates
+
+| Template | Game Type | When to Use |
+|----------|-----------|-------------|
+| `hypothesis_validation` | `hypothesis_game` | Validate a claim via propose/challenge/arbitrate. Use for CRITICAL findings needing adversarial scrutiny. |
+| `negotiated_merge` | `negotiation` | Resolve conflicting results via multi-party negotiation. Use when agents disagree on severity or classification. |
+| `consensus_vote` | `consensus_game` | Reach group agreement via voting. Use for multi-option decisions requiring group input. |
+| `contract_allocation` | `contract_net` | Assign tasks via competitive bidding. Use to match tasks to agents by capability or cache affinity. |
+
+#### Scrutiny Levels
+
+Each template supports four levels that control team size and rigor:
+
+| Level | Team Size | Behavior |
+|-------|-----------|----------|
+| `quick` | 2-3 agents | Minimal scrutiny, 1 round. Fast validation. |
+| `standard` | 3-4 agents | Balanced team with distinct roles. Default choice. |
+| `thorough` | 4-6 agents | Multiple challengers, evidence gathering, deeper analysis. |
+| `adversarial` | 5-8 agents | Maximum scrutiny. Multiple skeptics, formal evidence requirements. |
+
+**Example 1: `hypothesis_validation` levels**
+
+**Purpose:** Validate a claim or analysis result. The most common game in code analysis — used by impact, contracts, and intent coordinators to validate CRITICAL findings.
+
+**Game type:** `hypothesis_game`
+
+| Level | Team Composition | Config |
+|-------|-----------------|--------|
+| `quick` | 1 proposer, 1 skeptic (doubles as arbiter) | `max_rounds=1, use_llm_reasoning=True` |
+| `standard` | 1 proposer, 1 skeptic, 1 arbiter | `max_rounds=2, use_llm_reasoning=True` |
+| `thorough` | 1 proposer, 2 skeptics, 1 grounder, 1 arbiter | `max_rounds=3, use_llm_reasoning=True` |
+| `adversarial` | 1 proposer, 3 skeptics, 2 grounders, 1 arbiter | `max_rounds=4, use_llm_reasoning=True, require_formal_evidence=True` |
+
+
+Role capabilities are pre-wired:
+
+- `proposer`: `[ReflectionCapability]` — can self-reflect before defending
+- `skeptic`: `[CriticCapability]` — structured critique
+- `grounder`: `[]` — uses base agent inference
+- `arbiter`: `[ValidationCapability]` — structured validation
+
+**Subject mapping:**
+```python
+subject = {"claim": "...", "evidence": [...], "confidence": 0.8}
+→ initial_data = {
+    "hypothesis": Hypothesis(
+        claim=subject["claim"],
+        evidence=subject.get("evidence", []),
+        confidence=subject.get("confidence", 0.5),
+        created_by=self.agent.agent_id,
+    ).model_dump()
+}
+```
+
+
+**Example 2: `negotiated_merge`**
+
+**Purpose:** Resolve conflicting analysis results when multiple agents disagree on severity, classification, or interpretation. Used by merge policies to handle conflicts that pure confidence-weighting can't resolve.
+
+**Game type:** `negotiation`
+
+| Level | Roles | Team | Config |
+|-------|-------|------|--------|
+| quick | 2 negotiators | 2 | `strategy=COMPROMISING, max_rounds=3` |
+| standard | 2 negotiators, 1 mediator | 3 | `strategy=COMPROMISING, max_rounds=5` |
+| thorough | 3 negotiators, 1 mediator | 4 | `strategy=INTEGRATIVE, max_rounds=8` |
+| adversarial | 4 negotiators, 1 mediator | 5 | `strategy=COMPETITIVE, max_rounds=10, min_acceptable_utility=0.4` |
+
+**Subject mapping:**
+```python
+subject = {"issue": "...", "options": [...], "constraints": {...}}
+→ initial_data = {
+    "issue": NegotiationIssue(
+        issue_id=f"negotiation_{uuid.uuid4().hex[:8]}",
+        description=subject["issue"],
+        parties=[],  # Filled after spawning
+        constraints=subject.get("constraints", {}),
+    ).model_dump()
+}
+```
+
+**Example 3: `consensus_vote`**
+
+**Purpose:** Reach group agreement on a decision (e.g., which analysis approach to use, whether to escalate a finding).
+
+**Game type:** `consensus_game`
+
+| Level | Roles | Team | Config |
+|-------|-------|------|--------|
+| quick | 3 voters, 1 aggregator | 4 | `voting_method="majority", rounds=1` |
+| standard | 5 voters, 1 aggregator | 6 | `voting_method="majority", rounds=2` |
+| thorough | 5 voters, 1 proposer, 1 aggregator | 7 | `voting_method="ranked_choice", rounds=3` |
+| adversarial | 7 voters, 2 proposers, 1 aggregator | 10 | `voting_method="ranked_choice", rounds=4, require_justification=True` |
+
+**Example 4: `contract_allocation`**
+
+**Purpose:** Allocate analysis tasks to the best-fit agents based on their capabilities and page cache affinity.
+
+**Game type:** `contract_net`
+
+| Level | Roles | Team | Config |
+|-------|-------|------|--------|
+| quick | 1 coordinator, 2 bidders | 3 | `max_bids=1` |
+| standard | 1 coordinator, 3 bidders, 1 validator | 5 | `max_bids=2` |
+| thorough | 1 coordinator, 5 bidders, 1 validator | 7 | `max_bids=3, require_capability_proof=True` |
+
+
+#### Subject Mapping
+
+Each template maps a simple `subject` dict to protocol-specific `initial_data`:
+
+| Template | Subject Keys |
+|----------|-------------|
+| `hypothesis_validation` | `claim` (str), `evidence` (list), `confidence` (float) |
+| `negotiated_merge` | `issue` (str), `options` (list), `constraints` (dict) |
+| `consensus_vote` | `proposal` (str), `options` (list) |
+| `contract_allocation` | `tasks` (list), `requirements` (dict) |
+
+Custom templates can be registered via `BUILTIN_TEMPLATES["my_template"] = GameTemplate(...)`.
+
 ### Concurrent Games
 
 An agent can participate in multiple games simultaneously.  Each game gets its own `GameProtocolCapability` instance with `capability_key = "{game_type}:{game_id}"`, preventing collisions.

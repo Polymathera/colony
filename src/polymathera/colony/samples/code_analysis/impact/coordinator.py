@@ -23,12 +23,12 @@ from polymathera.colony.agents.patterns.capabilities.merge import MergeCapabilit
 from polymathera.colony.agents.patterns.capabilities.validation import ValidationResult
 from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
 from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraphCapability
-from polymathera.colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
+from polymathera.colony.agents.blackboard import EnhancedBlackboard, BlackboardEvent
 from polymathera.colony.agents.base import Agent, AgentCapability, AgentMetadata
 from polymathera.colony.agents.patterns.actions import action_executor
 from polymathera.colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
 from polymathera.colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
-from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisRole
+
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
 from polymathera.colony.agents.blackboard.protocol import AgentRunProtocol, ErrorSignalProtocol, ImpactAnalysisProtocol
 from polymathera.colony.agents.patterns.capabilities import WorkingSetCapability, AgentPoolCapability
@@ -332,7 +332,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     1. Uses a cache-aware `Planner` for cache-optimized planning
     2. Uses `spawn_next_batch()` for cache-aware agent scheduling
     3. Uses `SynthesisCapability` for progressive result synthesis
-    4. Uses `HypothesisGameProtocol` for validating CRITICAL impacts
+    4. Uses `DynamicGameCapability` for validating CRITICAL impacts
     5. Uses `FeedbackLoopPredictor` for page prefetching during feedback loops
 
     Key difference from naive batching: Spawns pages by WORKING SET OVERLAP,
@@ -356,6 +356,10 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             AgentRunProtocol.result_pattern(),
             ErrorSignalProtocol.error_pattern()
         ],
+        max_critical_validations: int = 5,
+        confidence_decay_factor: float = 0.8,
+        overlap_weight: float = 0.7,
+        centrality_weight: float = 0.3,
         capability_key: str = "change_impact_analysis_coordinator",
     ):
         """Initialize coordinator.
@@ -365,12 +369,22 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             scope: Blackboard scope for coordination (default: COLONY)
             namespace: Namespace for event patterns
             input_patterns: List of event patterns to subscribe to
+            max_critical_validations: Max critical impacts to validate via hypothesis game
+            confidence_decay_factor: Decay factor per depth for indirect impacts
+            overlap_weight: Weight for cache overlap in page scoring
+            centrality_weight: Weight for graph centrality in page scoring
             capability_key: Unique key for this capability within the agent
         """
         super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
 
         self.page_agents: dict[str, str] = {}  # page_id -> agent_id
         self.blackboard: EnhancedBlackboard | None = None
+
+        # Configurable analysis parameters
+        self.max_critical_validations = max_critical_validations
+        self.confidence_decay_factor = confidence_decay_factor
+        self.overlap_weight = overlap_weight
+        self.centrality_weight = centrality_weight
 
         # Cache-aware components (initialized in initialize())
         self.working_set_cap: WorkingSetCapability | None = None
@@ -758,7 +772,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             dependency_graph
         )
 
-        # Validate CRITICAL impacts using HypothesisGameProtocol
+        # Validate CRITICAL impacts using DynamicGameCapability
         validated_results = await self._validate_critical_impacts(propagated_results)
 
         # Final synthesis via the agent's registered SynthesisCapability
@@ -837,7 +851,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
                 centrality_score = page_graph.degree(page_id) / max(page_graph.number_of_nodes(), 1)
 
             # Combined score
-            total_score = overlap_score * 0.7 + centrality_score * 0.3
+            total_score = overlap_score * self.overlap_weight + centrality_score * self.centrality_weight
             scored_pages.append((page_id, total_score))
 
         # Sort by score (descending)
@@ -912,7 +926,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         self,
         results: list[ScopeAwareResult[ChangeImpactReport]]
     ) -> list[ScopeAwareResult[ChangeImpactReport]]:
-        """Validate CRITICAL impacts using HypothesisGameProtocol.
+        """Validate CRITICAL impacts using DynamicGameCapability.
 
         For each CRITICAL impact, runs a hypothesis game with:
         - Proposer: Agent that found the impact
@@ -935,10 +949,10 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         if not critical_impacts:
             return results  # No critical impacts to validate
 
-        logger.info(f"Validating {len(critical_impacts)} CRITICAL impacts via HypothesisGameProtocol")
+        logger.info(f"Validating {len(critical_impacts)} CRITICAL impacts via DynamicGameCapability")
 
         # For each critical impact, create hypothesis and run game
-        for result, impact in critical_impacts[:5]:  # Limit to top 5 to avoid delays - TODO: Make configurable.
+        for result, impact in critical_impacts[:self.max_critical_validations]:
             # TODO: Generate hypothesis using LLM reasoning.
             hypothesis = Hypothesis(
                 claim=f"CRITICAL impact on {impact.component_id}: {impact.description}",
@@ -1191,7 +1205,7 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
                         severity=self._propagate_severity(current_comp.severity),
                         description=f"Indirect impact from {current_comp.component_id}",  # TODO: Use a more specific description.
                         requires_update=False,
-                        confidence=current_comp.confidence * 0.8 ** (depth + 1)  # Decay confidence  # TODO: Use a more specific confidence decay.
+                        confidence=current_comp.confidence * self.confidence_decay_factor ** (depth + 1)
                     )
 
                     # Create impact path

@@ -93,6 +93,8 @@ class ProgramSlicingCapability(AgentCapability):
         input_patterns: list[str] = [AgentRunProtocol.request_pattern()],
         interprocedural: bool = True,
         max_depth: int = 5,
+        temperature: float = 0.1,
+        max_tokens: int = 2000,
         capability_key: str = "program_slicing_capability"
     ):
         """Initialize slicing capability.
@@ -104,11 +106,15 @@ class ProgramSlicingCapability(AgentCapability):
             input_patterns: List of event patterns to subscribe to
             interprocedural: Whether to follow function calls
             max_depth: Maximum call depth for interprocedural
+            temperature: LLM temperature for inference calls
+            max_tokens: Max tokens for LLM responses
             capability_key: Unique key for this capability within the agent
         """
         super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.interprocedural = interprocedural
         self.max_depth = max_depth
+        self.temperature = temperature
+        self.max_tokens = max_tokens
 
     def get_action_group_description(self) -> str:
         return (
@@ -125,15 +131,20 @@ class ProgramSlicingCapability(AgentCapability):
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
-        # TODO: Implement
-        logger.warning("serialize_suspension_state not implemented for ProgramSlicingCapability")
+        state = await super().serialize_suspension_state(state)
+        state.custom_data["_program_slicing_state"] = {
+            "interprocedural": self.interprocedural,
+            "max_depth": self.max_depth,
+        }
         return state
 
     @override
     async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
-        # TODO: Implement
-        logger.warning("deserialize_suspension_state not implemented for ProgramSlicingCapability")
-        pass
+        await super().deserialize_suspension_state(state)
+        custom_state = state.custom_data.get("_program_slicing_state", {})
+        if custom_state:
+            self.interprocedural = custom_state.get("interprocedural", True)
+            self.max_depth = custom_state.get("max_depth", 5)
 
     @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_analysis_request(
@@ -199,13 +210,20 @@ class ProgramSlicingCapability(AgentCapability):
         response = await self.agent.infer(
             context_page_ids=page_ids,
             prompt=prompt,
-            temperature=0.1,  # Low temperature for precise analysis
-            max_tokens=2000,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             json_schema=ProgramSlice.model_json_schema()  # Structured output
         )
 
-        # Parse structured response directly
-        slice_data = ProgramSlice.model_validate_json(response.generated_text)  # TODO: Handle validation errors. LLMs are not perfect.
+        # Parse structured response
+        try:
+            slice_data = ProgramSlice.model_validate_json(response.generated_text)
+        except Exception as e:
+            logger.warning(f"Failed to parse LLM response as ProgramSlice: {e}")
+            slice_data = ProgramSlice(
+                criterion=criterion,
+                reasoning=f"LLM response parsing failed: {e}",
+            )
 
         # If interprocedural, expand slice
         if self.interprocedural and slice_data.interprocedural:
@@ -792,342 +810,6 @@ class SlicingAnalysisCapability(VCMAnalysisCapability):
         }
 
 
-# =============================================================================
-# DEPRECATED: SlicingCoordinatorCapability
-# =============================================================================
-# This class is superseded by SlicingAnalysisCapability which extends
-# VCMAnalysisCapability. The new design provides atomic, composable primitives
-# that the LLM planner can compose into arbitrary workflows.
-#
-# Migration:
-#   Old: SlicingCoordinatorCapability with prescribed workflow
-#   New: SlicingAnalysisCapability with composable primitives
-#
-# TODO: Remove this class after migration is complete.
-# =============================================================================
 
-class SlicingCoordinatorCapability(AgentCapability):
-    """DEPRECATED: Use SlicingAnalysisCapability instead.
-
-    Provides @action_executor methods for:
-    - start_slicing_analysis: Begin slicing analysis across pages
-    - collect_results: Gather results from worker agents
-    - merge_results: Combine results into unified slice
-
-    This coordinator capability:
-    1. Spawns slicing agents for relevant pages via AgentPoolCapability
-    2. Distributes slicing criteria using BatchingPolicy
-    3. Collects and merges page-level slices via ResultCapability
-    4. Resolves interprocedural dependencies using PageGraphCapability
-    5. Builds complete program slice
-    """
-
-
-    def __init__(
-        self,
-        agent: Agent,
-        scope: BlackboardScope = BlackboardScope.AGENT,
-        namespace: str = "program_slicing",
-        input_patterns: list[str] = [AgentRunProtocol.request_pattern()],
-        batching_policy: BatchingPolicy | None = None,
-        capability_key: str = "slicing_coordinator_capability"
-    ):
-        """Initialize coordinator capability.
-
-        Args:
-            agent: Agent using this capability
-            scope: Blackboard scope for this capability (default: AGENT)
-            namespace: Namespace for event patterns (default: "program_slicing")
-            input_patterns: List of event patterns to subscribe to
-            batching_policy: Policy for cache-aware batch selection
-            capability_key: Unique key for this capability within the agent (default: "slicing_coordinator_capability")
-        """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
-        self.namespace = namespace
-        self._worker_handles: dict[str, AgentHandle] = {}
-        self._collected_results: list[ScopeAwareResult[ProgramSlice]] = []
-        self.max_agents: int = 10
-        self._batching_policy = batching_policy
-
-        # Layer 0/1 capability references (initialized in initialize())
-        self._agent_pool_cap: AgentPoolCapability | None = None
-        self._result_cap: ResultCapability | None = None
-        self._page_graph_cap: PageGraphCapability | None = None
-
-    def get_action_group_description(self) -> str:
-        return (
-            "Slicing Coordination — distributes program slicing across pages. "
-            "Spawns slicing agents via AgentPoolCapability, batches by cache affinity, "
-            "collects page-level results, resolves interprocedural dependencies via PageGraph, "
-            "merges into unified program slice."
-        )
-
-    async def initialize(self) -> None:
-        """Initialize coordinator capability with Layer 0/1 capabilities."""
-        await super().initialize()
-
-        # AgentPoolCapability for agent lifecycle management
-        self._agent_pool_cap = self.agent.get_capability_by_type(AgentPoolCapability)
-        if not self._agent_pool_cap:
-            self._agent_pool_cap = AgentPoolCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-                #max_agents=self.max_agents,
-            )
-            await self._agent_pool_cap.initialize()
-            self.agent.add_capability(self._agent_pool_cap)
-
-        # ResultCapability for cluster-wide result visibility
-        self._result_cap = self.agent.get_capability_by_type(ResultCapability)
-        if not self._result_cap:
-            self._result_cap = ResultCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-            )
-            await self._result_cap.initialize()
-            self.agent.add_capability(self._result_cap)
-
-        # PageGraphCapability for standardized graph operations
-        self._page_graph_cap = self.agent.get_capability_by_type(PageGraphCapability)
-        if not self._page_graph_cap:
-            self._page_graph_cap = PageGraphCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-            )
-            await self._page_graph_cap.initialize()
-            self.agent.add_capability(self._page_graph_cap)
-
-    def _get_merge_capability(self) -> MergeCapability | None:
-        """Get MergeCapability from agent dynamically."""
-        return self.agent.get_capability_by_type(MergeCapability)
-
-    @override
-    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
-        # TODO: Implement
-        logger.warning("serialize_suspension_state not implemented for ProgramCoordinatorCapability")
-        return state
-
-    @override
-    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
-        # TODO: Implement
-        logger.warning("deserialize_suspension_state not implemented for ProgramCoordinatorCapability")
-        pass
-
-    @event_handler(pattern=AgentRunProtocol.request_pattern())
-    async def handle_analysis_request(
-        self,
-        event: BlackboardEvent,
-        _repl: PolicyREPL,
-    ) -> EventProcessingResult | None:
-        """Handle analysis request events from AgentHandle.run()."""
-        request_data = event.value
-        if not isinstance(request_data, dict):
-            return None
-
-        input_data = request_data.get("input", {})
-        criterion = input_data.get("criterion")
-        page_ids = input_data.get("page_ids", [])
-        slice_type = input_data.get("slice_type", "backward")
-
-        parts = event.key.split(":")
-        request_id = parts[-1] if len(parts) >= 3 else None
-
-        return EventProcessingResult(
-            immediate_action=Action(
-                action_id=f"start_slicing_{request_id}",
-                agent_id=self.agent.agent_id,
-                action_type="start_slicing_analysis",
-                parameters={
-                    "criterion": criterion,
-                    "page_ids": page_ids,
-                    "slice_type": slice_type,
-                    "request_id": request_id,
-                }
-            )
-        )
-
-    @action_executor(action_key="start_slicing_analysis")
-    async def start_slicing_analysis(
-        self,
-        criterion: SliceCriterion | dict[str, Any],
-        page_ids: list[str],
-        slice_type: str = "backward",
-        request_id: str | None = None,
-    ) -> ScopeAwareResult[ProgramSlice]:
-        """Start coordinated slicing analysis across multiple pages.
-
-        Uses BatchingPolicy for cache-aware batch selection and AgentPoolCapability
-        for agent lifecycle management.
-
-        Args:
-            criterion: Slicing criterion
-            page_ids: VCM page IDs to analyze
-            slice_type: Type of slice
-            request_id: Optional request ID for tracking
-
-        Returns:
-            Complete program slice
-        """
-        self._pending_request_id = request_id
-        self._collected_results = []
-
-        # Parse criterion if dict
-        if isinstance(criterion, dict):
-            criterion = SliceCriterion(**criterion)
-
-        # Use BatchingPolicy for cache-aware batch selection if available
-        if self._batching_policy and self._page_graph_cap:
-            page_graph = await self._page_graph_cap.load_graph()
-            batch_page_ids = await self._batching_policy.create_batch(
-                candidate_pages=page_ids,
-                page_graph=page_graph,
-                max_batch_size=self.max_agents,
-            )
-        else:
-            # Fallback to simple truncation
-            batch_page_ids = page_ids[:self.max_agents]
-
-        # Spawn worker agents using AgentPoolCapability
-        await self._spawn_workers(batch_page_ids)
-
-        # Run workers and collect results
-        await self._run_workers_and_collect(criterion)
-
-        # Merge and finalize
-        final_result = await self._merge_and_finalize()
-
-        # Write result to blackboard
-        if request_id:
-            blackboard = await self.get_blackboard()
-            await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id),
-                value=final_result.model_dump(),
-                agent_id=self.agent.agent_id,
-            )
-
-        return request_id or "slicing_complete"
-
-    async def _spawn_workers(self, page_ids: list[str]) -> None:
-        """Spawn worker agents for pages using AgentPoolCapability.
-
-        Uses AgentPoolCapability for standardized agent lifecycle management,
-        enabling cache-aware agent placement and resource optimization.
-        """
-        if not self._agent_pool_cap:
-            raise RuntimeError("AgentPoolCapability not initialized")
-
-        for page_id in page_ids:
-            # Use AgentPoolCapability for standardized agent creation
-            handle = await self._agent_pool_cap.create_agent(
-                agent_type="polymathera.colony.samples.code_analysis.slicing.ProgramSlicingAgent",
-                bound_pages=[page_id],
-                capabilities=["polymathera.colony.samples.code_analysis.slicing.capabilities.ProgramSlicingCapability"],
-                requirements=None,
-                #requirements=LLMClientRequirements(
-                #    model_family="llama",  # TODO: Make configurable
-                #    min_context_window=32000,  # TODO: Make configurable
-                #),
-                resource_requirements=AgentResourceRequirements(
-                    cpu_cores=0.1,
-                    memory_mb=512,
-                    gpu_cores=0.0,
-                    gpu_memory_mb=0
-                ),
-                metadata=AgentMetadata(parameters={"page_id": page_id}),
-            )
-            self._worker_handles[page_id] = handle
-
-    async def _run_workers_and_collect(self, criterion: SliceCriterion, timeout: float = 60.0) -> None:
-        """Run workers and collect results.
-
-        Stores results via ResultCapability for cluster-wide visibility.
-        """
-        # TODO: This still sequentializes worker runs. For true parallelization,
-        # use asyncio.gather with handle.run() calls or rely on event handlers.
-        for page_id, handle in self._worker_handles.items():
-            # protocol=AgentRunProtocol: worker's ProgramSlicingCapability uses AgentRunProtocol
-            # scope=AGENT: worker's ProgramSlicingCapability uses AGENT scope
-            # namespace="program_slicing": must match worker's ProgramSlicingCapability namespace
-            run: AgentRun = await handle.run(
-                {"criterion": criterion.model_dump(), "page_ids": [page_id]},
-                timeout=timeout,
-                protocol=AgentRunProtocol,
-                scope=BlackboardScope.AGENT,
-                namespace=self.namespace,  # "program_slicing" — matches worker
-            )
-            if run.output_data:
-                result = SlicingResult(**run.output_data)
-                self._collected_results.append(result)
-
-                # Store result via ResultCapability for cluster-wide visibility
-                if self._result_cap:
-                    await self._result_cap.store_partial(
-                        result_id=f"slice:{page_id}",
-                        result={
-                            "page_id": page_id,
-                            "slice": result.content.model_dump() if result.content else {},
-                            "scope": result.scope.model_dump() if result.scope else {},
-                        },
-                        source_agent=handle.agent_id,
-                        source_pages=[page_id],
-                        result_type="program_slicing",
-                    )
-
-                logger.info(f"Collected slicing result for page {page_id}")
-
-    async def _merge_and_finalize(self) -> ScopeAwareResult[ProgramSlice]:
-        """Merge collected results into final slice."""
-        if not self._collected_results:
-            return ScopeAwareResult(content=ProgramSlice(criterion=SliceCriterion(file_path="", line_number=0)), scope=AnalysisScope())
-
-        if len(self._collected_results) == 1:
-            return self._collected_results[0]
-
-        merge_cap = self._get_merge_capability()
-        if merge_cap is None:
-            raise RuntimeError("SlicingCoordinatorCapability requires MergeCapability")
-
-        return await merge_cap.merge_results(
-            self._collected_results,
-            MergeContext()
-        )
-
-    async def _resolve_interprocedural(
-        self,
-        page_slices: dict[str, ScopeAwareResult[ProgramSlice]]
-    ) -> dict[str, Any]:
-        """Resolve interprocedural dependencies.
-
-        Args:
-            page_slices: Slices from each page
-
-        Returns:
-            Interprocedural resolution data
-        """
-        # TODO: This should be part of the SliceMergePolicy.
-        resolutions = {}
-
-        # Build dependency graph
-        for page_id, slice_result in page_slices.items():
-            slice_data = slice_result.content
-
-            # Track external dependencies
-            for dep in slice_data.dependencies:
-                if dep.is_external:
-                    if dep.location not in self.dependency_graph:
-                        self.dependency_graph[dep.location] = []
-                    self.dependency_graph[dep.location].append(page_id)
-
-        # Resolve references between pages
-        for location, dependent_pages in self.dependency_graph.items():
-            # Find page containing the definition
-            defining_page = await self._find_defining_page(location)
-
-            if defining_page:
-                resolutions[location] = {
-                    "defining_page": defining_page,
-                    "dependent_pages": dependent_pages
-                }
-
-        return resolutions
-
+# SlicingCoordinatorCapability has been removed.
+# Use SlicingAnalysisCapability (VCMAnalysisCapability subclass) instead.

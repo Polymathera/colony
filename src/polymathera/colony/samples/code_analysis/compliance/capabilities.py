@@ -23,7 +23,7 @@ from polymathera.colony.agents.patterns.capabilities.batching import BatchingPol
 from polymathera.colony.agents.patterns.capabilities.vcm_analysis import VCMAnalysisCapability
 from polymathera.colony.agents.patterns.actions import action_executor
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult
-from polymathera.colony.agents.blackboard import EnhancedBlackboard, ObligationGraph, BlackboardEvent
+from polymathera.colony.agents.blackboard import EnhancedBlackboard, ObligationGraph, BlackboardEvent, ComplianceRelationship
 from polymathera.colony.agents.base import Agent, AgentCapability, CapabilityResultFuture, AgentHandle
 from polymathera.colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
 from polymathera.colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
@@ -72,6 +72,8 @@ class ComplianceAnalysisCapability(AgentCapability):
         requirements: list[ComplianceRequirement] | None = None,
         check_licenses: bool = True,
         check_security: bool = True,
+        temperature: float = 0.1,
+        max_tokens: int = 1000,
         capability_key: str = "compliance_analysis_capability"
     ):
         """Initialize compliance analysis capability.
@@ -84,12 +86,16 @@ class ComplianceAnalysisCapability(AgentCapability):
             requirements: Specific requirements to check
             check_licenses: Whether to check license compliance
             check_security: Whether to check security compliance
+            temperature: LLM temperature for inference calls
+            max_tokens: Max tokens for LLM responses
             capability_key: Unique key for this capability within the agent
         """
         super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.requirements = requirements or self._default_requirements()
         self.check_licenses = check_licenses
         self.check_security = check_security
+        self.temperature = temperature
+        self.max_tokens = max_tokens
         self._obligation_graph: ObligationGraph | None = None
 
     def get_action_group_description(self) -> str:
@@ -111,15 +117,24 @@ class ComplianceAnalysisCapability(AgentCapability):
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
-        # TODO: Implement
-        logger.warning("serialize_suspension_state not implemented for ComplianceAnalysisCapability")
+        state = await super().serialize_suspension_state(state)
+        state.custom_data["_compliance_analysis_state"] = {
+            "check_licenses": self.check_licenses,
+            "check_security": self.check_security,
+            "requirements": [r.model_dump() for r in self.requirements] if self.requirements else [],
+        }
         return state
 
     @override
     async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
-        # TODO: Implement
-        logger.warning("deserialize_suspension_state not implemented for ComplianceAnalysisCapability")
-        pass
+        await super().deserialize_suspension_state(state)
+        custom_state = state.custom_data.get("_compliance_analysis_state", {})
+        if custom_state:
+            self.check_licenses = custom_state.get("check_licenses", True)
+            self.check_security = custom_state.get("check_security", True)
+            reqs_data = custom_state.get("requirements", [])
+            if reqs_data:
+                self.requirements = [ComplianceRequirement(**r) for r in reqs_data]
 
     @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_analysis_request(
@@ -408,12 +423,16 @@ Return a JSON object matching the License schema with:
         response = await self.agent.infer(
             context_page_ids=[page_id],  # Single page
             prompt=prompt,
-            temperature=0.1,
+            temperature=self.temperature,
             max_tokens=500,
             json_schema=License.model_json_schema()  # Structured output
         )
 
-        return License.model_validate_json(response.generated_text)
+        try:
+            return License.model_validate_json(response.generated_text)
+        except Exception as e:
+            logger.warning(f"Failed to parse LLM response as License: {e}")
+            return License(name="unknown", spdx_id="unknown")
 
     def _licenses_compatible(self, license1: str, license2: str) -> bool:
         """Check if two licenses are compatible.
@@ -495,8 +514,8 @@ Return empty list if no secrets found."""
         response = await self.agent.infer(
             context_page_ids=[page_id],  # Single page
             prompt=prompt,
-            temperature=0.1,
-            max_tokens=1000,  # TODO: Add max_tokens to constructor metadata?
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             json_schema={"type": "array", "items": ComplianceViolation.model_json_schema()}  # List of violations
         )
 
@@ -506,9 +525,8 @@ Return empty list if no secrets found."""
             violations_data = json.loads(response.generated_text)
             for v_data in violations_data:
                 violations.append(ComplianceViolation.model_validate(v_data))
-        except Exception:
-            # Return empty list if parsing fails
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to parse compliance violations for page {page_id}: {e}")
 
         return violations
 
@@ -538,8 +556,8 @@ Return empty list if no security issues detected."""
         response = await self.agent.infer(
             context_page_ids=[page_id],  # Single page
             prompt=prompt,
-            temperature=0.1,
-            max_tokens=1000,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             json_schema={"type": "array", "items": ComplianceViolation.model_json_schema()}
         )
 
@@ -549,8 +567,8 @@ Return empty list if no security issues detected."""
             violations_data = json.loads(response.generated_text)
             for v_data in violations_data:
                 violations.append(ComplianceViolation.model_validate(v_data))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to parse security violations for page {page_id}: {e}")
 
         return violations
 
@@ -613,13 +631,18 @@ Return empty list if no security issues detected."""
         if not violations:
             return ComplianceStatus.COMPLIANT
 
+        # Only INFO-level violations → still compliant
+        non_info = [v for v in violations if v.severity != ComplianceSeverity.INFO]
+        if not non_info:
+            return ComplianceStatus.COMPLIANT
+
         critical = any(v.severity == ComplianceSeverity.CRITICAL for v in violations)
         high = any(v.severity == ComplianceSeverity.HIGH for v in violations)
 
         if critical:
             return ComplianceStatus.NON_COMPLIANT
         elif high:
-            return ComplianceStatus.PARTIALLY_COMPLIANT
+            return ComplianceStatus.NON_COMPLIANT
         else:
             return ComplianceStatus.PARTIALLY_COMPLIANT
 
@@ -698,34 +721,37 @@ Return empty list if no security issues detected."""
         Args:
             report: Compliance report
         """
-        if not self._obligation_graph:
-            return
+        graph = await self._ensure_obligation_graph()
 
-        # Add requirements as obligations
+        # Add requirements as obligation nodes
+        req_node_ids: dict[str, str] = {}  # requirement_id -> node_id
         for req in report.requirements_checked:
-            await self._obligation_graph.add_requirement(
-                requirement_id=req.requirement_id,
+            node = await graph.add_requirement(
+                content={"requirement_id": req.requirement_id, "type": req.type.value, "source": req.source},
+                title=req.requirement_id,
                 description=req.description,
-                metadata={"type": req.type.value, "source": req.source}
+                tags=[req.type.value],
+            )
+            req_node_ids[req.requirement_id] = node.node_id
+
+        # Add violations as artifact nodes and link to requirements
+        for violation in report.violations:
+            artifact_node = await graph.add_artifact(
+                content={"violation_id": violation.violation_id, "severity": violation.severity.value},
+                location={"location": violation.location},
+                title=violation.violation_id,
+                description=violation.description,
+                tags=[violation.type.value, violation.severity.value],
             )
 
-        # Add evidence for violations
-        for violation in report.violations:
-            if violation.rule:
-                await self._obligation_graph.add_artifact(
-                    artifact_id=violation.violation_id,
-                    artifact_type="violation",
-                    metadata={
-                        "severity": violation.severity.value,
-                        "location": violation.location
-                    }
-                )
-                # Link as violating the requirement
-                await self._obligation_graph.add_edge(
-                    requirement_id=violation.rule,
-                    artifact_id=violation.violation_id,
-                    label="violates",
-                    confidence=violation.confidence
+            # Link violation to its rule (requirement) if we have it
+            if violation.rule and violation.rule in req_node_ids:
+                await graph.link(
+                    requirement_id=req_node_ids[violation.rule],
+                    artifact_id=artifact_node.node_id,
+                    relationship=ComplianceRelationship.VIOLATES,
+                    confidence=violation.confidence,
+                    evidence=violation.evidence,
                 )
 
     def _check_completeness(self, report: ComplianceReport) -> bool:
@@ -1412,426 +1438,6 @@ class ComplianceVCMCapability(VCMAnalysisCapability):
         }
 
 
-# =============================================================================
-# DEPRECATED: ComplianceCoordinatorCapability
-# =============================================================================
-# This class is superseded by ComplianceVCMCapability which extends
-# VCMAnalysisCapability. The new design provides atomic, composable primitives
-# that the LLM planner can compose into arbitrary workflows.
-#
-# Migration:
-#   Old: ComplianceCoordinatorCapability with prescribed workflow
-#   New: ComplianceVCMCapability with composable primitives
-#
-# TODO: Remove this class after migration is complete.
-# =============================================================================
 
-class ComplianceCoordinatorCapability(AgentCapability):
-    """DEPRECATED: Use ComplianceVCMCapability instead.
-
-    Uses event-driven architecture via @event_handler and @action_executor.
-    """
-
-
-    def __init__(
-        self,
-        agent: Agent,
-        scope: BlackboardScope = BlackboardScope.COLONY,
-        namespace: str = "compliance_coordinator",
-        input_patterns: list[str] = [
-            AgentRunProtocol.request_pattern(),
-            AgentRunProtocol.result_pattern()
-        ],
-        max_agents: int = 10,
-        batching_policy: BatchingPolicy | None = None,
-        capability_key: str = "compliance_coordinator",
-    ):
-        """Initialize coordinator capability.
-
-        Args:
-            agent: Agent instance
-            scope: Scope identifier
-            namespace: Namespace for event patterns
-            input_patterns: Event patterns to subscribe to
-            max_agents: Maximum page agents
-            batching_policy: Policy for cache-aware batch selection
-            capability_key: Unique key for this capability within the agent
-        """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace, agent_id=agent.agent_id), input_patterns=input_patterns, capability_key=capability_key)
-        self.namespace = namespace
-        self.max_agents = max_agents
-        self._page_agents: dict[str, str] = {}  # page_id -> agent_id
-        self._worker_handles: dict[str, Any] = {}  # page_id -> AgentHandle
-        self._pending_results: dict[str, list[ScopeAwareResult[ComplianceReport]]] = {}
-        self._obligation_graph: ObligationGraph | None = None
-        self._batching_policy = batching_policy
-
-        # Layer 0/1 capability references (initialized in initialize())
-        self._agent_pool_cap: AgentPoolCapability | None = None
-        self._result_cap: ResultCapability | None = None
-        self._page_graph_cap: PageGraphCapability | None = None
-
-    async def initialize(self) -> None:
-        """Initialize coordinator capability with Layer 0/1 capabilities."""
-        await super().initialize()
-
-        # AgentPoolCapability for agent lifecycle management
-        self._agent_pool_cap = self.agent.get_capability_by_type(AgentPoolCapability)
-        if not self._agent_pool_cap:
-            self._agent_pool_cap = AgentPoolCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-                #max_agents=self.max_agents,
-            )
-            await self._agent_pool_cap.initialize()
-            self.agent.add_capability(self._agent_pool_cap)
-
-        # ResultCapability for cluster-wide result visibility
-        self._result_cap = self.agent.get_capability_by_type(ResultCapability)
-        if not self._result_cap:
-            self._result_cap = ResultCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-            )
-            await self._result_cap.initialize()
-            self.agent.add_capability(self._result_cap)
-
-        # PageGraphCapability for standardized graph operations
-        self._page_graph_cap = self.agent.get_capability_by_type(PageGraphCapability)
-        if not self._page_graph_cap:
-            self._page_graph_cap = PageGraphCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-            )
-            await self._page_graph_cap.initialize()
-            self.agent.add_capability(self._page_graph_cap)
-
-    async def _ensure_obligation_graph(self) -> ObligationGraph:
-        """Ensure obligation graph is initialized."""
-        if self._obligation_graph is None:
-            blackboard = await self.get_blackboard()
-            self._obligation_graph = ObligationGraph(
-                blackboard=blackboard,
-            )
-        return self._obligation_graph
-
-    @override
-    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
-        # TODO: Implement
-        logger.warning("serialize_suspension_state not implemented for ComplianceCoordinatorCapability")
-        return state
-
-    @override
-    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
-        # TODO: Implement
-        logger.warning("deserialize_suspension_state not implemented for ComplianceCoordinatorCapability")
-        pass
-
-    @event_handler(pattern=AgentRunProtocol.request_pattern())
-    async def handle_analysis_request(
-        self,
-        event: BlackboardEvent,
-        repl: PolicyREPL
-    ) -> EventProcessingResult | None:
-        """Handle analysis request events from AgentHandle.run()."""
-        request_id = event.key.split(":")[-1]
-        request_data = event.value
-
-        input_data = request_data.get("input", {})
-        page_ids = input_data.get("page_ids", [])  # TODO: Use a symbolic selector for pages (e.g., a query or tag)
-        compliance_types_raw = input_data.get("compliance_types", [])
-        compliance_types = [ComplianceType(ct) for ct in compliance_types_raw] if compliance_types_raw else None
-
-        return EventProcessingResult(
-            immediate_action=Action(
-                action_id=f"start_analysis_{request_id}",
-                agent_id=self.agent.agent_id,
-                action_type="start_codebase_analysis",
-                parameters={
-                    "page_ids": page_ids,
-                    "compliance_types": [ct.value for ct in (compliance_types or [])],
-                    "request_id": request_id
-                }
-            )
-        )
-
-    @event_handler(pattern=AgentRunProtocol.result_pattern())
-    async def handle_worker_result(
-        self,
-        event: BlackboardEvent,
-        repl: PolicyREPL
-    ) -> EventProcessingResult | None:
-        """Handle results from worker agents."""
-        # Parse result
-        result_data = event.value
-        result = ScopeAwareResult[ComplianceReport](**result_data)
-
-        # Accumulate results for pending request
-        if self._pending_request_id:
-            if self._pending_request_id not in self._pending_results:
-                self._pending_results[self._pending_request_id] = []
-            self._pending_results[self._pending_request_id].append(result)
-
-            # Check if all results collected
-            expected_count = len(self._page_agents)
-            collected_count = len(self._pending_results[self._pending_request_id])
-
-            if collected_count >= expected_count:
-                # All results collected, trigger merge
-                return EventProcessingResult(
-                    immediate_action=Action(
-                        action_id=f"complete_analysis_{self._pending_request_id}",
-                        agent_id=self.agent.agent_id,
-                        action_type="complete_analysis",
-                        parameters={
-                            "request_id": self._pending_request_id
-                        }
-                    )
-                )
-
-        return None
-
-    @action_executor(action_key="start_codebase_analysis")
-    async def start_codebase_analysis(
-        self,
-        page_ids: list[str],
-        compliance_types: list[str] | None = None,
-        request_id: str | None = None
-    ) -> str:
-        """Start coordinated compliance analysis across multiple pages.
-
-        Uses BatchingPolicy for cache-aware batch selection and AgentPoolCapability
-        for agent lifecycle management.
-
-        Args:
-            page_ids: VCM page IDs to analyze
-            compliance_types: Compliance types as string values
-            request_id: Request ID for tracking
-
-        Returns:
-            Task ID for this analysis
-        """
-        import uuid
-        task_id = request_id or f"compliance_task_{uuid.uuid4().hex[:8]}"
-        self._pending_request_id = task_id
-        self._pending_results[task_id] = []
-
-        # Convert compliance types back to enums
-        ct_enums = [ComplianceType(ct) for ct in (compliance_types or [])] if compliance_types else None
-
-        # Use BatchingPolicy for cache-aware batch selection if available
-        if self._batching_policy and self._page_graph_cap:
-            page_graph = await self._page_graph_cap.load_graph()
-            batch_page_ids = await self._batching_policy.create_batch(
-                candidate_pages=page_ids,
-                page_graph=page_graph,
-                max_batch_size=self.max_agents,
-            )
-        else:
-            # Fallback to simple truncation
-            batch_page_ids = page_ids[:self.max_agents]
-
-        # Spawn compliance agents using AgentPoolCapability
-        await self._spawn_compliance_agents(batch_page_ids, ct_enums)
-
-        return task_id
-
-    async def _spawn_compliance_agents(
-        self,
-        page_ids: list[str],
-        compliance_types: list[ComplianceType] | None
-    ) -> None:
-        """Spawn compliance agents for pages using AgentPoolCapability.
-
-        Uses AgentPoolCapability for standardized agent lifecycle management,
-        enabling cache-aware agent placement and resource optimization.
-
-        Args:
-            page_ids: Page IDs to analyze
-            compliance_types: Compliance types to check
-        """
-        import uuid
-
-        if not self._agent_pool_cap:
-            raise RuntimeError("AgentPoolCapability not initialized")
-
-        for page_id in page_ids:
-            agent_id = f"compliance_agent_{uuid.uuid4().hex[:8]}"
-
-            # Use AgentPoolCapability for standardized agent creation
-            handle: AgentHandle = await self._agent_pool_cap.create_agent(
-                agent_type="polymathera.colony.samples.code_analysis.compliance.ComplianceAnalysisAgent",
-                capabilities=["polymathera.colony.samples.code_analysis.compliance.capabilities.ComplianceAnalysisCapability"],
-                bound_pages=[page_id],
-                requirements=None,
-                #requirements=LLMClientRequirements(
-                #    model_family="llama",  # TODO: Make configurable
-                #    min_context_window=32000,  # TODO: Make configurable
-                #),
-                resource_requirements=AgentResourceRequirements(
-                    cpu_cores=0.1,
-                    memory_mb=512,
-                    gpu_cores=0.0,
-                    gpu_memory_mb=0
-                ),
-                metadata=AgentMetadata(parameters={
-                    "page_id": page_id,
-                    "compliance_types": [ct.value for ct in (compliance_types or [])]
-                }),
-            )
-
-            self._page_agents[page_id] = agent_id
-            self._worker_handles[page_id] = handle
-
-            # Run worker and store result via ResultCapability
-            # TODO: This still sequentializes worker runs. For true parallelization,
-            # use asyncio.gather with handle.run() calls or rely on event handlers.
-            # protocol=AgentRunProtocol: worker's ComplianceAnalysisCapability uses AgentRunProtocol
-            # scope=AGENT: worker's ComplianceAnalysisCapability uses AGENT scope
-            # namespace="compliance_analysis": must match worker's ComplianceAnalysisCapability namespace
-            run = await handle.run(
-                {"page_ids": [page_id], "compliance_types": [ct.value for ct in (compliance_types or [])]},
-                timeout=60,
-                protocol=AgentRunProtocol,
-                scope=BlackboardScope.AGENT,
-                namespace="compliance_analysis",  # matches worker (NOT self.namespace)
-            )
-
-            # Store result via ResultCapability for cluster-wide visibility
-            if run.output_data and self._result_cap:
-                await self._result_cap.store_partial(
-                    result_id=f"compliance:{page_id}",
-                    result=run.output_data,
-                    source_agent=handle.child_agent_id,
-                    source_pages=[page_id],
-                    result_type="compliance_analysis",
-                )
-
-    @action_executor(action_key="complete_analysis")
-    async def complete_analysis(
-        self,
-        request_id: str
-    ) -> ComplianceResult:
-        """Complete the analysis by merging results and building obligation graph.
-
-        Args:
-            request_id: Request ID to complete
-
-        Returns:
-            Merged compliance result
-        """
-        results = self._pending_results.get(request_id, [])
-
-        if not results:
-            empty_report = ComplianceReport(
-                status=ComplianceStatus.UNKNOWN,
-                violations=[],
-                recommendations=[]
-            )
-            return ComplianceResult(
-                content=empty_report,
-                scope=AnalysisScope()
-            )
-
-        # Build obligation graph
-        await self._build_obligation_graph(results)
-
-        # Merge reports
-        unified_report = await self._merge_reports(results)
-        scope = self._compute_scope(results)
-
-        merged_result = ComplianceResult(
-            content=unified_report,
-            scope=scope
-        )
-
-        # Write result to blackboard
-        blackboard = await self.get_blackboard()
-        await blackboard.write(
-            key=AgentRunProtocol.result_key(request_id),
-            value=merged_result.model_dump(),
-        )
-
-        # Cleanup
-        del self._pending_results[request_id]
-        self._pending_request_id = None
-        self._page_agents.clear()
-        self._worker_handles.clear()
-
-        return merged_result
-
-    async def _build_obligation_graph(
-        self,
-        results: list[ScopeAwareResult[ComplianceReport]]
-    ) -> None:
-        """Build obligation graph from compliance results.
-
-        Args:
-            results: Compliance reports
-        """
-        if not self._obligation_graph:
-            await self._ensure_obligation_graph()
-
-        if not self._obligation_graph:
-            return
-
-        # TODO: FIXME: These classes do not exist.
-        from ....agents.blackboard.obligation_graph import Obligation, ObligationStatus
-
-        for result in results:
-            report = result.content
-
-            # Add obligations from violations
-            for violation in report.violations:
-                obligation = Obligation(
-                    obligation_id=f"fix_{violation.location}",
-                    description=f"Fix {violation.type.value} violation: {violation.description}",
-                    obligated_party="development_team",
-                    beneficiary="compliance",
-                    status=ObligationStatus.UNFULFILLED,
-                    severity=violation.severity.value,
-                    deadline=None,
-                    evidence=violation.evidence
-                )
-                # TODO: FIXME: This method does not exist.
-                await self._obligation_graph.add_obligation(obligation)
-
-    async def _merge_reports(
-        self,
-        results: list[ScopeAwareResult[ComplianceReport]]
-    ) -> ComplianceReport:
-        """Merge compliance reports using MergeCapability."""
-        if not results:
-            return ComplianceReport(
-                status=ComplianceStatus.UNKNOWN,
-                violations=[],
-                recommendations=[]
-            )
-
-        merge_cap = self.agent.get_capability_by_type(MergeCapability)
-        if merge_cap is None:
-            raise RuntimeError(
-                "ComplianceCoordinatorCapability requires MergeCapability. "
-                "Ensure it's added to the agent's capability_classes."
-            )
-        merged_result = await merge_cap.merge_results(results, MergeContext())
-
-        return merged_result.content
-
-    def _compute_scope(
-        self,
-        results: list[ScopeAwareResult[ComplianceReport]]
-    ) -> AnalysisScope:
-        """Compute unified scope."""
-        if not results:
-            return AnalysisScope()
-
-        scopes = [r.scope for r in results]
-
-        return AnalysisScope(
-            is_complete=all(s.is_complete for s in scopes),
-            missing_context=list(set(sum([s.missing_context for s in scopes], []))),
-            confidence=sum(s.confidence for s in scopes) / len(scopes),
-            reasoning=sum([s.reasoning for s in scopes], [])
-        )
-
+# ComplianceCoordinatorCapability has been removed.
+# Use ComplianceVCMCapability (VCMAnalysisCapability subclass) instead.

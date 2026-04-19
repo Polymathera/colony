@@ -29,6 +29,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .blackboard import EnhancedBlackboard
+
 
 class VectorClock(BaseModel):
     """Vector clock for distributed causality tracking.
@@ -388,7 +390,7 @@ class CausalityTimeline:
     - Timeline queries and visualization
     """
 
-    def __init__(self, blackboard: Any):
+    def __init__(self, blackboard: EnhancedBlackboard):
         """Initialize timeline.
 
         Args:

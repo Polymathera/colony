@@ -107,6 +107,8 @@ class IntentInferenceCapability(AgentCapability):
         use_context: bool = True,
         detect_misalignment: bool = True,
         granularity: str = "function",
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
         capability_key: str = "intent_inference_capability"
     ):
         """Initialize intent inference capability.
@@ -119,12 +121,16 @@ class IntentInferenceCapability(AgentCapability):
             use_context: Whether to use surrounding context
             detect_misalignment: Whether to detect code-intent misalignment
             granularity: Analysis granularity (function/class/module)
+            temperature: LLM temperature for inference calls
+            max_tokens: Max tokens for LLM responses
             capability_key: Unique key for this capability within the agent
         """
         super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
         self.use_context = use_context
         self.detect_misalignment = detect_misalignment
         self.granularity = granularity
+        self.temperature = temperature
+        self.max_tokens = max_tokens
         self.confidence_tracker = ConfidenceTracker()
 
     def get_action_group_description(self) -> str:
@@ -141,15 +147,22 @@ class IntentInferenceCapability(AgentCapability):
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
-        # TODO: Implement
-        logger.warning("serialize_suspension_state not implemented for IntentInferenceCapability")
+        state = await super().serialize_suspension_state(state)
+        state.custom_data["_intent_inference_state"] = {
+            "use_context": self.use_context,
+            "detect_misalignment": self.detect_misalignment,
+            "granularity": self.granularity,
+        }
         return state
 
     @override
     async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
-        # TODO: Implement
-        logger.warning("deserialize_suspension_state not implemented for IntentInferenceCapability")
-        pass
+        await super().deserialize_suspension_state(state)
+        custom_state = state.custom_data.get("_intent_inference_state", {})
+        if custom_state:
+            self.use_context = custom_state.get("use_context", True)
+            self.detect_misalignment = custom_state.get("detect_misalignment", True)
+            self.granularity = custom_state.get("granularity", "function")
 
     @event_handler(pattern=AgentRunProtocol.request_pattern())
     async def handle_analysis_request(
@@ -328,13 +341,20 @@ class IntentInferenceCapability(AgentCapability):
         response = await self.agent.infer(
             context_page_ids=[page_id],  # Single page
             prompt=prompt,
-            temperature=0.3,  # TODO: Make configurable
-            max_tokens=2000,  # TODO: Make configurable
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             json_schema=IntentInferenceResult.model_json_schema()
         )
 
         # Parse structured response
-        result = IntentInferenceResult.model_validate_json(response.generated_text)  # TODO: Handle schema errors. LLMs are not perfect.
+        try:
+            result = IntentInferenceResult.model_validate_json(response.generated_text)
+        except Exception as e:
+            logger.warning(f"Failed to parse LLM response as IntentInferenceResult: {e}")
+            result = IntentInferenceResult(
+                content=IntentGraph(),
+                scope=AnalysisScope(confidence=0.0, reasoning=[f"LLM response parsing failed: {e}"]),
+            )
 
         # Detect conflicts if enabled
         if self.detect_misalignment:
@@ -1211,482 +1231,5 @@ class IntentAnalysisCapability(VCMAnalysisCapability):
         }
 
 
-# =============================================================================
-# DEPRECATED: IntentCoordinatorCapability
-# =============================================================================
-# This class is superseded by IntentAnalysisCapability which extends
-# VCMAnalysisCapability. The new design provides atomic, composable primitives
-# that the LLM planner can compose into arbitrary workflows.
-#
-# Migration:
-#   Old: IntentCoordinatorCapability with prescribed workflow
-#   New: IntentAnalysisCapability with composable primitives
-#
-# TODO: Remove this class after migration is complete.
-# =============================================================================
-
-class IntentCoordinatorCapability(AgentCapability):
-    """Capability for coordinating intent inference across multiple pages.
-
-    Provides @action_executor methods for:
-    - start_codebase_analysis: Begin analysis across pages using BatchingPolicy
-    - collect_results: Gather results from worker agents via ResultCapability
-    - merge_results: Combine results into unified graph
-
-    Uses AgentPoolCapability for agent lifecycle management and PageGraphCapability
-    for standardized graph operations.
-    """
-
-
-    def __init__(
-        self,
-        agent: Agent,
-        scope: BlackboardScope = BlackboardScope.COLONY,
-        namespace: str = "intent_inference",
-        input_patterns: list[str] = [
-            AgentRunProtocol.request_pattern(),
-            AgentRunProtocol.result_pattern()
-        ],
-        batching_policy: BatchingPolicy | None = None,
-        capability_key: str = "intent_coordinator",
-    ):
-        """Initialize coordinator capability.
-
-        Args:
-            agent: Agent using this capability
-            scope: Blackboard scope for this capability (default: COLONY)
-            namespace: Namespace for this capability (default: "intent_inference")
-            input_patterns: List of input patterns for this capability
-            batching_policy: Policy for cache-aware batch selection
-            capability_key: Unique key for this capability within the agent (default: "intent_coordinator")
-        """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
-        self.namespace = namespace
-        self._worker_handles: dict[str, AgentHandle] = {}
-        self._collected_results: list[ScopeAwareResult[IntentGraph]] = []
-        self.max_agents: int = 10
-        self._batching_policy = batching_policy
-
-        # Layer 0/1 capability references (initialized in initialize())
-        self._agent_pool_cap: AgentPoolCapability | None = None
-        self._result_cap: ResultCapability | None = None
-        self._page_graph_cap: PageGraphCapability | None = None
-
-    def get_action_group_description(self) -> str:
-        return (
-            "Intent Coordination (DEPRECATED) — distributes intent inference across pages. "
-            "Spawns agents via AgentPoolCapability, batches by cache affinity, "
-            "collects and merges into unified intent graph."
-        )
-
-    async def initialize(self) -> None:
-        """Initialize coordinator capability with Layer 0/1 capabilities."""
-        await super().initialize()
-
-        # AgentPoolCapability for agent lifecycle management
-        self._agent_pool_cap = self.agent.get_capability_by_type(AgentPoolCapability)
-        if not self._agent_pool_cap:
-            self._agent_pool_cap = AgentPoolCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-                #max_agents=self.max_agents,
-            )
-            await self._agent_pool_cap.initialize()
-            self.agent.add_capability(self._agent_pool_cap)
-
-        # ResultCapability for cluster-wide result visibility
-        self._result_cap = self.agent.get_capability_by_type(ResultCapability)
-        if not self._result_cap:
-            self._result_cap = ResultCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-            )
-            await self._result_cap.initialize()
-            self.agent.add_capability(self._result_cap)
-
-        # PageGraphCapability for standardized graph operations
-        self._page_graph_cap = self.agent.get_capability_by_type(PageGraphCapability)
-        if not self._page_graph_cap:
-            self._page_graph_cap = PageGraphCapability(
-                agent=self.agent,
-                scope=BlackboardScope.COLONY,
-            )
-            await self._page_graph_cap.initialize()
-            self.agent.add_capability(self._page_graph_cap)
-
-    def _get_merge_capability(self) -> MergeCapability | None:
-        """Get MergeCapability from agent dynamically."""
-        return self.agent.get_capability_by_type(MergeCapability)
-
-    @override
-    async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
-        # TODO: Implement
-        logger.warning("serialize_suspension_state not implemented for IntentCoordinatorCapability")
-        return state
-
-    @override
-    async def deserialize_suspension_state(self, state: AgentSuspensionState) -> None:
-        # TODO: Implement
-        logger.warning("deserialize_suspension_state not implemented for IntentCoordinatorCapability")
-        pass
-
-    @event_handler(pattern=AgentRunProtocol.request_pattern())
-    async def handle_analysis_request(
-        self,
-        event: BlackboardEvent,
-        _repl: PolicyREPL,
-    ) -> EventProcessingResult | None:
-        """Handle analysis request events from AgentHandle.run()."""
-        request_data = event.value
-        if not isinstance(request_data, dict):
-            return None
-
-        input_data = request_data.get("input", {})
-        page_ids = input_data.get("page_ids", [])
-        granularity = input_data.get("granularity", "function")
-
-        parts = event.key.split(":")
-        request_id = parts[-1] if len(parts) >= 3 else None
-
-        return EventProcessingResult(
-            immediate_action=Action(
-                action_id=f"start_analysis::{request_id}",
-                agent_id=self.agent.agent_id,
-                action_type="start_codebase_analysis",
-                parameters={
-                    "page_ids": page_ids,
-                    "granularity": granularity,
-                    "request_id": request_id,
-                }
-            )
-        )
-
-    @event_handler(pattern=AgentRunProtocol.result_pattern())
-    async def handle_worker_result(
-        self,
-        event: BlackboardEvent,
-        _repl: PolicyREPL,
-    ) -> EventProcessingResult | None:
-        """Handle result from worker agent."""
-        for page_id, handle in self._worker_handles.items():
-            if event.key.startswith(f"{handle.agent_id}:result:"):
-                result_data = event.value
-                if isinstance(result_data, dict):
-                    result = IntentInferenceResult(**result_data)
-                    self._collected_results.append(result)
-                    logger.info(f"Collected intent result for page {page_id}")
-
-                    # Check if all results collected
-                    if len(self._collected_results) >= len(self._worker_handles):
-                        return EventProcessingResult(
-                            immediate_action=Action(
-                                action_id=f"finalize_analysis_{self._pending_request_id}",
-                                agent_id=self.agent.agent_id,
-                                action_type="finalize_analysis",
-                                parameters={"request_id": self._pending_request_id}
-                            )
-                        )
-                break
-
-        return None
-
-    @action_executor(action_key="start_codebase_analysis")
-    async def start_codebase_analysis(
-        self,
-        page_ids: list[str],
-        granularity: str = "function",
-        request_id: str | None = None,
-    ) -> str:
-        """Start coordinated analysis across multiple pages.
-
-        Uses BatchingPolicy for cache-aware batch selection and AgentPoolCapability
-        for agent lifecycle management.
-
-        Args:
-            page_ids: VCM page IDs to analyze
-            granularity: Analysis granularity
-            request_id: Optional request ID
-
-        Returns:
-            Task ID for tracking
-        """
-        self._pending_request_id = request_id
-        self._collected_results = []
-
-        # Use BatchingPolicy for cache-aware batch selection if available
-        if self._batching_policy and self._page_graph_cap:
-            page_graph = await self._page_graph_cap.load_graph()
-            batch_page_ids = await self._batching_policy.create_batch(
-                candidate_pages=page_ids,
-                page_graph=page_graph,
-                max_batch_size=self.max_agents,
-            )
-        else:
-            # Fallback to simple truncation
-            batch_page_ids = page_ids[:self.max_agents]
-
-        # Spawn worker agents using AgentPoolCapability
-        await self._spawn_workers(batch_page_ids, granularity)
-
-        # Run workers and collect results
-        await self._run_workers_and_collect(granularity)
-
-        # Merge and finalize
-        final_result = await self._merge_and_finalize()
-
-        # Write result to blackboard
-        if request_id:
-            blackboard = await self.get_blackboard()
-            await blackboard.write(
-                key=AgentRunProtocol.result_key(request_id),
-                value=final_result.model_dump(),
-                agent_id=self.agent.agent_id,
-            )
-
-        return request_id or "analysis_complete"
-
-    async def _spawn_workers(self, page_ids: list[str], granularity: str) -> None:
-        """Spawn worker agents for pages using AgentPoolCapability.
-
-        Uses AgentPoolCapability for standardized agent lifecycle management,
-        enabling cache-aware agent placement and resource optimization.
-        """
-        if not self._agent_pool_cap:
-            raise RuntimeError("AgentPoolCapability not initialized")
-
-        for page_id in page_ids:
-            # Use AgentPoolCapability for standardized agent creation
-            handle = await self._agent_pool_cap.create_agent(
-                agent_type="polymathera.colony.samples.code_analysis.intent.IntentInferenceAgent",
-                bound_pages=[page_id],
-                capabilities=["polymathera.colony.samples.code_analysis.intent.capabilities.IntentInferenceCapability"],
-                requirements=None,
-                #requirements=LLMClientRequirements(
-                #    model_family="llama",  # TODO: Make configurable
-                #    min_context_window=32000,  # TODO: Make configurable
-                #),
-                resource_requirements=AgentResourceRequirements(
-                    cpu_cores=0.1,
-                    memory_mb=512,
-                    gpu_cores=0.0,
-                    gpu_memory_mb=0
-                ),
-                metadata=AgentMetadata(
-                    parameters={"page_id": page_id, "granularity": granularity}
-                ),
-            )
-            self._worker_handles[page_id] = handle
-
-    async def _run_workers_and_collect(self, granularity: str) -> None:
-        """Run workers and collect results.
-
-        Stores results via ResultCapability for cluster-wide visibility.
-        """
-        timeout = 60.0
-
-        # TODO: This still sequentializes worker runs. For true parallelization,
-        # use asyncio.gather with handle.run() calls or rely on event handlers.
-        for page_id, handle in self._worker_handles.items():
-            # protocol=AgentRunProtocol: worker's IntentInferenceCapability uses AgentRunProtocol
-            # scope=AGENT: worker's IntentInferenceCapability uses AGENT scope
-            # namespace="intent_inference": must match worker's IntentInferenceCapability namespace
-            run = await handle.run(
-                {"page_ids": [page_id], "granularity": granularity},
-                timeout=timeout,
-                protocol=AgentRunProtocol,
-                scope=BlackboardScope.AGENT,
-                namespace=self.namespace,  # "intent_inference" — matches worker
-            )
-            if run.result:
-                result = IntentInferenceResult(**run.result)
-                self._collected_results.append(result)
-
-                # Store result via ResultCapability for cluster-wide visibility
-                if self._result_cap:
-                    await self._result_cap.store_partial(
-                        result_id=f"intent:{page_id}",
-                        result={
-                            "page_id": page_id,
-                            "intent_graph": result.content.model_dump() if result.content else {},
-                            "scope": result.scope.model_dump() if result.scope else {},
-                        },
-                        source_agent=handle.agent_id,
-                        source_pages=[page_id],
-                        result_type="intent_inference",
-                    )
-
-                logger.info(f"Collected intent result for page {page_id}")
-
-    async def _merge_and_finalize(self) -> ScopeAwareResult[IntentGraph]:
-        """Merge collected results into final graph."""
-        if not self._collected_results:
-            return ScopeAwareResult(content=IntentGraph(), scope=AnalysisScope())
-
-        if len(self._collected_results) == 1:
-            return self._collected_results[0]
-
-        merge_cap = self._get_merge_capability()
-        if merge_cap is None:
-            raise RuntimeError("IntentCoordinatorCapability requires MergeCapability")
-
-        ### # Detect and resolve conflicts
-        ### resolved_results = await self._resolve_conflicts(self._collected_results)
-
-        merged = await merge_cap.merge_results(
-            self._collected_results, # resolved_results
-            MergeContext(prefer_higher_confidence=True)
-        )
-
-        ### # Detect misalignments
-        ### await self._detect_misalignments(merged.content)
-
-        # Build hierarchies across pages
-        self._build_cross_page_hierarchies(merged.content)
-
-        return merged
-
-        ### return ScopeAwareResult(
-        ###     content=merged.content,
-        ###     scope=self._compute_scope(resolved_results)
-        ### )
-
-    async def _resolve_conflicts(
-        self,
-        results: list[ScopeAwareResult[IntentGraph]]
-    ) -> list[ScopeAwareResult[IntentGraph]]:
-        """Resolve conflicts between intent interpretations.
-
-        Args:
-            results: Intent graphs from agents
-
-        Returns:
-            Resolved intent graphs
-        """
-        # TODO: This should be part of the IntentMergePolicy.
-        if len(results) <= 1:
-            return results
-
-        # Detect conflicts across graphs
-        all_conflicts = []
-
-        for i, result1 in enumerate(results):
-            for j, result2 in enumerate(results[i+1:], i+1):
-                # Compare intents for same segments
-                for segment_id in result1.content.nodes:
-                    if segment_id in result2.content.nodes:
-                        intent1 = result1.content.nodes[segment_id]
-                        intent2 = result2.content.nodes[segment_id]
-
-                        # Check for conflicts
-                        agent1 = self.page_agents[list(self.page_agents.keys())[i]]
-                        conflicts = await agent1.detect_conflicts(intent1, [intent2])  # TODO: Agents have no detect_conflicts method - this is a placeholder for where conflict detection logic would go
-                        all_conflicts.extend(conflicts)
-
-        # Run consensus game if conflicts exist
-        if all_conflicts:
-            logger.info(f"Resolving {len(all_conflicts)} intent conflicts")
-
-            # Use ConsensusGameProtocol or negotiation
-            # For now, use confidence-based resolution
-            for conflict in all_conflicts:
-                if conflict.severity == "high":
-                    # High severity conflicts need consensus
-                    await self._run_consensus_game(conflict, results)
-
-        return results
-
-    async def _run_consensus_game(
-        self,
-        conflict: IntentConflict,
-        results: list[ScopeAwareResult[IntentGraph]]
-    ) -> None:
-        """Run consensus game to resolve conflict.
-
-        Args:
-            conflict: Intent conflict
-            results: All intent graphs
-        """
-        # TODO: Move to IntentMergePolicy
-        # TODO: Simplified consensus - would use ConsensusGameProtocol
-        # For now, just log
-        logger.info(f"Running consensus game for conflict: {conflict.conflict_type}")
-
-
-    def _build_cross_page_hierarchies(self, graph: IntentGraph) -> None:
-        """Build hierarchical relationships across pages.
-
-        Args:
-            graph: Intent graph to enhance
-        """
-        # Group intents by category
-        by_category: dict[IntentCategory, list[str]] = {}
-
-        for segment_id, intent in graph.nodes.items():
-            for category in intent.categories:
-                if category not in by_category:
-                    by_category[category] = []
-                by_category[category].append(segment_id)
-
-        # Create category-level hierarchies
-        for category, segment_ids in by_category.items():
-            if len(segment_ids) > 1:
-                # Create virtual parent node for category
-                parent_id = f"category_{category.value}"
-                graph.hierarchies[parent_id] = segment_ids
-
-    async def _detect_misalignments(self, graph: IntentGraph) -> None:
-        """Detect code-intent misalignments.
-
-        Args:
-            graph: Intent graph to analyze
-        """
-        # TODO: Move to IntentMergePolicy
-        misalignments = []
-
-        for segment_id, intent in graph.nodes.items():
-            if intent.alignment == IntentAlignment.MISALIGNED:
-                misalignments.append({
-                    "segment": segment_id,
-                    "file": intent.file_path,
-                    "lines": f"{intent.line_start}-{intent.line_end}",
-                    "issues": intent.issues,
-                    "confidence": intent.confidence
-                })
-
-        if misalignments:
-            logger.warning(f"Detected {len(misalignments)} code-intent misalignments")
-
-            # Store in blackboard for further analysis
-            blackboard = await self.get_blackboard()
-            await blackboard.write(
-                key=IntentAnalysisProtocol.intent_misalignments_key(),
-                value=misalignments,
-                tags={"misalignment", "intent"}
-            )
-
-    def _compute_scope(
-        self,
-        results: list[ScopeAwareResult[IntentGraph]]
-    ) -> AnalysisScope:
-        """Compute unified scope from results.
-
-        Args:
-            results: Intent analysis results
-
-        Returns:
-            Unified scope
-        """
-        # TODO: Move to IntentMergePolicy
-        if not results:
-            return AnalysisScope()
-
-        # Merge scopes
-        scopes = [r.scope for r in results]
-
-        return AnalysisScope(
-            is_complete=all(s.is_complete for s in scopes),
-            missing_context=list(set(sum([s.missing_context for s in scopes], []))),
-            confidence=sum(s.confidence for s in scopes) / len(scopes),
-            reasoning=sum([s.reasoning for s in scopes], [])
-        )
-
+# IntentCoordinatorCapability has been removed.
+# Use IntentAnalysisCapability (VCMAnalysisCapability subclass) instead.

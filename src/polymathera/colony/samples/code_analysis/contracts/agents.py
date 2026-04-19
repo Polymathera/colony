@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from polymathera.colony.agents.base import Agent
 from polymathera.colony.agents.patterns.capabilities.merge import MergeCapability
 from polymathera.colony.agents.patterns.capabilities.synthesis import SynthesisCapability
-from polymathera.colony.agents.patterns.games.hypothesis.capabilities import HypothesisGameProtocol
+from polymathera.colony.agents.patterns.games.dynamic import DynamicGameCapability
 
 from .capabilities import (
     ContractMergePolicy,
@@ -50,7 +50,7 @@ class ContractInferenceAgent(Agent):
     1. Receives analysis requests via blackboard events
     2. Uses ContractInferenceCapability to analyze code
     3. Returns results via blackboard for AgentHandle.run() to receive
-    4. Can participate in game protocols via HypothesisGameProtocol capability
+    4. Can participate in game protocols via DynamicGameCapability
     """
     formalism: str = Field(
         default=FormalismLevel.SEMI_FORMAL,
@@ -62,7 +62,7 @@ class ContractInferenceAgent(Agent):
         self.add_capability_blueprints([
             ContractInferenceCapability.bind(),
             MergeCapability.bind(),
-            HypothesisGameProtocol.bind(),
+            DynamicGameCapability.bind(),
         ])
         await super().initialize()
 

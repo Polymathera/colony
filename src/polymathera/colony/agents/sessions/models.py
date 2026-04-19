@@ -111,7 +111,7 @@ class TenantQuota(BaseModel):
         description="Total CPU cores available to this tenant"
     )
     max_total_memory_mb: int = Field(
-        default=10240,  # 10GB
+        default=51200,  # 50GB
         ge=512,
         description="Total memory (MB) available to this tenant"
     )

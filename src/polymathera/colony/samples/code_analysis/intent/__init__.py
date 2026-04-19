@@ -7,7 +7,6 @@ from .capabilities import (
     IntentInferenceCapability,
     IntentMergePolicy,
     IntentAnalysisCapability,
-    IntentCoordinatorCapability,
 )
 from .types import (
     IntentCategory,
@@ -26,7 +25,6 @@ __all__ = [
     "IntentInferenceCapability",
     "IntentMergePolicy",
     "IntentAnalysisCapability",
-    "IntentCoordinatorCapability",
     "IntentCategory",
     "IntentAlignment",
     "CodeIntent",
