@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 
@@ -30,7 +30,9 @@ class BlackboardEntry(BaseModel):
     tags: set[str] = Field(default_factory=set)  # For querying
     metadata: dict[str, Any] = Field(default_factory=dict)  # Extensible
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+    )
 
 
 @dataclass

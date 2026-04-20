@@ -317,14 +317,18 @@ Output ONLY valid JSON matching the ProgramSlice schema."""
         slice_data: ProgramSlice,
         page_ids: list[str]
     ) -> ProgramSlice:
-        """Expand slice across function boundaries.
+        """Expand slice across function boundaries using LLM analysis.
+
+        For each call dependency in the slice, loads the target page and
+        asks the LLM which lines of the called function affect the slice
+        criterion. Merges discovered lines and dependencies into the slice.
 
         Args:
-            slice_data: Initial slice
-            page_ids: VCM page IDs
+            slice_data: Initial slice with call dependencies
+            page_ids: VCM page IDs available for expansion
 
         Returns:
-            Expanded slice
+            Expanded slice with interprocedural lines and dependencies
         """
         # Find function calls in slice
         call_deps = [d for d in slice_data.dependencies if d.dep_type == "call"]
@@ -332,14 +336,55 @@ Output ONLY valid JSON matching the ProgramSlice schema."""
         if not call_deps:
             return slice_data
 
+        expanded = slice_data.model_copy(deep=True)
+
         # For each call, analyze the called function
         # (Simplified - would need more sophisticated call resolution)
         for dep in call_deps[:self.max_depth]:
-            # Would expand to called functions here
-            # This requires resolving function names to definitions
-            pass
+            callee = dep.variable or f"function at line {dep.to_line}"
 
-        return slice_data
+            prompt = f"""The program slice includes a call to '{callee}' at line {dep.from_line}.
+
+Analyze the called function in context and identify:
+1. Which lines of the called function affect the return value or have side effects relevant to the caller?
+2. What data dependencies exist within the called function?
+
+Return JSON with:
+- included_lines: list of line numbers in the called function that should be in the slice
+- dependencies: list of {{from_line, to_line, dep_type, variable}} within the called function"""
+
+            try:
+                response = await self.agent.infer(
+                    context_page_ids=page_ids,
+                    prompt=prompt,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                )
+                import json
+                expansion = json.loads(response.generated_text)
+
+                # Merge expanded lines
+                for file_path, lines in slice_data.included_lines.items():
+                    new_lines = expansion.get("included_lines", [])
+                    if new_lines:
+                        current = set(expanded.included_lines.get(file_path, []))
+                        current.update(new_lines)
+                        expanded.included_lines[file_path] = sorted(current)
+
+                # Merge expanded dependencies
+                for new_dep in expansion.get("dependencies", []):
+                    expanded.dependencies.append(DependencyEdge(
+                        from_line=new_dep.get("from_line", 0),
+                        to_line=new_dep.get("to_line", 0),
+                        dep_type=new_dep.get("dep_type", "data"),
+                        variable=new_dep.get("variable"),
+                        confidence=0.7,
+                    ))
+
+            except Exception as e:
+                logger.debug(f"Interprocedural expansion failed for {callee}: {e}")
+
+        return expanded
 
     def _check_completeness(self, slice_data: ProgramSlice) -> bool:
         """Check if slice is complete.

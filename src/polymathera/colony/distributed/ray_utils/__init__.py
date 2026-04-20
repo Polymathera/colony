@@ -6,7 +6,7 @@ from typing import Any
 
 import ray
 from prometheus_client import Counter, Histogram
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
@@ -58,7 +58,9 @@ _all_params = {
 class WorkerDeploymentOptions(BaseModel):
     """Options for deploying distributed workers"""
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+    )
 
     num_cpus: float | None = None
     num_gpus: float | None = None

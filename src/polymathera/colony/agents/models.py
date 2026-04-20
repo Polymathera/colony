@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Any, Literal, AsyncContextManager
 from abc import ABC, abstractmethod
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, ConfigDict
 
 from ..distributed.state_management import SharedState
 from ..distributed.ray_utils import serving
@@ -1748,7 +1748,7 @@ class ActionSharedDataDependency(BaseModel):
     Agents should design their versioning scheme accordingly.
     """
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     data_key: str = Field(
         description=(
@@ -1894,7 +1894,7 @@ class PolicyScope(BaseModel):
     # TODO: Remove support for nested scopes? Nested policies are no longer supported.
     _parent: PolicyScope | None = None
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get variable from scope (checks parent scopes).

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import fnmatch
 import functools
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Any, Callable, TYPE_CHECKING
 
 from ..models import Action
@@ -82,7 +82,9 @@ class EventProcessingResult(BaseModel):
     # If True, stop processing (terminal state, game over, task complete)
     done: bool = Field(default=False)
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+    )
 
 
 # Singleton for "I processed this but have nothing to contribute"

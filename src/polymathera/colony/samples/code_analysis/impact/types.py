@@ -1,7 +1,8 @@
 
 import uuid
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
+from pydantic.json_schema import SkipJsonSchema
 import time
 from typing import Any
 
@@ -207,7 +208,9 @@ class ImpactPath(BaseModel):
 class ChangeImpactReport(BaseModel):
     """Complete change impact analysis report."""
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+    )
 
     source_page_id: str | None = Field(
         default=None,
@@ -253,7 +256,12 @@ class ChangeImpactReport(BaseModel):
         description="Identified breaking changes"
     )
 
-    timeline: CausalityTimeline | None = Field(
+    # SkipJsonSchema[T] tells Pydantic to omit this field from model_json_schema()
+    # output (so the LLM never sees it), while still allowing normal validation,
+    # model_dump(), and runtime use.
+    # The ConfigDict(arbitrary_types_allowed=True) is needed for
+    # CausalityTimeline to pass Pydantic's type validation.
+    timeline: SkipJsonSchema[CausalityTimeline | None] = Field(
         default=None,
         description="Timeline of cascading impacts"
     )

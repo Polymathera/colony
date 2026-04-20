@@ -297,31 +297,21 @@ class ComplianceAnalysisCapability(AgentCapability):
         violations = []
         licenses_found = {}
 
-        # Check license compliance if enabled
-        if self.check_licenses and dependencies:
-            license_violations, licenses = await self._check_license_compliance(
-                page_id,
-                dependencies,
-                metadata
-            )
-            violations.extend(license_violations)
-            licenses_found = licenses
-
-        # Check security compliance if enabled
-        if self.check_security:
-            security_violations = await self._check_security_compliance(
-                page_id
-            )
-            violations.extend(security_violations)
-
-        # Check against specific requirements
+        # Check each requirement — the requirement type drives which analysis runs
         for requirement in self.requirements:
-            req_violations = await self._check_requirement(
-                requirement,
-                page_id,
-                metadata
-            )
-            violations.extend(req_violations)
+            if requirement.type == ComplianceType.LICENSE and self.check_licenses and dependencies:
+                license_violations, licenses = await self._check_license_compliance(
+                    page_id, dependencies, metadata
+                )
+                violations.extend(license_violations)
+                licenses_found.update(licenses)
+            elif requirement.type == ComplianceType.SECURITY and self.check_security:
+                security_violations = await self._check_security_compliance(page_id)
+                violations.extend(security_violations)
+            else:
+                # Other requirement types — use generic LLM-based check
+                req_violations = await self._check_requirement(requirement, page_id, metadata)
+                violations.extend(req_violations)
 
         # Build compliance report
         report = ComplianceReport(
@@ -380,9 +370,9 @@ class ComplianceAnalysisCapability(AgentCapability):
             license_info = await self._analyze_license(page_id, dep_license)
             licenses[dep_name] = license_info
 
-            # Check compatibility
+            # Check compatibility using LLM-analyzed license data
             if project_license:
-                if not self._licenses_compatible(project_license, dep_license):
+                if not self._licenses_compatible(project_license, license_info):
                     violations.append(ComplianceViolation(
                         violation_id=f"lic_violation_{dep_name}",
                         type=ComplianceType.LICENSE,
@@ -434,27 +424,24 @@ Return a JSON object matching the License schema with:
             logger.warning(f"Failed to parse LLM response as License: {e}")
             return License(name="unknown", spdx_id="unknown")
 
-    def _licenses_compatible(self, license1: str, license2: str) -> bool:
-        """Check if two licenses are compatible.
+    def _licenses_compatible(self, project_license: str, dep_license_info: License) -> bool:
+        """Check if a dependency license is compatible with the project license.
+
+        Uses the LLM-analyzed incompatible_with list from the License object
+        rather than a hardcoded compatibility matrix.
 
         Args:
-            license1: First license
-            license2: Second license
+            project_license: Project's license name
+            dep_license_info: Analyzed License object for the dependency
 
         Returns:
             True if compatible
         """
-        # Simplified compatibility matrix
-        incompatible_pairs = [
-            ("GPL", "Apache"),
-            ("GPL", "MIT"),  # Only if distributed together
-            ("AGPL", "proprietary"),
-            ("GPL", "proprietary")
-        ]
+        project_lower = project_license.lower()
 
-        for l1, l2 in incompatible_pairs:
-            if (l1.lower() in license1.lower() and l2.lower() in license2.lower()) or \
-               (l2.lower() in license1.lower() and l1.lower() in license2.lower()):
+        # Check if project license appears in the dependency's incompatible list
+        for incompat in dep_license_info.incompatible_with:
+            if incompat.lower() in project_lower or project_lower in incompat.lower():
                 return False
 
         return True
@@ -588,8 +575,36 @@ Return empty list if no security issues detected."""
         Returns:
             Violations of this requirement
         """
-        # TODO: Implement requirement-specific checks
-        return []
+        checks_desc = ", ".join(requirement.checks) if requirement.checks else "general compliance"
+        prompt = f"""Check the code loaded in context against this compliance requirement:
+
+Requirement: {requirement.description}
+Type: {requirement.type.value}
+Source: {requirement.source}
+Checks to perform: {checks_desc}
+
+Return a JSON list of ComplianceViolation objects for any violations found.
+Each violation should have: violation_id, type, severity, description, location, rule, evidence, remediation, risk, confidence.
+Return an empty list if no violations are found."""
+
+        response = await self.agent.infer(
+            context_page_ids=[page_id],
+            prompt=prompt,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            json_schema={"type": "array", "items": ComplianceViolation.model_json_schema()},
+        )
+
+        violations = []
+        try:
+            import json
+            violations_data = json.loads(response.generated_text)
+            for v_data in violations_data:
+                violations.append(ComplianceViolation.model_validate(v_data))
+        except Exception as e:
+            logger.warning(f"Failed to parse requirement check violations for {requirement.requirement_id}: {e}")
+
+        return violations
 
     def _find_license_conflicts(
         self,

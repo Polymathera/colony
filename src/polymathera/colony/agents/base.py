@@ -25,7 +25,7 @@ import uuid
 import functools
 from typing import Any, Callable, AsyncIterator, ClassVar, TYPE_CHECKING
 from abc import ABC, abstractmethod
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, ConfigDict
 import networkx as nx
 
 from ..cluster.models import InferenceRequest, InferenceResponse
@@ -1720,7 +1720,9 @@ class Agent(BaseModel):
     # Tracing config (set externally, e.g., by AgentSystemConfig)
     _tracing_config: TracingConfig | None = PrivateAttr(default=None)
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+    )
 
     @property
     def tenant_id(self) -> str:

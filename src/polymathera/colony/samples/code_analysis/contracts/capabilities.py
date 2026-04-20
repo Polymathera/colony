@@ -426,23 +426,92 @@ Be precise and consider edge cases."""
         contracts: list[FunctionContract],
         test_cases: list[dict[str, Any]]
     ) -> list[FunctionContract]:
-        """Validate contracts against test cases.
+        """Validate contracts against test cases using LLM reasoning.
+
+        For each contract with matching test cases, asks the LLM whether
+        the test inputs satisfy preconditions and test outputs satisfy
+        postconditions. Adjusts confidence and records counterexamples.
 
         Args:
             contracts: Inferred contracts
-            test_cases: Test cases
+            test_cases: Test cases with keys: function, input, output
 
         Returns:
-            Validated contracts
+            Contracts with adjusted confidence based on test validation
         """
-        # For each contract, check if test cases satisfy pre/post
+        # Group test cases by function name
+        tests_by_function: dict[str, list[dict[str, Any]]] = {}
+        for test in test_cases:
+            fname = test.get("function", "")
+            if fname:
+                tests_by_function.setdefault(fname, []).append(test)
+
         for contract in contracts:
-            for test in test_cases:
-                if test.get("function") == contract.function_name:
-                    # Would validate preconditions with input
-                    # Would validate postconditions with output
-                    # Store counterexamples if validation fails
-                    pass
+            matching_tests = tests_by_function.get(contract.function_name, [])
+            if not matching_tests:
+                continue
+
+            tests_desc = "\n".join(
+                f"  Input: {t.get('input')} -> Output: {t.get('output')}"
+                for t in matching_tests[:5]
+            )
+            pre_desc = "\n".join(f"  - {p.description}" for p in contract.preconditions)
+            post_desc = "\n".join(f"  - {p.description}" for p in contract.postconditions)
+
+            prompt = f"""Validate these inferred contracts for function '{contract.function_name}' against test cases.
+
+Preconditions:
+{pre_desc or '  (none)'}
+
+Postconditions:
+{post_desc or '  (none)'}
+
+Test cases:
+{tests_desc}
+
+For each precondition and postcondition, determine:
+1. Does the test evidence SUPPORT or CONTRADICT the contract?
+2. Are there any COUNTEREXAMPLES (test cases that violate a contract)?
+
+Return JSON: {{"supported": int, "contradicted": int, "counterexamples": [string]}}"""
+
+            try:
+                response = await self.agent.infer(
+                    prompt=prompt,
+                    temperature=0.1,
+                    max_tokens=500,
+                    json_schema={
+                        "type": "object",
+                        "properties": {
+                            "supported": {"type": "integer"},
+                            "contradicted": {"type": "integer"},
+                            "counterexamples": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["supported", "contradicted", "counterexamples"],
+                    },
+                )
+                import json
+                result = json.loads(response.generated_text)
+
+                supported = result.get("supported", 0)
+                contradicted = result.get("contradicted", 0)
+                counterexamples = result.get("counterexamples", [])
+
+                # Adjust confidence based on test validation
+                total = supported + contradicted
+                if total > 0:
+                    validation_ratio = supported / total
+                    for cond in contract.preconditions + contract.postconditions:
+                        cond.confidence = cond.confidence * 0.5 + validation_ratio * 0.5
+
+                # Record counterexamples
+                for cond in contract.preconditions + contract.postconditions:
+                    cond.counterexamples.extend(
+                        {"test": ce} for ce in counterexamples
+                    )
+
+            except Exception as e:
+                logger.debug(f"Test validation failed for {contract.function_name}: {e}")
 
         return contracts
 
@@ -477,39 +546,43 @@ Be precise and consider edge cases."""
         return contracts
 
     async def _to_formal(self, natural: str) -> str:
-        """Convert natural language to formal spec.
+        """Convert natural language contract to formal specification using LLM.
 
         Args:
-            natural: Natural language spec
+            natural: Natural language specification
 
         Returns:
-            Formal specification
+            Formal specification string
         """
-        # Simple heuristic conversion
-        # In practice, would use LLM or specialized NL2Formal model
-        formal = natural
+        # TODO: Be more specific in the prompt about the target formalism (e.g., first-order logic, Z3 syntax) and provide examples if self.use_examples is True.
+        prompt = f"""Convert this natural language contract specification to a formal specification.
 
-        # Replace common patterns
-        replacements = {
-            "is not null": "!= null",
-            "is null": "== null",
-            "greater than": ">",
-            "less than": "<",
-            "at least": ">=",
-            "at most": "<=",
-            "equals": "==",
-            "not equal": "!=",
-            " and ": " && ",
-            " or ": " || ",
-            "for all": "∀",
-            "exists": "∃",
-            "implies": "→"
-        }
+Natural language: {natural}
 
-        for pattern, replacement in replacements.items():
-            formal = formal.replace(pattern, replacement)
+Write a formal specification using standard notation:
+- Use logical operators: &&, ||, !, =>
+- Use quantifiers: forall, exists
+- Use comparison: ==, !=, <, >, <=, >=
+- Use set notation where appropriate: in, subset, union
+- Keep variable names from the original description
 
-        return formal
+Return ONLY the formal specification string, no explanation."""
+
+        try:
+            response = await self.agent.infer(
+                prompt=prompt,
+                temperature=0.1,
+                max_tokens=200,
+            )
+            formal = response.generated_text.strip()
+            # Strip markdown code fences if present
+            if formal.startswith("```"):
+                lines = formal.split("\n")
+                formal = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+            return formal
+        except Exception as e:
+            logger.debug(f"LLM formalization failed, returning original: {e}")
+            return natural
 
     def _check_completeness(self, contracts: list[FunctionContract]) -> bool:
         """Check if contract inference is complete.
