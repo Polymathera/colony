@@ -9,14 +9,7 @@ services:
       dockerfile: src/polymathera/colony/cli/deploy/docker/Dockerfile.local
     image: colony:local
     container_name: colony-ray-head
-    command: >
-      ray start --head
-      --port=6379
-      --dashboard-host=0.0.0.0
-      --dashboard-port=8265
-      --ray-client-server-port=10001
-      --num-cpus=0
-      --block
+    command: ["/bin/bash", "/home/ray/app/src/polymathera/colony/cli/deploy/docker/ray-head-entrypoint.sh"]
     ports:
       - "${COLONY_DASHBOARD_PORT:-8265}:8265"
       - "${COLONY_CLIENT_PORT:-10001}:10001"
@@ -60,6 +53,8 @@ services:
       - SLACK_ENABLED=false
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+      # Always-on Colony: auto-deploy cluster on container startup
+      - COLONY_AUTO_DEPLOY=${COLONY_AUTO_DEPLOY:-true}
     depends_on:
       redis:
         condition: service_started

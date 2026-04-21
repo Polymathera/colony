@@ -1,4 +1,10 @@
-"""Session and run management endpoints."""
+"""Session and run management endpoints.
+
+All endpoints require authentication. The AuthMiddleware sets the
+ExecutionContext (Ring.USER with tenant_id from JWT, colony_id from
+X-Colony-Id header) before any endpoint code runs. Deployment handle
+calls automatically propagate this context across Ray boundaries.
+"""
 
 from __future__ import annotations
 
@@ -6,13 +12,43 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
 
+from ..auth.middleware import require_auth
 from ..dependencies import get_colony
 from ..models.api_models import RunSummary, SessionSummary
 from ..services.colony_connection import ColonyConnection
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
+
+class CreateSessionRequest(BaseModel):
+    """Request to create a new session."""
+
+    name: str | None = Field(default=None, description="Human-readable session name")
+    ttl_seconds: float | None = Field(default=None, description="Session TTL (None = use default)")
+    fork_from_session_id: str | None = Field(default=None, description="Fork from existing session")
+
+
+class CreateSessionResponse(BaseModel):
+    """Response from session creation."""
+
+    session_id: str
+    status: str  # "created", "error"
+    message: str = ""
+
+
+class SessionActionResponse(BaseModel):
+    """Response from session state change."""
+
+    session_id: str
+    success: bool
+    message: str = ""
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -24,153 +60,279 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+# ---------------------------------------------------------------------------
+# Read endpoints
+# ---------------------------------------------------------------------------
+
 @router.get("/sessions/", response_model=list[SessionSummary])
 async def list_sessions(
-    tenant_id: str | None = Query(None, description="Filter by tenant"),
-    colony_id: str | None = Query(None, description="Filter by colony"),
     limit: int = Query(100, le=500),
+    user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ):
-    """List sessions, optionally filtered by tenant."""
+    """List sessions for the authenticated user's tenant and active colony."""
     if not colony.is_connected:
         return []
 
-    with colony.user_execution_context(
-        tenant_id=tenant_id,
-        colony_id=colony_id,
-        origin="dashboard",
-    ):
-        try:
-            handle = colony.get_session_manager()
-            sessions = await handle.list_sessions(
-                tenant_id=tenant_id,
-                colony_id=colony_id,
-                include_expired=False,
-                limit=limit,
+    from polymathera.colony.distributed.ray_utils.serving.context import get_tenant_id, get_colony_id
+
+    try:
+        handle = colony.get_session_manager()
+        sessions = await handle.list_sessions(
+            tenant_id=get_tenant_id(),
+            colony_id=get_colony_id(),
+            include_expired=False,
+            limit=limit,
+        )
+
+        return [
+            SessionSummary(
+                session_id=_get(s, "session_id", ""),
+                tenant_id=_get(s, "tenant_id", ""),
+                colony_id=_get(s, "colony_id", ""),
+                state=str(_get(s, "state", "")),
+                created_at=_get(s, "created_at", 0.0),
+                run_count=len(_get(s, "runs", []) or []),
             )
+            for s in sessions
+        ]
 
-            return [
-                SessionSummary(
-                    session_id=_get(s, "session_id", ""),
-                    tenant_id=_get(s, "tenant_id", ""),
-                    colony_id=_get(s, "colony_id", ""),
-                    state=str(_get(s, "state", "")),
-                    created_at=_get(s, "created_at", 0.0),
-                    run_count=len(_get(s, "runs", []) or []),
-                )
-                for s in sessions
-            ]
-
-        except Exception as e:
-            logger.warning(f"Failed to list sessions: {e}")
-            return []
+    except Exception as e:
+        logger.warning(f"Failed to list sessions: {e}")
+        return []
 
 
 @router.get("/sessions/{session_id}")
 async def get_session_detail(
     session_id: str,
+    user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """Get detailed session information."""
     if not colony.is_connected:
         return {"error": "not connected"}
 
-    with colony.user_execution_context(
-        session_id=session_id,
-        origin="dashboard",
-    ):
-        try:
-            handle = colony.get_session_manager()
-            session = await handle.get_session(session_id=session_id)
-            if session is None:
-                return {"error": "session not found", "session_id": session_id}
-            if isinstance(session, dict):
-                return session
-            if hasattr(session, "model_dump"):
-                return session.model_dump()
-            return {"session_id": session_id, "raw": str(session)}
+    try:
+        handle = colony.get_session_manager()
+        session = await handle.get_session(session_id=session_id)
+        if session is None:
+            return {"error": "session not found", "session_id": session_id}
 
-        except Exception as e:
-            return {"error": str(e), "session_id": session_id}
+        # Verify the session belongs to this user's tenant
+        from polymathera.colony.distributed.ray_utils.serving.context import get_tenant_id
+        session_tenant = _get(session, "tenant_id", "")
+        if session_tenant and session_tenant != get_tenant_id():
+            return {"error": "session not found", "session_id": session_id}
+
+        if isinstance(session, dict):
+            return session
+        if hasattr(session, "model_dump"):
+            return session.model_dump()
+        return {"session_id": session_id, "raw": str(session)}
+
+    except Exception as e:
+        return {"error": str(e), "session_id": session_id}
 
 
 @router.get("/sessions/{session_id}/runs", response_model=list[RunSummary])
 async def get_session_runs(
     session_id: str,
     limit: int = Query(100, le=500),
+    user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ):
     """List runs for a specific session."""
     if not colony.is_connected:
         return []
 
-    with colony.user_execution_context(
-        session_id=session_id,
-        origin="dashboard",
-    ):
-        try:
-            handle = colony.get_session_manager()
-            runs = await handle.get_session_runs(session_id=session_id, limit=limit)
+    try:
+        handle = colony.get_session_manager()
+        runs = await handle.get_session_runs(session_id=session_id, limit=limit)
 
-            result = []
-            for r in runs:
-                ru = _get(r, "resource_usage", None)
-                result.append(RunSummary(
-                    run_id=_get(r, "run_id", ""),
-                    session_id=_get(r, "session_id", session_id),
-                    agent_id=_get(r, "agent_id", ""),
-                    status=str(_get(r, "status", "")),
-                    started_at=_get(r, "started_at", None),
-                    completed_at=_get(r, "completed_at", None),
-                    input_tokens=_get(ru, "input_tokens", 0) if ru else 0,
-                    output_tokens=_get(ru, "output_tokens", 0) if ru else 0,
-                ))
-            return result
+        result = []
+        for r in runs:
+            ru = _get(r, "resource_usage", None)
+            result.append(RunSummary(
+                run_id=_get(r, "run_id", ""),
+                session_id=_get(r, "session_id", session_id),
+                agent_id=_get(r, "agent_id", ""),
+                status=str(_get(r, "status", "")),
+                started_at=_get(r, "started_at", None),
+                completed_at=_get(r, "completed_at", None),
+                input_tokens=_get(ru, "input_tokens", 0) if ru else 0,
+                output_tokens=_get(ru, "output_tokens", 0) if ru else 0,
+            ))
+        return result
 
-        except Exception as e:
-            logger.warning(f"Failed to list runs for session {session_id}: {e}")
-            return []
+    except Exception as e:
+        logger.warning(f"Failed to list runs for session {session_id}: {e}")
+        return []
 
 
 @router.get("/sessions/runs/{run_id}")
 async def get_run_detail(
     run_id: str,
+    user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """Get detailed run information including events and resource usage."""
     if not colony.is_connected:
         return {"error": "not connected"}
 
-    with colony.user_execution_context(
-        run_id=run_id,
-        origin="dashboard",
-    ):
-        try:
-            handle = colony.get_session_manager()
-            run = await handle.get_run(run_id=run_id)
-            if run is None:
-                return {"error": "run not found", "run_id": run_id}
-            if isinstance(run, dict):
-                return run
-            if hasattr(run, "model_dump"):
-                return run.model_dump()
-            return {"run_id": run_id, "raw": str(run)}
+    try:
+        handle = colony.get_session_manager()
+        run = await handle.get_run(run_id=run_id)
+        if run is None:
+            return {"error": "run not found", "run_id": run_id}
+        if isinstance(run, dict):
+            return run
+        if hasattr(run, "model_dump"):
+            return run.model_dump()
+        return {"run_id": run_id, "raw": str(run)}
 
-        except Exception as e:
-            return {"error": str(e), "run_id": run_id}
+    except Exception as e:
+        return {"error": str(e), "run_id": run_id}
 
 
 @router.get("/sessions/stats/overview")
 async def get_session_stats(
+    user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """Get session manager statistics."""
     if not colony.is_connected:
         return {"status": "disconnected"}
 
-    with colony.kernel_execution_context(origin="dashboard"):
-        try:
-            handle = colony.get_session_manager()
-            return await handle.get_stats()
-        except Exception as e:
-            return {"error": str(e)}
+    try:
+        handle = colony.get_session_manager()
+        return await handle.get_stats()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Write endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/sessions/", response_model=CreateSessionResponse)
+async def create_session(
+    request: CreateSessionRequest | None = None,
+    user: dict = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> CreateSessionResponse:
+    """Create a new session.
+
+    The session is created under the authenticated user's tenant.
+    The colony_id comes from the X-Colony-Id header (set by the frontend).
+    """
+    if not colony.is_connected:
+        return CreateSessionResponse(session_id="", status="error", message="Not connected")
+
+    request = request or CreateSessionRequest()
+
+    try:
+        from polymathera.colony.agents.sessions.models import SessionMetadata
+        metadata = SessionMetadata(name=request.name) if request.name else None
+
+        handle = colony.get_session_manager()
+        session = await handle.create_session(
+            metadata=metadata,
+            ttl_seconds=request.ttl_seconds,
+            fork_from_session_id=request.fork_from_session_id,
+        )
+        session_id = _get(session, "session_id", "")
+        return CreateSessionResponse(session_id=session_id, status="created")
+
+    except Exception as e:
+        logger.error("Failed to create session: %s", e)
+        return CreateSessionResponse(session_id="", status="error", message=str(e))
+
+
+@router.put("/sessions/{session_id}/suspend", response_model=SessionActionResponse)
+async def suspend_session(
+    session_id: str,
+    user: dict = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> SessionActionResponse:
+    """Suspend an active session."""
+    if not colony.is_connected:
+        return SessionActionResponse(session_id=session_id, success=False, message="Not connected")
+
+    try:
+        handle = colony.get_session_manager()
+        success = await handle.suspend_session(session_id=session_id)
+        return SessionActionResponse(
+            session_id=session_id,
+            success=bool(success),
+            message="Suspended" if success else "Failed to suspend",
+        )
+    except Exception as e:
+        return SessionActionResponse(session_id=session_id, success=False, message=str(e))
+
+
+@router.put("/sessions/{session_id}/resume", response_model=SessionActionResponse)
+async def resume_session(
+    session_id: str,
+    user: dict = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> SessionActionResponse:
+    """Resume a suspended session."""
+    if not colony.is_connected:
+        return SessionActionResponse(session_id=session_id, success=False, message="Not connected")
+
+    try:
+        handle = colony.get_session_manager()
+        success = await handle.activate_session(session_id=session_id)
+        return SessionActionResponse(
+            session_id=session_id,
+            success=bool(success),
+            message="Resumed" if success else "Failed to resume",
+        )
+    except Exception as e:
+        return SessionActionResponse(session_id=session_id, success=False, message=str(e))
+
+
+@router.delete("/sessions/{session_id}", response_model=SessionActionResponse)
+async def close_session(
+    session_id: str,
+    archive: bool = Query(True, description="Archive session data"),
+    user: dict = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> SessionActionResponse:
+    """Close and optionally archive a session."""
+    if not colony.is_connected:
+        return SessionActionResponse(session_id=session_id, success=False, message="Not connected")
+
+    try:
+        handle = colony.get_session_manager()
+        success = await handle.close_session(session_id=session_id, archive=archive)
+        return SessionActionResponse(
+            session_id=session_id,
+            success=bool(success),
+            message="Closed" if success else "Failed to close",
+        )
+    except Exception as e:
+        return SessionActionResponse(session_id=session_id, success=False, message=str(e))
+
+
+@router.post("/sessions/{session_id}/runs/{run_id}/cancel", response_model=SessionActionResponse)
+async def cancel_run(
+    session_id: str,
+    run_id: str,
+    user: dict = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> SessionActionResponse:
+    """Cancel a running agent run."""
+    if not colony.is_connected:
+        return SessionActionResponse(session_id=session_id, success=False, message="Not connected")
+
+    try:
+        handle = colony.get_session_manager()
+        success = await handle.cancel_run(run_id=run_id)
+        return SessionActionResponse(
+            session_id=session_id,
+            success=bool(success),
+            message=f"Run {run_id} cancelled" if success else f"Failed to cancel run {run_id}",
+        )
+    except Exception as e:
+        return SessionActionResponse(session_id=session_id, success=False, message=str(e))

@@ -41,15 +41,17 @@ def up(
     workers: int = typer.Option(1, "--workers", "-w", help="Number of Ray workers"),
     no_build: bool = typer.Option(False, "--no-build", help="Skip image build"),
     k8s: bool = typer.Option(False, "--k8s", help="Use Kind + KubeRay (advanced)"),
+    config: Optional[str] = typer.Option(None, "--config", "-c", help="Path to cluster YAML config to use for auto-deploy"),
 ):
     """Build Colony image and start Ray cluster + Redis."""
-    config = DeployConfig(mode="k8s" if k8s else "compose")
-    manager = DeploymentManager(config)
+    deploy_config = DeployConfig(mode="k8s" if k8s else "compose")
+    manager = DeploymentManager(deploy_config)
 
     try:
         services = _run(manager.up(
             build=not no_build,
             workers=workers,
+            config_path=config,
             on_status=lambda msg: console.print(f"  [blue]{msg}[/blue]"),
         ))
     except RuntimeError as e:

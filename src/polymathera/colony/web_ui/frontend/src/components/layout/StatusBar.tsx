@@ -12,15 +12,27 @@ function Dot({ ok }: { ok: boolean }) {
   );
 }
 
-export function StatusBar() {
+interface StatusBarProps {
+  authenticated: boolean;
+}
+
+export function StatusBar({ authenticated }: StatusBarProps) {
   const health = useHealthStatus();
-  const agents = useAgents();
-  const vcm = useVCMStats();
+  const agents = useAgents({ enabled: authenticated });
+  const vcm = useVCMStats({ enabled: authenticated });
 
   const rayOk = health.data?.ray_connected ?? false;
   const redisOk = health.data?.redis_connected ?? false;
   const agentCount = agents.data?.length ?? 0;
   const pageCount = vcm.data?.total_pages ?? 0;
+
+  if (!authenticated) {
+    return (
+      <footer className="flex h-7 shrink-0 items-center border-t bg-muted/20 px-4 text-[11px] text-muted-foreground">
+        <span className="ml-auto text-muted-foreground/50">Colony v0.1</span>
+      </footer>
+    );
+  }
 
   return (
     <footer className="flex h-7 shrink-0 items-center gap-4 border-t bg-muted/20 px-4 text-[11px] text-muted-foreground">

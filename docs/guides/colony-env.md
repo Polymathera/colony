@@ -9,10 +9,13 @@
 Build the Docker image and start the cluster.
 
 ```bash
-colony-env up              # 1 worker (default)
-colony-env up --workers 3  # 3 Ray workers
-colony-env up --no-build   # Skip image rebuild
+colony-env up --config my_analysis.yaml              # 1 worker with config
+colony-env up --workers 3 --config my_analysis.yaml  # 3 Ray workers with config
+colony-env up --no-build --config my_analysis.yaml   # Skip image rebuild
+colony-env up                                        # No config (empty cluster)
 ```
+
+The `--config` flag copies a YAML configuration file into the cluster. The cluster auto-deploys LLM backends, VCM, and the agent system from this config on startup. Without `--config`, the cluster starts with no LLM deployments.
 
 **Services started:**
 
@@ -35,17 +38,17 @@ colony-env down
 
 ### `colony-env run`
 
-Execute an analysis inside the cluster.
+Submit an analysis job to the running cluster. Tries the dashboard API first, falls back to `docker exec`.
 
 ```bash
 # Analyze a local codebase
 colony-env run --local-repo /path/to/codebase --config analysis.yaml
 
 # With verbose output
-colony-env run --local-repo /path/to/codebase --config analysis.yaml --verbose
+colony-env run --origin-url https://github.com/org/repo --config analysis.yaml --verbose
 ```
 
-The local repo is copied to a shared Docker volume and made available to all containers.
+For local repos, the codebase is copied to a shared Docker volume and made available to all containers. For most workflows, use the **web dashboard** at [localhost:8080](http://localhost:8080) instead — it provides a richer interface for mapping content, configuring runs, and monitoring agents.
 
 ### `colony-env status`
 
@@ -75,8 +78,11 @@ colony-env doctor
 ## Typical Workflow
 
 ```bash
-# Full rebuild + run cycle
-colony-env down && colony-env up --workers 3 && colony-env run --local-repo /path/to/code --config my_analysis.yaml --verbose
+# Full rebuild + start the always-on cluster with config
+colony-env down && colony-env up --workers 3 --config my_analysis.yaml
+
+# Open the dashboard to map content, create sessions, and submit runs
+colony-env dashboard
 ```
 
 ## Environment Variables

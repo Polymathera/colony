@@ -64,6 +64,11 @@ async def lifespan(app: FastAPI):
         kafka_bootstrap=config.kafka_bootstrap,
     )
 
+    # Initialize auth schema (users + colonies tables)
+    if colony._db_pool:
+        from .auth.schema import ensure_auth_schema
+        await ensure_auth_schema(colony._db_pool)
+
     yield
 
     # Shutdown
@@ -98,8 +103,9 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    ### # Execution context for all API requests (Ring.KERNEL — admin interface)
-    ### app.add_middleware(ExecutionContextMiddleware)
+    # Auth middleware — extracts JWT from cookie, sets ExecutionContext
+    from .auth.middleware import AuthMiddleware
+    app.add_middleware(AuthMiddleware)
 
     # Register API routers
     from .routers import (
@@ -114,13 +120,23 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         page_graph,
         traces,
         trace_analysis,
+        jobs,
+        chat,
+        auth,
+        colonies,
     )
+    from .routers import config as config_router
     from .streaming import sse
 
+    app.include_router(auth.router, prefix="/api/v1", tags=["auth"])
+    app.include_router(colonies.router, prefix="/api/v1", tags=["colonies"])
     app.include_router(infrastructure.router, prefix="/api/v1", tags=["infrastructure"])
     app.include_router(deployments.router, prefix="/api/v1", tags=["deployments"])
     app.include_router(agents.router, prefix="/api/v1", tags=["agents"])
     app.include_router(sessions.router, prefix="/api/v1", tags=["sessions"])
+    app.include_router(jobs.router, prefix="/api/v1", tags=["jobs"])
+    app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
+    app.include_router(config_router.router, prefix="/api/v1", tags=["config"])
     app.include_router(vcm.router, prefix="/api/v1", tags=["vcm"])
     app.include_router(metrics.router, prefix="/api/v1", tags=["metrics"])
     app.include_router(logs.router, prefix="/api/v1", tags=["logs"])

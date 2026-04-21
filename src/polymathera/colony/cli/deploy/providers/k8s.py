@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from overrides import override
 
 from ..config import DeployConfig
 from .base import DeploymentProvider, ServiceInfo
@@ -26,10 +27,12 @@ class KindKubeRayProvider(DeploymentProvider):
     def __init__(self, config: DeployConfig) -> None:
         self._config = config
 
+    @override
     async def up(
         self,
         build: bool = True,
         workers: int = 1,
+        config_path: str | None = None,
         on_status: Callable[[str], None] | None = None,
     ) -> list[ServiceInfo]:
         raise NotImplementedError(
@@ -37,12 +40,15 @@ class KindKubeRayProvider(DeploymentProvider):
             "Use Docker Compose mode (default) for now."
         )
 
+    @override
     async def down(self) -> None:
         raise NotImplementedError("Kind + KubeRay deployment is not yet implemented.")
 
+    @override
     async def status(self) -> list[ServiceInfo]:
         raise NotImplementedError("Kind + KubeRay deployment is not yet implemented.")
 
+    @override
     async def run(
         self,
         origin_url: str | None = None,

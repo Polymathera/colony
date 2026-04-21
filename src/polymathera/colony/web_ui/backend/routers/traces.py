@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
+from ..auth.middleware import require_auth
 from ..dependencies import get_colony
 from ..services.colony_connection import ColonyConnection
 
@@ -20,6 +21,7 @@ router = APIRouter()
 @router.get("/traces/")
 async def list_traces(
     limit: int = Query(100, le=500),
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> list[dict[str, Any]]:
     """List all traces (sessions with spans), ordered by most recent."""
@@ -36,6 +38,7 @@ async def list_traces(
 @router.get("/traces/{trace_id}/summary")
 async def get_trace_summary(
     trace_id: str,
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """Get aggregated summary for a trace."""
@@ -57,6 +60,7 @@ async def get_trace_spans(
     ring: str | None = Query(None, description="Filter by Ring level: USER or KERNEL"),
     service_name: str | None = Query(None, description="Filter by service name"),
     limit: int = Query(5000, le=10000),
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> list[dict[str, Any]]:
     """Get all spans for a trace, with optional filters."""
@@ -76,6 +80,7 @@ async def get_trace_spans(
 @router.get("/stream/traces/{trace_id}")
 async def stream_trace_spans(
     trace_id: str,
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> StreamingResponse:
     """SSE stream of spans for a trace.

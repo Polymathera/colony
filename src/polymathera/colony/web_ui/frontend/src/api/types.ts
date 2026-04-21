@@ -218,3 +218,86 @@ export interface TraceSummary {
   run_count: number;
   total_tokens: number;
 }
+
+/* Session mutations */
+
+export interface CreateSessionRequest {
+  name?: string | null;
+  ttl_seconds?: number | null;
+  fork_from_session_id?: string | null;
+}
+
+export interface CreateSessionResponse {
+  session_id: string;
+  status: string;
+  message: string;
+}
+
+export interface SessionActionResponse {
+  session_id: string;
+  success: boolean;
+  message: string;
+}
+
+/* VCM repo mapping */
+
+export interface MapRepoRequest {
+  origin_url: string;
+  branch?: string;
+  commit?: string;
+  repo_id?: string | null;
+  flush_threshold?: number;
+  flush_token_budget?: number;
+  pinned?: boolean;
+}
+
+export interface MapRepoResponse {
+  status: string;
+  scope_id: string;
+  message: string;
+}
+
+/* Job submission */
+
+export interface AnalysisSpec {
+  type: string;
+  coordinator_version?: string;
+  max_agents?: number;
+  quality_threshold?: number;
+  max_iterations?: number;
+  batching_policy?: string;
+  extra_capabilities?: string[];
+  parameters?: Record<string, unknown>;
+}
+
+export interface JobSubmitRequest {
+  origin_url: string;
+  branch?: string;
+  commit?: string;
+  repo_id?: string | null;
+  analyses: AnalysisSpec[];
+  paging?: {
+    flush_threshold?: number;
+    flush_token_budget?: number;
+    pinned?: boolean;
+  };
+  timeout_seconds?: number;
+  budget_usd?: number | null;
+}
+
+export interface JobSubmitResponse {
+  job_id: string;
+  session_id: string;
+  status: string;
+  analyses: string[];
+  message: string;
+}
+
+export interface JobStatusResponse {
+  job_id: string;
+  session_id: string;
+  status: string;
+  analyses_completed: number;
+  analyses_total: number;
+  message: string;
+}

@@ -8,7 +8,9 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { useVCMStats, useVCMPages, useLoadedPageEntries } from "@/api/hooks/useVCM";
+import { FolderUp } from "lucide-react";
+import { useVCMStats, useVCMPages, useLoadedPageEntries, useMappingOperations } from "@/api/hooks/useVCM";
+import { MapContentDialog } from "../dialogs/MapContentDialog";
 import { MetricCard } from "../shared/MetricCard";
 import { DataTable } from "../shared/DataTable";
 import { Badge } from "../shared/Badge";
@@ -85,7 +87,9 @@ export function VCMTab() {
   const stats = useVCMStats();
   const pages = useVCMPages();
   const loadedEntries = useLoadedPageEntries();
+  const mappingOps = useMappingOperations();
   const [viewMode, setViewMode] = useState<"table" | "grid">("grid");
+  const [showMapDialog, setShowMapDialog] = useState(false);
   const [colorMode, setColorMode] = useState<ColorMode>("loaded");
   const [hoveredPage, setHoveredPage] = useState<PageSummary | null>(null);
 
@@ -114,8 +118,67 @@ export function VCMTab() {
     return max;
   }, [loadedEntries.data]);
 
+  const activeOps = (mappingOps.data ?? []).filter(
+    (op) => op.status === "pending" || op.status === "running",
+  );
+  const recentOps = (mappingOps.data ?? []).filter(
+    (op) => op.status !== "pending" && op.status !== "running" && op.completed_at && op.completed_at > Date.now() / 1000 - 300,
+  );
+
   return (
     <div className="space-y-6">
+      {/* Map Content action */}
+      <div className="flex items-center justify-between">
+        <div />
+        <button
+          onClick={() => setShowMapDialog(true)}
+          className="rounded bg-cyan-500/10 px-4 py-1.5 text-xs font-medium text-cyan-400 hover:bg-cyan-500/20 transition-colors"
+        >
+          <FolderUp size={14} className="inline -mt-0.5" /> Map Content
+        </button>
+      </div>
+      <MapContentDialog open={showMapDialog} onClose={() => setShowMapDialog(false)} />
+
+      {/* Active mapping operations */}
+      {activeOps.length > 0 && (
+        <section>
+          {activeOps.map((op) => (
+            <div key={op.op_id} className="flex items-center gap-3 rounded border border-blue-500/20 bg-blue-500/5 px-4 py-2.5 mb-2">
+              <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-blue-400 border-t-transparent" />
+              <div className="flex-1">
+                <div className="text-xs font-medium text-blue-400">{op.message}</div>
+                <div className="text-[10px] text-blue-400/70">{op.origin_url}</div>
+              </div>
+              <Badge variant="info">{op.status}</Badge>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {/* Recently completed mapping operations */}
+      {recentOps.length > 0 && (
+        <section>
+          {recentOps.map((op) => (
+            <div key={op.op_id} className={`flex items-center gap-3 rounded border px-4 py-2 mb-2 ${
+              op.status === "mapped" || op.status === "already_mapped"
+                ? "border-emerald-500/20 bg-emerald-500/5"
+                : "border-red-500/20 bg-red-500/5"
+            }`}>
+              <span className="text-xs">{op.status === "mapped" || op.status === "already_mapped" ? "\u2713" : "\u2717"}</span>
+              <div className="flex-1">
+                <div className={`text-xs font-medium ${op.status === "mapped" || op.status === "already_mapped" ? "text-emerald-400" : "text-red-400"}`}>
+                  {op.message}
+                </div>
+                <div className="text-[10px] text-muted-foreground">{op.origin_url}</div>
+              </div>
+              <Badge variant={op.status === "mapped" || op.status === "already_mapped" ? "success" : "error"}>
+                {op.status}
+              </Badge>
+            </div>
+          ))}
+        </section>
+      )}
+
       {/* Stats row */}
       <section>
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted-foreground">

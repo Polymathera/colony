@@ -1285,3 +1285,57 @@ class SlicingAnalysisProtocol(BlackboardProtocol):
     @staticmethod
     def interprocedural_resolutions_key() -> str:
         return "interprocedural_resolutions"
+
+
+class InterruptionProtocol(BlackboardProtocol):
+    """Protocol for external agent/session interruption.
+
+    Enables the dashboard or CLI to interrupt running agents by writing
+    to the colony-scoped blackboard. Agents with an ``@event_handler``
+    for ``interrupt_pattern()`` react by cancelling, suspending, or
+    applying configuration changes.
+
+    Key format: ``interrupt:{agent_id}``
+
+    Value schema::
+
+        {
+            "action": "cancel" | "suspend" | "reconfigure",
+            "reason": "user requested via dashboard",
+            "config": { ... }  // only for "reconfigure" action
+        }
+
+    Colony-scoped so any agent can be interrupted regardless of which
+    deployment replica it's running on.
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    _PREFIX = "interrupt:"
+
+    @staticmethod
+    def interrupt_key(agent_id: str) -> str:
+        """Key for interrupting a specific agent."""
+        return f"{InterruptionProtocol._PREFIX}{agent_id}"
+
+    @staticmethod
+    def interrupt_pattern() -> str:
+        """Pattern matching all interruption events."""
+        return f"{InterruptionProtocol._PREFIX}*"
+
+    @staticmethod
+    def parse_interrupt_key(key: str) -> str:
+        """Extract agent_id from an interrupt key."""
+        if not key.startswith(InterruptionProtocol._PREFIX):
+            raise ValueError(f"Not an InterruptionProtocol key: {key!r}")
+        return key[len(InterruptionProtocol._PREFIX):]
+
+    @staticmethod
+    def session_interrupt_key(session_id: str) -> str:
+        """Key for interrupting all agents in a session."""
+        return f"session_interrupt:{session_id}"
+
+    @staticmethod
+    def session_interrupt_pattern() -> str:
+        """Pattern matching session-level interruption events."""
+        return "session_interrupt:*"

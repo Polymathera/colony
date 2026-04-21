@@ -1229,118 +1229,33 @@ def _resolve_class(fqn: str) -> type:
     return getattr(module, class_name)
 
 
-async def run_integration_test(
+def _build_cluster_config(
     config: TestConfig,
-    app_name: str | None = None,
-) -> list[dict[str, Any]]:
-    """Run the integration test workflow.
+    effective_app_name: str,
+) -> "PolymatheraClusterConfig":
+    """Build PolymatheraClusterConfig from TestConfig.
 
-    This is the main entry point that:
-    1. Connects to the Ray cluster via PolymatheraApp.setup_ray()
-    2. Deploys PolymatheraCluster (LLM deployments, VCM, agent system)
-    3. Pages the codebase into VCM using FileGrouperContextPageSource
-    4. Spawns coordinator agents via AgentHandle.from_blueprint()
-    5. Monitors progress via handle.run_streamed() and collects results
-    6. Returns a list of result dictionaries
+    Pure config-building function — no I/O, no Ray, no deployment.
+    Converts YAML config dataclasses into the deployment config objects.
 
     Args:
-        config: Test configuration (includes origin_url, branch, commit).
-        app_name: Optional Polymathera serving application name. If None,
-            uses the current application context.
+        config: Test configuration with cluster/vcm/agent_system sections.
+        effective_app_name: Polymathera serving application name.
 
     Returns:
-        List of result dictionaries, one per analysis.
+        PolymatheraClusterConfig ready for deployment.
     """
     # -----------------------------------------------------------------------
     # Lazy imports — these require Ray and colony to be available.
     # We use absolute imports so the CLI can run both as a module
     # (python -m colony.cli.polymath) and as a direct script (./polymath.py).
     # -----------------------------------------------------------------------
-    from polymathera.colony.distributed import get_initialized_polymathera
-    from polymathera.colony.vcm.sources import BuilInContextPageSourceType, ContextPageSourceFactory
-    from polymathera.colony.vcm.models import MmapConfig, MmapResult
-    from polymathera.colony.agents import AgentMetadata, AgentHandle, AgentRunEvent
-    from polymathera.colony.agents import ScopeUtils
-    from polymathera.colony.system import (
-        PolymatheraCluster, PolymatheraClusterConfig,
-        get_vcm, get_session_manager,
-    )
+    from polymathera.colony.system import PolymatheraClusterConfig
     from polymathera.colony.cluster.config import ClusterConfig, LLMDeploymentConfig
     from polymathera.colony.cluster.remote_config import RemoteLLMDeploymentConfig
     from polymathera.colony.vcm.config import VCMConfig
     from polymathera.colony.agents.config import AgentSystemConfig
-    from polymathera.colony.agents.sessions import AgentRun
-    from polymathera.colony.agents import AgentSelfConcept
 
-    # Import built-in page source modules to trigger their @register decorators.
-    # User-defined page sources from working_dir should also be imported here
-    # (or in user startup code) before publish_to_env() is called.
-    import polymathera.colony.samples.paging  # noqa: F401 — registers file_grouper
-    # blackboard is already registered via colony.agents.blackboard import chain
-
-    # Publish registered page source module paths to an env var so Ray workers
-    # can discover and import them (they start with a fresh Python interpreter).
-    ContextPageSourceFactory.publish_to_env()
-
-    results: list[dict[str, Any]] = []
-
-    # -----------------------------------------------------------------------
-    # Step 0: Connect to Ray cluster
-    # -----------------------------------------------------------------------
-    console.print()
-    # Build Step 0 display
-    step0_lines = ["[bold]Step 0:[/bold] Connecting to Ray cluster"]
-    if config.working_dir:
-        step0_lines.append(f"  working_dir: {config.working_dir}")
-    console.print(Panel(
-        "\n".join(step0_lines),
-        title="[bold blue]Ray Cluster Connection[/bold blue]",
-        border_style="blue",
-    ))
-
-    with console.status("[blue]Connecting to Ray cluster..."):
-        polymathera = await get_initialized_polymathera()
-
-        # setup_ray connects to the Ray cluster and propagates env vars to
-        # all worker processes (including autoscaled nodes).
-        #
-        # working_dir (optional): A directory on the driver containing user
-        # code — custom agents, capabilities, configs — that workers need to
-        # import.  Ray zips it, uploads it to every worker, unpacks it, and
-        # prepends it to sys.path.
-        #
-        # This is NOT for the codebase being analyzed.  The target codebase
-        # lives on shared storage (e.g. EFS) and workers access it through
-        # VCM paging.  Colony modules are already distributed via py_modules
-        # (setup_ray appends the colony package automatically).
-        # Collect env vars to propagate — include API keys for remote deployments
-        env_prefixes = ("POLYMATH_", "RAY_", "REDIS_", "PYTHONPATH")
-        api_key_vars = {
-            rd.api_key_env_var
-            for rd in config.cluster.remote_deployments
-        }
-        if config.cluster.remote_embedding_config and config.cluster.remote_embedding_config.api_key_env_var:
-            api_key_vars.add(config.cluster.remote_embedding_config.api_key_env_var)
-        worker_env_vars = {
-            k: v for k, v in os.environ.items()
-            if k.startswith(env_prefixes) or k in api_key_vars
-        }
-
-        await polymathera.setup_ray(
-            worker_env_vars=worker_env_vars,
-            working_dir=config.working_dir,
-        )
-
-    console.print("  [green]OK[/green] — Connected to Ray cluster")
-    if config.working_dir:
-        console.print(f"  [dim]User code distributed from: {config.working_dir}[/dim]")
-
-    # Use the deployed app name for subsequent handle lookups
-    effective_app_name = app_name or config.cluster.app_name
-
-    # -----------------------------------------------------------------------
-    # Step 0.5: Deploy PolymatheraCluster (LLM deployments, VCM, agent system)
-    # -----------------------------------------------------------------------
     # Build RemoteLLMDeploymentConfig objects from YAML config
     remote_deployment_configs = []
     for rd in config.cluster.remote_deployments:
@@ -1451,10 +1366,113 @@ async def run_integration_test(
         agent_system_config=agent_system_config,
         cleanup_on_init=config.cluster.cleanup_on_init,
     )
+    return polyconfig
+
+
+async def deploy_cluster(
+    config: TestConfig,
+    app_name: str | None = None,
+) -> tuple["PolymatheraCluster", str]:
+    """Connect to Ray and deploy the Colony cluster.
+
+    Idempotent — if the cluster is already deployed, this is a no-op.
+    This function handles:
+    - Ray cluster connection and env var propagation via polymathera.setup_ray()
+    - Building PolymatheraClusterConfig from TestConfig
+    - Deploying LLM, VCM, agent system, and session manager deployments
+
+    It does NOT create sessions, page codebases, or spawn agents.
+    Those are per-job operations handled by job submission.
+
+    Args:
+        config: Test configuration with cluster/vcm/agent_system sections.
+        app_name: Override serving application name. If None, uses config default.
+
+    Returns:
+        Tuple of (PolymatheraCluster, effective_app_name).
+    """
+    from polymathera.colony.distributed import get_initialized_polymathera
+    from polymathera.colony.vcm.sources import ContextPageSourceFactory
+    from polymathera.colony.system import PolymatheraCluster
+
+    # Import built-in page source modules to trigger their @register decorators.
+    # User-defined page sources from working_dir should also be imported here
+    # (or in user startup code) before publish_to_env() is called.
+    import polymathera.colony.samples.paging  # noqa: F401 — registers file_grouper
+    # blackboard is already registered via colony.agents.blackboard import chain
+
+    # Publish registered page source module paths to an env var so Ray workers
+    # can discover and import them (they start with a fresh Python interpreter).
+    ContextPageSourceFactory.publish_to_env()
+
+    # -----------------------------------------------------------------------
+    # Connect to Ray cluster
+    # -----------------------------------------------------------------------
+    console.print()
+    step0_lines = ["[bold]Connecting to Ray cluster[/bold]"]
+    if config.working_dir:
+        step0_lines.append(f"  working_dir: {config.working_dir}")
+    console.print(Panel(
+        "\n".join(step0_lines),
+        title="[bold blue]Ray Cluster Connection[/bold blue]",
+        border_style="blue",
+    ))
+
+    with console.status("[blue]Connecting to Ray cluster..."):
+        polymathera = await get_initialized_polymathera()
+
+        # setup_ray connects to the Ray cluster and propagates env vars to
+        # all worker processes (including autoscaled nodes).
+        #
+        # working_dir (optional): A directory on the driver containing user
+        # code — custom agents, capabilities, configs — that workers need to
+        # import.  Ray zips it, uploads it to every worker, unpacks it, and
+        # prepends it to sys.path.
+        #
+        # This is NOT for the codebase being analyzed.  The target codebase
+        # lives on shared storage (e.g. EFS) and workers access it through
+        # VCM paging.  Colony modules are already distributed via py_modules
+        # (setup_ray appends the colony package automatically).
+        # Collect env vars to propagate — include API keys for remote deployments
+
+        # Collect env vars to propagate — include API keys for remote deployments
+        env_prefixes = ("POLYMATH_", "RAY_", "REDIS_", "PYTHONPATH")
+        api_key_vars = {
+            rd.api_key_env_var
+            for rd in config.cluster.remote_deployments
+        }
+        if config.cluster.remote_embedding_config and config.cluster.remote_embedding_config.api_key_env_var:
+            api_key_vars.add(config.cluster.remote_embedding_config.api_key_env_var)
+        worker_env_vars = {
+            k: v for k, v in os.environ.items()
+            if k.startswith(env_prefixes) or k in api_key_vars
+        }
+
+        await polymathera.setup_ray(
+            worker_env_vars=worker_env_vars,
+            working_dir=config.working_dir,
+        )
+
+    console.print("  [green]OK[/green] — Connected to Ray cluster")
+    if config.working_dir:
+        console.print(f"  [dim]User code distributed from: {config.working_dir}[/dim]")
+
+    # -----------------------------------------------------------------------
+    # Build config and deploy cluster
+    # -----------------------------------------------------------------------
+    # Use the deployed app name for subsequent handle lookups
+    effective_app_name = app_name or config.cluster.app_name
+    polyconfig = _build_cluster_config(config, effective_app_name)
+
+    vllm_deployment_configs = polyconfig.llm_cluster_config.vllm_deployments
+    remote_deployment_configs = polyconfig.llm_cluster_config.remote_deployments
+    embedding_deployment_config = polyconfig.llm_cluster_config.embedding_config
+    st_embedding_deployment_config = polyconfig.llm_cluster_config.st_embedding_config
+    remote_embedding_deployment_config = polyconfig.llm_cluster_config.remote_embedding_config
 
     # Display deployment info
     deploy_lines = [
-        "[bold]Step 0.5:[/bold] Deploying PolymatheraCluster",
+        "[bold]Deploying PolymatheraCluster[/bold]",
         f"  App:    {effective_app_name}",
     ]
     for vd in vllm_deployment_configs:
@@ -1483,6 +1501,7 @@ async def run_integration_test(
         )
     if not vllm_deployment_configs and not remote_deployment_configs:
         deploy_lines.append("  [yellow]WARNING: No LLM deployments configured[/yellow]")
+
     console.print()
     console.print(Panel(
         "\n".join(deploy_lines),
@@ -1498,6 +1517,57 @@ async def run_integration_test(
         await polycluster.deploy()
 
     console.print("  [green]OK[/green] — Cluster deployed")
+
+    return polycluster, effective_app_name
+
+
+async def run_integration_test(
+    config: TestConfig,
+    app_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Run the integration test workflow.
+
+    This is the main entry point that:
+    1. Deploys the Colony cluster via deploy_cluster()
+    2. Creates a session for tracking
+    3. Pages the codebase into VCM using FileGrouperContextPageSource
+    4. Spawns coordinator agents via AgentHandle.from_blueprint()
+    5. Monitors progress via handle.run_streamed() and collects results
+    6. Returns a list of result dictionaries
+
+    Args:
+        config: Test configuration (includes origin_url, branch, commit).
+        app_name: Optional Polymathera serving application name. If None,
+            uses the current application context.
+
+    Returns:
+        List of result dictionaries, one per analysis.
+    """
+    """Run the integration test workflow.
+
+    This is the main entry point that:
+    1. Connects to the Ray cluster via PolymatheraApp.setup_ray()
+    2. Deploys PolymatheraCluster (LLM deployments, VCM, agent system)
+    3. Pages the codebase into VCM using FileGrouperContextPageSource
+    4. Spawns coordinator agents via AgentHandle.from_blueprint()
+    5. Monitors progress via handle.run_streamed() and collects results
+    6. Returns a list of result dictionaries
+    """
+
+    from polymathera.colony.vcm.sources import BuilInContextPageSourceType
+    from polymathera.colony.vcm.models import MmapConfig, MmapResult
+    from polymathera.colony.agents import AgentMetadata, AgentHandle, AgentRunEvent
+    from polymathera.colony.agents import ScopeUtils
+    from polymathera.colony.system import get_vcm, get_session_manager
+    from polymathera.colony.agents.sessions import AgentRun
+    from polymathera.colony.agents import AgentSelfConcept
+
+    results: list[dict[str, Any]] = []
+
+    # -----------------------------------------------------------------------
+    # Deploy cluster (connect to Ray + deploy all services)
+    # -----------------------------------------------------------------------
+    _polycluster, effective_app_name = await deploy_cluster(config, app_name)
 
     # -----------------------------------------------------------------------
     # Step 0.75: Create session for this test run
@@ -1941,6 +2011,92 @@ app = typer.Typer(
 
 list_app = typer.Typer(help="List available analyses, agents, and capabilities.")
 app.add_typer(list_app, name="list")
+
+
+# ---------------------------------------------------------------------------
+# polymath deploy
+# ---------------------------------------------------------------------------
+
+@app.command()
+def deploy(
+    config: Optional[str] = typer.Option(
+        None,
+        "--config", "-c",
+        help="Path to a YAML configuration file with cluster settings.",
+    ),
+    app_name: Optional[str] = typer.Option(
+        None,
+        "--app-name",
+        help="Polymathera serving application name.",
+    ),
+    working_dir: Optional[str] = typer.Option(
+        None,
+        "--working-dir", "-w",
+        help="Directory containing user code (custom agents, capabilities) to distribute to Ray workers.",
+    ),
+    block: bool = typer.Option(
+        False,
+        "--block",
+        help="Block forever after deployment. Required for container mode to keep actors alive.",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose", "-v",
+        help="Enable verbose logging.",
+    ),
+) -> None:
+    """Deploy the Colony cluster without running any analyses.
+
+    Connects to Ray, deploys LLM deployments, VCM, agent system, and
+    session manager. Idempotent — safe to call if already deployed.
+
+    This command is used by the ray-head container on startup to make the
+    cluster ready before users interact via the dashboard. It can also be
+    called manually to verify the cluster is healthy.
+    Use --block in container mode to keep the process alive (Ray actors
+    are garbage-collected when their owner process exits).
+
+    [bold]Example:[/bold]
+
+        polymath deploy --config /etc/colony/cluster.yaml --block
+    """
+    if verbose:
+        logging.getLogger("polymath").setLevel(logging.DEBUG)
+        logging.getLogger("colony").setLevel(logging.DEBUG)
+
+    # Build config
+    if config:
+        try:
+            test_config = load_config_from_yaml(config)
+        except Exception as e:
+            console.print(f"[red]Failed to load config: {e}[/red]")
+            raise typer.Exit(1)
+    else:
+        test_config = TestConfig()
+
+    if working_dir is not None:
+        test_config.working_dir = working_dir
+
+    console.print(Panel(
+        "[bold]polymath deploy[/bold] — deploying Colony cluster",
+        title="[bold magenta]Colony Deployment[/bold magenta]",
+        border_style="magenta",
+    ))
+
+    try:
+        _cluster, effective_name = asyncio.run(deploy_cluster(test_config, app_name))
+        console.print(f"\n[green]Colony cluster deployed successfully.[/green] (app={effective_name})")
+    except Exception as e:
+        console.print(f"\n[red]Deployment failed:[/red] {e}")
+        raise typer.Exit(1)
+
+    if block:
+        console.print("[dim]Blocking to keep serving actors alive. Ctrl-C to shutdown.[/dim]")
+        try:
+            import signal
+            signal.pause()  # Block until signal (SIGTERM/SIGINT)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Shutting down...[/yellow]")
 
 
 # ---------------------------------------------------------------------------

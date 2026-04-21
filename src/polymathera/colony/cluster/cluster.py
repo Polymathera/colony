@@ -133,6 +133,7 @@ class LLMCluster:
         self.embedding_deployment_handle: serving.DeploymentHandle | None = None
         self.state_manager: StateManager | None = None
         self.deployment_state_managers: dict[str, StateManager] = {}
+        self._handles_discovered: bool = False
 
     @serving.initialize_deployment
     async def initialize(self):
@@ -308,6 +309,7 @@ class LLMCluster:
 
         # Per-deployment state managers (for reading deployment states)
         await self._initialize_deployment_state_managers()
+        self._handles_discovered = True
 
     async def _initialize_deployment_state_managers(self) -> None:
         # Per-deployment state managers (for reading deployment states)
@@ -631,7 +633,7 @@ class LLMCluster:
         self._check_initialized()
 
         handles = list(self.vllm_deployment_handles.keys()) + list(self.remote_deployment_handles.keys())
-        if not self.top_level and not handles:
+        if not self.top_level and not self._handles_discovered:
             raise RuntimeError("Cluster's @on_app_ready endpoint must be called to discover deployment handles.")
 
         return handles

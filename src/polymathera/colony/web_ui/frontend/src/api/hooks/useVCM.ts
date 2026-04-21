@@ -1,10 +1,17 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "../client";
-import type { PageLoadedEntry, PageSummary, VCMStats } from "../types";
+import type {
+  PageLoadedEntry,
+  PageSummary,
+  VCMStats,
+  MapRepoRequest,
+  MapRepoResponse,
+} from "../types";
 
-export function useVCMStats() {
+export function useVCMStats(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["vcm", "stats"],
+    enabled: options?.enabled ?? true,
     queryFn: () => apiFetch<VCMStats>("/vcm/stats"),
   });
 }
@@ -36,5 +43,44 @@ export function usePageDetail(pageId: string, colonyId: string, tenantId: string
     queryFn: () =>
       apiFetch<Record<string, unknown>>(`/vcm/pages/${pageId}/${colonyId}/${tenantId}`),
     enabled: !!pageId && !!colonyId && !!tenantId,
+  });
+}
+
+export interface MappingOpStatus {
+  op_id: string;
+  status: string;
+  origin_url: string;
+  started_at: number;
+  completed_at: number | null;
+  message: string;
+  scope_id: string;
+}
+
+export function useMappingOperations() {
+  return useQuery({
+    queryKey: ["vcm", "map", "operations"],
+    queryFn: () => apiFetch<MappingOpStatus[]>("/vcm/map/operations"),
+    refetchInterval: (query) => {
+      const ops = query.state.data;
+      if (ops && ops.some((op) => op.status === "pending" || op.status === "running")) {
+        return 2000; // Poll every 2s while active
+      }
+      return false;
+    },
+  });
+}
+
+export function useMapRepo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: MapRepoRequest) =>
+      apiFetch<MapRepoResponse>("/vcm/map", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["vcm"] });
+      qc.invalidateQueries({ queryKey: ["page-graph"] });
+    },
   });
 }

@@ -2,10 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../client";
 import type { AgentHierarchyNode, AgentSummary } from "../types";
 
-export function useAgents() {
+export function useAgents(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["agents"],
     queryFn: () => apiFetch<AgentSummary[]>("/agents/"),
+    enabled: options?.enabled ?? true,
   });
 }
 

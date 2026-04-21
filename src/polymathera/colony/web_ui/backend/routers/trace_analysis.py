@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
+from ..auth.middleware import require_auth
 from ..dependencies import get_colony
 from ..services.colony_connection import ColonyConnection
 
@@ -243,6 +244,7 @@ def _extract_iterations(
 async def get_codegen_iterations(
     trace_id: str,
     agent_id: str = Query(..., description="Filter iterations by agent ID"),
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> list[dict[str, Any]]:
     """Extract the linearized codegen iteration sequence for one agent.
@@ -270,6 +272,7 @@ async def get_prompt_diff(
     agent_id: str = Query(...),
     step_a: int = Query(..., ge=0, description="First step index"),
     step_b: int = Query(..., ge=0, description="Second step index"),
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """Compute a section-aware diff between two codegen prompts.
@@ -370,6 +373,7 @@ def _compute_section_diff(
 async def get_fsm_graph(
     trace_id: str,
     agent_id: str = Query(...),
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """Compute the finite-state machine graph for one agent's execution.

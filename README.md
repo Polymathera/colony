@@ -113,23 +113,17 @@ pip install polymathera-colony --all-extras      # Everything
 Colony ships with `colony-env`, a CLI tool that spins up a local Ray cluster + Redis using Docker Compose. The only prerequisite is **Docker**.
 
 ```bash
-# Start the cluster (builds image on first run)
-colony-env up
+# Start the cluster with a config (builds docker images on first run)
+colony-env up --config my_analysis.yaml
 
-# Generate a sample analysis config
-polymath init-config --output my_analysis.yaml
-
-# Run a code analysis over a local codebase
-colony-env run /path/to/codebase --config my_analysis.yaml
+# Start with multiple workers
+colony-env up --workers 3 --config my_analysis.yaml
 
 # Check service status
 colony-env status
 
 # Open the web dashboard
 colony-env dashboard
-
-# Scale workers
-colony-env up --workers 3
 
 # Tear down
 colony-env down
@@ -138,7 +132,9 @@ colony-env down
 colony-env doctor
 ```
 
-All Colony dependencies run inside Docker -- no local GPU drivers, Ray, or Redis installation required. The `colony-env run` command copies your codebase to be analyzed into the cluster and executes inside the Ray head container with full access to the framework.
+Colony runs as an **always-on system**. After `colony-env up`, the cluster deploys automatically and the web dashboard is ready at [localhost:8080](http://localhost:8080). Users sign up, create sessions, map codebases, and submit analysis jobs through the dashboard — no need to run separate CLI commands.
+
+All Colony dependencies run inside Docker -- no local GPU drivers, Ray, or Redis installation required.
 
 **Services started by `colony-env up`:**
 
@@ -151,15 +147,27 @@ All Colony dependencies run inside Docker -- no local GPU drivers, Ray, or Redis
 
 ### Web Dashboard
 
-The Colony dashboard starts automatically with `colony-env up` at [localhost:8080](http://localhost:8080). It provides:
+The Colony dashboard starts automatically with `colony-env up` at [localhost:8080](http://localhost:8080). Sign up to create an account, then use the dashboard to:
+
+1. **Map content** — clone a git repo into VCM pages via the VCM tab, or explore codebases before running agents
+2. **Create sessions** — each session is an isolated workspace with its own VCM branch
+3. **Submit analysis runs** — choose analysis types (impact, compliance, intent, contracts, slicing) and configure agent teams
+4. **Monitor** — watch agents, traces, logs, and metrics in real time
+5. **Interact** — chat with running agents via the Interact tab
+
+**Dashboard tabs:**
 
 - **Overview** — cluster health, application deployments, quick stats
-- **Agents** — list registered agents, view state, capabilities, and details
+- **Agents** — registered agents, state, capabilities, hierarchy view
 - **Sessions** — browse sessions and their agent runs with token usage
-- **VCM** — page table, working set, and virtual context statistics
-- **Logs** — centralized logging of agent actions, system events, and errors
-- **Traces** — detailed tracing of agent actions, VCM operations, and system events for debugging and performance analysis
-- And more...
+- **VCM** — page table, working set, content mapping with progress tracking
+- **Page Graph** — 3D visualization of page relationships
+- **Blackboard** — inspect agent communication channels
+- **Interact** — real-time chat with running agents
+- **Logs** — centralized logging with persistent search (PostgreSQL-backed)
+- **Traces** — waterfall and timeline views for debugging agent execution
+- **Metrics** — token usage, cost tracking, per-agent breakdowns
+- **Settings** — cluster info, tenant quotas
 
 #### Waterfall Trace View
 ![traces](./docs/guides/images/dashboard-traces-tab.png)
@@ -168,8 +176,8 @@ The Colony dashboard starts automatically with `colony-env up` at [localhost:808
 ![traces](./docs/guides/images/dashboard-traces-timeline.png)
 
 ```bash
-# Run the agent colony
-colony-env down && colony-env up --workers 3 && colony-env run --local-repo /path/to/codebase --config my_analysis.yaml --verbose
+# Start the colony (auto-deploys cluster and opens dashboard)
+colony-env down && colony-env up --workers 3 --config my_analysis.yaml
 
 # Open the dashboard in your browser
 colony-env dashboard

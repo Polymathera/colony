@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
+from ..auth.middleware import require_auth
 from ..dependencies import get_colony
 from ..services.colony_connection import ColonyConnection
 
@@ -21,6 +22,7 @@ router = APIRouter()
 
 @router.get("/logs/sources")
 async def list_log_sources(
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> list[dict[str, Any]]:
     """List available log sources (live Ray actors) with metadata.
@@ -75,6 +77,7 @@ async def list_log_sources(
 
 @router.get("/logs/actors")
 async def list_log_actors(
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """List available log files/actors from the Ray dashboard."""
@@ -97,6 +100,7 @@ async def get_log_file(
     filename: str = Query(None, description="Log filename"),
     actor_id: str = Query(None, description="Ray actor ID"),
     lines: int = Query(200, le=2000),
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """Get log file content from a Ray node."""
@@ -138,6 +142,7 @@ async def query_persistent_logs(
     until: float | None = Query(None, description="Unix timestamp — logs before this time"),
     limit: int = Query(500, le=5000),
     offset: int = Query(0),
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """Query persistent logs from PostgreSQL.
@@ -172,6 +177,7 @@ async def query_persistent_logs(
 async def get_log_stats(
     session_id: str | None = Query(None),
     since: float | None = Query(None),
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> dict[str, Any]:
     """Get aggregate log statistics."""
@@ -188,6 +194,7 @@ async def get_log_stats(
 
 @router.get("/logs/persistent/actors")
 async def list_log_actor_classes(
+    _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> list[dict[str, Any]]:
     """List distinct actor classes that have emitted logs."""

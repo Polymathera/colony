@@ -28,10 +28,11 @@ class DeploymentManager:
         self,
         build: bool = True,
         workers: int = 1,
+        config_path: str | None = None,
         on_status: Callable[[str], None] | None = None,
     ) -> list[ServiceInfo]:
         return await self._provider.up(
-            build=build, workers=workers, on_status=on_status,
+            build=build, workers=workers, config_path=config_path, on_status=on_status,
         )
 
     async def down(self) -> None:

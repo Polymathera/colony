@@ -9518,7 +9518,7 @@ aws = ["aiobotocore", "boto3", "botocore"]
 cache-compression = ["zstandard"]
 code-analysis = ["astor", "chardet", "gitpython", "html2text", "markdown", "nbformat", "pillow", "psutil", "pygithub", "python-louvain", "python-magic", "sqlparse", "toml", "tree-sitter", "xxhash"]
 cpu = ["anthropic", "chromadb", "openai", "sentence-transformers"]
-dashboard = ["fastapi", "httpx", "uvicorn"]
+dashboard = ["fastapi", "httpx", "python-multipart", "uvicorn"]
 distributed = ["etcd3"]
 gpu = ["pynvml", "torch", "torchaudio", "torchvision", "transformers", "vllm"]
 observability = ["aiokafka"]
@@ -9526,4 +9526,4 @@ observability = ["aiokafka"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.13"
-content-hash = "3efcc19dd1f771664a989c0ac8db7b25f2ed5de0322bbcaa7e5146603858ac41"
+content-hash = "9c9da37a549690079c444aa12c6f22827ef22f82f1e5561ceb1e4d051ad45823"

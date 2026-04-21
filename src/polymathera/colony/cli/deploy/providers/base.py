@@ -32,6 +32,7 @@ class DeploymentProvider(ABC):
         self,
         build: bool = True,
         workers: int = 1,
+        config_path: str | None = None,
         on_status: Callable[[str], None] | None = None,
     ) -> list[ServiceInfo]:
         """Start all infrastructure. Returns status of each service."""
