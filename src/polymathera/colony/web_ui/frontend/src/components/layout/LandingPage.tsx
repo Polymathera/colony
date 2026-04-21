@@ -7,9 +7,10 @@ import { formatTimestamp } from "@/lib/utils";
 interface LandingPageProps {
   onSelectSession: (sessionId: string) => void;
   onCreateSession: () => void;
+  clusterReady: boolean;
 }
 
-export function LandingPage({ onSelectSession, onCreateSession }: LandingPageProps) {
+export function LandingPage({ onSelectSession, onCreateSession, clusterReady }: LandingPageProps) {
   const health = useHealthStatus();
   const sessions = useSessions();
 
@@ -62,9 +63,10 @@ export function LandingPage({ onSelectSession, onCreateSession }: LandingPagePro
       <div className="flex gap-3">
         <button
           onClick={onCreateSession}
-          className="rounded-lg bg-primary px-6 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+          disabled={!clusterReady}
+          className="rounded-lg bg-primary px-6 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          <Plus size={16} className="inline -mt-0.5" /> New Session
+          <Plus size={16} className="inline -mt-0.5" /> {clusterReady ? "New Session" : "Waiting for cluster..."}
         </button>
       </div>
 

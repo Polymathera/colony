@@ -1,13 +1,14 @@
 """Job submission and management endpoints.
 
-A "job" is a complete analysis workflow: create session, map repo, spawn
-coordinators, monitor until completion. Jobs are submitted asynchronously
-and tracked via the session system.
+A "job" spawns coordinator agents within an existing session and monitors
+them until completion. Content must already be mapped in VCM (POST /vcm/map)
+and a session must already exist (created via the sidebar).
+
+Jobs are submitted asynchronously and tracked via the session system.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from typing import Any
@@ -40,23 +41,15 @@ class AnalysisSpec(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict, description="Analysis-specific params")
 
 
-class PagingSpec(BaseModel):
-    """Paging configuration for a job."""
-
-    flush_threshold: int = Field(default=20)
-    flush_token_budget: int = Field(default=4096)
-    pinned: bool = Field(default=False)
-
-
 class JobSubmitRequest(BaseModel):
-    """Submit an analysis job to the running Colony."""
+    """Submit an analysis job to the running Colony.
 
-    origin_url: str = Field(description="Git repo URL (https:// or file://)")
-    branch: str = Field(default="main")
-    commit: str = Field(default="HEAD")
-    repo_id: str | None = Field(default=None, description="Scope ID (auto-generated if None)")
+    Content must already be mapped in VCM before submitting a job.
+    Use POST /vcm/map to map a codebase first.
+    """
+
+    session_id: str = Field(description="Session to run analyses in (created via sidebar)")
     analyses: list[AnalysisSpec] = Field(description="Analyses to run")
-    paging: PagingSpec = Field(default_factory=PagingSpec)
     timeout_seconds: int = Field(default=600, description="Max time for the job")
     budget_usd: float | None = Field(default=None, description="Max budget in USD")
 
@@ -102,11 +95,10 @@ async def submit_job(
 ) -> JobSubmitResponse:
     """Submit an analysis job. Returns immediately — monitoring via SSE/polling.
 
+    Content must already be mapped in VCM.
     The job runs asynchronously in the background:
-    1. Creates a session
-    2. Maps the repo to VCM (if not already mapped)
-    3. Spawns coordinator agents for each analysis
-    4. Coordinators run autonomously until completion or timeout
+    1. Spawns coordinator agents for each analysis in the given session
+    2. Coordinators run autonomously until completion or timeout
     """
     if not colony.is_connected:
         return JobSubmitResponse(
@@ -115,23 +107,8 @@ async def submit_job(
         )
 
     job_id = f"job_{uuid.uuid4().hex[:12]}"
+    session_id = request.session_id
     analysis_types = [a.type for a in request.analyses]
-
-    # Create session — AuthMiddleware has already set Ring.USER context
-    # with the user's tenant_id and colony_id from the JWT and header.
-    try:
-        sm = colony.get_session_manager()
-        session = await sm.create_session()
-        if isinstance(session, dict):
-            session_id = session.get("session_id", "")
-        else:
-            session_id = session.session_id
-    except Exception as e:
-        logger.error("Failed to create session for job %s: %s", job_id, e)
-        return JobSubmitResponse(
-            job_id=job_id, session_id="", status="error",
-            analyses=analysis_types, message=f"Session creation failed: {e}",
-        )
 
     # Track job
     _active_jobs[job_id] = {
@@ -144,7 +121,7 @@ async def submit_job(
         "request": request.model_dump(),
     }
 
-    # Launch background task for VCM mapping + agent spawning.
+    # Launch background task for agent spawning.
     # Background tasks don't inherit the request's execution context
     # (contextvars are lost), so capture tenant/colony now.
     from polymathera.colony.distributed.ray_utils.serving.context import get_colony_id
@@ -215,58 +192,16 @@ async def _run_job(
     Must set its own execution context since contextvars don't propagate
     to background tasks.
 
-    Steps:
-    1. Map repo to VCM
-    2. Spawn coordinator agents for each analysis
-    3. Update job status as coordinators complete
+    Content must already be mapped in VCM. Steps:
+    1. Spawn coordinator agents for each analysis
+    2. Monitor coordinators until completion or timeout
     """
     job = _active_jobs.get(job_id)
     if not job:
         return
 
     try:
-        job["status"] = "mapping"
-
-        # Step 1: Map repo to VCM — use the user's context
-        with colony.user_execution_context(
-            tenant_id=tenant_id,
-            colony_id=colony_id,
-            session_id=session_id,
-            origin="dashboard_job",
-        ):
-            from polymathera.colony.vcm.models import MmapConfig
-            from polymathera.colony.vcm.sources import BuilInContextPageSourceType
-            from polymathera.colony.agents import ScopeUtils
-
-            vcm = colony.get_vcm()
-            scope_id = request.repo_id or ScopeUtils.get_colony_level_scope()
-
-            mmap_config = MmapConfig(
-                flush_threshold=request.paging.flush_threshold,
-                flush_token_budget=request.paging.flush_token_budget,
-                pinned=request.paging.pinned,
-            )
-
-            mmap_result = await vcm.mmap_application_scope(
-                scope_id=scope_id,
-                source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
-                config=mmap_config,
-                origin_url=request.origin_url,
-                branch=request.branch,
-                commit=request.commit,
-            )
-
-            if isinstance(mmap_result, dict):
-                mmap_status = mmap_result.get("status", "error")
-            else:
-                mmap_status = mmap_result.status
-
-            if mmap_status not in ("mapped", "already_mapped"):
-                job["status"] = "failed"
-                job["message"] = f"VCM mapping failed: {mmap_status}"
-                return
-
-        # Step 2: Spawn coordinators
+        # Spawn coordinators
         job["status"] = "spawning"
 
         with colony.user_execution_context(
@@ -308,11 +243,10 @@ async def _run_job(
                     role=f"{reg['label']} coordinator",
                     run_id=run_id,
                     session_id=session_id,
-                    goals=[f"Run {reg['label']} on {request.repo_id or scope_id}"],
+                    goals=[f"Run {reg['label']} analysis"],
                     max_iterations=analysis.max_iterations,
                     self_concept=AgentSelfConcept(**self_concept_config) if self_concept_config else None,
                     parameters={
-                        "repo_id": request.repo_id or scope_id,
                         "max_agents": analysis.max_agents,
                         "quality_threshold": analysis.quality_threshold,
                         "max_iterations": analysis.max_iterations,
@@ -356,7 +290,7 @@ async def _run_job(
                 job["message"] = "No valid analyses to run"
                 return
 
-        # Step 3: Monitor coordinators (run in background)
+        # Monitor coordinators
         job["status"] = "running"
         job["message"] = f"Running {len(coordinator_handles)} analysis coordinator(s)"
 
@@ -369,7 +303,6 @@ async def _run_job(
                 ):
                     async for event in handle.run_streamed(
                         input_data={
-                            "repo_id": request.repo_id or scope_id,
                             "analysis_type": analysis_spec.type,
                             **analysis_spec.parameters,
                         },

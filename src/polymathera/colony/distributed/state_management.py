@@ -81,6 +81,7 @@ class StateManager(Generic[T]):
             if state_data:
                 self._state_version = version
                 return self.state_type.model_validate_json(state_data)
+            self._state_version = 0
             return self.state_type()
         except Exception as e:
             logger.error(f"Failed to load state: {e}")

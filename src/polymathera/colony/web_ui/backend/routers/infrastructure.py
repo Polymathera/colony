@@ -34,6 +34,7 @@ async def get_status(
         ray_nodes = await colony.get_ray_nodes()
 
         redis_connected = False
+        deployments_ready = False
         if colony.is_connected:
             try:
                 handle = colony.get_agent_system()
@@ -42,9 +43,18 @@ async def get_status(
             except Exception as e:
                 logger.warning("Failed to get infra status from deployment: %s", e)
 
+            # Probe session manager — only True after on_app_ready has fired
+            # and all sibling handles (VCM, etc.) are discovered.
+            try:
+                sm = colony.get_session_manager()
+                deployments_ready = await sm.is_ready()
+            except Exception as e:
+                logger.debug("Session manager not ready: %s", e)
+
         return HealthStatus(
             ray_connected=colony.is_connected,
             redis_connected=redis_connected,
+            deployments_ready=deployments_ready,
             ray_cluster_status="active" if ray_status.get("result") is True else ray_status.get("status", "unknown"),
             node_count=len(ray_nodes),
         )

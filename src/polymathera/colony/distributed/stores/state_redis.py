@@ -19,7 +19,7 @@ class RedisStateStorageConfig(BaseModel):
     """Configuration for state storage"""
 
     namespace: str = Field(default="polymathera")
-    ttl: int = 3600  # 1 hour default TTL
+    ttl: int = 86400  # 24 hour default TTL
     max_retries: int = 3
     retry_delay: float = 0.1  # seconds
 

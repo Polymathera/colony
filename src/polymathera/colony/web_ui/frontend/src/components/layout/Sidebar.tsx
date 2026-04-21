@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Plus, PanelLeftClose, PanelLeftOpen, Pause, Play, X, Rocket } from "lucide-react";
 import { useSessions, useCreateSession, useSuspendSession, useResumeSession, useCloseSession } from "@/api/hooks/useSessions";
 import { Badge } from "../shared/Badge";
@@ -39,6 +39,13 @@ export function Sidebar({
   const activeSession = sessions.data?.find(
     (s) => s.session_id === activeSessionId,
   );
+
+  // Clear stale session ID if sessions loaded but the active one doesn't exist
+  useEffect(() => {
+    if (activeSessionId && sessions.data && !activeSession) {
+      onSelectSession(null);
+    }
+  }, [activeSessionId, sessions.data, activeSession, onSelectSession]);
 
   const handleCreateSession = async () => {
     const name = newSessionName.trim() || undefined;

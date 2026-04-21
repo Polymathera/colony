@@ -141,6 +141,15 @@ class SessionManagerDeployment:
         self.vcm_handle = get_vcm()
         logger.info("SessionManagerDeployment handle discovery complete")
 
+    @serving.endpoint(ring=serving.Ring.KERNEL)
+    async def is_ready(self) -> bool:
+        """Check if session manager is fully initialized and ready to serve.
+
+        Returns True only after on_app_ready has completed (vcm_handle set).
+        Used by the dashboard health endpoint to gate UI interactions.
+        """
+        return self.state_manager is not None and self.vcm_handle is not None
+
     # =========================================================================
     # Session Lifecycle
     # =========================================================================
@@ -170,6 +179,12 @@ class SessionManagerDeployment:
             ValueError: If tenant quota exceeded or parent session not found
         """
         syscontext = serving.require_execution_context()
+
+        if self.vcm_handle is None:
+            raise RuntimeError(
+                "Session manager is still initializing (VCM handle not yet available). "
+                "Please wait a few seconds and try again."
+            )
 
         # Check quota
         await self._check_session_quota()

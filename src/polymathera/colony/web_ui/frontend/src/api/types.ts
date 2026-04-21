@@ -3,6 +3,7 @@
 export interface HealthStatus {
   ray_connected: boolean;
   redis_connected: boolean;
+  deployments_ready: boolean;
   ray_cluster_status: string;
   node_count: number;
 }
@@ -271,16 +272,8 @@ export interface AnalysisSpec {
 }
 
 export interface JobSubmitRequest {
-  origin_url: string;
-  branch?: string;
-  commit?: string;
-  repo_id?: string | null;
+  session_id: string;
   analyses: AnalysisSpec[];
-  paging?: {
-    flush_threshold?: number;
-    flush_token_budget?: number;
-    pinned?: boolean;
-  };
   timeout_seconds?: number;
   budget_usd?: number | null;
 }

@@ -15,6 +15,7 @@ class HealthStatus(BaseModel):
 
     ray_connected: bool = False
     redis_connected: bool = False
+    deployments_ready: bool = False
     ray_cluster_status: str = "unknown"
     node_count: int = 0
 

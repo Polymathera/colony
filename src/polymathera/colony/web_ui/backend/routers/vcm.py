@@ -291,6 +291,7 @@ async def _run_mapping(
     with colony.user_execution_context(
         tenant_id=tenant_id,
         colony_id=colony_id,
+        session_id=None,
         origin="dashboard_map",
     ):
         # AuthMiddleware sets USER context; no explicit context needed

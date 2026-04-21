@@ -24,6 +24,37 @@ logger = logging.getLogger(__name__)
 _DEPLOYMENT_PROXIES: dict[str, Any] = {}
 
 
+def _is_actor_not_found(e: Exception) -> bool:
+    """Check if an exception indicates a dead or missing Ray actor."""
+    msg = str(e)
+    return "not found" in msg or "Failed to look up actor" in msg
+
+
+def invalidate_proxy_cache(app_name: str | None = None, deployment_name: str | None = None) -> None:
+    """Invalidate cached proxy actor handles.
+
+    Call when a proxy actor is dead (Colony app restarted, actor crashed)
+    so the next get_deployment() call re-resolves via ray.get_actor().
+
+    Args:
+        app_name: Invalidate only proxies for this app. If None, invalidate all.
+        deployment_name: Invalidate only this deployment. Requires app_name.
+    """
+    if app_name and deployment_name:
+        key = f"{app_name}/{deployment_name}"
+        _DEPLOYMENT_PROXIES.pop(key, None)
+        logger.info("Invalidated proxy cache for %s", key)
+    elif app_name:
+        keys = [k for k in _DEPLOYMENT_PROXIES if k.startswith(f"{app_name}/")]
+        for k in keys:
+            del _DEPLOYMENT_PROXIES[k]
+        logger.info("Invalidated %d proxy cache entries for app %s", len(keys), app_name)
+    else:
+        count = len(_DEPLOYMENT_PROXIES)
+        _DEPLOYMENT_PROXIES.clear()
+        logger.info("Invalidated all %d proxy cache entries", count)
+
+
 class DeploymentHandle:
     """Handle for calling into a deployment.
 
@@ -144,6 +175,27 @@ class DeploymentHandle:
             )
             return None
 
+    def _re_resolve_proxy(self) -> bool:
+        """Re-resolve the proxy actor handle after a stale-actor error.
+
+        Returns True if a new proxy was found, False if the deployment
+        is genuinely unavailable.
+        """
+        cache_key = f"{self.app_name}/{self.deployment_name}"
+        invalidate_proxy_cache(self.app_name, self.deployment_name)
+        try:
+            proxy_namespace = ApplicationRegistry.get_ray_actor_namespace(self.app_name)
+            proxy_actor_name = ApplicationRegistry.get_deployment_proxy_actor_name(
+                self.app_name, self.deployment_name,
+            )
+            self._proxy_actor_handle = ray.get_actor(proxy_actor_name, namespace=proxy_namespace)
+            _DEPLOYMENT_PROXIES[cache_key] = self._proxy_actor_handle
+            logger.info("Re-resolved proxy for %s/%s", self.app_name, self.deployment_name)
+            return True
+        except (ValueError, Exception) as e:
+            logger.warning("Failed to re-resolve proxy for %s/%s: %s", self.app_name, self.deployment_name, e)
+            return False
+
     def __getattr__(self, method_name: str) -> Any:
         """Get a callable for invoking a deployment method.
 
@@ -227,27 +279,38 @@ class DeploymentHandle:
                 correlation_id=correlation_id,
             )
 
-            # Send request to proxy actor
-            logger.debug(
-                f"[TRACE] DeploymentHandle: BEFORE .remote() "
-                f"deployment={self.deployment_name}.{method_name} "
-                f"correlation_id={request.correlation_id}"
-            )
-            try:
-                response: DeploymentResponse = await self._proxy_actor_handle.handle_request.remote(
-                    request
-                )
+            # Send request to proxy actor. On actor-not-found (stale proxy
+            # from a Colony restart), re-resolve the proxy and retry once.
+            for attempt in range(2):
                 logger.debug(
-                    f"[TRACE] DeploymentHandle: AFTER .remote() "
+                    f"[TRACE] DeploymentHandle: BEFORE .remote() "
                     f"deployment={self.deployment_name}.{method_name} "
-                    f"correlation_id={request.correlation_id}"
+                    f"correlation_id={request.correlation_id} attempt={attempt}"
                 )
-            except Exception as e:
-                logger.error(
-                    f"Error calling {self.deployment_name}.{method_name}: {e}",
-                    exc_info=True,
-                )
-                raise
+                try:
+                    response: DeploymentResponse = await self._proxy_actor_handle.handle_request.remote(
+                        request
+                    )
+                    logger.debug(
+                        f"[TRACE] DeploymentHandle: AFTER .remote() "
+                        f"deployment={self.deployment_name}.{method_name} "
+                        f"correlation_id={request.correlation_id}"
+                    )
+                    break  # Success
+                except Exception as e:
+                    if attempt == 0 and _is_actor_not_found(e):
+                        logger.warning(
+                            f"Stale proxy for {self.deployment_name}.{method_name}, "
+                            f"re-resolving: {e}"
+                        )
+                        if not self._re_resolve_proxy():
+                            raise
+                        continue  # Retry with fresh proxy
+                    logger.error(
+                        f"Error calling {self.deployment_name}.{method_name}: {e}",
+                        exc_info=True,
+                    )
+                    raise
 
             # Check response status and unpack
             if response.status == DeploymentResponseStatus.SUCCESS:

@@ -4,6 +4,7 @@ import type { AnalysisSpec } from "@/api/types";
 
 interface SubmitRunDialogProps {
   open: boolean;
+  sessionId: string;
   onClose: () => void;
   onSubmitted?: (jobId: string, sessionId: string) => void;
 }
@@ -17,10 +18,8 @@ const ANALYSIS_TYPES = [
   { id: "basic", label: "Basic Analysis", description: "General code structure analysis" },
 ];
 
-export function SubmitRunDialog({ open, onClose, onSubmitted }: SubmitRunDialogProps) {
+export function SubmitRunDialog({ open, sessionId, onClose, onSubmitted }: SubmitRunDialogProps) {
   const submitJob = useSubmitJob();
-  const [originUrl, setOriginUrl] = useState("");
-  const [branch, setBranch] = useState("main");
   const [selectedAnalyses, setSelectedAnalyses] = useState<Set<string>>(new Set(["basic"]));
   const [maxAgents, setMaxAgents] = useState(10);
   const [timeoutSeconds, setTimeoutSeconds] = useState(600);
@@ -38,7 +37,7 @@ export function SubmitRunDialog({ open, onClose, onSubmitted }: SubmitRunDialogP
   };
 
   const handleSubmit = async () => {
-    if (!originUrl.trim() || selectedAnalyses.size === 0) return;
+    if (selectedAnalyses.size === 0) return;
 
     const analyses: AnalysisSpec[] = Array.from(selectedAnalyses).map((type) => ({
       type,
@@ -46,8 +45,7 @@ export function SubmitRunDialog({ open, onClose, onSubmitted }: SubmitRunDialogP
     }));
 
     const result = await submitJob.mutateAsync({
-      origin_url: originUrl.trim(),
-      branch,
+      session_id: sessionId,
       analyses,
       timeout_seconds: timeoutSeconds,
       budget_usd: budgetUsd,
@@ -75,33 +73,6 @@ export function SubmitRunDialog({ open, onClose, onSubmitted }: SubmitRunDialogP
 
         {/* Body */}
         <div className="space-y-4 px-5 py-4">
-          {/* Repository */}
-          <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">
-              Repository URL
-            </label>
-            <input
-              type="text"
-              value={originUrl}
-              onChange={(e) => setOriginUrl(e.target.value)}
-              placeholder="https://github.com/org/repo or file:///mnt/shared/codebase"
-              className="w-full rounded border border-border bg-background px-3 py-1.5 text-xs font-mono focus:border-primary focus:outline-none"
-            />
-            <div className="grid grid-cols-2 gap-3 mt-2">
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">
-                  Branch
-                </label>
-                <input
-                  type="text"
-                  value={branch}
-                  onChange={(e) => setBranch(e.target.value)}
-                  className="w-full rounded border border-border bg-background px-2 py-1.5 text-xs font-mono focus:border-primary focus:outline-none"
-                />
-              </div>
-            </div>
-          </div>
-
           {/* Analysis types */}
           <div>
             <label className="block text-xs font-medium text-muted-foreground mb-1.5">
@@ -182,7 +153,7 @@ export function SubmitRunDialog({ open, onClose, onSubmitted }: SubmitRunDialogP
           </button>
           <button
             onClick={handleSubmit}
-            disabled={!originUrl.trim() || selectedAnalyses.size === 0 || submitJob.isPending}
+            disabled={selectedAnalyses.size === 0 || submitJob.isPending}
             className="rounded bg-emerald-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
           >
             {submitJob.isPending ? "Submitting..." : "Start Run"}

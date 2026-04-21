@@ -20,6 +20,7 @@ import { TracesTab } from "../observability/TracesTab";
 import { SettingsTab } from "../settings/SettingsTab";
 import { useCreateSession } from "@/api/hooks/useSessions";
 import { useCurrentUser, useLogout, useColonies } from "@/api/hooks/useAuth";
+import { useHealthStatus } from "@/api/hooks/useInfrastructure";
 
 const TABS: Tab[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={14} /> },
@@ -113,6 +114,8 @@ export function AppShell() {
   const logout = useLogout();
   const isAuthenticated = !!currentUser.data && !currentUser.isError;
   const colonies = useColonies({ enabled: isAuthenticated });
+  const health = useHealthStatus();
+  const clusterReady = !!activeColonyId && health.isSuccess && !!health.data?.deployments_ready;
   const createSession = useCreateSession();
   // Only show loading spinner briefly on initial load, not on refetches.
   // isFetching is true during refetches; isLoading is true only when there's
@@ -242,7 +245,7 @@ export function AppShell() {
           activeSessionId={activeSessionId}
           onSelectSession={setActiveSessionId}
           onStartRun={() => setShowRunDialog(true)}
-          colonyReady={!!activeColonyId}
+          colonyReady={clusterReady}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         />
@@ -272,6 +275,7 @@ export function AppShell() {
               <LandingPage
                 onSelectSession={setActiveSessionId}
                 onCreateSession={handleCreateSession}
+                clusterReady={clusterReady}
               />
             </main>
           )}
@@ -284,6 +288,7 @@ export function AppShell() {
       {/* Dialogs */}
       <SubmitRunDialog
         open={showRunDialog}
+        sessionId={activeSessionId || ""}
         onClose={() => setShowRunDialog(false)}
         onSubmitted={handleJobSubmitted}
       />
