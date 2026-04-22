@@ -347,7 +347,7 @@ class ObjectiveGuardCapability(AgentCapability):
         await blackboard.write(
             key=GoalAlignmentProtocol.joint_goal_key(goal.goal_id),
             value=goal.model_dump(),
-            agent_id=self.agent.agent_id,
+            created_by=self.agent.agent_id if self.agent else None,
         )
 
     @action_executor()
@@ -409,7 +409,7 @@ class ObjectiveGuardCapability(AgentCapability):
         await blackboard.write(
             key=GoalAlignmentProtocol.request_key(f"{result.goal_id}:{result.requesting_agent_id}"),
             value=result.model_dump(),
-            agent_id=self.agent.agent_id,
+            created_by=self.agent.agent_id if self.agent else None,
         )
 
     def _get_goal_alignment_prompt(

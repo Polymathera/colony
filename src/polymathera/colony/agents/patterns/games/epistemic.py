@@ -538,7 +538,8 @@ class EpistemicCapability(AgentCapability):
         await blackboard.write(
             key=key,
             value=intention.model_dump(),
-            tags={"intention", agent_id, intention.status}
+            tags={"intention", agent_id, intention.status},
+            created_by=self.agent.agent_id if self.agent else None
         )
 
         return intention
@@ -577,7 +578,8 @@ class EpistemicCapability(AgentCapability):
         await blackboard.write(
             key=key,
             value=joint.model_dump(),
-            tags={"joint_intention", *members}
+            tags={"joint_intention", *members},
+            created_by=self.agent.agent_id if self.agent else None
         )
 
         return joint
@@ -598,7 +600,8 @@ class EpistemicCapability(AgentCapability):
                 "epistemic_status",
                 "common" if status.common_knowledge else "not_common",
                 status.domain or "general"
-            }
+            },
+            created_by=self.agent.agent_id if self.agent else None
         )
 
 

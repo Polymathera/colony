@@ -240,6 +240,30 @@ class SessionManagerDeployment:
         return session
 
     @serving.endpoint(ring=serving.Ring.KERNEL)
+    async def set_session_agent_id(self, session_id: str, agent_id: str) -> str | None:
+        """Set the session agent ID for a session. If the session already
+        has a session_agent_id, returns the existing one without overwriting.
+
+        Args:
+            session_id: Session identifier
+            agent_id: Agent identifier
+
+        Returns:
+            The agent_id now on the session, or None if session not found.
+        """
+        result: str | None = None
+        async for state in self.state_manager.write_transaction():
+            session = state.sessions.get(session_id)
+            if not session:
+                result = None
+            elif session.session_agent_id is None:
+                session.session_agent_id = agent_id
+                result = agent_id
+            else:
+                result = session.session_agent_id
+        return result
+
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_session(self, session_id: str) -> Session | None:
         """Get session by ID.
 

@@ -786,7 +786,8 @@ class ChangeImpactAnalysisCapability(AgentCapability):
             await self.blackboard.write(
                 key=ImpactAnalysisProtocol.impact_key(self.page_id),
                 value=result.model_dump(),
-                tags={"impact", self.agent.agent_id}
+                tags={"impact", self.agent.agent_id} if self.agent else {"impact"},
+                created_by=self.agent.agent_id if self.agent else None,
             )
 
         return result

@@ -64,10 +64,18 @@ async def lifespan(app: FastAPI):
         kafka_bootstrap=config.kafka_bootstrap,
     )
 
-    # Initialize auth schema (users + colonies tables)
+    # Initialize database schemas
     if colony._db_pool:
         from .auth.schema import ensure_auth_schema
+        from .chat.schema import ensure_chat_schema
         await ensure_auth_schema(colony._db_pool)
+        await ensure_chat_schema(colony._db_pool)
+
+        # Make chat store available via app state
+        from .chat.store import ChatMessageStore
+        app.state.chat_store = ChatMessageStore(colony._db_pool)
+    else:
+        app.state.chat_store = None
 
     yield
 

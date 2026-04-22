@@ -384,7 +384,7 @@ class ConsciousnessCapability(AgentCapability):
         await blackboard.write(
             key=ConsciousnessProtocol.state_key(f"metrics:{int(time.time() * 1000)}"),
             value=metrics_entry,
-            created_by=self.scope_id,
+            created_by=self.agent.agent_id if self.agent else self.scope_id,
             tags={"consciousness", "metrics"},
         )
 
@@ -448,7 +448,7 @@ class ConsciousnessCapability(AgentCapability):
         await blackboard.write(
             key=ConsciousnessProtocol.state_key(f"self_concept_update:{int(time.time() * 1000)}"),
             value={"updated_fields": list(updates.keys()), "timestamp": time.time()},
-            created_by=self.scope_id,
+            created_by=self.agent.agent_id if self.agent else self.scope_id,
             tags={"consciousness", "self_concept"},
         )
 

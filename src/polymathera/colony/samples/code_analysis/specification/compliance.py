@@ -563,6 +563,7 @@ class SpecificationComplianceCapability(AgentCapability):
             await blackboard.write(
                 key=AgentRunProtocol.result_key(request_id),
                 value=result.model_dump(),
+                created_by=self.agent.agent_id if self.agent else None,
             )
 
         return result

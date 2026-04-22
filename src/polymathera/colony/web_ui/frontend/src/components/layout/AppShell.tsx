@@ -1,19 +1,17 @@
 import { useEffect, useState, useCallback } from "react";
-import { LogOut, LayoutDashboard, Bot, Clock, Database, GitFork, ClipboardList, MessageSquare, ScrollText, Activity, Gauge, Settings } from "lucide-react";
+import { LogOut, LayoutDashboard, Bot, Database, GitFork, ClipboardList, ScrollText, Activity, Gauge, Settings } from "lucide-react";
 import { TabBar, type Tab } from "./TabBar";
 import { StatusBar } from "./StatusBar";
 import { Sidebar } from "./Sidebar";
 import { LandingPage } from "./LandingPage";
 import { AuthPage } from "../auth/AuthPage";
 import { ErrorBoundary } from "../shared/ErrorBoundary";
-import { SubmitRunDialog } from "../dialogs/SubmitRunDialog";
+import { ChatPanel } from "../chat/ChatPanel";
 import { OverviewTab } from "../dashboard/OverviewTab";
 import { AgentsTab } from "../agents/AgentsTab";
-import { SessionsTab } from "../sessions/SessionsTab";
 import { VCMTab } from "../vcm/VCMTab";
 import { PageGraphTab } from "../graph/PageGraphTab";
 import { BlackboardTab } from "../blackboard/BlackboardTab";
-import { InteractTab, setInteractSessionId } from "../interact/InteractTab";
 import { LogsTab } from "../logs/LogsTab";
 import { MetricsTab } from "../observability/MetricsTab";
 import { TracesTab } from "../observability/TracesTab";
@@ -25,11 +23,9 @@ import { useHealthStatus } from "@/api/hooks/useInfrastructure";
 const TABS: Tab[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={14} /> },
   { id: "agents", label: "Agents", icon: <Bot size={14} /> },
-  { id: "sessions", label: "Sessions", icon: <Clock size={14} /> },
   { id: "vcm", label: "VCM", icon: <Database size={14} /> },
   { id: "graph", label: "Page Graph", icon: <GitFork size={14} /> },
   { id: "blackboard", label: "Blackboard", icon: <ClipboardList size={14} /> },
-  { id: "interact", label: "Interact", icon: <MessageSquare size={14} /> },
   { id: "logs", label: "Logs", icon: <ScrollText size={14} /> },
   { id: "traces", label: "Traces", icon: <Activity size={14} /> },
   { id: "metrics", label: "Metrics", icon: <Gauge size={14} /> },
@@ -42,11 +38,9 @@ const TABS: Tab[] = [
 const TAB_COMPONENTS: Record<string, React.FC> = {
   overview: OverviewTab,
   agents: AgentsTab,
-  sessions: SessionsTab,
   vcm: VCMTab,
   graph: PageGraphTab,
   blackboard: BlackboardTab,
-  interact: InteractTab,
   logs: LogsTab,
   traces: TracesTab,
   metrics: MetricsTab,
@@ -96,7 +90,7 @@ export function AppShell() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(() => localStorage.getItem("colony_active_session"));
   const [activeColonyId, setActiveColonyId] = useState<string | null>(() => localStorage.getItem("colony_active_colony"));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [showRunDialog, setShowRunDialog] = useState(false);
+  const [tabNotifications, setTabNotifications] = useState<Record<string, number>>({});
 
   // Persist UI state to localStorage
   useEffect(() => { localStorage.setItem("colony_active_tab", activeTab); }, [activeTab]);
@@ -134,11 +128,6 @@ export function AppShell() {
     }
   }, [currentUser.data, activeColonyId]);
 
-  // Sync session ID to InteractTab (which can't receive props in current tab architecture)
-  useEffect(() => {
-    setInteractSessionId(activeSessionId);
-  }, [activeSessionId]);
-
   // Set X-Colony-Id header for all API calls when colony changes
   useEffect(() => {
     if (activeColonyId) {
@@ -157,16 +146,27 @@ export function AppShell() {
     }
   }, [createSession]);
 
-  const handleJobSubmitted = useCallback((_jobId: string, sessionId: string) => {
-    setActiveSessionId(sessionId);
-    setActiveTab("overview");
-  }, []);
-
   const handleLogout = useCallback(async () => {
     await logout.mutateAsync();
     setActiveSessionId(null);
     setActiveColonyId(null);
   }, [logout]);
+
+  // Tab activity: received from ChatPanel's WebSocket, clear on tab visit
+  const handleTabActivity = useCallback((tabId: string, count: number) => {
+    setTabNotifications((prev) => ({ ...prev, [tabId]: (prev[tabId] || 0) + count }));
+  }, []);
+
+  const handleTabChange = useCallback((tabId: string) => {
+    setActiveTab(tabId);
+    // Clear notification for the tab being visited
+    setTabNotifications((prev) => {
+      if (!prev[tabId]) return prev;
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+  }, []);
 
   // Loading state
   if (isLoading) {
@@ -238,25 +238,28 @@ export function AppShell() {
         </div>
       </header>
 
-      {/* Body: Sidebar + Main */}
+      {/* Body: Sidebar + Main + Chat */}
       <div className="flex flex-1 min-h-0">
         {/* Sidebar */}
         <Sidebar
           activeSessionId={activeSessionId}
           onSelectSession={setActiveSessionId}
-          onStartRun={() => setShowRunDialog(true)}
           colonyReady={clusterReady}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         />
 
-        {/* Main content */}
+        {/* Main content: tabs area */}
         <div className="flex flex-1 flex-col min-w-0">
           {activeSessionId ? (
             <>
               {/* Tabs */}
-              <TabBar tabs={TABS} activeTab={activeTab} onTabChange={setActiveTab} />
-
+              <TabBar
+                tabs={TABS}
+                activeTab={activeTab}
+                onTabChange={handleTabChange}
+                notifications={tabNotifications}
+              />
               {/* Content — no overflow-auto here; each tab controls its own scroll */}
               <main className="flex-1 min-h-0 p-5">
                 <TabContent activeTab={activeTab} />
@@ -280,18 +283,16 @@ export function AppShell() {
             </main>
           )}
         </div>
+
+        {/* Chat panel — always rendered, manages its own collapsed/empty state */}
+        <ChatPanel
+          sessionId={activeSessionId}
+          onTabActivity={handleTabActivity}
+        />
       </div>
 
       {/* Status bar */}
       <StatusBar authenticated={isAuthenticated} />
-
-      {/* Dialogs */}
-      <SubmitRunDialog
-        open={showRunDialog}
-        sessionId={activeSessionId || ""}
-        onClose={() => setShowRunDialog(false)}
-        onSubmitted={handleJobSubmitted}
-      />
     </div>
   );
 }

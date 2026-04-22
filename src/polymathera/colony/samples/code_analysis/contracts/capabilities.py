@@ -256,7 +256,7 @@ class ContractInferenceCapability(AgentCapability):
             await blackboard.write(
                 key=AgentRunProtocol.result_key(request_id),
                 value=final_result.model_dump(),
-                created_by=self.agent.agent_id,
+                created_by=self.agent.agent_id if self.agent else None,
             )
 
         return final_result

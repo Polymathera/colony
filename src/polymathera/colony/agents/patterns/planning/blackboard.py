@@ -349,7 +349,7 @@ class PlanBlackboard:
                 "data": data,
                 "timestamp": time.time(),
             },
-            created_by="plan_blackboard",
+            created_by=self.agent.agent_id if self.agent else None,
             ttl_seconds=3600,  # TODO: Make configurable. Auto-expire after 1 hour
             tags={"notification", event_type},
         )

@@ -294,3 +294,26 @@ export interface JobStatusResponse {
   analyses_total: number;
   message: string;
 }
+
+/* Chat controls — sent alongside messages to configure the session agent */
+
+export interface ChatControls {
+  vcm_context?: {
+    repo_ids?: string[];
+    file_patterns?: string[];
+    dir_paths?: string[];
+    page_ids?: string[];
+    languages?: string[];
+    exclude_patterns?: string[];
+  };
+  agent_preferences?: {
+    analysis_types?: string[];
+    max_agents?: number;
+    capabilities?: string[];
+    tools?: string[];
+    tool_config?: Record<string, Record<string, unknown>>;
+  };
+  effort?: "low" | "medium" | "high";
+  timeout_seconds?: number;
+  budget_usd?: number | null;
+}

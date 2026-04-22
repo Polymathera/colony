@@ -218,7 +218,7 @@ class MemoryLifecycleHooks(AgentCapability):
         ctx_engine = self.agent.get_context_engine()
         if ctx_engine:
             try:
-                await ctx_engine.consolidate()
+                await ctx_engine.ingest_pending()
             except Exception as e:
                 logger.error(f"Failed to consolidate memories on shutdown: {e}")
 
@@ -305,7 +305,7 @@ class MemoryLifecycleHooks(AgentCapability):
         await blackboard.write(
             key=LifecycleSignalProtocol.terminated_key(agent_id),
             value=termination_data.model_dump(),
-            agent_id=agent_id,
+            created_by=agent_id,
             tags={"agent_terminated", "memory_recycle_pending"},
             metadata={
                 "agent_type": agent.agent_type,

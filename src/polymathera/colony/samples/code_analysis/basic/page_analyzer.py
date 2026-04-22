@@ -238,7 +238,8 @@ Be concise. Focus on facts, not speculation."""
         # Write page summary to blackboard
         await blackboard.write(
             BasicAnalysisProtocol.page_summary_key(self.page_id),
-            self.summary
+            self.summary,
+            created_by=self.agent.agent_id if self.agent else None
         )
 
         logger.info(f"Wrote summary for {self.page_id} to blackboard (parent: {parent_id})")

@@ -140,7 +140,11 @@ class ResultCapability(AgentCapability):
         }
 
         key = self._get_partial_key(result_id)
-        await blackboard.write(key, result_entry, created_by=self.agent.agent_id)
+        await blackboard.write(
+            key,
+            result_entry,
+            created_by=self.agent.agent_id if self.agent else None
+        )
 
         # Update index atomically (multiple workers may store_partial concurrently)
         index_key = self._get_index_key()
@@ -543,7 +547,11 @@ class ResultCapability(AgentCapability):
             index = await blackboard.read(index_key) or {"result_ids": [], "count": 0}
             index["result_ids"] = [r for r in index["result_ids"] if r not in result_ids]
             index["count"] = len(index["result_ids"])
-            await blackboard.write(index_key, index, created_by=self.agent.agent_id)
+            await blackboard.write(
+                index_key,
+                index,
+                created_by=self.agent.agent_id if self.agent else None
+            )
 
         logger.info(f"ResultCapability: cleared {cleared} partial results")
 

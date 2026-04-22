@@ -234,13 +234,109 @@ async def create_session(
         from polymathera.colony.agents.sessions.models import SessionMetadata
         metadata = SessionMetadata(name=request.name) if request.name else None
 
-        handle = colony.get_session_manager()
-        session = await handle.create_session(
+        sm = colony.get_session_manager()
+        session = await sm.create_session(
             metadata=metadata,
             ttl_seconds=request.ttl_seconds,
             fork_from_session_id=request.fork_from_session_id,
         )
         session_id = _get(session, "session_id", "")
+
+        # Spawn a SessionAgent for this session.
+        # The spawn needs session_id in the execution context — the AuthMiddleware
+        # only sets tenant_id and colony_id. Wrap in user_execution_context.
+        session_agent_id: str | None = None
+        try:
+            from polymathera.colony.agents import AgentMetadata, AgentHandle
+            from polymathera.colony.agents.self_concept import AgentSelfConcept
+            from ..chat import SessionAgent, SessionOrchestratorCapability
+            from polymathera.colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
+            from polymathera.colony.agents.patterns.capabilities.consciousness import ConsciousnessCapability
+            from polymathera.colony.cli.polymath import ANALYSIS_REGISTRY
+            from polymathera.colony.distributed.ray_utils.serving.context import get_tenant_id, get_colony_id
+
+            # Build the available analysis types info for the LLM planner
+            available_analyses = {
+                atype: {
+                    "label": reg["label"],
+                    "description": reg.get("description", ""),
+                    "coordinator_class": reg.get("coordinator_v2", ""),
+                    "worker_class": reg.get("worker", ""),
+                }
+                for atype, reg in ANALYSIS_REGISTRY.items()
+            }
+
+            agent_metadata = AgentMetadata(
+                role="session_orchestrator",
+                session_id=session_id,
+                goals=[
+                    "Orchestrate user interactions within this session",
+                    "Interpret user intent and decide whether to respond directly or spawn analysis agents",
+                    "Spawn and monitor coordinator agents for code analysis tasks",
+                    "Relay agent progress and results back to the user",
+                ],
+                self_concept=AgentSelfConcept(
+                    agent_id="",  # Overwritten by ConsciousnessCapability
+                    name="Session Agent",
+                    role=(
+                        "the session orchestrator responsible for handling all user "
+                        "interactions in this session. You receive user messages, decide "
+                        "how to handle them, and can either respond directly or spawn "
+                        "specialized coordinator agents to perform code analysis tasks."
+                    ),
+                    description=(
+                        "You are the primary interface between the user and the Colony's "
+                        "multi-agent system. You have access to an agent pool for spawning "
+                        "coordinator agents (one per analysis type), and you can respond "
+                        "directly to user questions. When the user requests an analysis, "
+                        "use create_agent to spawn the appropriate coordinator. When the "
+                        "user asks a question or needs information, use respond_to_user."
+                    ),
+                ),
+                parameters={
+                    "available_analyses": available_analyses,
+                    "session_id": session_id,
+                },
+            )
+
+            bp = SessionAgent.bind(
+                agent_type=SessionAgent.model_fields["agent_type"].default,
+                metadata=agent_metadata,
+                bound_pages=[],
+                capability_blueprints=[
+                    SessionOrchestratorCapability.bind(),
+                    AgentPoolCapability.bind(),
+                    ConsciousnessCapability.bind(),
+                ],
+            )
+
+            with colony.user_execution_context(
+                tenant_id=get_tenant_id(),
+                colony_id=get_colony_id(),
+                session_id=session_id,
+                origin="dashboard_session_create",
+            ):
+                handle = await AgentHandle.from_blueprint(
+                    agent_blueprint=bp,
+                    app_name=colony.app_name,
+                )
+            session_agent_id = handle.agent_id
+            logger.info("Spawned SessionAgent %s for session %s", session_agent_id, session_id)
+        except Exception as e:
+            logger.error("Failed to spawn SessionAgent for session %s: %s", session_id, e)
+            # Session still works without an agent — chat will fall back to direct agent routing
+
+        session_agent_id1 = await sm.set_session_agent_id(
+            session_id=session_id,
+            agent_id=session_agent_id
+        )
+        if session_agent_id1 != session_agent_id:
+            return CreateSessionResponse(
+                session_id=session_id,
+                status="error",
+                message=f"Session created but failed to set session agent ID. Expected {session_agent_id}, got {session_agent_id1}",
+            )
+
         return CreateSessionResponse(session_id=session_id, status="created")
 
     except Exception as e:

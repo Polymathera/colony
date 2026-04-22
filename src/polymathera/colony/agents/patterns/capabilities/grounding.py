@@ -387,6 +387,6 @@ class GroundingCapability(AgentCapability):
         await blackboard.write(
             key=self._get_result_key(),
             value=result.model_dump(),
-            agent_id=self.agent.agent_id,
+            created_by=self.agent.agent_id if self.agent else None,
         )
 

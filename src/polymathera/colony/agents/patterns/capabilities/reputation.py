@@ -77,9 +77,8 @@ from ...blackboard.protocol import ReputationProtocol
 from ...scopes import BlackboardScope, get_scope_prefix
 from ..actions import action_executor
 from ...models import Action, AgentSuspensionState, PolicyREPL
-from ... import KeyPatternFilter, BlackboardEvent
 from ..events import event_handler, EventProcessingResult
-from ...blackboard import BlackboardEvent
+from ...blackboard import BlackboardEvent, EnhancedBlackboard
 from ..games.state import GameState
 
 
@@ -301,7 +300,7 @@ class ReputationTracker:
     - No-regret learning preparation
     """
 
-    def __init__(self, blackboard: Any):
+    def __init__(self, blackboard: EnhancedBlackboard):
         """Initialize reputation tracker.
 
         Args:
@@ -1049,7 +1048,7 @@ class ReputationCapability(AgentCapability):
         await blackboard.write(
             key=self._get_result_key(),
             value=reputation.model_dump(),
-            agent_id=self.agent.agent_id,
+            created_by=self.agent.agent_id if self.agent else None,
         )
 
 

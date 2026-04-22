@@ -251,7 +251,7 @@ class ProgramSlicingCapability(AgentCapability):
             await blackboard.write(
                 key=AgentRunProtocol.result_key(request_id),
                 value=result.model_dump(),
-                agent_id=self.agent.agent_id,
+                created_by=self.agent.agent_id if self.agent else None,
             )
 
         return result
@@ -722,7 +722,7 @@ class SlicingAnalysisCapability(VCMAnalysisCapability):
                 "resolutions": resolutions,
                 "unresolved": unresolved,
             },
-            created_by=self.agent.agent_id,
+            created_by=self.agent.agent_id if self.agent else None,
         )
 
         return {

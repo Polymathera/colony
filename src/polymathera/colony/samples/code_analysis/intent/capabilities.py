@@ -277,7 +277,7 @@ class IntentInferenceCapability(AgentCapability):
             await blackboard.write(
                 key=AgentRunProtocol.result_key(request_id),
                 value=final_result.model_dump(),
-                agent_id=self.agent.agent_id,
+                created_by=self.agent.agent_id if self.agent else None,
             )
 
         return final_result
@@ -313,7 +313,7 @@ class IntentInferenceCapability(AgentCapability):
             await blackboard.write(
                 key=AgentRunProtocol.result_key(request_id),
                 value=result.model_dump(),
-                agent_id=self.agent.agent_id,
+                created_by=self.agent.agent_id if self.agent else None,
             )
 
         return result
@@ -1026,7 +1026,7 @@ class IntentAnalysisCapability(VCMAnalysisCapability):
                         "segment_ids": segment_ids,
                         "count": len(segment_ids),
                     },
-                    created_by=self.agent.agent_id,
+                    created_by=self.agent.agent_id if self.agent else None,
                 )
 
         logger.info(
@@ -1114,7 +1114,7 @@ class IntentAnalysisCapability(VCMAnalysisCapability):
                     "count": len(misalignments),
                     "min_severity": min_severity,
                 },
-                created_by=self.agent.agent_id,
+                created_by=self.agent.agent_id if self.agent else None,
             )
 
         return {

@@ -412,6 +412,12 @@ class Session(BaseModel):
         description="Target session if this was merged"
     )
 
+    # Session agent — per-session orchestrator for chat interactions
+    session_agent_id: str | None = Field(
+        None,
+        description="Agent ID of the SessionAgent spawned for this session"
+    )
+
     # Default run configuration for this session
     default_run_config: AgentRunConfig | None = Field(
         None,

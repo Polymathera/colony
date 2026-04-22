@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Plus, PanelLeftClose, PanelLeftOpen, Pause, Play, X, Rocket } from "lucide-react";
+import { Plus, PanelLeftClose, PanelLeftOpen, Pause, Play, X } from "lucide-react";
 import { useSessions, useCreateSession, useSuspendSession, useResumeSession, useCloseSession } from "@/api/hooks/useSessions";
 import { Badge } from "../shared/Badge";
 import { formatTimestamp } from "@/lib/utils";
@@ -14,7 +14,6 @@ const stateVariant = (state: string) => {
 interface SidebarProps {
   activeSessionId: string | null;
   onSelectSession: (sessionId: string | null) => void;
-  onStartRun: () => void;
   colonyReady: boolean;
   collapsed: boolean;
   onToggleCollapsed: () => void;
@@ -23,7 +22,6 @@ interface SidebarProps {
 export function Sidebar({
   activeSessionId,
   onSelectSession,
-  onStartRun,
   colonyReady,
   collapsed,
   onToggleCollapsed,
@@ -178,13 +176,6 @@ export function Sidebar({
       {/* Active session controls */}
       {activeSession && (
         <div className="border-t border-border p-2 space-y-1.5">
-          <button
-            onClick={onStartRun}
-            disabled={!colonyReady}
-            className="w-full rounded bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            <Rocket size={14} className="inline -mt-0.5" /> Start Run
-          </button>
           <div className="flex gap-1">
             {activeSession.state === "active" && (
               <button

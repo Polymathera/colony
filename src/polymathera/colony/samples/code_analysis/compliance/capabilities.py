@@ -274,6 +274,7 @@ class ComplianceAnalysisCapability(AgentCapability):
             await blackboard.write(
                 key=AgentRunProtocol.result_key(request_id),
                 value=merged.model_dump(),
+                created_by=self.agent.agent_id if self.agent else None,
             )
 
         return merged
@@ -1281,7 +1282,7 @@ class ComplianceVCMCapability(VCMAnalysisCapability):
                         "evidence": violation.get("evidence", []),
                         "remediation": violation.get("remediation"),
                     },
-                    created_by=self.agent.agent_id,
+                    created_by=self.agent.agent_id if self.agent else None,
                 )
 
         logger.info(
