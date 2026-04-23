@@ -1185,8 +1185,8 @@ class ActionPolicyProtocol(BlackboardProtocol):
     scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
 
     @staticmethod
-    def iteration_key(namespace_prefix: str, iteration_count: int) -> str:
-        return f"{namespace_prefix}:action_policy_iteration:{iteration_count}"
+    def iteration_key(namespace_prefix: str, iteration_num: int) -> str:
+        return f"{namespace_prefix}:action_policy_iteration:{iteration_num}"
 
     @staticmethod
     def repl_key(agent_id: str, var_name: str, timestamp_ns: int) -> str:

@@ -252,6 +252,7 @@ async def create_session(
             from ..chat import SessionAgent, SessionOrchestratorCapability
             from polymathera.colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
             from polymathera.colony.agents.patterns.capabilities.consciousness import ConsciousnessCapability
+            from polymathera.colony.agents.patterns.planning.formatters import ConversationFormatter
             from polymathera.colony.cli.polymath import ANALYSIS_REGISTRY
             from polymathera.colony.distributed.ray_utils.serving.context import get_tenant_id, get_colony_id
 
@@ -296,10 +297,17 @@ async def create_session(
                 parameters={
                     "available_analyses": available_analyses,
                     "session_id": session_id,
+                    "repl_guidance_override": (
+                        "## REPL\n\n"
+                        "You have a Python REPL. Use `await run(\"action_key\", ...)` to "
+                        "execute capability actions. Use `results[\"key\"] = value` to "
+                        "store results. Use `log(msg)` for structured logging."
+                    ),
                 },
                 action_policy_config={
                     "allow_self_termination": False,  # SessionAgent should not terminate itself — the session lives on until the user closes it
                     "reactive_only": True, # SessionAgent only responds to user messages, it doesn't have proactive goals or actions
+                    "planning_capability_blueprints": [],
                 },
             )
 
@@ -312,6 +320,9 @@ async def create_session(
                     AgentPoolCapability.bind(),
                     ConsciousnessCapability.bind(),
                 ],
+                action_policy_blueprints={
+                    "event_history_formatter": ConversationFormatter.bind(),
+                },
             )
 
             with colony.user_execution_context(

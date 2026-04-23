@@ -75,6 +75,7 @@ class PlanningContextBuilder:
             action_descriptions=await action_policy.get_action_descriptions(),
             action_group_summaries=await action_policy.get_action_group_summaries(),
             recalled_memories=recalled_memories,
+            event_history=action_policy.get_event_history(),
             custom_data=custom_data,
             # parent_plan_id=self.current_plan.parent_plan_id,
         )

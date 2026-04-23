@@ -655,6 +655,13 @@ class PlanningContext(BaseModel):
         "Populated by AgentContextEngine.gather_context() before LLM planning."
     )
 
+    event_history: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Rolling window of recent event handler contexts. Each entry has "
+        "'iteration', 'timestamp', and 'contexts' (dict of context_key → handler context). "
+        "Populated from EventDrivenActionPolicy._event_history by PlanningContextBuilder."
+    )
+
     custom_data: dict[str, Any] = Field(
         default_factory=dict,
         description="Additional custom context data (escape hatch for extensibility)"

@@ -422,6 +422,7 @@ def format_planning_context_for_codegen(
     mode: str,
     error_history: list[dict[str, str]] | None = None,
     allow_self_termination: bool = True,
+    event_history_formatter: Any = None,
 ) -> str:
     """Format a ``PlanningContext`` as a code-generation prompt.
 
@@ -435,6 +436,9 @@ def format_planning_context_for_codegen(
             from ALL prior failed attempts, not just the last one.
         allow_self_termination: If True, include signal_completion in
             the prompt instructions and namespace docs.
+        event_history_formatter: Optional ``EventHistoryFormatter`` instance
+            that controls how events appear in the prompt. If None and
+            event_history is non-empty, uses ``DefaultEventHistoryFormatter``.
     """
     parts: list[str] = []
 
@@ -451,6 +455,14 @@ def format_planning_context_for_codegen(
     if planning_context.constraints:
         constraint_lines = [f"- {k}: {v}" for k, v in planning_context.constraints.items()]
         parts.append("## Constraints\n" + "\n".join(constraint_lines))
+
+    # Event history — recent event handler contexts (user messages, agent events, etc.)
+    if planning_context.event_history:
+        from ..planning.formatters import DefaultEventHistoryFormatter
+        formatter = event_history_formatter or DefaultEventHistoryFormatter()
+        event_section = formatter.format(planning_context.event_history)
+        if event_section:
+            parts.append(event_section)
 
     # Execution progress — show what actions each code step called,
     # Only render code steps (codegen_plan_step_*), not internal actions.
@@ -690,11 +702,13 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         code_timeout: float = 30.0,
         max_code_iterations: int = 50,
         allow_self_termination: bool = True,
+        event_history_formatter: Any = None,
         **kwargs,
     ):
         super().__init__(agent=agent, **kwargs)
         self.max_retries = max_retries
         self._allow_self_termination = allow_self_termination
+        self._event_history_formatter = event_history_formatter
         self.code_timeout = code_timeout
         self.max_code_iterations = max_code_iterations
         self._planning_capability_blueprints = planning_capability_blueprints
@@ -1122,6 +1136,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             mode=self._mode,
             error_history=self._error_history if self._error_history else None,
             allow_self_termination=self._allow_self_termination,
+            event_history_formatter=self._event_history_formatter,
         )
 
         # Clear completion rejection after it's been rendered into the prompt
@@ -1421,6 +1436,8 @@ async def create_code_generation_action_policy(
     max_code_iterations: int = 50,
     allow_self_termination: bool = True,
     reactive_only: bool = False,
+    planning_capability_blueprints: list[Any] | None = None,
+    event_history_formatter: Any = None,
 ) -> CodeGenerationActionPolicy:
     """Create a code-generation-based action policy.
 
@@ -1475,6 +1492,8 @@ async def create_code_generation_action_policy(
         code_timeout=code_timeout,
         max_code_iterations=max_code_iterations,
         allow_self_termination=allow_self_termination,
+        planning_capability_blueprints=planning_capability_blueprints,
+        event_history_formatter=event_history_formatter,
         reactive_only=reactive_only,
         action_map=action_map,
         action_providers=action_providers,

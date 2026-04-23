@@ -172,6 +172,14 @@ class BaseActionPolicy(ActionPolicy):
         # Base implementation - subclasses restore from state.policy_state
         pass
 
+    def get_event_history(self) -> list[dict[str, Any]]:
+        """Get the rolling event history buffer for the planning prompt.
+
+        Returns empty by default. Overridden by EventDrivenActionPolicy
+        which accumulates event handler contexts in plan_step().
+        """
+        return []
+
     async def get_action_descriptions(
         self,
         selected_groups: list[str] | None = None,
@@ -438,12 +446,16 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         action_providers: list[Any] = [],
         io: ActionPolicyIO | None = None, # Declare I/O contract (override in subclasses)
         reactive_only: bool = False,
+        max_event_history: int = 20,
         **kwargs
     ):
         super().__init__(agent, action_map=action_map, action_providers=action_providers, io=io, **kwargs)
         self._event_queue: asyncio.Queue[BlackboardEvent] = asyncio.Queue()
         self._subscribed_callbacks: list[Callable] = []
+        self._subscribed_providers: set[int] = set()  # Track by identity to prevent duplicate subscriptions
         self._reactive_only = reactive_only
+        self._event_history: list[dict[str, Any]] = []
+        self._max_event_history = max_event_history
 
     @override
     async def initialize(self) -> None:
@@ -457,13 +469,20 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         # - Explicit action_providers (for backwards compatibility / advanced composition).
         #
         # Deduplicate by object identity to avoid double-streaming the same capability.
-        seen: set[int] = set()
+        # Uses persistent _subscribed_providers set so capabilities added later
+        # (via use_agent_capabilities) don't get subscribed again.
         for provider in list(self.agent.get_capabilities()) + list(self._action_providers):
-            if id(provider) in seen:
+            if id(provider) in self._subscribed_providers:
                 continue
-            seen.add(id(provider))
+            self._subscribed_providers.add(id(provider))
 
             if isinstance(provider, AgentCapability) and hasattr(provider, "stream_events_to_queue"):
+                logger.debug(
+                    "Subscribing capability %s (scope_id=%s, input_patterns=%s) to event queue",
+                    type(provider).__name__,
+                    getattr(provider, "scope_id", "?"),
+                    provider.input_patterns if hasattr(provider, "input_patterns") else "?",
+                )
                 await provider.stream_events_to_queue(self.get_event_queue())
 
     def get_event_queue(self) -> asyncio.Queue[BlackboardEvent]:
@@ -504,6 +523,16 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             The next event (never None — blocks until one arrives).
         """
         return await self._event_queue.get()
+
+    def get_event_history(self) -> list[dict[str, Any]]:
+        """Get the rolling event history buffer.
+
+        Returns a copy of recent event handler contexts accumulated by
+        plan_step(). Each entry has 'iteration', 'timestamp', and 'contexts'.
+        Used by PlanningContextBuilder to include events in the planning prompt.
+        """
+        logger.debug("get_event_history called: %d entries", len(self._event_history))
+        return list(self._event_history)
 
     def _get_event_handlers(self) -> list[Callable]:
         """Get all event handlers from capabilities and action providers.
@@ -574,6 +603,17 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         else:
             event = await self.get_next_event_nowait()
 
+        if event is not None:
+            logger.debug(
+                "plan_step received event: key=%s, value_type=%s, value_preview=%s, metadata=%s",
+                event.key,
+                type(event.value).__name__,
+                str(event.value)[:200] if event.value else "None",
+                event.metadata,
+            )
+        else:
+            logger.debug("plan_step: no event")
+
         # 2. Extract session_id and run_id from event and store in state for distributed traceability.
         # In distributed Ray systems, context variables don't cross node boundaries,
         # so we extract these from the event metadata and propagate them explicitly.
@@ -595,12 +635,24 @@ class EventDrivenActionPolicy(BaseActionPolicy):
 
         if event is not None:
             with session_id_context(event_session_id):
-                for handler in self._get_event_handlers():
+                handlers = self._get_event_handlers()
+                logger.debug(
+                    "Broadcasting event key=%s to %d handlers: %s",
+                    event.key, len(handlers),
+                    [h.__name__ for h in handlers],
+                )
+                for handler in handlers:
                     try:
                         result = await handler(event, self._action_dispatcher.repl)
 
                         if result is None:
                             continue  # Event not relevant to this handler
+
+                        logger.debug(
+                            "Event handler %s returned: context_key=%s, has_context=%s, has_immediate=%s",
+                            handler.__name__, result.context_key,
+                            result.context is not None, result.immediate_action is not None,
+                        )
 
                         # Accumulate context from all handlers
                         # This context is available to action executors via scope
@@ -640,6 +692,22 @@ class EventDrivenActionPolicy(BaseActionPolicy):
                         state,
                         namespace="event_context"
                     )
+
+                    # Append to rolling event history for the planning prompt.
+                    # PlanningContextBuilder reads this to give the LLM visibility
+                    # into recent events (user messages, agent results, etc.)
+                    self._event_history.append({
+                        "iteration": state.iteration_num,
+                        "timestamp": time.time(),
+                        "contexts": accumulated_context,
+                    })
+                    logger.debug(
+                        "Event history updated: %d entries, latest context_keys=%s",
+                        len(self._event_history),
+                        list(accumulated_context.keys()),
+                    )
+                    if len(self._event_history) > self._max_event_history:
+                        self._event_history = self._event_history[-self._max_event_history:]
 
                 # If any handler provided immediate action, return the first one
                 # (others are ignored)
@@ -695,7 +763,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             working_memory = self.agent.get_working_memory()
             if working_memory:
                 await working_memory.store(
-                    key=ActionPolicyProtocol.iteration_key(namespace, state.iteration_count),
+                    key=ActionPolicyProtocol.iteration_key(namespace, state.iteration_num),
                     value=context,
                     tags={namespace, "planning_context"},
                     ttl_seconds=3600,  # 1 hour - TODO: Make configurable

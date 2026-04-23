@@ -311,6 +311,14 @@ async def _post_user_message(
         from ..chat import SessionChatProtocol
 
         bb = await _get_session_chat_blackboard(colony, session_info)
+        if bb is None:
+            logger.error("Failed to get session chat blackboard — bb is None")
+            return
+
+        logger.info(
+            "Writing user message to blackboard: scope_id=%s, backend_type=%s, event_bus=%s",
+            bb.scope_id, bb.backend_type, type(bb.event_bus).__name__ if bb.event_bus else "None",
+        )
 
         message_id = f"msg_{uuid.uuid4().hex[:12]}"
         key = SessionChatProtocol.user_message_key(message_id)

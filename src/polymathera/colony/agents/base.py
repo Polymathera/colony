@@ -453,6 +453,11 @@ class AgentCapability(ABC):
                 f"filter events and reduce noise."
             )
             patterns = ["*"]
+
+        logger.info(
+            "%s.stream_events_to_queue: blackboard scope_id=%s, backend=%s, patterns=%s",
+            self.__class__.__name__, blackboard.scope_id, blackboard.backend_type, patterns,
+        )
         for pattern in patterns:
             blackboard.stream_events_to_queue(
                 event_queue,
@@ -1707,6 +1712,15 @@ class Agent(BaseModel):
     )
 
     action_policy_blueprint: ActionPolicyBlueprint | None = None
+    action_policy_blueprints: dict[str, Any] = Field(
+        default_factory=dict,
+        exclude=True,
+        description="Blueprint objects for action policy config that can't be "
+        "JSON-serialized (e.g., EventHistoryFormatter). Excluded from Pydantic "
+        "serialization — travels via cloudpickle through AgentBlueprint only. "
+        "Resolved via local_instance() at policy creation time and merged "
+        "with metadata.action_policy_config.",
+    )
     action_policy_state: ActionPolicyExecutionState | None = Field(default=None)
     action_policy: ActionPolicy | None = None
 
@@ -2163,6 +2177,14 @@ class Agent(BaseModel):
         if not self.action_policy_blueprint:
             logger.warning("Agent does not have action_policy or action_policy_blueprint defined. We will create a default ActionPolicy, but consider defining a custom one for better performance and capabilities.")
             from .patterns.actions import create_default_action_policy
+
+            # Resolve blueprint objects from action_policy_blueprints and merge
+            # with the JSON-serializable action_policy_config.
+            resolved_config = dict(self.metadata.action_policy_config)
+            for key, value in self.action_policy_blueprints.items():
+                from .blueprint import Blueprint
+                resolved_config[key] = value.local_instance() if isinstance(value, Blueprint) else value
+
             self.action_policy = await create_default_action_policy(
                 agent=self,
                 action_map={},  # Action executors are discovered from capabilities
@@ -2172,7 +2194,7 @@ class Agent(BaseModel):
                 #     inputs={"context": QueryContext, "queries": list},
                 #     outputs={"analysis": ScopeAwareResult, "next_queries": list},
                 # ),
-                **self.metadata.action_policy_config,
+                **resolved_config,
             )
         else:
             self.action_policy = self.action_policy_blueprint.local_instance(

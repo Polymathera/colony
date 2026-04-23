@@ -1216,13 +1216,25 @@ class REPLCapability(AgentCapability):
 
 
 def get_repl_guidance(repl: PolicyPythonREPL) -> str:
-    """Get comprehensive REPL guidance for LLM planner.
+    """Get REPL guidance for LLM planner.
+
+    If ``repl.agent.metadata.parameters["repl_guidance_override"]`` is set, returns that instead of the
+    default comprehensive guidance. Use this for agents (like `SessionAgent`)
+    that need simpler instructions.
+
+    Use "repl_guidance_override" parameter for agents that need simpler instructions (e.g., SessionAgent).
 
     This should be included in action descriptions when REPL is available.
 
     Returns:
         Multi-line guidance string for LLM context
     """
+    from ...models import AgentMetadata
+    metadata: AgentMetadata = repl.agent.metadata
+    guidance_override = metadata.parameters.get("repl_guidance_override", None)
+    if guidance_override:
+        return guidance_override
+
     return '''
 ## REPL Execution Context
 

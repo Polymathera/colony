@@ -73,7 +73,10 @@ class EventProcessingResult(BaseModel):
 
     # Additional context for LLM planner (merged into scope.bindings["event_context"])
     # Action executors can read this to validate state versions before modifying
-    context: BaseModel | dict[str, Any] | None = Field(default=None)
+    # when a dict is passed to a union field where BaseModel is first, Pydantic
+    # may try to construct a BaseModel from the dict. That would fail with
+    # "BaseModel cannot be instantiated directly" because BaseModel itself is abstract
+    context: dict[str, Any] | BaseModel | None = Field(default=None)
 
     # If set, skip LLM planning and execute this action immediately
     # Use for rule-based responses that don't need LLM reasoning

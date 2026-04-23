@@ -608,7 +608,7 @@ class ReplanningCapability(AgentCapability):
         # NOTE: In the pre-programmed path (CacheAwareActionPolicy),
         # the full state is passed. Here we construct what we can.
         state = ActionPolicyExecutionState(
-            iteration_count=0,
+            iteration_num=0,
             custom={},
         )
 
