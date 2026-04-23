@@ -331,12 +331,14 @@ class PlanEvaluationCapability(AgentCapability):
         namespace: str = "plan_evaluation",
         input_patterns: list[str] | None = None,
         capability_key: str = "plan_evaluation",
+        app_name: str | None = None,
     ):
         super().__init__(
             agent=agent,
             scope_id=get_scope_prefix(scope, agent, namespace=namespace),
             input_patterns=input_patterns or [],
             capability_key=capability_key,
+            app_name=app_name,
         )
 
     def get_capability_tags(self) -> frozenset[str]:

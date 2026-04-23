@@ -81,6 +81,7 @@ class MultiHopSearchCapability(AgentCapability):
         namespace: str = "multi_hop",
         input_patterns: list[str] = [MultiHopSearchProtocol.request_pattern()],
         capability_key: str = "multi_hop_search",
+        app_name: str | None = None,
     ):
         """Initialize multi-hop search capability.
 
@@ -91,8 +92,17 @@ class MultiHopSearchCapability(AgentCapability):
             scope: Scope for the capability
             namespace: Namespace for the capability within the scope (default "multi_hop")
             input_patterns: List of input patterns for the capability
+            capability_key: Unique key for this capability within the agent (default "multi_hop_search")
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(
+            agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self.base_router = base_router
         self.max_hops = max_hops
         self._visited: set[str] = set()

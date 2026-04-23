@@ -1,3 +1,5 @@
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 
 export interface ChatMessageData {
@@ -72,8 +74,14 @@ export function ChatMessage({ message, onReply }: ChatMessageProps) {
         </div>
       )}
 
-      {/* Content */}
-      <div className="whitespace-pre-wrap leading-5">{content}</div>
+      {/* Content — render markdown for agent messages, plain text for user */}
+      {role === "user" ? (
+        <div className="whitespace-pre-wrap leading-5">{content}</div>
+      ) : (
+        <div className="prose prose-invert prose-xs max-w-none leading-5 [&_table]:text-[10px] [&_th]:px-2 [&_td]:px-2 [&_code]:text-[10px] [&_pre]:text-[10px]">
+          <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+        </div>
+      )}
 
       {/* Agent question response options */}
       {awaiting_reply && response_options && response_options.length > 0 && request_id && agent_id && onReply && (

@@ -9,7 +9,7 @@
 **A no-RAG, cache-aware multi-agent framework for extremely long, dense contexts (1B+ tokens).**
 
 <p align="center">
-  <img src="./docs/guides/images/landing-page.png" alt="traces" width="400"/>
+  <img src="./docs/guides/images/landing-page.png" alt="traces" width="500"/>
 </p>
 
 Colony is a framework for building *tightly-coupled, self-improving, self-aware multi-agent systems* (***agent colonies***) that reason over extremely long context without retrieval-augmented generation (RAG). Instead of fragmenting context into chunks and retrieving snippets, Colony keeps the entire context *live* across a **cluster of LLMs** through a virtual memory system that manages GPU KV caches the same way an operating system manages (almost unlimited) virtual memory over finite physical memory.
@@ -171,6 +171,9 @@ The Colony dashboard starts automatically with `colony-env up` at [localhost:808
 - **Traces** — waterfall and timeline views for debugging agent execution
 - **Metrics** — token usage, cost tracking, per-agent breakdowns
 - **Settings** — cluster info, tenant quotas
+
+#### Session Window
+![traces](./docs/guides/images/dashboard-session-view.png)
 
 #### Waterfall Trace View
 ![traces](./docs/guides/images/dashboard-traces-tab.png)

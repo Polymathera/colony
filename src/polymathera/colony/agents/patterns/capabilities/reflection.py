@@ -142,6 +142,7 @@ class ReflectionCapability(AgentCapability):
         namespace: str = "reflection",
         input_patterns: list[str] = [ReflectionProtocol.request_pattern()],
         capability_key: str = "reflection",
+        app_name: str | None = None,
     ):
         """Initialize reflection capability.
 
@@ -151,8 +152,16 @@ class ReflectionCapability(AgentCapability):
             namespace: Namespace for the capability within the scope (default "reflection")
             input_patterns: List of input patterns for the capability (default listens for reflection requests)
             capability_key: Unique key for this capability (default "reflection")
+            app_name: The `serving.Application` name where the agent system resides.
+                      Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self._state_managers: dict[str, Any] = {}
 
     def get_action_group_description(self) -> str:

@@ -249,6 +249,7 @@ class MemoryCapability(AgentCapability):
 
         # === IDENTITY ===
         capability_key: str | None = None,
+        app_name: str | None = None,
     ):
         """Initialize memory capability.
 
@@ -288,8 +289,16 @@ class MemoryCapability(AgentCapability):
 
             capability_key: Override for the capability dict key (allows multiple
                 instances of MemoryCapability with distinct keys).
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=scope_id, capability_key=capability_key, input_patterns=[])  # MemoryCapability manages its own subscriptions, so no input patterns
+        super().__init__(
+            agent=agent,
+            scope_id=scope_id,
+            input_patterns=[],  # MemoryCapability manages its own subscriptions, so no input patterns
+            capability_key=capability_key,
+            app_name=app_name
+        )
 
         # Ingestion: sources and transformation
         self.producers = producers or []

@@ -67,18 +67,24 @@ class MemoryLifecycleHooks(AgentCapability):
         agent: Agent,
         stm_scope_id: str | None = None,
         capability_key: str = "memory_lifecycle_hooks",
+        app_name: str | None = None,
     ):
         """Initialize memory lifecycle hooks.
 
         Args:
             agent: Agent that owns this capability
             stm_scope_id: Target STM scope (defaults to agent's STM)
+            capability_key: Override for the capability dict key (allows multiple
+                instances of MemoryLifecycleHooks with distinct keys).
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
         super().__init__(
             agent=agent,
             scope_id=get_scope_prefix(BlackboardScope.AGENT, agent, namespace="memory_lifecycle"),
             input_patterns=[], # This capability to the colony control plane lifecycle scope to receive agent creation/termination events.
             capability_key=capability_key,
+            app_name=app_name,
         )
         self._stm_scope_id = stm_scope_id or MemoryScope.agent_stm(agent)
 

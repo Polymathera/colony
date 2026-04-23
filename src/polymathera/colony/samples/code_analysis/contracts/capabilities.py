@@ -97,6 +97,7 @@ class ContractInferenceCapability(AgentCapability):
         temperature: float = 0.2,
         max_tokens: int = 3000,
         capability_key: str = "contract_inference_capability",
+        app_name: str | None = None,
     ):
         """Initialize contract inference capability.
 
@@ -110,8 +111,10 @@ class ContractInferenceCapability(AgentCapability):
             temperature: LLM temperature for inference calls
             max_tokens: Max tokens for LLM responses
             capability_key: Unique key for this capability within the agent
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key, app_name=app_name)
         self.formalism = formalism
         self.use_examples = use_examples
         self.temperature = temperature

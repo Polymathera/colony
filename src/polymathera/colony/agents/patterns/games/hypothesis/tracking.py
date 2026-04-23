@@ -69,6 +69,7 @@ class HypothesisTrackingCapability(AgentCapability):
         scope: BlackboardScope = BlackboardScope.AGENT,
         namespace: str = "hypothesis_tracking",
         capability_key: str = "hypothesis_tracking",
+        app_name: str | None = None,
     ):
         """Initialize tracking capability.
 
@@ -77,8 +78,16 @@ class HypothesisTrackingCapability(AgentCapability):
             scope: Scope for sharing (defaults to BlackboardScope.AGENT)
             namespace: Namespace prefix for blackboard keys (default: "hypothesis_tracking")
             capability_key: Key to identify this capability within the agent (default: "hypothesis_tracking")
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=[],
+            capability_key=capability_key,
+            app_name=app_name,
+        )
 
         # Local cache (authoritative data is on blackboard)
         self._cache: dict[str, TrackedHypothesis] = {}

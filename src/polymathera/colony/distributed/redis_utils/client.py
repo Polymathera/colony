@@ -609,11 +609,11 @@ class RedisClient:
             ).inc()
 
             # Close all connections
-            await self.redis.close()
+            await self.redis.close()  # TODO - FIXME - There is no self.redis attribute.
 
             # Reinitialize Redis client
             self.redis_pool = self._init_redis_pool_with_persistence()
-            self.redis = Redis(connection_pool=self.redis_pool)
+            self.redis = Redis(connection_pool=self.redis_pool)  # TODO - FIXME - There is no self.redis attribute.
 
             # Verify connection
             await self.execute_with_semaphore(lambda redis: redis.ping())
@@ -641,7 +641,7 @@ class RedisClient:
     async def cleanup(self) -> None:
         """Cleanup resources."""
         try:
-            await self.redis.flushdb()
+            await self.redis.flushdb()  # TODO - FIXME - There is no self.redis attribute.
             await self.redis.aclose()
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
@@ -649,7 +649,7 @@ class RedisClient:
     async def memory_usage(self) -> int:
         """Get Redis memory usage in bytes."""
         try:
-            info = await self.redis.info("memory")
+            info = await self.redis.info("memory")  # TODO - FIXME - There is no self.redis attribute.
             return int(info["used_memory"])
         except Exception as e:
             logger.error(f"Failed to get Redis memory usage: {e}")

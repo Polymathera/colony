@@ -24,6 +24,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from ..dependencies import get_colony
 from ..services.colony_connection import ColonyConnection
 
+from polymathera.colony.agents.blackboard import EnhancedBlackboard
+
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -65,7 +68,6 @@ async def session_chat(
         return
 
     tenant_id = user_payload.get("tenant_id", "")
-    colony_id = websocket.headers.get("X-Colony-Id") or ""
     user_id = user_payload.get("user_id", "")
 
     # Get colony connection from app state
@@ -82,6 +84,13 @@ async def session_chat(
     # Look up session metadata (agent ID, tenant, colony for execution context)
     session_info = await _get_session_info(colony, session_id)
     session_agent_id = session_info.session_agent_id if session_info else None
+
+    # colony_id: try WebSocket header first, fall back to session's colony_id.
+    # WebSocket connections don't go through apiFetch so X-Colony-Id may be absent.
+    colony_id = (
+        websocket.headers.get("X-Colony-Id")
+        or (session_info.colony_id if session_info else "")
+    )
 
     # Set execution context for the entire WebSocket connection.
     # All blackboard operations within this connection use the
@@ -240,15 +249,14 @@ async def _get_session_info(colony: ColonyConnection, session_id: str) -> _Sessi
             if session is None:
                 return None
 
-            def _field(name: str) -> str:
-                if isinstance(session, dict):
-                    return session.get(name, "")
-                return getattr(session, name, "") or ""
+            from polymathera.colony.agents.sessions.models import Session as SessionModel
+            if isinstance(session, dict):
+                session = SessionModel(**session)
 
             return _SessionInfo(
-                session_agent_id=_field("session_agent_id") or None,
-                tenant_id=_field("tenant_id"),
-                colony_id=_field("colony_id"),
+                session_agent_id=session.session_agent_id or None,
+                tenant_id=session.tenant_id,
+                colony_id=session.colony_id,
             )
     except Exception as e:
         logger.warning("Failed to look up session info for %s: %s", session_id, e)
@@ -267,6 +275,27 @@ def _get_session_chat_scope_id() -> str:
     return get_scope_prefix(BlackboardScope.SESSION, namespace="session_chat")
 
 
+async def _get_session_chat_blackboard(colony: ColonyConnection, session_info: _SessionInfo) -> EnhancedBlackboard | None:
+    """Get the session-scoped blackboard for the session agent."""
+    try:
+        from ..chat import SessionOrchestratorCapability
+        from polymathera.colony.agents import AgentHandle
+        from polymathera.colony.agents.scopes import BlackboardScope
+
+        handle = await AgentHandle.from_agent_id(session_info.session_agent_id, app_name=colony.app_name)
+        cap = handle.get_capability(
+            SessionOrchestratorCapability,
+            scope=BlackboardScope.SESSION,
+            namespace="session_chat",
+        )
+        bb: EnhancedBlackboard = await cap.get_blackboard()
+        logger.info("Got session chat blackboard: scope_id=%s, backend_type=%s", bb.scope_id, bb.backend_type)
+        return bb
+    except Exception as e:
+        logger.error("Failed to get session chat blackboard: %s", e)
+        return None
+
+
 async def _post_user_message(
     colony: ColonyConnection,
     session_id: str,
@@ -280,17 +309,8 @@ async def _post_user_message(
     """
     try:
         from ..chat import SessionChatProtocol
-        from polymathera.colony.agents import AgentHandle
 
-        # TODO: This is not the most robust way to write chats.
-        # TODO: Use AgentHandle.get_capability(
-        #               capability_type=SessionOrchestratorCapability,
-        #               scope=BlackboardScope.SESSION,
-        #               namespace="session_chat",
-        #           ) to write messages back to the user.
-        scope_id = _get_session_chat_scope_id()
-        handle = await AgentHandle.from_agent_id(session_info.session_agent_id, app_name=colony.app_name)
-        bb = await handle.get_blackboard(scope_id=scope_id)
+        bb = await _get_session_chat_blackboard(colony, session_info)
 
         message_id = f"msg_{uuid.uuid4().hex[:12]}"
         key = SessionChatProtocol.user_message_key(message_id)
@@ -298,12 +318,12 @@ async def _post_user_message(
         await bb.write(key, {
             "content": content,
             "message_id": message_id,
-            "user_id": "",  # TODO: pass from auth context
             "controls": controls,
             "timestamp": time.time(),
         })
+        logger.info("User message %s written to blackboard key=%s", message_id, key)
     except Exception as e:
-        logger.error("Failed to post user message to session agent: %s", e)
+        logger.error("Failed to post user message to session agent: %s", e, exc_info=True)
 
 
 async def _post_user_reply(
@@ -320,11 +340,8 @@ async def _post_user_reply(
     """
     try:
         from ..chat import SessionChatProtocol
-        from polymathera.colony.agents import AgentHandle
 
-        scope_id = _get_session_chat_scope_id()
-        handle = await AgentHandle.from_agent_id(session_info.session_agent_id, app_name=colony.app_name)
-        bb = await handle.get_blackboard(scope_id=scope_id)
+        bb = await _get_session_chat_blackboard(colony, session_info)
 
         message_id = f"msg_{uuid.uuid4().hex[:12]}"
         key = SessionChatProtocol.reply_key(request_id, message_id)
@@ -357,11 +374,8 @@ async def _listen_for_agent_messages(
     """
     try:
         from ..chat import SessionChatProtocol
-        from polymathera.colony.agents import AgentHandle
 
-        scope_id = _get_session_chat_scope_id()
-        handle = await AgentHandle.from_agent_id(session_info.session_agent_id, app_name=colony.app_name)
-        bb = await handle.get_blackboard(scope_id=scope_id)
+        bb = await _get_session_chat_blackboard(colony, session_info)
 
         async for event in bb.stream_events(
             pattern=SessionChatProtocol.agent_message_pattern(),

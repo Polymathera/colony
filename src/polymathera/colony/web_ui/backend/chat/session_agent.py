@@ -47,8 +47,11 @@ class SessionOrchestratorCapability(AgentCapability):
         namespace: str = "session_chat",
         input_patterns: list[str] | None = None,
         capability_key: str = "session_orchestrator",
+        app_name: str | None = None,
     ):
         """Initialize session orchestrator capability.
+
+        NOTE: scope cannot be BlackboardScope.AGENT in detached mode (agent=None).
 
         Args:
             agent: Owning agent (the SessionAgent). None for detached mode.
@@ -57,13 +60,20 @@ class SessionOrchestratorCapability(AgentCapability):
             input_patterns: Event patterns to subscribe to. If None, auto-inferred
                 from @event_handler decorators.
             capability_key: Unique key for the capability
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        scope_id = get_scope_prefix(scope, agent, namespace=namespace) if agent is not None else None
+        scope_id = get_scope_prefix(scope, agent, namespace=namespace)
+        logger.info(
+            "SessionOrchestratorCapability init: scope=%s, namespace=%s, scope_id=%s",
+            scope, namespace, scope_id,
+        )
         super().__init__(
             agent=agent,
             scope_id=scope_id,
             input_patterns=input_patterns,
             capability_key=capability_key,
+            app_name=app_name,
         )
 
     @override

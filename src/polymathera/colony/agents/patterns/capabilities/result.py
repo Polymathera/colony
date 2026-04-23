@@ -58,6 +58,7 @@ class ResultCapability(AgentCapability):
         scope: BlackboardScope = BlackboardScope.COLONY,
         namespace: str = "result_store",
         capability_key: str = "result_capability",
+        app_name: str | None = None,
     ):
         """Initialize result capability.
 
@@ -66,8 +67,16 @@ class ResultCapability(AgentCapability):
             scope: Blackboard scope (defaults to COLONY)
             namespace: Namespace for the result store (defaults to "result_store")
             capability_key: Key to identify this capability within the agent (default "result_capability")
+            app_name: The `serving.Application` name where the agent system resides.
+                      Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=[],
+            capability_key=capability_key,
+            app_name=app_name
+        )
 
     def get_action_group_description(self) -> str:
         return (

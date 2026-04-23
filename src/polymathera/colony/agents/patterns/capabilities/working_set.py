@@ -165,6 +165,7 @@ class WorkingSetCapability(AgentCapability):
         namespace: str = "working_set",
         input_patterns: list[str] = [WorkingSetStateProtocol.state_pattern()],
         capability_key: str = "working_set",
+        app_name: str | None = None,
     ):
         """Initialize working set capability.
 
@@ -176,8 +177,17 @@ class WorkingSetCapability(AgentCapability):
             scope: Blackboard scope (defaults to COLONY)
             namespace: Namespace for the working set (defaults to "working_set")
             input_patterns: List of input patterns to subscribe to (default listens for working set state updates)
+            capability_key: Key for this capability (default "working_set")
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self.eviction_policy = eviction_policy or LRUEvictionPolicy()
         self.coordination_policy = coordination_policy
         self.working_set_size: int = working_set_size

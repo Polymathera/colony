@@ -63,9 +63,9 @@ class PageAnalyzerCapability(AgentCapability):
         scope: BlackboardScope = BlackboardScope.AGENT,
         namespace: str = "page_analysis",
         capability_key: str = "page_analyzer_capability",
-
+        app_name: str | None = None,
     ):
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace, page_analyzer=agent.agent_id), input_patterns=[], capability_key=capability_key)  # TODO: Replace some of the actions below with event handlers and input patterns BasicAnalysisProtocol
+        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace, page_analyzer=agent.agent_id), input_patterns=[], capability_key=capability_key, app_name=app_name)  # TODO: Replace some of the actions below with event handlers and input patterns BasicAnalysisProtocol
 
     def get_action_group_description(self) -> str:
         return (

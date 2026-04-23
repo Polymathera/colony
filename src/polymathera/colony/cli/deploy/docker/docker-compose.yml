@@ -197,12 +197,47 @@ services:
       - RAY_CLIENT_ADDRESS=ray://ray-head:10001
       - RAY_DASHBOARD_URL=http://ray-head:8265
       - PROMETHEUS_URL=http://ray-head:9090
+      # Redis — blackboard, state management, event bus
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # Observability
+      - TRACING_ENABLED=true
+      # Kafka — log streaming + span consumer
       - KAFKA_BOOTSTRAP=kafka:9092
+      # PostgreSQL — auth, chat persistence, observability
       - RDS_HOST=postgres
       - RDS_PORT=5432
       - RDS_USER=colony
       - RDS_PASSWORD=${COLONY_PG_PASSWORD:-colony_dev}
       - RDS_DB_NAME=colony
+      # Polymathera environment
+      - RAY_CLUSTER_ENVIRONMENT=true
+      - POLYMATHERA_ENV=development
+      - POLYMATHERA_RUNNING_LOCALLY=true
+      - PROMETHEUS_PORT=9090
+      # Authentication - local mode
+      - AUTH_ENABLED=False
+      # Storage backends — same as ray-head/workers
+      - DISTRIBUTED_FS_BACKEND=local
+      - LOCAL_FS_ROOT_PATH=/mnt/shared/filesystem
+      - OBJECT_STORAGE_BACKEND=disabled
+      - JSON_STORAGE_BACKEND=local
+      - JSON_STORAGE_LOCAL_PATH=/mnt/shared/json_storage
+      - GIT_COLD_STORAGE_ENABLED=False
+      - RELATIONAL_STORAGE_BACKEND=local
+      # API keys — forwarded from host environment
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      # Slack chat service (optional)
+      - SLACK_ENABLED=false
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+    volumes:
+      - colony-shared:/mnt/shared
     depends_on:
       ray-head:
         condition: service_healthy

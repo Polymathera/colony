@@ -63,6 +63,7 @@ class DynamicGameCapability(AgentCapability):
         auto_accept: bool = True,
         default_game_config: dict[str, dict[str, Any]] | None = None,
         capability_key: str = "dynamic_game",
+        app_name: str | None = None,
     ):
         """Initialize DynamicGameCapability.
 
@@ -76,6 +77,8 @@ class DynamicGameCapability(AgentCapability):
                 Merged (invitation overrides) before protocol creation.
                 Example: ``{"negotiation": {"strategy": "hardball"}}``
             capability_key: Unique key for this capability.
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
         scope_id = get_scope_prefix(
             BlackboardScope.COLONY, agent, namespace="game_invitations",
@@ -85,6 +88,7 @@ class DynamicGameCapability(AgentCapability):
             scope_id=scope_id,
             input_patterns=[GameInvitationProtocol.invitation_pattern()],
             capability_key=capability_key,
+            app_name=app_name,
         )
         self._registry = registry or GameProtocolRegistry.instance()
         self._auto_accept = auto_accept

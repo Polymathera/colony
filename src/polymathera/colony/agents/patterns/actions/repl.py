@@ -1060,6 +1060,7 @@ class REPLCapability(AgentCapability):
         scope: BlackboardScope = BlackboardScope.AGENT,
         namespace: str = "repl",
         capability_key: str = "repl",
+        app_name: str | None = None,
         backing_stores: dict[str, BackingStore] | None = None,
         allowed_imports: list[str] | None = None,
         restrict_builtins: bool = True,
@@ -1072,6 +1073,8 @@ class REPLCapability(AgentCapability):
             scope: BlackboardScope for variable storage (default: AGENT)
             namespace: Namespace prefix for this capability (default: "repl")
             capability_key: Unique key for this capability within the agent (default: "repl")
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
             backing_stores: Map of store name -> BackingStore implementation
             allowed_imports: List of allowed import module names
             restrict_builtins: If True, restrict dangerous builtins
@@ -1081,7 +1084,8 @@ class REPLCapability(AgentCapability):
             agent=agent,
             scope_id=get_scope_prefix(scope, agent, namespace=namespace),
             input_patterns=[],
-            capability_key=capability_key
+            capability_key=capability_key,
+            app_name=app_name,
         )
 
         # Create underlying REPL

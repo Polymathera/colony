@@ -42,6 +42,7 @@ _KIND_MAP: dict[str, SpanKind] = {
     "infer": SpanKind.INFER,
     "request_page": SpanKind.PAGE_REQUEST,
     "get_next_event": SpanKind.EVENT_PROCESS,
+    "get_next_event_nowait": SpanKind.EVENT_PROCESS,
 }
 
 
@@ -133,6 +134,7 @@ class AgentTracingFacility(TracingFacility):
             ("*.infer", SpanKind.INFER),
             ("*.request_page", SpanKind.PAGE_REQUEST),
             ("*.get_next_event", SpanKind.EVENT_PROCESS),
+            ("*.get_next_event_nowait", SpanKind.EVENT_PROCESS),
         ]
 
     @override
@@ -218,7 +220,7 @@ class AgentTracingFacility(TracingFacility):
             if generated and isinstance(generated, str):
                 summary["response"] = generated[:max_infer]
         elif kind == SpanKind.EVENT_PROCESS:
-            # get_next_event returns BlackboardEvent or None
+            # get_next_event/get_next_event_nowait returns BlackboardEvent or None
             if result is None:
                 summary["event_received"] = False
             else:

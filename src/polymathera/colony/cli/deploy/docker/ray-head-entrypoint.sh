@@ -29,10 +29,25 @@ if [ "${COLONY_AUTO_DEPLOY:-true}" = "true" ]; then
     CONFIG_FLAG=""
     if [ -f "/etc/colony/cluster.yaml" ]; then
         CONFIG_FLAG="--config /etc/colony/cluster.yaml"
-    elif [ -f "/mnt/shared/config.yaml" ]; then
-        CONFIG_FLAG="--config /mnt/shared/config.yaml"
-    elif [ -f "/mnt/shared/cluster.yaml" ]; then
-        CONFIG_FLAG="--config /mnt/shared/cluster.yaml"
+    else
+        # Wait for config file to be copied in by `colony-env up --config`
+        # (docker cp happens after container starts). Timeout after 15s.
+        echo "[colony] Waiting for config file..."
+        for i in $(seq 1 15); do
+            if [ -f "/mnt/shared/config.yaml" ]; then
+                CONFIG_FLAG="--config /mnt/shared/config.yaml"
+                break
+            elif [ -f "/mnt/shared/cluster.yaml" ]; then
+                CONFIG_FLAG="--config /mnt/shared/cluster.yaml"
+                break
+            fi
+            sleep 1
+        done
+        if [ -z "$CONFIG_FLAG" ]; then
+            echo "[colony] WARNING: No config file found after 15s. Deploying with defaults."
+        else
+            echo "[colony] Found config: $CONFIG_FLAG"
+        fi
     fi
 
     echo "[colony] Deploying Colony cluster (blocking — keeps actors alive)..."

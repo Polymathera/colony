@@ -510,12 +510,14 @@ class ReplanningCapability(AgentCapability):
         max_replan_cycles: int = 5,
         input_patterns: list[str] | None = None,
         capability_key: str = "replanning",
+        app_name: str | None = None,
     ):
         super().__init__(
             agent=agent,
             scope_id=get_scope_prefix(scope, agent, namespace=namespace),
             input_patterns=input_patterns or [],
             capability_key=capability_key,
+            app_name=app_name,
         )
         self._replan_every_n_steps = replan_every_n_steps
         self._replan_on_failure = replan_on_failure

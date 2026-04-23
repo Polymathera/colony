@@ -87,8 +87,15 @@ class IncrementalQueryCapability(AgentCapability):
         namespace: str = "incremental_query",
         input_patterns: list[str] = [IncrementalQueryProtocol.request_pattern()],
         capability_key: str = "incremental_query_processor",
+        app_name: str | None = None,
     ):
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(
+            agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self.answer_generator = answer_generator
         self.query_router = query_router
         self.confidence_threshold = confidence_threshold

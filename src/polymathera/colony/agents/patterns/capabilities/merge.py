@@ -854,9 +854,16 @@ class MergeCapability(AgentCapability):
         scope: BlackboardScope = BlackboardScope.COLONY,
         namespace: str = "merge",
         capability_key: str = "merge",
+        app_name: str | None = None,
         merge_policy: MergePolicy | None = None,
     ):
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=[],
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self.merge_policy: MergePolicy | None = merge_policy
 
     def get_action_group_description(self) -> str:

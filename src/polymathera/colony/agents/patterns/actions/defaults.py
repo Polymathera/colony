@@ -32,6 +32,8 @@ async def create_default_action_policy(agent: Agent, **kwargs) -> ActionPolicy:
             max_retries=kwargs.get("max_retries", 2),
             code_timeout=kwargs.get("code_timeout", 30.0),
             max_code_iterations=kwargs.get("max_code_iterations", 50),
+            allow_self_termination=kwargs.get("allow_self_termination", True),
+            reactive_only=kwargs.get("reactive_only", False),
         )
 
     elif _DEFAULT_POLICY == "CACHE_AWARE":

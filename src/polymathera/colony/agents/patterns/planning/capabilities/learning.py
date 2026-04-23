@@ -447,12 +447,14 @@ class PlanLearningCapability(AgentCapability):
         namespace: str = "plan_learning",
         input_patterns: list[str] | None = None,
         capability_key: str = "plan_learning",
+        app_name: str | None = None,
     ):
         super().__init__(
             agent=agent,
             scope_id=get_scope_prefix(scope, agent, namespace=namespace),
             input_patterns=input_patterns or [],
             capability_key=capability_key,
+            app_name=app_name,
         )
         # Sub-components initialized lazily
         self._history_store = None

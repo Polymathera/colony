@@ -87,9 +87,16 @@ class AdaptiveQueryGenerator(AgentCapability):
         namespace: str = "adaptive_query",
         input_patterns: list[str] = [AnalysisResultProtocol.result_pattern()],
         capability_key: str = "adaptive_query_generator",
+        app_name: str | None = None,
     ):
         """Initialize strategy."""
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(
+            agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self.query_history: list[dict[str, Any]] = []
         self.successful_patterns: list[dict[str, Any]] = []
         self.failed_patterns: list[dict[str, Any]] = []

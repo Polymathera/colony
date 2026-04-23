@@ -297,6 +297,10 @@ async def create_session(
                     "available_analyses": available_analyses,
                     "session_id": session_id,
                 },
+                action_policy_config={
+                    "allow_self_termination": False,  # SessionAgent should not terminate itself — the session lives on until the user closes it
+                    "reactive_only": True, # SessionAgent only responds to user messages, it doesn't have proactive goals or actions
+                },
             )
 
             bp = SessionAgent.bind(

@@ -724,8 +724,15 @@ class ValidationCapability(AgentCapability):
         scope: BlackboardScope = BlackboardScope.AGENT,
         namespace: str = "validation",
         capability_key: str = "validation",
+        app_name: str | None = None,
     ):
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=[],
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self.validators: list[AnalysisValidationPolicy] = []
         self.contradiction_resolver: ContradictionResolver | None = None
         self._consensus_validator = ConsensusValidator()

@@ -72,6 +72,7 @@ class CacheAnalysisCapability(AgentCapability):
         query_vcm_state: bool = False,
         input_patterns: list[str] | None = None,
         capability_key: str = "cache_analysis",
+        app_name: str | None = None,
     ):
         """Initialize cache analysis capability.
 
@@ -83,12 +84,15 @@ class CacheAnalysisCapability(AgentCapability):
             query_vcm_state: If True, query live VCM for currently cached pages.
             input_patterns: Event patterns (empty — this is action-executor only).
             capability_key: Capability registration key.
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
         super().__init__(
             agent=agent,
             scope_id=get_scope_prefix(scope, agent, namespace=namespace),
             input_patterns=input_patterns or [],
             capability_key=capability_key,
+            app_name=app_name,
         )
         self.cache_capacity = cache_capacity
         self.query_vcm_state = query_vcm_state

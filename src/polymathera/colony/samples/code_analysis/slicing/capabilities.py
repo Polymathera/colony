@@ -95,7 +95,8 @@ class ProgramSlicingCapability(AgentCapability):
         max_depth: int = 5,
         temperature: float = 0.1,
         max_tokens: int = 2000,
-        capability_key: str = "program_slicing_capability"
+        capability_key: str = "program_slicing_capability",
+        app_name: str | None = None,
     ):
         """Initialize slicing capability.
 
@@ -109,8 +110,10 @@ class ProgramSlicingCapability(AgentCapability):
             temperature: LLM temperature for inference calls
             max_tokens: Max tokens for LLM responses
             capability_key: Unique key for this capability within the agent
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key, app_name=app_name)
         self.interprocedural = interprocedural
         self.max_depth = max_depth
         self.temperature = temperature

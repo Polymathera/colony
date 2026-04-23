@@ -96,6 +96,7 @@ class QueryDrivenExplorationCapability(AgentCapability):
         namespace: str = "query_driven_exploration",
         input_patterns: list[str] = [ExplorationProtocol.request_pattern()],
         capability_key: str = "query_driven_exploration",
+        app_name: str | None = None,
     ):
         """Initialize explorer.
 
@@ -106,8 +107,17 @@ class QueryDrivenExplorationCapability(AgentCapability):
             scope: Scope for the capability
             namespace: Namespace for the capability within the scope (default "query_driven_exploration")
             input_patterns: List of input patterns for the capability
+            capability_key: Unique key for this capability within the agent (default "query_driven_exploration")
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(
+            agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self.query_generator = query_generator
         self.query_router = query_router
         self._all_findings: list[Any] = []

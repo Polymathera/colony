@@ -192,6 +192,7 @@ class PolymatheraApp:
 
     async def get_redis_client(self):
         if self._redis_client is None:
+            await self.initialize()
             self._redis_client = RedisClient(self.sys_config.redis)
             await self._redis_client.initialize()
         return self._redis_client
@@ -209,6 +210,8 @@ class PolymatheraApp:
         self, namespace: str, config: CacheConfig | None = None
     ) -> DistributedSimpleCache:
         """Create a distributed cache instance. The namespace is nested under tenant and colony to avoid collisions between different VMRs and tenants."""
+        await self.initialize()
+
         from .ray_utils import serving
         ctx = serving.get_execution_context()
 

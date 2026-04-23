@@ -64,6 +64,7 @@ class PageGraphCapability(AgentCapability):
         scope: BlackboardScope = BlackboardScope.COLONY,
         namespace: str = "page_graph",
         capability_key: str = "page_graph",
+        app_name: str | None = None,
     ):
         """Initialize page graph capability.
 
@@ -72,8 +73,16 @@ class PageGraphCapability(AgentCapability):
             scope: Blackboard scope (defaults to COLONY)
             namespace: Namespace for the page graph (defaults to "page_graph")
             capability_key: Unique key for this capability (default "page_graph")
+            app_name: The `serving.Application` name where the agent system resides.
+                      Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=[],
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self._page_graph: nx.DiGraph | None = None
 
     def get_action_group_description(self) -> str:

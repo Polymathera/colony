@@ -423,7 +423,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
 
             @override
             async def plan_step(self, state) -> Action | None:
-                event: BlackboardEvent = await self.get_next_event()
+                event: BlackboardEvent = await self.get_next_event_nowait()
                 if not event:
                     return None  # No events pending
                 # Parse event.value and produce action
@@ -437,11 +437,13 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         action_map: list[ActionGroup] | None = None,
         action_providers: list[Any] = [],
         io: ActionPolicyIO | None = None, # Declare I/O contract (override in subclasses)
+        reactive_only: bool = False,
         **kwargs
     ):
         super().__init__(agent, action_map=action_map, action_providers=action_providers, io=io, **kwargs)
         self._event_queue: asyncio.Queue[BlackboardEvent] = asyncio.Queue()
         self._subscribed_callbacks: list[Callable] = []
+        self._reactive_only = reactive_only
 
     @override
     async def initialize(self) -> None:
@@ -473,7 +475,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         return self._event_queue
 
     @hookable
-    async def get_next_event(self) -> BlackboardEvent | None:
+    async def get_next_event_nowait(self) -> BlackboardEvent | None:
         """Get the next pending event (non-blocking).
 
         This method is @hookable so memory capabilities can observe events.
@@ -489,6 +491,19 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             return self._event_queue.get_nowait()
         except asyncio.QueueEmpty:
             return None
+
+    @hookable
+    async def get_next_event(self) -> BlackboardEvent:
+        """Block until an event arrives (for reactive_only mode).
+
+        Like get_next_event_nowait but blocking. Used when the agent should only
+        act in response to events, never spontaneously. @hookable so tracing
+        and memory hooks can observe events just like get_next_event_nowait.
+
+        Returns:
+            The next event (never None — blocks until one arrives).
+        """
+        return await self._event_queue.get()
 
     def _get_event_handlers(self) -> list[Callable]:
         """Get all event handlers from capabilities and action providers.
@@ -528,7 +543,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         """Plan next action with event-driven context enrichment.
 
         Flow:
-        1. Get next event from queue via get_next_event() (non-blocking)
+        1. Get next event from queue via get_next_event_nowait() (non-blocking)
         2. Extract session_id from event metadata and set up context
         3. If event exists, broadcast to @event_handler methods in capabilities
            and action providers
@@ -551,7 +566,13 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             Action to execute, or None
         """
         # 1. Get next event
-        event = await self.get_next_event()
+        if self._reactive_only:
+            # Block until an event arrives — no LLM calls when idle.
+            # This makes the agent purely event-driven: it only acts
+            # when something happens (user message, child agent event, etc.)
+            event = await self.get_next_event()
+        else:
+            event = await self.get_next_event_nowait()
 
         # 2. Extract session_id and run_id from event and store in state for distributed traceability.
         # In distributed Ray systems, context variables don't cross node boundaries,

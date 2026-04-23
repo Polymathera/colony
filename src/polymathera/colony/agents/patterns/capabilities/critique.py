@@ -324,8 +324,15 @@ class CriticCapability(AgentCapability):
         namespace: str = "critique",
         input_patterns: list[str] = CritiqueProtocol.all_request_patterns(),
         capability_key: str = "critique",
+        app_name: str | None = None,
     ):
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name
+        )
         # Injected critique policies for different relationships
         self.critique_policy_self: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_self")  # FIXME: Get the policy instances properly
         self.critique_policy_child: CritiquePolicy | None = self.agent.metadata.parameters.get("critique_policy_child")  # FIXME: Get the policy instances properly
@@ -429,7 +436,7 @@ class CriticCapability(AgentCapability):
         1. EventDrivenActionPolicy.initialize() calls capability.stream_events_to_queue()
         2. stream_events_to_queue() subscribes to CritiqueRequest events on blackboard
         3. When event arrives, it's queued to EventDrivenActionPolicy._event_queue
-        4. plan_step() calls get_next_event(), then broadcasts to @event_handler methods
+        4. plan_step() calls get_next_event_nowait(), then broadcasts to @event_handler methods
         5. This method processes the request and sends response back to requester
 
         Args:

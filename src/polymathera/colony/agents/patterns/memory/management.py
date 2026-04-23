@@ -64,7 +64,7 @@ class AgentMemoryRecycler(AgentCapability):
     delivered via the standard event handler pattern.
     """
 
-    def __init__(self, agent: Agent, capability_key: str = "memory_recycler"):
+    def __init__(self, agent: Agent, capability_key: str = "memory_recycler", app_name: str | None = None):
         """Initialize memory recycler.
 
         This capability to the colony control plane lifecycle scope to receive agent creation/termination events and writes recycled memories to collective memory.
@@ -72,8 +72,16 @@ class AgentMemoryRecycler(AgentCapability):
         Args:
             agent: The MemoryManagementAgent that owns this capability
             capability_key: Key to identify this capability within the agent (default "memory_recycler")
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(BlackboardScope.AGENT, agent, namespace="memory_mgmt:recycler"), input_patterns=[], capability_key=capability_key)  # AgentMemoryRecycler manages its own subscriptions, so no input patterns
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(BlackboardScope.AGENT, agent, namespace="memory_mgmt:recycler"),
+            input_patterns=[],  # AgentMemoryRecycler manages its own subscriptions, so no input patterns
+            capability_key=capability_key,
+            app_name=app_name,
+        )
 
     def get_action_group_description(self) -> str:
         return (
@@ -342,7 +350,7 @@ class CollectiveMemoryInitializer(AgentCapability):
     ``@event_handler``.
     """
 
-    def __init__(self, agent: Agent, capability_key: str = "memory_initializer"):
+    def __init__(self, agent: Agent, capability_key: str = "memory_initializer", app_name: str | None = None):
         """Initialize collective memory initializer.
 
         This capability subscribes to the colony control plane lifecycle scope to receive agent creation events and initializes new agents' LTM from collective memory.
@@ -350,8 +358,16 @@ class CollectiveMemoryInitializer(AgentCapability):
         Args:
             agent: The MemoryManagementAgent that owns this capability
             capability_key: Key to identify this capability within the agent (default "memory_initializer")
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(BlackboardScope.AGENT, agent, namespace="memory_mgmt:initializer"), input_patterns=[], capability_key=capability_key)  # CollectiveMemoryInitializer manages its own subscriptions, so no input patterns
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(BlackboardScope.AGENT, agent, namespace="memory_mgmt:initializer"),
+            input_patterns=[],  # CollectiveMemoryInitializer manages its own subscriptions, so no input patterns
+            capability_key=capability_key,
+            app_name=app_name,
+        )
 
     def get_action_group_description(self) -> str:
         return (
@@ -580,7 +596,7 @@ class CollectiveMemoryMaintainer(AgentCapability):
 
     input_patterns: list[str] = []  # Action-executor-only; no event monitoring needed
 
-    def __init__(self, agent: Agent, capability_key: str = "memory_maintainer"):
+    def __init__(self, agent: Agent, capability_key: str = "memory_maintainer", app_name: str | None = None):
         """Initialize collective memory maintainer.
 
         This capability provides action executors for maintaining collective memory health, but does not subscribe to any events. Maintenance can be triggered manually or set up as a periodic task by the MemoryManagementAgent.
@@ -588,9 +604,17 @@ class CollectiveMemoryMaintainer(AgentCapability):
         Args:
             agent: The MemoryManagementAgent that owns this capability
             capability_key: Key to identify this capability within the agent (default "memory_maintainer")
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
         
-        super().__init__(agent=agent, scope_id=get_scope_prefix(BlackboardScope.AGENT, agent, namespace="memory_mgmt:maintainer"), input_patterns=[], capability_key=capability_key)  # CollectiveMemoryMaintainer manages its own subscriptions, so no input patterns
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(BlackboardScope.AGENT, agent, namespace="memory_mgmt:maintainer"),
+            input_patterns=[],  # CollectiveMemoryMaintainer manages its own subscriptions, so no input patterns
+            capability_key=capability_key,
+            app_name=app_name,
+        )
 
     def get_action_group_description(self) -> str:
         return (

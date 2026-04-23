@@ -85,6 +85,7 @@ class AgentContextEngine(AgentCapability):
         scope: BlackboardScope = BlackboardScope.AGENT,
         namespace: str = f"context_engine:{uuid.uuid4()}",
         capability_key: str = "context_engine",
+        app_name: str | None = None,
     ):
         """Initialize context engine.
 
@@ -93,11 +94,14 @@ class AgentContextEngine(AgentCapability):
             scope: Scope of the context engine (defaults to AGENT)
             namespace: Namespace for the context engine (default unique per instance)
             capability_key: Key to identify this capability within the agent (default "context_engine")
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
         super().__init__(
             agent=agent,
             scope_id=get_scope_prefix(scope, agent, namespace=namespace),
             capability_key=capability_key,
+            app_name=app_name,
             input_patterns=[],  # Context engine manages its own subscriptions to memory capabilities
         )
 

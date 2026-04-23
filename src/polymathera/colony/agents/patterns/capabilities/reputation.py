@@ -818,6 +818,7 @@ class ReputationCapability(AgentCapability):
         namespace: str = "reputation",
         input_patterns: list[str] = ReputationProtocol.all_input_patterns(),
         capability_key: str = "reputation",
+        app_name: str | None = None,
     ):
         """Initialize reputation capability.
 
@@ -827,8 +828,16 @@ class ReputationCapability(AgentCapability):
             namespace: Namespace for blackboard keys. Defaults to "reputation".
             input_patterns: List of event patterns to subscribe to. Defaults to all reputation patterns.
             capability_key: Key to identify this capability within the agent. Defaults to "reputation".
+            app_name: The `serving.Application` name where the agent system resides.
+                      Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self.reputation_tracker = None
         self.update_history: list[ReputationUpdate] = []
 

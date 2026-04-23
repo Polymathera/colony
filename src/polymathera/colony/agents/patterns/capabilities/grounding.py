@@ -200,6 +200,7 @@ class GroundingCapability(AgentCapability):
         namespace: str = "grounding",
         input_patterns: list[str] = [GroundingProtocol.request_pattern()],
         capability_key: str = "grounding",
+        app_name: str | None = None,
     ):
         """Initialize grounding capability.
 
@@ -211,8 +212,16 @@ class GroundingCapability(AgentCapability):
             namespace: Namespace for the capability within the scope (default "grounding")
             input_patterns: List of input patterns for the capability (default listens for grounding requests)
             capability_key: Unique key for this capability (default "grounding")
+            app_name: The `serving.Application` name where the agent system resides.
+                      Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name
+        )
 
     def get_action_group_description(self) -> str:
         return (

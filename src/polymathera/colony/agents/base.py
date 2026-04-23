@@ -237,6 +237,7 @@ class AgentCapability(ABC):
         input_patterns: list[str] | None = None,
         blackboard: EnhancedBlackboard | None = None,
         capability_key: str | None = None,
+        app_name: str | None = None,
     ):
         """Initialize capability.
 
@@ -257,6 +258,8 @@ class AgentCapability(ABC):
             blackboard: Pre-configured blackboard (for detached mode)
             capability_key: Instance-level key for the agent's ``_capabilities`` dict.
                 Defaults to ``f"{cls.__name__}:{self.scope_id}"`` via ``get_capability_name()``.
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
 
         Raises:
             ValueError: If both agent and scope_id are None
@@ -266,6 +269,7 @@ class AgentCapability(ABC):
         self._blackboard: EnhancedBlackboard | None = blackboard
         self._pending_request_id: str | None = None
         self._capability_key: str | None = capability_key
+        self._app_name: str | None = app_name
 
         # In attached mode, derive scope from agent
         # In detached mode, scope_id must be provided
@@ -353,7 +357,7 @@ class AgentCapability(ABC):
             )
         else:
             # Detached mode: create standalone blackboard
-            app_name = serving.get_my_app_name()
+            app_name = self._app_name or serving.get_my_app_name()
 
             self._blackboard = EnhancedBlackboard(
                 app_name=app_name,
@@ -747,7 +751,7 @@ class AgentHandle:
         capability_types: list[type[AgentCapability]] | None = None,
         *,
         default_capability_type: type[AgentCapability] | None = None,
-        app_name: str | None = None
+        app_name: str | None = None,
     ):
         """Initialize agent handle.
 
@@ -983,8 +987,10 @@ class AgentHandle:
             cap_kwargs = dict(kwargs)
             if capability_key is not None:
                 cap_kwargs["capability_key"] = capability_key
+
             if self.is_detached:
                 # Detached mode: create capability with scope_id only
+                cap_kwargs["app_name"] = self._app_name
                 self._capabilities[cache_key] = capability_type(
                     agent=None,
                     **cap_kwargs,

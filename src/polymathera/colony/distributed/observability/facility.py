@@ -40,6 +40,7 @@ _KIND_MAP: dict[str, SpanKind] = {
     "infer": SpanKind.INFER,
     "request_page": SpanKind.PAGE_REQUEST,
     "get_next_event": SpanKind.EVENT_PROCESS,
+    "get_next_event_nowait": SpanKind.EVENT_PROCESS,
 }
 
 

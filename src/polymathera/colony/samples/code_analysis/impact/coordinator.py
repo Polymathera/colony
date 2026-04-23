@@ -361,6 +361,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         overlap_weight: float = 0.7,
         centrality_weight: float = 0.3,
         capability_key: str = "change_impact_analysis_coordinator",
+        app_name: str | None = None,
     ):
         """Initialize coordinator.
 
@@ -374,8 +375,10 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             overlap_weight: Weight for cache overlap in page scoring
             centrality_weight: Weight for graph centrality in page scoring
             capability_key: Unique key for this capability within the agent
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key, app_name=app_name)
 
         self.page_agents: dict[str, str] = {}  # page_id -> agent_id
         self.blackboard: EnhancedBlackboard | None = None

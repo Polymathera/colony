@@ -167,6 +167,7 @@ class ConsistencyCapability(AgentCapability):
         namespace: str = "consistency",
         input_patterns: list[str] = [ConsistencyCheckProtocol.request_pattern()],
         capability_key: str = "consistency",
+        app_name: str | None = None,
     ):
         """Initialize consistency capability.
 
@@ -176,8 +177,16 @@ class ConsistencyCapability(AgentCapability):
             namespace: Namespace for the capability within the scope (default "consistency")
             input_patterns: List of input patterns for the capability
             capability_key: Key for the capability (default "consistency")
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self.checked_results: dict[str, ScopeAwareResult] = {}
 
     def _get_validation_capability(self) -> ValidationCapability | None:

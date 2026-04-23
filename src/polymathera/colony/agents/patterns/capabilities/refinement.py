@@ -628,8 +628,15 @@ class RefinementCapability(AgentCapability):
         scope: BlackboardScope = BlackboardScope.AGENT,
         namespace: str = "refinement",
         capability_key: str = "refinement",
+        app_name: str | None = None,
     ):
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=[], capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=[],
+            capability_key=capability_key,
+            app_name=app_name
+        )
         self.refinement_policy: RefinementPolicy | None = None
         self._refiner: IncrementalRefiner | None = None
 

@@ -691,9 +691,10 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         scope: BlackboardScope = BlackboardScope.AGENT,
         namespace: str = "change_impact_analysis",
         input_patterns: list[str] = [DependencyQueryProtocol.query_pattern()],
-        capability_key: str = "change_impact_analysis_capability"
+        capability_key: str = "change_impact_analysis_capability",
+        app_name: str | None = None,
     ):
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key, app_name=app_name)
 
         # Analysis state
         self.page_id: str | None = None

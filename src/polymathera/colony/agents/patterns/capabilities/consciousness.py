@@ -122,6 +122,7 @@ class ConsciousnessCapability(AgentCapability):
         namespace: str = "consciousness",
         input_patterns: list[str] = [ConsciousnessProtocol.state_pattern()],
         capability_key: str = "consciousness",
+        app_name: str | None = None,
     ):
         """Initialize consciousness capability.
 
@@ -131,8 +132,16 @@ class ConsciousnessCapability(AgentCapability):
             namespace: Namespace for the capability within the scope (default "consciousness")
             input_patterns: List of input patterns for the capability
             capability_key: Unique key for the capability (default "consciousness")
+            app_name: The `serving.Application` name where the agent system resides.
+                    Required when creating detached handles from outside any `serving.deployment`.
         """
-        super().__init__(agent=agent, scope_id=get_scope_prefix(scope, agent, namespace=namespace), input_patterns=input_patterns, capability_key=capability_key)
+        super().__init__(
+            agent=agent,
+            scope_id=get_scope_prefix(scope, agent, namespace=namespace),
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name
+        )
 
         # Cached self-concept (loaded lazily)
         self._self_concept: AgentSelfConcept | None = None
@@ -215,8 +224,13 @@ class ConsciousnessCapability(AgentCapability):
                     "agent_id": self.agent.agent_id
                 }
             )
+            if d is None:
+                logger.warning(f"Could not load self-concept for agent {self.agent.agent_id}. Not found in storage.")
+                return None
+
             d.update({"agent_id": self.agent.agent_id})
             return AgentSelfConcept.from_dict(d)
+
         except Exception as e:
             logger.warning(f"Could not load self-concept for agent {self.agent.agent_id}: {e}")
             return None

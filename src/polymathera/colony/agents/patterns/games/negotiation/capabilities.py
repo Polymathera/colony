@@ -40,7 +40,7 @@ Architecture:
 │               (e.g. CacheAwareActionPolicy)                     │
 ├─────────────────────────────────────────────────────────────────┤
 │  OWNS:                                                          │
-│  • Pulling events (`get_next_event`) and broadcasting to        │
+│  • Pulling events (`get_next_event*`) and broadcasting to       │
 │    capability `@event_handler`s                                 │
 │  • Invoking an LLM planner (if configured) using enriched scope │
 │                                                                 │

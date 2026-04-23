@@ -64,6 +64,10 @@ async def lifespan(app: FastAPI):
         kafka_bootstrap=config.kafka_bootstrap,
     )
 
+    # Attach Kafka log handler so dashboard backend logs appear in the UI's Logs tab
+    from polymathera.colony.distributed.observability.log_setup import attach_kafka_log_handler
+    await attach_kafka_log_handler(kafka_bootstrap=config.kafka_bootstrap)
+
     # Initialize database schemas
     if colony._db_pool:
         from .auth.schema import ensure_auth_schema
@@ -80,6 +84,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    from polymathera.colony.distributed.observability.log_setup import detach_kafka_log_handler
+    await detach_kafka_log_handler()
     await colony.disconnect()
     logger.info("Dashboard services shut down")
 

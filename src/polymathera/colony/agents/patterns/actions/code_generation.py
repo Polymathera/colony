@@ -421,6 +421,7 @@ def format_planning_context_for_codegen(
     planning_context: PlanningContext,
     mode: str,
     error_history: list[dict[str, str]] | None = None,
+    allow_self_termination: bool = True,
 ) -> str:
     """Format a ``PlanningContext`` as a code-generation prompt.
 
@@ -432,6 +433,8 @@ def format_planning_context_for_codegen(
         mode: Current mode — ``"planning"`` or ``"execution"``.
         error_history: Accumulated list of ``{"code": ..., "error": ...}`` dicts
             from ALL prior failed attempts, not just the last one.
+        allow_self_termination: If True, include signal_completion in
+            the prompt instructions and namespace docs.
     """
     parts: list[str] = []
 
@@ -525,7 +528,7 @@ def format_planning_context_for_codegen(
             parts.append("\n".join(rejection_lines))
 
     # -- Instructions --
-    parts.append(_build_instructions_section(mode, planning_context))
+    parts.append(_build_instructions_section(mode, planning_context, allow_self_termination=allow_self_termination))
 
     return "\n\n".join(parts)
 
@@ -571,32 +574,41 @@ if result.success:
 ```"""
 
 
-def _build_instructions_section(mode: str, planning_context: PlanningContext) -> str:
+def _build_instructions_section(mode: str, planning_context: PlanningContext, *, allow_self_termination: bool = True) -> str:
     """Build the tightened instructions section."""
-    return """## Rules
+    rules = [
+        "1. Write 1–3 focused actions per iteration. NOT a complete program.",
+        "2. Use EXACT action keys from Available Actions above with `await run(\"key\")`.",
+        "3. Read task parameters from `params` — do NOT hardcode file paths, thresholds, or config values.",
+        "4. Check `result.success` before using `result.output`.",
+        "5. Store important results: `results[\"key\"] = value`.",
+    ]
+    if allow_self_termination:
+        rules.append("6. Only when all goals are achieved, call `await signal_completion()` (validated before accepting).")
 
-1. Write 1–3 focused actions per iteration. NOT a complete program.
-2. Use EXACT action keys from Available Actions above with `await run("key")`.
-3. Read task parameters from `params` — do NOT hardcode file paths, thresholds, or config values.
-4. Check `result.success` before using `result.output`.
-5. Store important results: `results["key"] = value`.
-6. Only when all goals are achieved, call `await signal_completion()` (validated before accepting).
+    namespace_items = [
+        '- `await run("action_key", param1=val1, ...)` — execute a capability action, returns ActionResult',
+        '- `await browse(query=None)` — discover available capabilities (None=list groups, "group"=detail, "group.action"=full docs, "programmatic"=full Python APIs)',
+        "- `params` — task parameters dict (repo_id, target_files, thresholds, etc.)",
+        "- `_agent` — the Agent instance (for calling programmatic APIs on capabilities directly)",
+        "- `bb` — the agent's primary blackboard (await bb.read/write/query)",
+        "- `results` — dict of prior action results by action_id",
+        '- `switch_mode("planning"|"execution")` — switch which capabilities appear in the prompt',
+        "- `pages` — current working set page IDs (list[str])",
+        "- `goals` — agent's current goals (list[str])",
+    ]
+    if allow_self_termination:
+        namespace_items.append("- `await signal_completion()` — signal all goals achieved (validated before accepting)")
+    namespace_items.extend([
+        "- `log(msg)` — structured logging",
+        "- Standard library: json, re, math, itertools, functools, collections, asyncio",
+    ])
 
-## Namespace
-- `await run("action_key", param1=val1, ...)` — execute a capability action, returns ActionResult
-- `await browse(query=None)` — discover available capabilities (None=list groups, "group"=detail, "group.action"=full docs, "programmatic"=full Python APIs)
-- `params` — task parameters dict (repo_id, target_files, thresholds, etc.)
-- `_agent` — the Agent instance (for calling programmatic APIs on capabilities directly)
-- `bb` — the agent's primary blackboard (await bb.read/write/query)
-- `results` — dict of prior action results by action_id
-- `switch_mode("planning"|"execution")` — switch which capabilities appear in the prompt
-- `pages` — current working set page IDs (list[str])
-- `goals` — agent's current goals (list[str])
-- `await signal_completion()` — signal all goals achieved (validated before accepting)
-- `log(msg)` — structured logging
-- Standard library: json, re, math, itertools, functools, collections, asyncio
-
-Respond with ONLY Python code. No markdown fences. No explanation."""
+    return (
+        "## Rules\n\n" + "\n".join(rules) +
+        "\n\n## Namespace\n" + "\n".join(namespace_items) +
+        "\n\nRespond with ONLY Python code. No markdown fences. No explanation."
+    )
 
 
 def _first_action_key(planning_context: PlanningContext) -> str | None:
@@ -677,10 +689,12 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         max_retries: int = 2,
         code_timeout: float = 30.0,
         max_code_iterations: int = 50,
+        allow_self_termination: bool = True,
         **kwargs,
     ):
         super().__init__(agent=agent, **kwargs)
         self.max_retries = max_retries
+        self._allow_self_termination = allow_self_termination
         self.code_timeout = code_timeout
         self.max_code_iterations = max_code_iterations
         self._planning_capability_blueprints = planning_capability_blueprints
@@ -956,7 +970,8 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         # Install into namespace
         ns["run"] = run
         ns["browse"] = browse
-        ns["signal_completion"] = signal_completion
+        if self._allow_self_termination:
+            ns["signal_completion"] = signal_completion
         ns["switch_mode"] = switch_mode
         ns["log"] = log
         ns["results"] = {}
@@ -1106,6 +1121,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             planning_context=planning_context,
             mode=self._mode,
             error_history=self._error_history if self._error_history else None,
+            allow_self_termination=self._allow_self_termination,
         )
 
         # Clear completion rejection after it's been rendered into the prompt
@@ -1403,6 +1419,8 @@ async def create_code_generation_action_policy(
     max_retries: int = 2,
     code_timeout: float = 30.0,
     max_code_iterations: int = 50,
+    allow_self_termination: bool = True,
+    reactive_only: bool = False,
 ) -> CodeGenerationActionPolicy:
     """Create a code-generation-based action policy.
 
@@ -1438,6 +1456,8 @@ async def create_code_generation_action_policy(
         max_retries: Max retries on code execution failure.
         code_timeout: Timeout for each code execution.
         max_code_iterations: Max code generation iterations.
+        allow_self_termination: If True, generated code can signal completion (for reactive agents).
+        reactive_only: If True, only include capabilities tagged "reactive" in the prompt (for reactive agents).
 
     Returns:
         CodeGenerationActionPolicy
@@ -1454,6 +1474,8 @@ async def create_code_generation_action_policy(
         max_retries=max_retries,
         code_timeout=code_timeout,
         max_code_iterations=max_code_iterations,
+        allow_self_termination=allow_self_termination,
+        reactive_only=reactive_only,
         action_map=action_map,
         action_providers=action_providers,
         io=io,

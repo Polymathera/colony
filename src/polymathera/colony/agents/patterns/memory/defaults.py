@@ -137,11 +137,16 @@ async def create_default_memory_hierarchy(
                 CapacityMaintenancePolicy(max_entries=50, check_interval_seconds=60.0),
                 PruneMaintenancePolicy(prune_threshold=0.1, check_interval_seconds=60.0),
             ],
-            # Observe blackboard events via hook on get_next_event
+            # Observe blackboard events via hook on get_next_event*
             # Note: extractor=None means directly store the result
             producers=[
                 MemoryProducerConfig(
                     pointcut=Pointcut.pattern("EventDrivenActionPolicy.get_next_event"),
+                    extractor=extract_event_from_event_driven_policy,
+                    ttl_seconds=60,  # 1 minute retention
+                ),
+                MemoryProducerConfig(
+                    pointcut=Pointcut.pattern("EventDrivenActionPolicy.get_next_event_nowait"),
                     extractor=extract_event_from_event_driven_policy,
                     ttl_seconds=60,  # 1 minute retention
                 ),
