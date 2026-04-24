@@ -51,6 +51,7 @@ from ..planning import (
 )
 from ..planning.planner import create_cache_aware_planner
 from ..planning.context import PlanningContextBuilder
+from ..planning.streams import ConsciousnessStream
 if TYPE_CHECKING:
     from ..planning.capabilities import ReplanningDecision
 
@@ -172,11 +173,12 @@ class BaseActionPolicy(ActionPolicy):
         # Base implementation - subclasses restore from state.policy_state
         pass
 
-    def get_event_history(self) -> list[dict[str, Any]]:
-        """Get the rolling event history buffer for the planning prompt.
+    def get_consciousness_streams(self) -> list[ConsciousnessStream]:
+        """Return the policy's consciousness streams, in render order.
 
-        Returns empty by default. Overridden by EventDrivenActionPolicy
-        which accumulates event handler contexts in plan_step().
+        Returns empty by default. Overridden by policies that maintain
+        streams of recorded experience (events + actions) that should
+        surface in the planning prompt.
         """
         return []
 
@@ -446,7 +448,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         action_providers: list[Any] = [],
         io: ActionPolicyIO | None = None, # Declare I/O contract (override in subclasses)
         reactive_only: bool = False,
-        max_event_history: int = 20,
+        consciousness_streams: list[ConsciousnessStream] | None = None,
         **kwargs
     ):
         super().__init__(agent, action_map=action_map, action_providers=action_providers, io=io, **kwargs)
@@ -454,8 +456,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         self._subscribed_callbacks: list[Callable] = []
         self._subscribed_providers: set[int] = set()  # Track by identity to prevent duplicate subscriptions
         self._reactive_only = reactive_only
-        self._event_history: list[dict[str, Any]] = []
-        self._max_event_history = max_event_history
+        self._consciousness_streams: list[ConsciousnessStream] = list(consciousness_streams or [])
 
     @override
     async def initialize(self) -> None:
@@ -524,15 +525,10 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         """
         return await self._event_queue.get()
 
-    def get_event_history(self) -> list[dict[str, Any]]:
-        """Get the rolling event history buffer.
-
-        Returns a copy of recent event handler contexts accumulated by
-        plan_step(). Each entry has 'iteration', 'timestamp', and 'contexts'.
-        Used by PlanningContextBuilder to include events in the planning prompt.
-        """
-        logger.debug("get_event_history called: %d entries", len(self._event_history))
-        return list(self._event_history)
+    @override
+    def get_consciousness_streams(self) -> list[ConsciousnessStream]:
+        """Return the streams this policy feeds (events + actions)."""
+        return list(self._consciousness_streams)
 
     def _get_event_handlers(self) -> list[Callable]:
         """Get all event handlers from capabilities and action providers.
@@ -693,21 +689,11 @@ class EventDrivenActionPolicy(BaseActionPolicy):
                         namespace="event_context"
                     )
 
-                    # Append to rolling event history for the planning prompt.
-                    # PlanningContextBuilder reads this to give the LLM visibility
-                    # into recent events (user messages, agent results, etc.)
-                    self._event_history.append({
-                        "iteration": state.iteration_num,
-                        "timestamp": time.time(),
-                        "contexts": accumulated_context,
-                    })
-                    logger.debug(
-                        "Event history updated: %d entries, latest context_keys=%s",
-                        len(self._event_history),
-                        list(accumulated_context.keys()),
-                    )
-                    if len(self._event_history) > self._max_event_history:
-                        self._event_history = self._event_history[-self._max_event_history:]
+                    # Feed the accumulated context to every consciousness
+                    # stream. Each stream decides independently (via its
+                    # event_filter) whether to record this event.
+                    for stream in self._consciousness_streams:
+                        stream.consider_event(accumulated_context)
 
                 # If any handler provided immediate action, return the first one
                 # (others are ignored)

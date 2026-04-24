@@ -462,6 +462,7 @@ class PlanLearningCapability(AgentCapability):
         self._cost_trainer = None
         self._initialized = False
 
+    @override
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"planning"})
 

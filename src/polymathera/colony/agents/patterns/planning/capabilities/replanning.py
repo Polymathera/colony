@@ -524,6 +524,7 @@ class ReplanningCapability(AgentCapability):
         self._max_replan_cycles = max_replan_cycles
         self._composite_policy = None
 
+    @override
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"planning"})
 

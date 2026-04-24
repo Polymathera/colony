@@ -378,8 +378,7 @@ class AgentCapability(ABC):
         """
         return cls.__name__
 
-    @classmethod
-    def get_capability_tags(cls) -> frozenset[str]:
+    def get_capability_tags(self) -> frozenset[str]:
         """Return domain/modality tags for hierarchical action scoping.
 
         Override in subclasses to provide tags used for filtering action groups
@@ -1715,11 +1714,11 @@ class Agent(BaseModel):
     action_policy_blueprints: dict[str, Any] = Field(
         default_factory=dict,
         exclude=True,
-        description="Blueprint objects for action policy config that can't be "
-        "JSON-serialized (e.g., EventHistoryFormatter). Excluded from Pydantic "
-        "serialization — travels via cloudpickle through AgentBlueprint only. "
-        "Resolved via local_instance() at policy creation time and merged "
-        "with metadata.action_policy_config.",
+        description="Blueprint objects (or lists of blueprints) for action policy "
+        "config that can't be JSON-serialized (e.g., consciousness-stream "
+        "blueprints). Excluded from Pydantic serialization — travels via "
+        "cloudpickle through AgentBlueprint only. Resolved via local_instance() "
+        "at policy creation time and merged with metadata.action_policy_config.",
     )
     action_policy_state: ActionPolicyExecutionState | None = Field(default=None)
     action_policy: ActionPolicy | None = None
@@ -2179,11 +2178,21 @@ class Agent(BaseModel):
             from .patterns.actions import create_default_action_policy
 
             # Resolve blueprint objects from action_policy_blueprints and merge
-            # with the JSON-serializable action_policy_config.
+            # with the JSON-serializable action_policy_config. Values may be
+            # a single Blueprint or a list of Blueprints (e.g., consciousness
+            # streams); list elements are resolved element-wise.
+            from .blueprint import Blueprint
+
+            def _resolve(v):
+                if isinstance(v, Blueprint):
+                    return v.local_instance()
+                if isinstance(v, list):
+                    return [_resolve(item) for item in v]
+                return v
+
             resolved_config = dict(self.metadata.action_policy_config)
             for key, value in self.action_policy_blueprints.items():
-                from .blueprint import Blueprint
-                resolved_config[key] = value.local_instance() if isinstance(value, Blueprint) else value
+                resolved_config[key] = _resolve(value)
 
             self.action_policy = await create_default_action_policy(
                 agent=self,

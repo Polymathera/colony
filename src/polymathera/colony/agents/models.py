@@ -655,11 +655,12 @@ class PlanningContext(BaseModel):
         "Populated by AgentContextEngine.gather_context() before LLM planning."
     )
 
-    event_history: list[dict[str, Any]] = Field(
+    stream_sections: list[str] = Field(
         default_factory=list,
-        description="Rolling window of recent event handler contexts. Each entry has "
-        "'iteration', 'timestamp', and 'contexts' (dict of context_key → handler context). "
-        "Populated from EventDrivenActionPolicy._event_history by PlanningContextBuilder."
+        description="Pre-rendered consciousness-stream sections (markdown). "
+        "Populated by PlanningContextBuilder by calling ``render()`` on each "
+        "stream returned by the action policy. The prompt formatter inserts "
+        "them verbatim into the planning prompt."
     )
 
     custom_data: dict[str, Any] = Field(

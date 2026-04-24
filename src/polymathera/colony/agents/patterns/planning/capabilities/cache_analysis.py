@@ -97,6 +97,7 @@ class CacheAnalysisCapability(AgentCapability):
         self.cache_capacity = cache_capacity
         self.query_vcm_state = query_vcm_state
 
+    @override
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"planning"})
 

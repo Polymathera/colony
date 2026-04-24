@@ -422,12 +422,12 @@ def format_planning_context_for_codegen(
     mode: str,
     error_history: list[dict[str, str]] | None = None,
     allow_self_termination: bool = True,
-    event_history_formatter: Any = None,
 ) -> str:
     """Format a ``PlanningContext`` as a code-generation prompt.
 
     This is a thin rendering layer — all context gathering (memories, identity,
-    constraints, action descriptions) is done by ``PlanningContextBuilder``.
+    constraints, action descriptions, consciousness streams) is done by
+    ``PlanningContextBuilder``.
 
     Args:
         planning_context: Structured context from ``PlanningContextBuilder``.
@@ -436,9 +436,6 @@ def format_planning_context_for_codegen(
             from ALL prior failed attempts, not just the last one.
         allow_self_termination: If True, include signal_completion in
             the prompt instructions and namespace docs.
-        event_history_formatter: Optional ``EventHistoryFormatter`` instance
-            that controls how events appear in the prompt. If None and
-            event_history is non-empty, uses ``DefaultEventHistoryFormatter``.
     """
     parts: list[str] = []
 
@@ -456,13 +453,12 @@ def format_planning_context_for_codegen(
         constraint_lines = [f"- {k}: {v}" for k, v in planning_context.constraints.items()]
         parts.append("## Constraints\n" + "\n".join(constraint_lines))
 
-    # Event history — recent event handler contexts (user messages, agent events, etc.)
-    if planning_context.event_history:
-        from ..planning.formatters import DefaultEventHistoryFormatter
-        formatter = event_history_formatter or DefaultEventHistoryFormatter()
-        event_section = formatter.format(planning_context.event_history)
-        if event_section:
-            parts.append(event_section)
+    # Consciousness streams — each stream is a filtered view of the agent's
+    # experience (events + actions) rendered by its own formatter. Streams
+    # are pre-rendered by PlanningContextBuilder.
+    for section in planning_context.stream_sections:
+        if section:
+            parts.append(section)
 
     # Execution progress — show what actions each code step called,
     # Only render code steps (codegen_plan_step_*), not internal actions.
@@ -702,13 +698,11 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         code_timeout: float = 30.0,
         max_code_iterations: int = 50,
         allow_self_termination: bool = True,
-        event_history_formatter: Any = None,
         **kwargs,
     ):
         super().__init__(agent=agent, **kwargs)
         self.max_retries = max_retries
         self._allow_self_termination = allow_self_termination
-        self._event_history_formatter = event_history_formatter
         self.code_timeout = code_timeout
         self.max_code_iterations = max_code_iterations
         self._planning_capability_blueprints = planning_capability_blueprints
@@ -768,6 +762,17 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
 
         self._browser = CapabilityBrowser(self._action_dispatcher, self.agent)
         await self._setup_enriched_namespace()
+
+        # If no planning-tagged action groups exist, planning mode is a
+        # vacuous state — the prompt filter would hide every real action
+        # and the LLM could never dispatch a domain action to trigger the
+        # planning→execution transition. Start directly in execution mode.
+        if not self._get_planning_action_keys():
+            self._mode = "execution"
+            logger.info(
+                "CodeGenerationActionPolicy: no planning-tagged actions registered; "
+                "starting in execution mode"
+            )
 
     async def _ensure_planning_capabilities(self) -> None:
         """Add default planning capabilities if not already registered."""
@@ -841,6 +846,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 self._run_call_trace.append({
                     "call_index": len(self._run_call_trace),
                     "action_key": action_key,
+                    "parameters": dict(params),
                     "success": False,
                     "error": f"Blocked: {decision.reason}"[:200],
                     "output_preview": "",
@@ -880,6 +886,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             self._run_call_trace.append({
                 "call_index": len(self._run_call_trace),
                 "action_key": resolved_action_key,
+                "parameters": dict(params),
                 "success": result.success,
                 "error": (result.error or "")[:200] if not result.success else None,
                 "output_preview": str(result.output)[:200] if result.output is not None else "",
@@ -1136,7 +1143,6 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             mode=self._mode,
             error_history=self._error_history if self._error_history else None,
             allow_self_termination=self._allow_self_termination,
-            event_history_formatter=self._event_history_formatter,
         )
 
         # Clear completion rejection after it's been rendered into the prompt
@@ -1310,6 +1316,13 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 run_call_trace=list(self._run_call_trace),
             )
 
+        # Feed this iteration's action calls to every consciousness stream.
+        # Each stream decides independently (via its action_filter) what to
+        # record. Streams bound to this policy surface in the planning prompt.
+        for call in self._run_call_trace:
+            for stream in self._consciousness_streams:
+                stream.consider_action(call)
+
         # Check if code execution failed
         if (result.result and not result.result.success
                 and result.action_executed
@@ -1437,7 +1450,7 @@ async def create_code_generation_action_policy(
     allow_self_termination: bool = True,
     reactive_only: bool = False,
     planning_capability_blueprints: list[Any] | None = None,
-    event_history_formatter: Any = None,
+    consciousness_streams: list[Any] | None = None,
 ) -> CodeGenerationActionPolicy:
     """Create a code-generation-based action policy.
 
@@ -1493,7 +1506,7 @@ async def create_code_generation_action_policy(
         max_code_iterations=max_code_iterations,
         allow_self_termination=allow_self_termination,
         planning_capability_blueprints=planning_capability_blueprints,
-        event_history_formatter=event_history_formatter,
+        consciousness_streams=consciousness_streams,
         reactive_only=reactive_only,
         action_map=action_map,
         action_providers=action_providers,

@@ -1126,6 +1126,7 @@ class PlanCoordinationCapability(AgentCapability):
         self._resolver = None
         self._plan_blackboard = None
 
+    @override
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"planning"})
 

@@ -252,7 +252,13 @@ async def create_session(
             from ..chat import SessionAgent, SessionOrchestratorCapability
             from polymathera.colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
             from polymathera.colony.agents.patterns.capabilities.consciousness import ConsciousnessCapability
-            from polymathera.colony.agents.patterns.planning.formatters import ConversationFormatter
+            from polymathera.colony.agents.patterns.planning.streams import (
+                ConsciousnessStream,
+                ConversationFormatter,
+                EventContextKeyFilter,
+                ActionKeySubstringFilter,
+                SuccessfulActionFilter,
+            )
             from polymathera.colony.cli.polymath import ANALYSIS_REGISTRY
             from polymathera.colony.distributed.ray_utils.serving.context import get_tenant_id, get_colony_id
 
@@ -321,7 +327,16 @@ async def create_session(
                     ConsciousnessCapability.bind(),
                 ],
                 action_policy_blueprints={
-                    "event_history_formatter": ConversationFormatter.bind(),
+                    "consciousness_streams": [
+                        ConsciousnessStream.bind(
+                            name="conversation",
+                            formatter=ConversationFormatter.bind(),
+                            event_filter=EventContextKeyFilter("user_chat_message"),
+                            action_filter=SuccessfulActionFilter(
+                                ActionKeySubstringFilter("respond_to_user")
+                            ),
+                        ),
+                    ],
                 },
             )
 

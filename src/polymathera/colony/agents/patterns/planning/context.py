@@ -65,6 +65,12 @@ class PlanningContextBuilder:
         action_policy: BaseActionPolicy = self.agent.action_policy
         assert isinstance(action_policy, BaseActionPolicy), "Agent's action_policy must be a BaseActionPolicy for planning context building"
 
+        # Render consciousness streams — each stream is a filtered view of
+        # the agent's experience (events + actions) with its own formatter.
+        stream_sections = [
+            stream.render() for stream in action_policy.get_consciousness_streams()
+        ]
+
         # Create new planning context based on current state
         return PlanningContext(
             system_prompt=await self._build_system_prompt(),
@@ -75,7 +81,7 @@ class PlanningContextBuilder:
             action_descriptions=await action_policy.get_action_descriptions(),
             action_group_summaries=await action_policy.get_action_group_summaries(),
             recalled_memories=recalled_memories,
-            event_history=action_policy.get_event_history(),
+            stream_sections=stream_sections,
             custom_data=custom_data,
             # parent_plan_id=self.current_plan.parent_plan_id,
         )

@@ -87,6 +87,7 @@ nav:
     - Agent Memory System: architecture/agent-memory-system.md
     - Action Policies: architecture/action-policies.md
     - Planning: architecture/planning.md
+    - Consciousness Streams: architecture/consciousness-streams.md
     - Blackboard Pattern: architecture/blackboard.md
     - Hook System: architecture/hook-system.md
     - Game Patterns: architecture/game-engine.md

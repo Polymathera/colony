@@ -605,10 +605,10 @@ class MemoryScope:
         if not scope_id.startswith(f"{prefix}:agent:"):
             return None
         scope_id = scope_id[len(f"{prefix}:") :]
-        parts = scope_id.split(":", 2)
+        parts = scope_id.split(":", 3)
         if len(parts) < 4 or parts[2] != "memory":
             return None
-        return (parts[1], ":".join(parts[3:]))
+        return (parts[1], parts[3])
 
     @staticmethod
     def parse_collective_scope(scope_id: str) -> tuple[str, str] | None:

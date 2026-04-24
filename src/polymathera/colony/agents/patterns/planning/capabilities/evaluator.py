@@ -341,6 +341,7 @@ class PlanEvaluationCapability(AgentCapability):
             app_name=app_name,
         )
 
+    @override
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"planning"})
 
