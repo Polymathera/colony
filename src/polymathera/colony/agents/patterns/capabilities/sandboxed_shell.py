@@ -423,7 +423,9 @@ class SandboxedShellCapability(AgentCapability):
             (workspace, workdir, "rw"),
         ]
         for v in (extra_volumes or []):
-            src = v.get("src"); dst = v.get("dst"); mode = v.get("mode", "ro")
+            src = v.get("src")
+            dst = v.get("dst")
+            mode = v.get("mode", "ro")
             if not src or not dst:
                 continue
             volumes.append((str(src), str(dst), str(mode)))
