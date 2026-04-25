@@ -39,15 +39,14 @@ export function Sidebar({
   );
 
   // Clear stale session ID if sessions loaded but the active one
-  // doesn't exist. Skip during in-flight fetches: ``handleCreateSession``
-  // calls ``onSelectSession(new_id)`` and *also* invalidates the
-  // sessions query, which kicks off a refetch. Until that refetch
-  // completes ``sessions.data`` still holds the pre-create list, and
-  // a naive lookup would incorrectly conclude the brand-new session
-  // is stale and snap ``activeSessionId`` back to ``null`` — the
-  // landing page then re-appears with the new session listed under
-  // "Recent Sessions". Waiting for ``isFetching`` to settle closes
-  // that race.
+  // doesn't exist. The race that used to make a brand-new session
+  // land in "Recent Sessions" instead of opening — between
+  // ``onSelectSession(new_id)`` and the post-create refetch
+  // returning — is closed at its source: ``useCreateSession`` now
+  // optimistically inserts the new row into the cached list, so
+  // ``sessions.data`` includes it on the next render. The
+  // ``isFetching`` guard remains as a backstop for the case where a
+  // refetch is in flight for unrelated reasons.
   useEffect(() => {
     if (
       activeSessionId

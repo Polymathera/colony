@@ -680,7 +680,7 @@ class SandboxedShellCapability(AgentCapability):
             return s, False
         return s[:cap], True
 
-    @action_executor()
+    @action_executor(interruptible=True)
     async def execute_command(
         self,
         container_id: str,
@@ -925,7 +925,7 @@ class SandboxedShellCapability(AgentCapability):
                 )
         return rendered
 
-    @action_executor()
+    @action_executor(interruptible=True)
     async def execute_script(
         self,
         container_id: str,

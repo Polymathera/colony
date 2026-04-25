@@ -58,7 +58,37 @@ export function useCreateSession() {
         method: "POST",
         body: JSON.stringify(req ?? {}),
       }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
+    onSuccess: (data) => {
+      // Optimistically insert the new session into every cached
+      // session list so the Sidebar's ``activeSession`` lookup matches
+      // immediately after ``onSelectSession(new_id)``. Without this,
+      // there is a race window between the create returning and the
+      // refetch landing where ``sessions.data`` still holds the
+      // pre-create list — Sidebar's stale-cleanup useEffect would
+      // then snap ``activeSessionId`` back to ``null`` and the new
+      // session would appear under "Recent Sessions" instead of
+      // opening. The optimistic row is replaced with the real one as
+      // soon as the invalidated query refetches.
+      if (data.status === "created") {
+        qc.setQueriesData<SessionSummary[]>(
+          { queryKey: ["sessions"], exact: false },
+          (prev) => {
+            if (!Array.isArray(prev)) return prev;
+            if (prev.some((s) => s.session_id === data.session_id)) return prev;
+            const optimistic: SessionSummary = {
+              session_id: data.session_id,
+              tenant_id: "",
+              colony_id: "",
+              state: "active",
+              created_at: Date.now() / 1000,
+              run_count: 0,
+            };
+            return [optimistic, ...prev];
+          },
+        );
+      }
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+    },
   });
 }
 

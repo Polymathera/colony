@@ -147,6 +147,17 @@ class ActionResult(BaseModel):
         default=False,
         description="If action fully completed (vs. partial result). Used mostly by ActionPolicies. If True, action is done. If False, more iterations needed."
     )
+    cancelled: bool = Field(
+        default=False,
+        description=(
+            "True iff the action was interrupted by a cancellation request "
+            "(e.g. /abort or /replace) while in flight. Distinct from `success`: "
+            "a cancelled action is neither a success nor an ordinary failure — "
+            "callers should treat it as 'no result, do not retry, do not record "
+            "as an error'. When True, `success` MUST be False and `error` SHOULD "
+            "describe the cancellation source."
+        ),
+    )
 
 
 class ActionCheckpoint(BaseModel):

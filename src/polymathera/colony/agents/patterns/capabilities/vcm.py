@@ -302,7 +302,7 @@ class VCMCapability(AgentCapability):
 
     # === Action Executors ===
 
-    @action_executor()
+    @action_executor(interruptible=True)
     async def mmap_repo(
         self,
         *,
@@ -605,7 +605,7 @@ class VCMCapability(AgentCapability):
 
     # --- Page lifecycle (Phase 2) ------------------------------------------
 
-    @action_executor()
+    @action_executor(interruptible=True)
     async def request_pages(
         self,
         page_ids: list[str],

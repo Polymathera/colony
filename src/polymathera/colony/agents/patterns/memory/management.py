@@ -94,8 +94,14 @@ class AgentMemoryRecycler(AgentCapability):
     async def stream_events_to_queue(
         self,
         event_queue: asyncio.Queue[BlackboardEvent],
+        *,
+        high_priority_queue: asyncio.Queue[BlackboardEvent] | None = None,
     ) -> None:
         """Subscribe to termination events on the colony control plane.
+
+        ``high_priority_queue`` is accepted for interface compatibility
+        with the base method but ignored here — lifecycle events are
+        not high-priority traffic.
 
         Lifecycle events are emitted to a separate blackboard scope
         (colony control plane), not this capability's own scope.
@@ -380,8 +386,13 @@ class CollectiveMemoryInitializer(AgentCapability):
     async def stream_events_to_queue(
         self,
         event_queue: asyncio.Queue[BlackboardEvent],
+        *,
+        high_priority_queue: asyncio.Queue[BlackboardEvent] | None = None,
     ) -> None:
         """Subscribe to creation events on the colony control plane.
+
+        ``high_priority_queue`` is accepted for interface compatibility
+        with the base method but ignored here.
 
         Lifecycle events are emitted to a separate blackboard scope
         (colony control plane), not this capability's own scope.

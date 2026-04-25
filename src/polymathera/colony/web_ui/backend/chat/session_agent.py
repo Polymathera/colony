@@ -216,21 +216,48 @@ class SessionOrchestratorCapability(AgentCapability):
             return
 
         if ActionPolicyLifecycleProtocol.is_codegen_retry_key(key):
+            # ``codegen_retry`` carries both progress events (``finished=False``)
+            # and the terminal success event (``finished=True, succeeded=True``)
+            # that ``_emit_codegen_recovery_banner`` fires when a regenerated
+            # cell finally validates. The banner must clear on the terminal
+            # event — otherwise it stays "running" forever even though the
+            # policy is idle, and ``/abort`` then correctly reports "nothing
+            # to abort" while the user stares at a stuck spinner.
             attempt = payload.get("attempt", 0)
             max_attempts = payload.get("max_attempts", 0)
-            await chat_bb.write(
-                f"chat:action_status:{agent_id}:codegen_recovery",
-                {
-                    "agent_id": agent_id,
-                    "action_id": "codegen_recovery",
-                    "action_key": (
-                        f"codegen — regenerating after invalid output "
-                        f"(attempt {attempt}/{max_attempts})"
-                    ),
-                    "status": "running",
-                    "started_at": payload.get("ts"),
-                },
-            )
+            finished = bool(payload.get("finished"))
+            succeeded = bool(payload.get("succeeded"))
+            if finished:
+                await chat_bb.write(
+                    f"chat:action_status:{agent_id}:codegen_recovery",
+                    {
+                        "agent_id": agent_id,
+                        "action_id": "codegen_recovery",
+                        "action_key": (
+                            f"codegen — recovered on attempt {attempt}"
+                            if succeeded
+                            else f"codegen — gave up after {attempt} attempts"
+                        ),
+                        "status": "complete" if succeeded else "failed",
+                        "started_at": payload.get("ts"),
+                        "ended_at": payload.get("ts"),
+                        "error": payload.get("error"),
+                    },
+                )
+            else:
+                await chat_bb.write(
+                    f"chat:action_status:{agent_id}:codegen_recovery",
+                    {
+                        "agent_id": agent_id,
+                        "action_id": "codegen_recovery",
+                        "action_key": (
+                            f"codegen — regenerating after invalid output "
+                            f"(attempt {attempt}/{max_attempts})"
+                        ),
+                        "status": "running",
+                        "started_at": payload.get("ts"),
+                    },
+                )
             return
 
         if ActionPolicyLifecycleProtocol.is_codegen_failed_key(key):
@@ -432,6 +459,227 @@ class SessionOrchestratorCapability(AgentCapability):
         await self._post_response(f"Reply to {request_id} acknowledged: {content}")
 
         return PROCESSED
+
+    @event_handler(
+        pattern=SessionChatProtocol.control_message_pattern(),
+        priority="high",
+    )
+    async def handle_control_command(
+        self, event: BlackboardEvent, _repl: Any,
+    ) -> EventProcessingResult:
+        """Handle a high-priority control command from the user.
+
+        Runs on the policy's concurrent high-priority lane, so it is
+        NOT blocked by long-running actions in the main planning
+        loop. Strict read-only contract:
+
+        - MAY read agent / policy state via
+          ``policy.get_status_snapshot()``.
+        - MAY write to its own (chat) blackboard via
+          ``self._post_response``.
+        - MUST NOT dispatch actions through the action dispatcher.
+        - MUST NOT mutate policy internals; cancellation paths are
+          dedicated APIs added in Phase 2 of the design (see
+          ``design_event_priority_and_action_interruption.md``).
+        """
+        payload = event.value if isinstance(event.value, dict) else {}
+        command = (payload.get("command") or "").lower()
+
+        if command in ("/status", "/whatdoing"):
+            await self._respond_with_status_snapshot()
+            return PROCESSED
+
+        if command in ("/abort", "/cancel"):
+            await self._handle_abort_command(reason=command)
+            return PROCESSED
+
+        if command == "/replace":
+            content = (payload.get("content") or "").strip()
+            await self._handle_replace_command(content)
+            return PROCESSED
+
+        # Unknown control: acknowledge so the user knows the command
+        # was received on the high-priority lane.
+        await self._post_response(
+            f"⚠️ Unknown control command `{command}`. "
+            f"Available: `/status`, `/whatdoing`, `/abort`, `/cancel`, `/replace`.",
+            kind="control_ack",
+        )
+        return PROCESSED
+
+    async def _handle_abort_command(self, *, reason: str) -> None:
+        """Cancel the action policy's currently-executing action.
+
+        Always called from the high-priority lane, so a long-running
+        action does NOT keep us from getting here. We:
+
+        1. Pull the live action policy off the agent. If there isn't one
+           yet (agent still warming up) the user gets a clear message;
+           there is nothing to abort.
+        2. Call ``policy.abort_current(reason=...)`` — the policy is
+           responsible for resetting any per-policy state (codegen
+           recovery counters, in-flight LLM call) AND cancelling the
+           dispatcher-tracked action. Returns True iff *something* was
+           actually interrupted.
+        3. Surface the outcome to the user. ``False`` is not a failure
+           — it just means the agent was idle when /abort landed.
+        """
+        policy = getattr(self.agent, "action_policy", None)
+        if policy is None:
+            await self._post_response(
+                "⚠️ No action policy attached to this agent — nothing to abort.",
+                kind="control_ack",
+            )
+            return
+
+        try:
+            aborted = await policy.abort_current(reason=reason)
+        except Exception as e:  # pragma: no cover — defensive
+            logger.exception("abort_current() raised")
+            await self._post_response(
+                f"⚠️ Abort failed: {e}",
+                kind="control_ack",
+            )
+            return
+
+        if aborted:
+            await self._post_response(
+                f"⏹️ Aborted current action ({reason}).",
+                kind="control_ack",
+            )
+        else:
+            await self._post_response(
+                "ℹ️ Nothing to abort — the agent is idle.",
+                kind="control_ack",
+            )
+
+    async def _handle_replace_command(self, full_content: str) -> None:
+        """Pre-emptive re-prioritisation: abort current action, queue new request.
+
+        ``/replace <new request>`` is the user saying "stop what you're doing,
+        do this instead". Two-step:
+
+        1. Cancel the in-flight action via ``policy.abort_current()`` so the
+           planner doesn't continue spending time on something the user has
+           already discarded.
+        2. Post the new request as a regular ``chat:user:*`` message on the
+           same chat blackboard, so it picks up via the *normal* event lane
+           in ``plan_step`` exactly as if the user had sent a fresh message.
+           This keeps the planning path single-sourced — the high-priority
+           lane never tries to *plan*, it only kicks the planner with new
+           input.
+
+        Empty payload is rejected with a clear message — ``/replace`` with
+        no body is almost always a typo, and we'd rather flag it than
+        silently abort + queue an empty message that the planner ignores.
+        """
+        # ``full_content`` is the full chat message including the leading
+        # "/replace " — strip the command itself, preserving any whitespace
+        # / newlines in the actual request.
+        body = full_content[len("/replace"):].lstrip()
+        if not body:
+            await self._post_response(
+                "⚠️ `/replace` requires a new request. "
+                "Usage: `/replace <what to do instead>`.",
+                kind="control_ack",
+            )
+            return
+
+        policy = getattr(self.agent, "action_policy", None)
+        aborted = False
+        if policy is not None:
+            try:
+                aborted = await policy.abort_current(reason="/replace")
+            except Exception:  # pragma: no cover — defensive
+                logger.exception("abort_current() raised during /replace")
+
+        try:
+            await self._post_user_message_on_normal_lane(body)
+        except Exception as e:
+            logger.exception("/replace failed to enqueue new request")
+            await self._post_response(
+                f"⚠️ Aborted current action but failed to queue replacement: {e}",
+                kind="control_ack",
+            )
+            return
+
+        if aborted:
+            await self._post_response(
+                "🔁 Aborted current action and queued your new request.",
+                kind="control_ack",
+            )
+        else:
+            await self._post_response(
+                "🔁 Agent was idle — queued your new request.",
+                kind="control_ack",
+            )
+
+    async def _post_user_message_on_normal_lane(self, content: str) -> None:
+        """Inject ``content`` as if the user had typed it as a fresh chat
+        message. Used by ``/replace`` to seed the next iteration of the
+        planner with the new request.
+
+        Routes to ``chat:user:*`` on this capability's own scoped
+        blackboard — same key shape and namespace the chat router
+        produces, so the existing ``handle_user_message`` event handler
+        on the normal lane picks it up unchanged.
+        """
+        blackboard = await self.get_blackboard()
+        message_id = f"msg_{uuid.uuid4().hex[:12]}"
+        await blackboard.write(
+            SessionChatProtocol.user_message_key(message_id),
+            {
+                "content": content,
+                "command": None,
+                "message_id": message_id,
+                "controls": None,
+                "timestamp": time.time(),
+                "source": "control:/replace",
+            },
+        )
+
+    async def _respond_with_status_snapshot(self) -> None:
+        """Read the policy's status snapshot and post it as a chat
+        message. No action dispatch, no LLM call — pure read."""
+        try:
+            policy = getattr(self.agent, "action_policy", None)
+            snapshot = policy.get_status_snapshot() if policy else {
+                "error": "no action policy attached to agent",
+            }
+        except Exception as e:  # pragma: no cover — defensive
+            await self._post_response(
+                f"⚠️ Could not read agent status: {e}",
+            )
+            return
+
+        lines = ["**Agent status**", ""]
+        # Render the snapshot as a small markdown table. Stable order
+        # so the user can scan repeated /status calls easily.
+        for k in (
+            "policy_class", "agent_id", "mode",
+            "in_recovery", "recovery_attempts", "max_recovery_attempts",
+            "code_iteration_count",
+            "queue_depth_normal", "queue_depth_high",
+            "high_priority_loop_running",
+            "reactive_only", "has_pending_work",
+            "complete_signaled",
+        ):
+            if k in snapshot:
+                lines.append(f"- **{k}**: `{snapshot[k]}`")
+        # Surface anything else the snapshot carried that we didn't
+        # explicitly list — defensive against future field additions.
+        for k, v in snapshot.items():
+            if k not in {
+                "policy_class", "agent_id", "mode",
+                "in_recovery", "recovery_attempts", "max_recovery_attempts",
+                "code_iteration_count",
+                "queue_depth_normal", "queue_depth_high",
+                "high_priority_loop_running",
+                "reactive_only", "has_pending_work",
+                "complete_signaled",
+            }:
+                lines.append(f"- **{k}**: `{v}`")
+        await self._post_response("\n".join(lines), kind="status")
 
     # ------------------------------------------------------------------
     # Command handlers

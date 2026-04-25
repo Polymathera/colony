@@ -436,7 +436,7 @@ class UserPluginCapability(AgentCapability):
             ],
         }
 
-    @action_executor()
+    @action_executor(interruptible=True)
     async def run_skill(
         self,
         name: str,

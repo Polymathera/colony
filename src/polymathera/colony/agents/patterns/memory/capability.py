@@ -537,13 +537,21 @@ class MemoryCapability(AgentCapability):
     async def stream_events_to_queue(
         self,
         event_queue: asyncio.Queue[BlackboardEvent],
+        *,
+        high_priority_queue: asyncio.Queue[BlackboardEvent] | None = None,
     ) -> None:
         """Stream memory events from this scope to the given queue.
 
         Streams all write events from this memory capability's scope.
 
+        ``high_priority_queue`` is accepted for interface compatibility
+        with the base ``stream_events_to_queue`` (added by the
+        event-priority work) but ignored here — memory events are not
+        high-priority traffic.
+
         Args:
-            event_queue: Queue to stream events to
+            event_queue: Queue to stream events to.
+            high_priority_queue: Ignored.
         """
         await self.storage.stream_events_to_queue(event_queue, "*")
 

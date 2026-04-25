@@ -528,7 +528,7 @@ class WebSearchCapability(AgentCapability):
         result = [h.to_dict() for h in hits]
         return {"hits": result, "count": len(result), "message": ""}
 
-    @action_executor()
+    @action_executor(interruptible=True)
     async def fetch_page(
         self,
         url: str,
@@ -613,7 +613,7 @@ class WebSearchCapability(AgentCapability):
             self._cache.set((url, extract), dict(result))
         return result
 
-    @action_executor()
+    @action_executor(interruptible=True)
     async def search_and_fetch(
         self,
         query: str,

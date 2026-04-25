@@ -313,6 +313,48 @@ class AgentCapability(ABC):
                         patterns.append(pattern)
         return patterns
 
+    def _patterns_by_priority(
+        self, priority: str,
+    ) -> list[str]:
+        """Walk the class MRO and collect ``@event_handler`` patterns
+        whose ``priority`` attribute matches.
+
+        Used by ``stream_events_to_queue`` to route events into the
+        correct lane (normal vs high-priority). When the capability
+        was constructed with explicit ``input_patterns``, the override
+        is treated as ``"normal"`` priority — explicit lists predate
+        the priority lane and stay backward-compatible.
+        """
+        if self._input_patterns is not None:
+            return list(self._input_patterns) if priority == "normal" else []
+        patterns: list[str] = []
+        seen: set[str] = set()
+        for cls in type(self).__mro__:
+            for _name, attr in vars(cls).items():
+                if not (callable(attr) and getattr(attr, '_is_event_handler', False)):
+                    continue
+                if getattr(attr, '_event_priority', "normal") != priority:
+                    continue
+                pattern = getattr(attr, '_event_pattern', None)
+                if pattern is not None and isinstance(pattern, str) and pattern not in seen:
+                    seen.add(pattern)
+                    patterns.append(pattern)
+        return patterns
+
+    @property
+    def normal_priority_patterns(self) -> list[str]:
+        """Patterns from ``@event_handler`` methods with default
+        priority. Routed into the policy's normal event queue."""
+        return self._patterns_by_priority("normal")
+
+    @property
+    def high_priority_patterns(self) -> list[str]:
+        """Patterns from ``@event_handler(priority="high")`` methods.
+        Routed into the policy's high-priority event queue and
+        processed concurrently with the main loop. See
+        ``EventDrivenActionPolicy._run_high_priority_loop``."""
+        return self._patterns_by_priority("high")
+
     @property
     def agent(self) -> Agent | None:
         """Get owning agent (None in detached mode)."""
@@ -429,37 +471,59 @@ class AgentCapability(ABC):
         """
         return None
 
-    async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
-        """Stream capability-specific events to the given queue.
+    async def stream_events_to_queue(
+        self,
+        event_queue: asyncio.Queue[BlackboardEvent],
+        *,
+        high_priority_queue: asyncio.Queue[BlackboardEvent] | None = None,
+    ) -> None:
+        """Stream capability-specific events to one or two queues.
 
-        Default implementation subscribes to all patterns declared in
-        ``input_patterns``. If ``input_patterns`` is empty, falls back to
-        ``"*"`` (all writes within the capability's blackboard scope) with
-        a deprecation warning.
+        The capability's ``@event_handler`` patterns are split by their
+        ``priority`` attribute. ``priority="normal"`` patterns subscribe
+        on ``event_queue``; ``priority="high"`` patterns subscribe on
+        ``high_priority_queue`` *if* one was provided, otherwise they
+        fall back to ``event_queue`` (degraded but functional, so older
+        callers that pass a single queue keep working).
 
-        Subclasses can override to customize the event filter or subscribe
-        to multiple blackboards.
+        When ``input_patterns`` was passed explicitly to ``__init__``,
+        those patterns are treated as normal priority for backward
+        compatibility — the explicit override predates the priority
+        lane and we don't second-guess it.
 
         Args:
-            event_queue: Queue to stream events to. Usually the local event queue of an ActionPolicy.
+            event_queue: Normal-priority queue. Required.
+            high_priority_queue: Optional high-priority queue. When
+                ``None``, high-priority handler patterns route into
+                ``event_queue`` instead.
         """
         blackboard = await self.get_blackboard()
-        patterns = self.input_patterns
-        if not patterns:
+
+        normal_patterns = self.normal_priority_patterns
+        high_patterns = self.high_priority_patterns
+
+        if not normal_patterns and not high_patterns:
             logger.warning(
                 f"{self.__class__.__name__} has no input_patterns declared — "
                 f"streaming all events (\"*\"). Declare input_patterns to "
                 f"filter events and reduce noise."
             )
-            patterns = ["*"]
+            normal_patterns = ["*"]
 
         logger.info(
-            "%s.stream_events_to_queue: blackboard scope_id=%s, backend=%s, patterns=%s",
-            self.__class__.__name__, blackboard.scope_id, blackboard.backend_type, patterns,
+            "%s.stream_events_to_queue: scope_id=%s backend=%s "
+            "normal=%s high=%s",
+            self.__class__.__name__, blackboard.scope_id,
+            blackboard.backend_type, normal_patterns, high_patterns,
         )
-        for pattern in patterns:
+        for pattern in normal_patterns:
             blackboard.stream_events_to_queue(
-                event_queue,
+                event_queue, pattern=pattern, event_types={"write"},
+            )
+        target_for_high = high_priority_queue or event_queue
+        for pattern in high_patterns:
+            blackboard.stream_events_to_queue(
+                target_for_high,
                 pattern=pattern,
                 event_types={"write"},
             )
@@ -2159,7 +2223,6 @@ class Agent(BaseModel):
                     capability_key="repl",
                     allowed_imports=None,     # TODO: Make configurable
                     restrict_builtins=True,   # TODO: Make configurable
-                    max_execution_time=self.metadata.repl_max_execution_time,
                 )
                 await repl_cap.initialize()
                 self.add_capability(

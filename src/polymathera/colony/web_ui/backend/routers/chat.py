@@ -103,6 +103,32 @@ async def session_chat(
         origin="dashboard_chat",
     ):
 
+        # Backfill chat history from the session blackboard before
+        # loading from chat_store. Persistence to chat_store happens
+        # inside ``_listen_for_agent_messages`` — i.e., only AFTER a
+        # WebSocket has connected and started listening. Any agent
+        # message written *before* the first WebSocket connection
+        # (e.g., the very first ``run_step`` of the session agent
+        # almost always emits a welcome ``respond_to_user`` while the
+        # browser is still negotiating the socket) lives only on the
+        # blackboard. Without backfill, the user would have to type
+        # something first to trigger any subsequent agent activity
+        # before the welcome appeared — exactly the symptom reported.
+        #
+        # The blackboard query is ``ON CONFLICT DO NOTHING`` via
+        # ``chat_store.save_message``, so backfill is idempotent and
+        # safe to run on every connect (reconnects don't duplicate).
+        if chat_store and session_agent_id:
+            try:
+                await _backfill_chat_history_from_blackboard(
+                    colony, session_id, session_info, chat_store,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to backfill chat history from blackboard for session %s: %s",
+                    session_id, e,
+                )
+
         # Send chat history on connect
         if chat_store:
             try:
@@ -305,6 +331,11 @@ async def _post_user_message(
 ) -> None:
     """Post a user message to the session agent via the session-scoped blackboard.
 
+    Slash commands listed in ``_HIGH_PRIORITY_COMMANDS`` are routed
+    to ``chat:control:*`` (high-priority lane on the agent's policy)
+    so they bypass any in-flight long-running action. Plain messages
+    and unrecognised commands stay on ``chat:user:*``.
+
     Caller must have set the execution context (session_chat does this).
     """
     try:
@@ -315,16 +346,22 @@ async def _post_user_message(
             logger.error("Failed to get session chat blackboard — bb is None")
             return
 
-        logger.info(
-            "Writing user message to blackboard: scope_id=%s, backend_type=%s, event_bus=%s",
-            bb.scope_id, bb.backend_type, type(bb.event_bus).__name__ if bb.event_bus else "None",
-        )
-
         message_id = f"msg_{uuid.uuid4().hex[:12]}"
-        key = SessionChatProtocol.user_message_key(message_id)
+        is_control = _is_control_command(content)
+        if is_control:
+            key = SessionChatProtocol.control_message_key(message_id)
+        else:
+            key = SessionChatProtocol.user_message_key(message_id)
+
+        logger.info(
+            "Writing %s message to blackboard: scope_id=%s, key=%s, backend_type=%s",
+            "CONTROL" if is_control else "user",
+            bb.scope_id, key, bb.backend_type,
+        )
 
         await bb.write(key, {
             "content": content,
+            "command": _extract_command(content) if is_control else None,
             "message_id": message_id,
             "controls": controls,
             "timestamp": time.time(),
@@ -332,6 +369,45 @@ async def _post_user_message(
         logger.info("User message %s written to blackboard key=%s", message_id, key)
     except Exception as e:
         logger.error("Failed to post user message to session agent: %s", e, exc_info=True)
+
+
+# Slash commands routed to the high-priority lane. Anything not in
+# this set goes through the normal lane (so /help, /agents etc. still
+# do their pre-existing rule-based handling on the main loop).
+#
+# - ``/status`` / ``/whatdoing``: read-only inspection, must not block.
+# - ``/abort`` / ``/cancel``: cancel the in-flight action so the user
+#   regains control without waiting for the action to complete.
+# - ``/replace <new request>``: pre-emptive re-prioritisation —
+#   abort the current action AND queue the new request as the next
+#   user message so the planner picks it up immediately.
+_HIGH_PRIORITY_COMMANDS: frozenset[str] = frozenset({
+    "/status",
+    "/whatdoing",
+    "/abort",
+    "/cancel",
+    "/replace",
+})
+
+
+def _extract_command(content: str) -> str | None:
+    """Return the leading slash command (lowercased) or ``None``.
+
+    A bare slash (``"/"`` or ``" / "``) is NOT a command — the user
+    has to type at least one character after the slash.
+    """
+    stripped = content.strip()
+    if not stripped.startswith("/") or len(stripped) < 2:
+        return None
+    head = stripped.split(None, 1)[0]
+    if head == "/":
+        return None
+    return head.lower()
+
+
+def _is_control_command(content: str) -> bool:
+    cmd = _extract_command(content)
+    return cmd is not None and cmd in _HIGH_PRIORITY_COMMANDS
 
 
 async def _post_user_reply(
@@ -364,6 +440,79 @@ async def _post_user_reply(
         })
     except Exception as e:
         logger.error("Failed to post user reply: %s", e)
+
+
+async def _backfill_chat_history_from_blackboard(
+    colony: ColonyConnection,
+    session_id: str,
+    session_info: _SessionInfo,
+    chat_store: Any,
+) -> int:
+    """Persist any agent/user chat messages on the session blackboard
+    that are not yet in ``chat_store`` (which is only written to by the
+    live WS-bound listener — so anything written before the first WS
+    connect would otherwise be invisible to the UI).
+
+    ``chat_store.save_message`` uses ``ON CONFLICT (id) DO NOTHING``,
+    so calling this on every connect is safe — duplicates from prior
+    backfills are dropped at the DB level.
+
+    Returns the number of records inspected (for logging).
+    """
+    from ..chat import SessionChatProtocol
+
+    bb = await _get_session_chat_blackboard(colony, session_info)
+    if bb is None:
+        return 0
+
+    # Both agent messages and user messages live on the chat
+    # blackboard. We backfill both so the history shown on a fresh
+    # connect matches what would have been streamed live had the
+    # WebSocket been connected when the messages were written. The
+    # ``query`` is a single backend round-trip per pattern.
+    count = 0
+    for pattern, role in (
+        (SessionChatProtocol.agent_message_pattern(), "agent"),
+        (SessionChatProtocol.user_message_pattern(), "user"),
+    ):
+        entries = await bb.query(namespace=pattern, limit=500)
+        for entry in entries:
+            payload = entry.value if isinstance(entry.value, dict) else {}
+            chat_msg = {
+                "id": payload.get("message_id") or entry.key,
+                "session_id": session_id,
+                "run_id": payload.get("run_id"),
+                "role": role,
+                "agent_id": (
+                    payload.get("agent_id")
+                    if role == "agent"
+                    else None
+                ) or (session_info.session_agent_id if role == "agent" else None),
+                "agent_type": payload.get("agent_type", "") if role == "agent" else None,
+                "user_id": payload.get("user_id") if role == "user" else None,
+                "username": payload.get("username") if role == "user" else None,
+                "content": payload.get("content", ""),
+                "timestamp": payload.get("timestamp", entry.created_at),
+                "request_id": payload.get("request_id"),
+                "response_options": payload.get("response_options"),
+                "awaiting_reply": payload.get("awaiting_reply", False),
+                "run_status": payload.get("run_status"),
+                "controls": payload.get("controls"),
+            }
+            try:
+                await chat_store.save_message(chat_msg)
+                count += 1
+            except Exception as e:
+                logger.debug(
+                    "Backfill: failed to persist message %s: %s",
+                    chat_msg["id"], e,
+                )
+    if count:
+        logger.info(
+            "Backfilled %d chat messages from blackboard for session %s",
+            count, session_id,
+        )
+    return count
 
 
 async def _listen_for_agent_messages(

@@ -140,10 +140,14 @@ def _resolve_pattern(pattern: str | Callable, capability: Any) -> str:
     return resolved
 
 
+_VALID_PRIORITIES = ("normal", "high")
+
+
 def event_handler(
     func: Callable | None = None,
     *,
     pattern: str | Callable[[Any], str] | None = None,
+    priority: str = "normal",
 ):
     """Decorator to mark a capability method as an event handler.
 
@@ -156,6 +160,27 @@ def event_handler(
 
     IMPORTANT: Event handlers should NOT manage transactions. They provide
     context only. Transaction management belongs in action executors.
+
+    **Priority lanes** (``priority="high"``)
+
+    Handlers tagged ``priority="high"`` are dispatched on a *concurrent*
+    background task rather than the main policy iteration loop, so they
+    can run while the agent is in the middle of a long action or in
+    code-generation recovery. The trade-off is a strict read-only
+    contract:
+
+    - High-priority handlers MAY read agent / capability state and MAY
+      write to chat-side blackboard scopes (e.g., post a status reply).
+    - High-priority handlers MUST NOT dispatch actions through the action
+      dispatcher (would race with the main loop's REPL state).
+    - High-priority handlers MUST NOT mutate the policy's internal state
+      except via documented APIs (``policy.cancel_current_action()``,
+      ``policy.abort_current()``).
+
+    A high-priority handler that returns an ``immediate_action`` is
+    logged and the action is ignored — see
+    ``EventDrivenActionPolicy._run_high_priority_loop``. Default
+    priority is ``"normal"``; existing handlers keep working unchanged.
 
     Args:
         pattern: Optional event key pattern to filter events before calling handler.
@@ -207,6 +232,12 @@ def event_handler(
         ```
     """
 
+    if priority not in _VALID_PRIORITIES:
+        raise ValueError(
+            f"@event_handler priority must be one of {_VALID_PRIORITIES}, "
+            f"got {priority!r}"
+        )
+
     def decorator(fn: Callable) -> Callable:
         @functools.wraps(fn)
         async def wrapper(self, event, scope):
@@ -219,6 +250,7 @@ def event_handler(
 
         wrapper._is_event_handler = True
         wrapper._event_pattern = pattern
+        wrapper._event_priority = priority
         return wrapper
 
     # Support both @event_handler and @event_handler(pattern="...")
@@ -226,6 +258,7 @@ def event_handler(
         # Called without parentheses: @event_handler
         func._is_event_handler = True
         func._event_pattern = None
+        func._event_priority = "normal"
         return func
     else:
         # Called with parentheses: @event_handler(pattern="...")

@@ -35,6 +35,7 @@ Usage::
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import logging
 import time
@@ -756,6 +757,15 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         # "execution" shows only domain capabilities. Starts in planning.
         self._mode: str = "planning"
 
+        # In-flight LLM code-generation task. The codegen LLM call lives
+        # *outside* any @action_executor (it is invoked directly from
+        # plan_step), so the dispatcher cannot cancel it. We track it here
+        # explicitly so /abort can cancel a long-running codegen call mid-
+        # request. None when no LLM call is in flight. Cleared in finally
+        # in plan_step regardless of outcome.
+        self._current_codegen_task: asyncio.Task[str] | None = None
+        self._codegen_cancel_requested: bool = False
+
     @override
     async def initialize(self) -> None:
         """Initialize the policy, add planning capabilities, and set up REPL."""
@@ -835,6 +845,109 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         if action_key in planning_action_keys:
             return True
         return any(key.endswith(f".{action_key}") for key in planning_action_keys)
+
+    @override
+    def get_status_snapshot(self) -> dict[str, Any]:
+        """Read-only summary of policy state.
+
+        Adds codegen-specific fields on top of the parent snapshot:
+        recovery state (so ``/status`` can tell the user "regenerating
+        code, attempt 2/3"), code-iteration count, and current mode.
+        Safe to call concurrently with the main planning loop.
+        """
+        snapshot = super().get_status_snapshot()
+        snapshot.update({
+            "in_recovery": self._consecutive_failures > 0,
+            "recovery_attempts": self._consecutive_failures,
+            "max_recovery_attempts": self.max_retries,
+            "code_iteration_count": self._code_iteration_count,
+            "mode": self._mode,
+            "complete_signaled": self._complete_signaled,
+        })
+        return snapshot
+
+    @override
+    async def abort_current(self, *, reason: str | None = None) -> bool:
+        """Abort whatever the policy is currently doing.
+
+        The codegen policy has TWO interruptible-state surfaces beyond what
+        the dispatcher tracks, both of which must be wound down for ``/abort``
+        to feel correct to the user:
+
+        1. **In-flight LLM codegen call** — the call sits in ``plan_step``,
+           NOT in an ``@action_executor``, so the dispatcher cannot see it.
+           We track it explicitly in ``_current_codegen_task`` and cancel it
+           here. Setting ``_codegen_cancel_requested`` first lets ``plan_step``
+           tell a user-cancel apart from outer-shutdown when the
+           ``CancelledError`` lands.
+        2. **Recovery state** — if validation has been failing in a loop, the
+           policy has ``_consecutive_failures > 0`` and an ``_error_history``
+           that ``has_pending_work()`` reads to short-circuit the event wait.
+           After an abort, the user is no longer interested in this attempt
+           chain; resetting clears the recovery banner and lets the next
+           iteration block on a fresh user event.
+
+        Steps 1 and 2 are independent: the codegen call may not be in flight
+        when /abort lands (we may already be inside ``await dispatch(...)``),
+        and recovery may be active without an in-flight LLM call. We always
+        do both, then delegate to ``super().abort_current()`` to also cancel
+        any dispatcher-tracked action (the ``EXECUTE_CODE`` REPL run, or any
+        other interruptible @action_executor invoked from generated code).
+
+        Returns ``True`` if anything was actually interrupted — useful for
+        callers (the chat handler) to know whether to send "aborted" feedback
+        or "nothing to abort".
+        """
+        anything_aborted = False
+
+        # 1. Cancel in-flight LLM codegen task, if any.
+        codegen_task = self._current_codegen_task
+        if codegen_task is not None and not codegen_task.done():
+            self._codegen_cancel_requested = True
+            codegen_task.cancel()
+            anything_aborted = True
+            logger.info(
+                "CodeGenerationActionPolicy.abort_current: cancelled in-flight codegen LLM task"
+            )
+
+        # 2. Reset recovery state regardless of whether (1) fired — recovery
+        # may be active without an in-flight LLM call (e.g., we already have
+        # a recovered_code waiting to execute).
+        prior_failures = self._consecutive_failures
+        recovery_was_active = (
+            self._consecutive_failures > 0
+            or self._recovered_code is not None
+            or bool(self._error_history)
+        )
+        if recovery_was_active:
+            self._consecutive_failures = 0
+            self._error_history.clear()
+            self._recovered_code = None
+            anything_aborted = True
+            # Clear the recovery banner so the UI doesn't keep spinning
+            # on "regenerating after invalid output". We emit a terminal
+            # codegen_retry event with finished=True, succeeded=False
+            # (the user aborted, not a clean recovery) — same protocol
+            # the bridge uses when retries exhaust.
+            await self._emit_codegen_recovery_banner(
+                attempt=prior_failures,
+                max_attempts=self.max_retries,
+                last_error=f"aborted: {reason or 'user request'}",
+                finished=True,
+                succeeded=False,
+            )
+            logger.info(
+                "CodeGenerationActionPolicy.abort_current: reset recovery state "
+                "(prior failures=%d)", prior_failures,
+            )
+
+        # 3. Delegate to super so a currently-dispatched interruptible action
+        # (EXECUTE_CODE in REPL, or any @action_executor with interruptible=True
+        # called from generated code) is also cancelled.
+        if await super().abort_current(reason=reason):
+            anything_aborted = True
+
+        return anything_aborted
 
     @override
     def has_pending_work(self) -> bool:
@@ -953,6 +1066,38 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 e,
             )
 
+    async def _emit_codegen_recovery_banner(
+        self,
+        *,
+        attempt: int,
+        max_attempts: int,
+        last_error: str,
+        finished: bool,
+        succeeded: bool,
+    ) -> None:
+        """Emit a recovery-progress signal on the policy lifecycle bus.
+
+        Re-uses the ``policy:codegen_retry:*`` key — chat-UI subscribers
+        already render the recovery banner from these events. The
+        ``finished`` + ``succeeded`` flags tell the renderer to clear /
+        replace the banner instead of stacking another "attempt N/M"
+        line. Without this method, the success branch in ``plan_step``
+        (which fires after a recovery iteration validates) would crash
+        with ``AttributeError`` and recovery itself would loop.
+        """
+        ts_ms = int(time.time() * 1000)
+        await self._emit_lifecycle_event(
+            key=ActionPolicyLifecycleProtocol.codegen_retry_key(ts_ms),
+            payload={
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "error": (last_error or "")[:300],
+                "finished": finished,
+                "succeeded": succeeded,
+                "ts": time.time(),
+            },
+        )
+
     async def _setup_enriched_namespace(self) -> None:
         """Install helper functions into the REPL namespace."""
         repl = self._action_dispatcher.repl
@@ -1021,69 +1166,109 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     "started_at": _started_at,
                 },
             )
-            result = await self._action_dispatcher.dispatch(action)
 
-            # Track result in structured PlanExecutionContext
-            self._execution_context.completed_action_ids.append(action.action_id)
-            self._execution_context.action_results[action.action_id] = result
+            # Dispatch under a try/finally so the matching action_completed
+            # event ALWAYS fires — even when dispatch raises CancelledError
+            # (REPL wait_for timeout, /abort) or any other exception.
+            # Without this, a started event is never paired and the chat-UI
+            # action-status banner spins forever after the action that
+            # actually finished but raised on the way back.
+            result: ActionResult
+            exc_to_reraise: BaseException | None = None
+            try:
+                result = await self._action_dispatcher.dispatch(action)
+            except asyncio.CancelledError as e:
+                # Cancellation must propagate — the REPL cell needs to
+                # see it (so the LLM-generated code stops executing
+                # subsequent statements). But we still need to finalise
+                # the lifecycle event so the UI doesn't dangle.
+                result = ActionResult(
+                    success=False,
+                    completed=True,
+                    cancelled=True,
+                    error="Action cancelled mid-flight",
+                )
+                exc_to_reraise = e
+            except Exception as e:
+                # Same intent for non-cancel failures: lifecycle must close,
+                # then re-raise so the cell sees the real exception.
+                result = ActionResult(
+                    success=False,
+                    completed=True,
+                    error=f"{type(e).__name__}: {e}",
+                )
+                exc_to_reraise = e
 
-            # Track internal failures so the skill library doesn't store
-            # code that "executed" but had failing actions inside it.
-            if not result.success:
-                self._had_internal_failures = True
-                self._internal_errors.append(result.error or "unknown error")
+            try:
+                # Track result in structured PlanExecutionContext
+                self._execution_context.completed_action_ids.append(action.action_id)
+                self._execution_context.action_results[action.action_id] = result
 
-            resolved_action_key = str(action.action_type)
-            self._call_history.append(resolved_action_key)
+                # Track internal failures so the skill library doesn't store
+                # code that "executed" but had failing actions inside it.
+                if not result.success:
+                    self._had_internal_failures = True
+                    self._internal_errors.append(result.error or "unknown error")
 
-            # Per-call trace for timeline view annotations.
-            # Stored both on the policy and in the REPL namespace so
-            # _execute_repl_code can include it in the ActionResult.
-            self._run_call_trace.append({
-                "call_index": len(self._run_call_trace),
-                "action_key": resolved_action_key,
-                "parameters": dict(params),
-                "success": result.success,
-                "error": (result.error or "")[:200] if not result.success else None,
-                "output_preview": str(result.output)[:200] if result.output is not None else "",
-                "blocked": False,
-            })
-            ns["_run_call_trace"] = self._run_call_trace
+                resolved_action_key = str(action.action_type)
+                self._call_history.append(resolved_action_key)
 
-            # Mode transitions based on action results:
-            # - should_replan returning should_replan=True → back to planning mode
-            # - First domain action in planning mode → switch to execution mode
-            action_lower = resolved_action_key.lower()
-            if "should_replan" in action_lower and result.success:
-                output = result.output if isinstance(result.output, dict) else {}
-                if output.get("should_replan"):
-                    self._mode = "planning"
-                    log(f"Mode → PLANNING (replan triggered: {output.get('reason', '')})")
-
-            if self._mode == "planning" and result.success and not self._is_planning_action_key(resolved_action_key):
-                # First non-planning action → switch to execution mode
-                self._mode = "execution"
-                log("Mode → EXECUTION (first domain action dispatched)")
-
-            # Pair the started event with a terminal one so the
-            # downstream subscribers can finalise their state
-            # (clear a UI banner, close a span, write a log line).
-            ended_at = time.time()
-            await self._emit_lifecycle_event(
-                key=ActionPolicyLifecycleProtocol.action_completed_key(
-                    action.action_id,
-                ),
-                payload={
-                    "agent_id": self.agent.agent_id,
-                    "action_id": action.action_id,
+                # Per-call trace for timeline view annotations.
+                # Stored both on the policy and in the REPL namespace so
+                # _execute_repl_code can include it in the ActionResult.
+                self._run_call_trace.append({
+                    "call_index": len(self._run_call_trace),
                     "action_key": resolved_action_key,
+                    "parameters": dict(params),
                     "success": result.success,
-                    "started_at": _started_at,
-                    "ended_at": ended_at,
-                    "wall_time_ms": int((ended_at - _started_at) * 1000),
-                    "error": (result.error or None) if not result.success else None,
-                },
-            )
+                    "error": (result.error or "")[:200] if not result.success else None,
+                    "output_preview": str(result.output)[:200] if result.output is not None else "",
+                    "blocked": False,
+                })
+                ns["_run_call_trace"] = self._run_call_trace
+
+                # Mode transitions only apply when dispatch returned a real
+                # result. After an exception there is no meaningful action
+                # output to drive a transition.
+                if exc_to_reraise is None:
+                    # Mode transitions based on action results:
+                    # - should_replan returning should_replan=True → back to planning mode
+                    # - First domain action in planning mode → switch to execution mode
+                    action_lower = resolved_action_key.lower()
+                    if "should_replan" in action_lower and result.success:
+                        output = result.output if isinstance(result.output, dict) else {}
+                        if output.get("should_replan"):
+                            self._mode = "planning"
+                            log(f"Mode → PLANNING (replan triggered: {output.get('reason', '')})")
+
+                    if self._mode == "planning" and result.success and not self._is_planning_action_key(resolved_action_key):
+                        # First non-planning action → switch to execution mode
+                        self._mode = "execution"
+                        log("Mode → EXECUTION (first domain action dispatched)")
+
+                # Pair the started event with a terminal one so the
+                # downstream subscribers can finalise their state
+                # (clear a UI banner, close a span, write a log line).
+                ended_at = time.time()
+                await self._emit_lifecycle_event(
+                    key=ActionPolicyLifecycleProtocol.action_completed_key(
+                        action.action_id,
+                    ),
+                    payload={
+                        "agent_id": self.agent.agent_id,
+                        "action_id": action.action_id,
+                        "action_key": resolved_action_key,
+                        "success": result.success,
+                        "cancelled": result.cancelled,
+                        "started_at": _started_at,
+                        "ended_at": ended_at,
+                        "wall_time_ms": int((ended_at - _started_at) * 1000),
+                        "error": (result.error or None) if not result.success else None,
+                    },
+                )
+            finally:
+                if exc_to_reraise is not None:
+                    raise exc_to_reraise
 
             return result
 
@@ -1350,17 +1535,39 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     skill_section += f"# Goal: {s.goal}\n{s.code}\n\n"
                 prompt += skill_section
 
-            # Dimension 1: CodeGenerator
-            try:
-                code = await self._code_generator.generate(
+            # Dimension 1: CodeGenerator. Wrap the LLM call in a tracked task
+            # so /abort can interrupt it mid-request — codegen prompts can take
+            # tens of seconds (especially on cold caches), and waiting that out
+            # is exactly the UX problem the abort feature exists to solve.
+            self._codegen_cancel_requested = False
+            self._current_codegen_task = asyncio.create_task(
+                self._code_generator.generate(
                     agent=self.agent,
                     prompt=prompt,
                     max_tokens=2048,
                     temperature=0.3,
                 )
+            )
+            try:
+                code = await self._current_codegen_task
+            except asyncio.CancelledError:
+                if self._codegen_cancel_requested:
+                    # User-requested abort. Reset cancel flag, surface it as
+                    # a clean "no work this iteration" — abort_current() has
+                    # already cleared recovery state and emitted any chat
+                    # banner, so plan_step just bails.
+                    self._codegen_cancel_requested = False
+                    logger.info(
+                        "CodeGenerationActionPolicy: codegen LLM call cancelled by user abort"
+                    )
+                    return None
+                # Outer cancellation (e.g., agent shutdown) — propagate.
+                raise
             except Exception as e:
                 logger.error(f"CodeGenerationActionPolicy: code generation failed: {e}")
                 return None
+            finally:
+                self._current_codegen_task = None
 
         # Snapshot the raw output right after the LLM returns. We feed
         # it back to the LLM in the error_history when validation fails

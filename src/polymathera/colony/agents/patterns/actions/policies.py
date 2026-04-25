@@ -182,6 +182,26 @@ class BaseActionPolicy(ActionPolicy):
         """
         return []
 
+    def get_status_snapshot(self) -> dict[str, Any]:
+        """Read-only summary of policy state.
+
+        Safe to call concurrently with the main planning loop. The
+        base implementation returns generic identity; ``EventDriven``
+        and code-gen subclasses extend with queue + recovery telemetry.
+        Used by high-priority control handlers (e.g., ``/status``)
+        without going through the LLM.
+
+        Tolerant of partial init: production policies always have an
+        agent set, but background tasks can call this very early
+        before construction has completed; ``getattr(self, "_agent")``
+        returns ``None`` cleanly in that case.
+        """
+        agent = getattr(self, "_agent", None)
+        return {
+            "agent_id": getattr(agent, "agent_id", None) if agent is not None else None,
+            "policy_class": type(self).__name__,
+        }
+
     async def get_action_descriptions(
         self,
         selected_groups: list[str] | None = None,
@@ -233,6 +253,52 @@ class BaseActionPolicy(ActionPolicy):
         # AgentCapability implementing a multi-agent protocol.
         # scope._clear_shared_data_dependencies()
         return result
+
+    def cancel_current_action(self, *, reason: str | None = None) -> bool:
+        """Request cancellation of the currently executing interruptible action.
+
+        Thin pass-through to the action dispatcher. Subclasses with additional
+        per-policy state to reset on abort (e.g., codegen recovery counters)
+        should override ``abort_current()`` instead — that is the higher-level
+        entrypoint called by ``/abort`` handlers.
+
+        Returns:
+            True if a cancellation was actually delivered. False if no
+            interruptible action was in flight (caller should treat as a
+            no-op, not as a failure).
+        """
+        if self._action_dispatcher is None:
+            return False
+        return self._action_dispatcher.cancel_current_action(reason=reason)
+
+    async def abort_current(self, *, reason: str | None = None) -> bool:
+        """High-level abort hook used by ``/abort`` and ``/replace`` handlers.
+
+        Default implementation cancels the current action via
+        ``cancel_current_action()``. Policies that maintain additional in-flight
+        state (e.g., ``CodeGenerationActionPolicy`` which carries codegen
+        recovery counters and an LLM call task that lives outside any
+        ``@action_executor``) should override this method to:
+
+          1. Reset that internal state to a clean baseline.
+          2. Delegate to ``super().abort_current(...)`` to also cancel any
+             dispatcher-tracked action.
+
+        Returning ``True`` means *something* was interrupted; ``False`` means
+        the policy was idle and nothing happened.
+
+        ``async`` because subclasses may need to ``await`` cleanup work
+        (e.g., emitting a "cancelled" event onto the blackboard before
+        returning); the base implementation does not await.
+        """
+        return self.cancel_current_action(reason=reason)
+
+    @property
+    def has_interruptible_action_in_flight(self) -> bool:
+        """True iff the dispatcher is currently running a cancellable action."""
+        if self._action_dispatcher is None:
+            return False
+        return self._action_dispatcher.has_interruptible_action_in_flight
 
     async def _create_action_dispatcher(self) -> None:
         """Create action dispatcher with capability providers."""
@@ -453,6 +519,17 @@ class EventDrivenActionPolicy(BaseActionPolicy):
     ):
         super().__init__(agent, action_map=action_map, action_providers=action_providers, io=io, **kwargs)
         self._event_queue: asyncio.Queue[BlackboardEvent] = asyncio.Queue()
+        # High-priority lane: drained by ``_run_high_priority_loop`` on
+        # a dedicated background task that runs concurrently with the
+        # main policy loop. Lets read-only handlers (status queries,
+        # control commands) make progress even while the main loop is
+        # awaiting a long-running action's coroutine. See
+        # ``colony_docs/markdown/plans/design_event_priority_and_action_interruption.md``.
+        self._high_priority_event_queue: asyncio.Queue[BlackboardEvent] = asyncio.Queue()
+        self._high_priority_task: asyncio.Task | None = None
+        # Bounded restart counter for the concurrent loop, so a
+        # poisonous event handler can't burn CPU restarting forever.
+        self._high_priority_restarts: int = 0
         self._subscribed_callbacks: list[Callable] = []
         self._subscribed_providers: set[int] = set()  # Track by identity to prevent duplicate subscriptions
         self._reactive_only = reactive_only
@@ -484,15 +561,144 @@ class EventDrivenActionPolicy(BaseActionPolicy):
                     getattr(provider, "scope_id", "?"),
                     provider.input_patterns if hasattr(provider, "input_patterns") else "?",
                 )
-                await provider.stream_events_to_queue(self.get_event_queue())
+                await provider.stream_events_to_queue(
+                    self.get_event_queue(),
+                    high_priority_queue=self.get_high_priority_event_queue(),
+                )
+
+        # Spawn the high-priority lane reader. Idempotent — only one
+        # task per policy. The main loop and this task share the
+        # capability event handlers; the per-handler ``priority``
+        # filter inside the wrapper guarantees that high-priority
+        # handlers fire only on this task and normal-priority handlers
+        # only on the main loop.
+        if self._high_priority_task is None or self._high_priority_task.done():
+            self._high_priority_task = asyncio.create_task(
+                self._run_high_priority_loop(),
+                name=f"high_priority_loop:{self.agent.agent_id}",
+            )
 
     def get_event_queue(self) -> asyncio.Queue[BlackboardEvent]:
-        """Get the local event queue.
+        """Get the local event queue (normal lane).
 
         Returns:
             Local asyncio.Queue of BlackboardEvents
         """
         return self._event_queue
+
+    def get_high_priority_event_queue(self) -> asyncio.Queue[BlackboardEvent]:
+        """Get the high-priority event queue.
+
+        Capabilities subscribe ``@event_handler(priority="high")``
+        patterns into this queue. The dedicated background task
+        ``_run_high_priority_loop`` drains it concurrently with the
+        main planning loop, so a long-running action in the main
+        loop does NOT block status queries / control commands.
+        """
+        return self._high_priority_event_queue
+
+    async def _run_high_priority_loop(self) -> None:
+        """Background task that drains the high-priority event queue.
+
+        Runs alongside ``Agent.run_step``'s normal planning loop. For
+        each event:
+
+        - Walks the agent's event handlers (the per-handler ``pattern``
+          filter inside the decorator wrapper rejects non-matching
+          handlers — so only handlers tagged ``priority="high"`` and
+          whose pattern matches actually fire).
+        - Catches per-event exceptions so one bad handler doesn't
+          poison the lane.
+        - Logs a WARNING and discards if a handler returns an
+          ``immediate_action`` — high-priority handlers are read-only
+          by contract; dispatching from this lane would race with the
+          main loop's REPL state.
+
+        If the loop itself crashes (not a per-event exception), it
+        restarts up to a small bound and then logs ERROR and exits.
+        The lane going dark must NOT take down the main loop.
+        """
+        # Bounded restart guard: the loop can recover from a small
+        # number of unexpected crashes (e.g., transient backend hiccup)
+        # but not from an infinite restart storm.
+        MAX_RESTARTS = 3
+        try:
+            while True:
+                try:
+                    event = await self._high_priority_event_queue.get()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # pragma: no cover — defensive
+                    logger.error(
+                        "high-priority loop: queue read failed: %s",
+                        e, exc_info=True,
+                    )
+                    self._high_priority_restarts += 1
+                    if self._high_priority_restarts > MAX_RESTARTS:
+                        logger.error(
+                            "high-priority loop: exceeded %d restarts; "
+                            "lane going dark", MAX_RESTARTS,
+                        )
+                        return
+                    await asyncio.sleep(1.0)
+                    continue
+
+                handlers = self._get_event_handlers()
+                # repl is None in this lane: high-priority handlers
+                # MUST NOT touch REPL state, since the main loop owns it.
+                # Handlers that need to write chat replies use their own
+                # capability blackboard, not the REPL.
+                for handler in handlers:
+                    try:
+                        result = await handler(event, None)
+                    except Exception as e:
+                        logger.warning(
+                            "high-priority handler %s raised on event "
+                            "%s: %s",
+                            getattr(handler, "__name__", "<anon>"),
+                            event.key, e,
+                            exc_info=True,
+                        )
+                        continue
+                    if result is None:
+                        continue
+                    if getattr(result, "immediate_action", None):
+                        logger.warning(
+                            "high-priority handler %s returned an "
+                            "immediate_action on event %s; ignored — "
+                            "high-priority handlers are read-only by "
+                            "contract.",
+                            getattr(handler, "__name__", "<anon>"),
+                            event.key,
+                        )
+        except asyncio.CancelledError:
+            logger.debug(
+                "high-priority loop cancelled for agent %s",
+                self.agent.agent_id,
+            )
+            raise
+
+    @override
+    def get_status_snapshot(self) -> dict[str, Any]:
+        """Read-only summary of policy state.
+
+        Safe to call concurrently with the main planning loop. Each
+        field is internally consistent; the snapshot as a whole is
+        not atomic across fields, which is acceptable for status
+        display (the values may differ by a few microseconds).
+        """
+        snapshot = super().get_status_snapshot()
+        high_task = getattr(self, "_high_priority_task", None)
+        snapshot.update({
+            "queue_depth_normal": self._event_queue.qsize(),
+            "queue_depth_high": self._high_priority_event_queue.qsize(),
+            "high_priority_loop_running": (
+                high_task is not None and not high_task.done()
+            ),
+            "reactive_only": self._reactive_only,
+            "has_pending_work": self.has_pending_work(),
+        })
+        return snapshot
 
     @hookable
     async def get_next_event_nowait(self) -> BlackboardEvent | None:

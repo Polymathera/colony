@@ -202,7 +202,6 @@ class PolicyPythonREPL(PolicyREPL):
         agent: "Agent",
         backing_stores: dict[str, BackingStore] | None = None,
         allowed_imports: list[str] | None = None,
-        max_execution_time: float = 5.0,
         restrict_builtins: bool = True,
     ):
         """Initialize REPL with IPython.
@@ -212,14 +211,19 @@ class PolicyPythonREPL(PolicyREPL):
             backing_stores: Map of store name -> BackingStore implementation
                 If None, creates default BlackboardBackingStore
             allowed_imports: List of allowed import module names
-            max_execution_time: Max seconds for code execution
             restrict_builtins: If True, restrict dangerous builtins (default: True)
+
+        Note: there is no per-cell wall-clock timeout. Cancellation of a
+        long-running cell is the dispatcher's job — ``/abort`` cancels the
+        EXECUTE_CODE task via ``ActionDispatcher.cancel_current_action``.
+        A REPL-level ``wait_for`` would conflate "runaway code" with
+        "code awaiting external work" (mmap, web fetch, shell), and the
+        latter is the common case.
         """
         self._agent = agent
         self._variables: dict[str, REPLVariable] = {}
         self._pending_actions: list[Action] = []
         self._allowed_imports = allowed_imports or self._default_allowed_imports()
-        self._max_execution_time = max_execution_time
         self._restrict_builtins = restrict_builtins
         self._code_history: list[dict[str, Any]] = []  # For procedural memory export
 
@@ -236,10 +240,6 @@ class PolicyPythonREPL(PolicyREPL):
 
         # Create IPython shell
         self._shell = self._create_shell()
-
-    @property
-    def max_execution_time(self) -> float:
-        return self._max_execution_time
 
     @property
     def agent(self) -> "Agent":
@@ -703,13 +703,10 @@ class PolicyPythonREPL(PolicyREPL):
 
         try:
             # Execute with IPython (native async support)
-            exec_result = await asyncio.wait_for(
-                self._shell.run_cell_async(
-                    code,
-                    store_history=False,  # Don't save to IPython history
-                    silent=False,  # Show output
-                ),
-                timeout=self._max_execution_time
+            exec_result = await self._shell.run_cell_async(
+                code,
+                store_history=False,
+                silent=False,
             )
 
             # Track new names
@@ -748,14 +745,10 @@ class PolicyPythonREPL(PolicyREPL):
                 "pending_actions": list(self._pending_actions),
             }
 
-        except asyncio.TimeoutError:
-            return {
-                "success": False,
-                "result": None,
-                "error": f"TimeoutError: code execution exceeded {self._max_execution_time}s limit:\n{type(e).__name__}: {e}",
-                "new_names": [],
-                "pending_actions": [],
-            }
+        except asyncio.CancelledError:
+            # Re-raise so the dispatcher's outer handler converts it to
+            # ActionResult(cancelled=True). Swallowing would mask /abort.
+            raise
         except Exception as e:
             logger.exception(f"REPL execution failed: {e}")
             return {
@@ -1064,7 +1057,6 @@ class REPLCapability(AgentCapability):
         backing_stores: dict[str, BackingStore] | None = None,
         allowed_imports: list[str] | None = None,
         restrict_builtins: bool = True,
-        max_execution_time: float = 5.0,
     ):
         """Initialize REPL capability.
 
@@ -1078,7 +1070,6 @@ class REPLCapability(AgentCapability):
             backing_stores: Map of store name -> BackingStore implementation
             allowed_imports: List of allowed import module names
             restrict_builtins: If True, restrict dangerous builtins
-            max_execution_time: Max seconds for code execution
         """
         super().__init__(
             agent=agent,
@@ -1094,10 +1085,7 @@ class REPLCapability(AgentCapability):
             backing_stores=backing_stores,
             allowed_imports=allowed_imports,
             restrict_builtins=restrict_builtins,
-            max_execution_time=max_execution_time,
         )
-
-        self.max_execution_time = max_execution_time
         # Track if initialized
         self._initialized = False
 
@@ -1325,9 +1313,6 @@ Useful magic commands available:
 
 - **Allowed imports**: json, re, math, itertools, functools, collections, dataclasses, typing, datetime, pydantic, asyncio
 - **Blocked builtins**: eval, exec, compile, open, __import__, input, globals, locals, vars, dir
-''' + f'''
-- **Timeout**: Code execution limited to {repl.max_execution_time} seconds
-''' + '''
 - **No file I/O**: Use backing stores (blackboard) for persistent data
 
 ### Available Utilities in REPL Namespace

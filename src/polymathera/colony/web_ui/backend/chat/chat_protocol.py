@@ -81,6 +81,21 @@ class SessionChatProtocol(BlackboardProtocol):
         return f"chat:event:{run_id}:{event_name}"
 
     @staticmethod
+    def control_message_key(message_id: str) -> str:
+        """Key for a high-priority control command from the user.
+
+        Slash commands like ``/status``, ``/whatdoing``, ``/help``,
+        ``/abort``, ``/cancel`` get classified by the chat router and
+        written to this key shape instead of ``chat:user:*``. The
+        session orchestrator subscribes with
+        ``@event_handler(pattern=control_message_pattern(), priority="high")``
+        so the command is processed on the policy's concurrent
+        high-priority lane and is NOT blocked by long-running actions
+        in the main planning loop.
+        """
+        return f"chat:control:{message_id}"
+
+    @staticmethod
     def action_status_key(agent_id: str, action_id: str) -> str:
         """Key for a per-action status update.
 
@@ -99,6 +114,11 @@ class SessionChatProtocol(BlackboardProtocol):
     def user_message_pattern() -> str:
         """Pattern matching all user messages."""
         return "chat:user:*"
+
+    @staticmethod
+    def control_message_pattern() -> str:
+        """Pattern matching all high-priority control commands."""
+        return "chat:control:*"
 
     @staticmethod
     def agent_message_pattern() -> str:

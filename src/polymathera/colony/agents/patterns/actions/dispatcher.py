@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import traceback as traceback_mod
@@ -134,8 +135,24 @@ class ActionExecutor(ABC):
     - CoordinatorExecutor: Execute coordination actions
     """
 
-    def __init__(self, agent: Agent):
+    def __init__(self, agent: Agent | None = None, *, interruptible: bool = False):
+        """Initialize the executor.
+
+        Args:
+            agent: Owning agent, when one applies. Method wrappers don't
+                carry an agent of their own (the bound object decides
+                that), so this is optional.
+            interruptible: Whether the dispatcher should wrap calls to
+                ``execute()`` in a cancellable ``asyncio.Task`` so
+                ``ActionDispatcher.cancel_current_action()`` can abort
+                them mid-flight. Subclasses forward this from their own
+                constructor / decorator metadata via
+                ``super().__init__(interruptible=...)``. Single source of
+                truth — there is no class-level default that subclass
+                instances might shadow.
+        """
         self.agent = agent
+        self.interruptible = interruptible
 
     @abstractmethod
     async def execute(self, action: Action) -> ActionResult:
@@ -186,7 +203,12 @@ class MethodWrapperActionExecutor(ActionExecutor):
         writes: list[str] | None = None,
         exclude_from_planning: bool = False,
         planning_summary: str | None = None,
+        interruptible: bool = False,
     ):
+        # Method wrappers don't carry an agent — the bound ``object``
+        # is the action provider. Forward only ``interruptible`` to the
+        # base so ``self.interruptible`` is set in exactly one place.
+        super().__init__(interruptible=interruptible)
         self.object = object
         self.method = method
         self.action_key = str(action_key)
@@ -321,10 +343,11 @@ class FunctionWrapperActionExecutor(ActionExecutor):
         first_param_name: str | None = None,
         exclude_from_planning: bool = False,
         planning_summary: str | None = None,
+        interruptible: bool = False,
     ):
+        super().__init__(agent=agent, interruptible=interruptible)
         self.func = func
         self.action_key = str(action_key)
-        self.agent = agent
         self.input_schema = input_schema
         self.output_schema = output_schema
         self.reads = reads or []
@@ -633,6 +656,7 @@ def action_executor(
     exclude_from_planning: bool = False,
     planning_summary: str | None = None,
     tags: frozenset[str] | None = None,
+    interruptible: bool = False,
 ):
     """Decorator to turn any method into an action executor.
 
@@ -652,6 +676,18 @@ def action_executor(
             to spawned agent events). Default is False.
         tags: Optional domain/modality tags for this action (e.g., frozenset({"memory", "expensive"})).
             Used for future per-action tag-based filtering and grouping.
+        interruptible: If True, the dispatcher wraps this action's execution in
+            an asyncio.Task so it can be cancelled mid-flight via
+            ``ActionDispatcher.cancel_current_action()`` (e.g., in response to a
+            ``/abort`` or ``/replace`` slash command). The action body MUST be
+            cancel-safe: any external resources it acquires must be released in
+            ``finally`` / ``async with`` blocks, and intermediate state must be
+            consistent at every ``await``. When the action is cancelled, the
+            dispatcher returns ``ActionResult(success=False, completed=True,
+            cancelled=True, ...)`` instead of raising. Default False — only opt
+            in for genuinely long-running actions (LLM calls, network I/O,
+            sandboxed shell, large analyses) where the user benefits from being
+            able to interrupt them.
 
     Example:
         ```python
@@ -700,6 +736,9 @@ def action_executor(
 
         # Store tags for future per-action tag-based filtering
         func._action_tags = tags or frozenset()
+
+        # Store interruptibility flag — dispatched as a cancellable task when True.
+        func._action_interruptible = bool(interruptible)
 
         return func
 
@@ -768,6 +807,16 @@ class ActionDispatcher:
         self.action_providers = action_providers
         self._repl: PolicyPythonREPL | None = None
         self._repl_discovered = False
+
+        # Cancellation state for interruptible actions. Updated only by
+        # _dispatch_action and cancel_current_action; readers should treat
+        # these fields as opaque. The action_id discriminator prevents a stale
+        # cancel request from killing an unrelated action that happens to start
+        # after the original task completes (race between requestor and dispatcher).
+        self._current_task: asyncio.Task[ActionResult] | None = None
+        self._current_action_id: str | None = None
+        self._cancellation_requested: bool = False
+        self._cancellation_reason: str | None = None
 
     @property
     def repl(self) -> PolicyPythonREPL | None:
@@ -875,6 +924,7 @@ class ActionDispatcher:
             first_param_is_agent=first_param_is_agent,
             first_param_name=first_param_name,
             exclude_from_planning=getattr(func, '_action_exclude_from_planning', False),
+            interruptible=getattr(func, '_action_interruptible', False),
         )
 
     def _create_object_action_group(self, obj: Any) -> ActionGroup:
@@ -931,6 +981,7 @@ class ActionDispatcher:
                     writes=getattr(method, '_action_writes', []),
                     exclude_from_planning=getattr(method, '_action_exclude_from_planning', False),
                     planning_summary=getattr(method, '_action_planning_summary', None),
+                    interruptible=getattr(method, '_action_interruptible', False),
                 )
                 # We can have multiple capabilities of the same type (e.g., memory
                 # capabilities) and/or capabilities of different types but with same action key.
@@ -1142,6 +1193,117 @@ class ActionDispatcher:
             action.result = result
             return result
 
+    # -------------------------------------------------------------------------
+    # Cancellation
+    # -------------------------------------------------------------------------
+
+    async def _track_cancellable(
+        self,
+        action: Action,
+        coro: Any,
+        *,
+        interruptible: bool,
+    ) -> Any:
+        """Run ``coro`` under cancellation tracking.
+
+        If ``interruptible`` is False, this is a transparent ``await coro``.
+
+        If ``interruptible`` is True, ``coro`` is wrapped in an ``asyncio.Task``
+        and registered as ``self._current_task`` (with the action_id discriminator)
+        so that ``cancel_current_action()`` can target it. On cancellation, the
+        ``CancelledError`` propagates out of this helper — callers must catch it
+        and call ``_consume_user_cancellation()`` to determine whether to return
+        a cancelled ``ActionResult`` (user-requested) or re-raise (outer cancel,
+        e.g., agent shutdown).
+
+        The action_id discriminator prevents a stale cancel signal from killing
+        an unrelated subsequent action: if the user requests cancellation just
+        as the current action completes naturally, the next dispatch will see
+        ``_cancellation_requested`` reset to False (we clear it in the finally
+        block) and proceed normally.
+        """
+        if not interruptible:
+            return await coro
+
+        task = asyncio.create_task(coro)
+        prev_task = self._current_task
+        prev_action_id = self._current_action_id
+        self._current_task = task
+        self._current_action_id = action.action_id
+        try:
+            return await task
+        finally:
+            # Restore the previous tracking state. Re-entrant dispatches (e.g.,
+            # a REPL run() that triggers another action_executor call) push and
+            # pop the tracking stack via these locals, so /abort always targets
+            # the innermost currently-executing interruptible action.
+            self._current_task = prev_task
+            self._current_action_id = prev_action_id
+
+    def _consume_user_cancellation(self, action: Action) -> ActionResult | None:
+        """Decide whether a CancelledError should produce a cancelled result.
+
+        Called from a CancelledError handler. Returns a cancelled ``ActionResult``
+        iff the cancellation was requested via ``cancel_current_action()`` for
+        *this* action (matched by ``action_id``). Otherwise returns None and the
+        caller should re-raise — the cancellation came from above (e.g., agent
+        shutdown) and must propagate.
+
+        This method consumes the cancellation flags so a single ``cancel_current_action()``
+        call cancels exactly one action.
+        """
+        if not self._cancellation_requested:
+            return None
+        # The cancel request must target THIS action — otherwise it was meant
+        # for an action that already finished, and we should not consume it
+        # against an unrelated downstream cancel-from-above.
+        target_action_id = self._current_action_id or action.action_id
+        if target_action_id != action.action_id:
+            return None
+        reason = self._cancellation_reason or "abort requested"
+        self._cancellation_requested = False
+        self._cancellation_reason = None
+        return ActionResult(
+            success=False,
+            completed=True,
+            cancelled=True,
+            error=f"Action cancelled: {reason}",
+            metadata={"cancellation_reason": reason},
+        )
+
+    def cancel_current_action(self, *, reason: str | None = None) -> bool:
+        """Request cancellation of the currently executing interruptible action.
+
+        Safe to call from any task — only flips the cancellation flag and calls
+        ``Task.cancel()`` (both idempotent / thread-safe enough for asyncio).
+        Idempotent: multiple calls before the action observes the cancellation
+        only flip the reason; the cancel signal itself is delivered once.
+
+        Args:
+            reason: Optional human-readable reason (e.g., ``"/abort"``,
+                ``"/replace"``) — surfaced in the resulting ``ActionResult.error``
+                and metadata for downstream observability.
+
+        Returns:
+            True if a cancellation was actually delivered (a current task
+            existed and was not yet done). False if there is no current
+            interruptible action — in that case the caller should not assume
+            anything was cancelled.
+        """
+        task = self._current_task
+        if task is None or task.done():
+            return False
+        self._cancellation_requested = True
+        self._cancellation_reason = reason
+        task.cancel()
+        return True
+
+    @property
+    def has_interruptible_action_in_flight(self) -> bool:
+        """True iff there is a currently-tracked cancellable action."""
+        task = self._current_task
+        return task is not None and not task.done()
+
     def _get_executor_for_action(self, action: Action) -> ActionExecutor | None:
         """Get the executor for a given action by exact key match,
         followed by fuzzy fallback.
@@ -1244,10 +1406,21 @@ class ActionDispatcher:
         #     )
         # else:
         if isinstance(executor, (MethodWrapperActionExecutor, FunctionWrapperActionExecutor)):
-            result: ActionResult = await executor.execute(action, resolved_params)
+            execute_coro = executor.execute(action, resolved_params)
         else:
             # Fallback for other executor types
-            result: ActionResult = await executor.execute(action)
+            execute_coro = executor.execute(action)
+        try:
+            result: ActionResult = await self._track_cancellable(
+                action, execute_coro, interruptible=executor.interruptible,
+            )
+        except asyncio.CancelledError:
+            cancelled = self._consume_user_cancellation(action)
+            if cancelled is not None:
+                action.status = ActionStatus.CANCELLED
+                action.result = cancelled
+                return cancelled
+            raise
 
         result_str, trunc = pydantic_model_to_str(result)
         logger.info(f"______ Action execution result: {result_str} ({trunc})")  # Log a truncated version of the result for readability
@@ -1311,7 +1484,20 @@ class ActionDispatcher:
             )
 
         action.status = ActionStatus.IN_PROGRESS
-        result_dict = await self.repl.execute(code)
+        # EXECUTE_CODE is always interruptible: user-authored code (or planner-
+        # generated code) can run arbitrarily long, so /abort and /replace
+        # must be able to cancel it.
+        try:
+            result_dict = await self._track_cancellable(
+                action, self.repl.execute(code), interruptible=True
+            )
+        except asyncio.CancelledError:
+            cancelled = self._consume_user_cancellation(action)
+            if cancelled is not None:
+                action.status = ActionStatus.CANCELLED
+                action.result = cancelled
+                return cancelled
+            raise
 
         # Pick up per-run() call trace if the code generation policy stored it
         metadata: dict[str, Any] = {}

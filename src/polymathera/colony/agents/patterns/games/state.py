@@ -927,14 +927,24 @@ class GameProtocolCapability(AgentCapability, ABC, Generic[TGameData, TRole]):
         return GameStateProtocol.result_key()
 
     @override
-    async def stream_events_to_queue(self, event_queue: asyncio.Queue[BlackboardEvent]) -> None:
+    async def stream_events_to_queue(
+        self,
+        event_queue: asyncio.Queue[BlackboardEvent],
+        *,
+        high_priority_queue: asyncio.Queue[BlackboardEvent] | None = None,
+    ) -> None:
         """Stream game events to a queue.
 
         Streams "write" events for game state changes. The game event type is
         stored in `metadata["game_event_type"]`.
 
+        ``high_priority_queue`` is accepted for interface compatibility
+        with the base method but ignored — game events are not
+        high-priority traffic.
+
         Args:
             event_queue: Queue to stream events into. Usually the local event queue of an ActionPolicy.
+            high_priority_queue: Ignored.
         """
         # IMPORTANT:
         # - The semantic game events (GameEventType.*) are used for higher-level coordination.

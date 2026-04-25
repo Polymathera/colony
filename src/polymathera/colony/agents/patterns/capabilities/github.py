@@ -1021,7 +1021,7 @@ class GitHubCapability(AgentCapability):
             items=items, count=len(items),
         )
 
-    @action_executor()
+    @action_executor(interruptible=True)
     async def claim_unassigned_issue(
         self,
         *,

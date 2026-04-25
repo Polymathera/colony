@@ -366,7 +366,11 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
         </div>
 
         {/* Currently-running actions banner */}
-        <ActionStatusBanner running={runningActions} />
+        <ActionStatusBanner
+          running={runningActions}
+          onAbort={() => sendMessage("/abort")}
+          canAbort={status === "connected"}
+        />
 
         {/* Controls + Input */}
         <ChatControls controls={chatControls} onChange={setChatControls} />
@@ -393,35 +397,55 @@ function _shortActionName(actionKey: string): string {
 
 function ActionStatusBanner({
   running,
+  onAbort,
+  canAbort,
 }: {
   running: Record<string, RunningAction>;
+  onAbort: () => void;
+  canAbort: boolean;
 }) {
   const entries = Object.values(running);
   if (entries.length === 0) return null;
   // Most recent first so the user sees the latest action at the top.
   entries.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
   return (
-    <div className="border-t border-border bg-accent/30 px-3 py-2 text-xs">
-      {entries.map((a) => {
-        const elapsed = a.started_at
-          ? Math.max(0, Math.floor(Date.now() / 1000 - a.started_at))
-          : null;
-        return (
-          <div key={a.action_id} className="flex items-center gap-2">
-            <div
-              className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent"
-              aria-hidden
-            />
-            <span className="font-mono text-foreground">
-              {_shortActionName(a.action_key)}
-            </span>
-            <span className="text-muted-foreground">
-              running{elapsed !== null ? ` for ${elapsed}s` : ""}
-              {a.agent_id ? ` · ${a.agent_id.slice(0, 12)}` : ""}
-            </span>
-          </div>
-        );
-      })}
+    <div className="flex items-start gap-2 border-t border-border bg-accent/30 px-3 py-2 text-xs">
+      <div className="flex-1 min-w-0">
+        {entries.map((a) => {
+          const elapsed = a.started_at
+            ? Math.max(0, Math.floor(Date.now() / 1000 - a.started_at))
+            : null;
+          return (
+            <div key={a.action_id} className="flex items-center gap-2">
+              <div
+                className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent"
+                aria-hidden
+              />
+              <span className="font-mono text-foreground">
+                {_shortActionName(a.action_key)}
+              </span>
+              <span className="text-muted-foreground">
+                running{elapsed !== null ? ` for ${elapsed}s` : ""}
+                {a.agent_id ? ` · ${a.agent_id.slice(0, 12)}` : ""}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {/* One Abort button per banner — abort cancels the *current* in-flight
+          action on the agent. Banner shows multiple entries only when actions
+          interleave (e.g., child policies); a single /abort propagates through
+          policy.abort_current() which cancels whatever is at the top of the
+          dispatcher's task stack, so a single button is the correct UX. */}
+      <button
+        type="button"
+        onClick={onAbort}
+        disabled={!canAbort}
+        title="Abort the running action (sends /abort on the high-priority lane)"
+        className="shrink-0 rounded border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        Abort
+      </button>
     </div>
   );
 }

@@ -169,14 +169,21 @@ class AgentContextEngine(AgentCapability):
     @override
     async def stream_events_to_queue(
         self,
-        event_queue: asyncio.Queue[BlackboardEvent]
+        event_queue: asyncio.Queue[BlackboardEvent],
+        *,
+        high_priority_queue: asyncio.Queue[BlackboardEvent] | None = None,
     ) -> None:
         """Stream memory events from all memory capabilities to the given queue.
 
         Aggregates events from all discovered memory capabilities.
+        ``high_priority_queue`` is forwarded so a memory capability
+        that ever declares high-priority handlers in the future will
+        route correctly without another change here.
         """
         for cap in self._memory_capabilities:
-            await cap.stream_events_to_queue(event_queue)
+            await cap.stream_events_to_queue(
+                event_queue, high_priority_queue=high_priority_queue,
+            )
 
     @override
     async def get_result_future(self) -> CapabilityResultFuture:

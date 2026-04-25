@@ -107,9 +107,16 @@ class MemoryLifecycleHooks(AgentCapability):
     @override
     async def stream_events_to_queue(
         self,
-        event_queue: asyncio.Queue[BlackboardEvent]
+        event_queue: asyncio.Queue[BlackboardEvent],
+        *,
+        high_priority_queue: asyncio.Queue[BlackboardEvent] | None = None,
     ) -> None:
         """Stream lifecycle events from colony control plane.
+
+        ``high_priority_queue`` is accepted for interface compatibility
+        with the base ``stream_events_to_queue`` (added by the
+        event-priority work) but ignored here — lifecycle events are
+        not high-priority traffic.
 
         Lifecycle events (creation, termination) are emitted to the colony
         control plane scope, not the agent-local scope. Subscribe there
