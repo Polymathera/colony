@@ -115,9 +115,13 @@ async def session_chat(
         # Background task for streaming blackboard events from the session agent
         # back to the WebSocket client.
         event_listener_task: asyncio.Task | None = None
+        action_status_task: asyncio.Task | None = None
         if session_agent_id:
             event_listener_task = asyncio.create_task(
                 _listen_for_agent_messages(websocket, colony, session_id, session_info, chat_store)
+            )
+            action_status_task = asyncio.create_task(
+                _listen_for_action_status(websocket, colony, session_id, session_info)
             )
 
         # Track active streaming tasks so we can cancel on disconnect
@@ -222,6 +226,8 @@ async def session_chat(
         finally:
             if event_listener_task and not event_listener_task.done():
                 event_listener_task.cancel()
+            if action_status_task and not action_status_task.done():
+                action_status_task.cancel()
             # Cancel all active streams
             for task in active_tasks.values():
                 if not task.done():
@@ -263,20 +269,14 @@ async def _get_session_info(colony: ColonyConnection, session_id: str) -> _Sessi
         return None
 
 
-def _get_session_chat_scope_id() -> str:
-    """Compute the scope_id for the session chat blackboard.
-
-    Must match what SessionOrchestratorCapability uses:
-    get_scope_prefix(BlackboardScope.SESSION, agent, namespace="session_chat")
-
-    Requires the execution context to be set (tenant_id, colony_id, session_id).
-    """
-    from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
-    return get_scope_prefix(BlackboardScope.SESSION, namespace="session_chat")
-
-
 async def _get_session_chat_blackboard(colony: ColonyConnection, session_info: _SessionInfo) -> EnhancedBlackboard | None:
-    """Get the session-scoped blackboard for the session agent."""
+    """Get the session-scoped blackboard for the session agent.
+
+    Resolves the chat namespace via
+    ``SessionOrchestratorCapability.DEFAULT_NAMESPACE`` so the literal
+    lives in exactly one place — the capability class — and any future
+    rename happens in one file rather than three.
+    """
     try:
         from ..chat import SessionOrchestratorCapability
         from polymathera.colony.agents import AgentHandle
@@ -286,7 +286,7 @@ async def _get_session_chat_blackboard(colony: ColonyConnection, session_info: _
         cap = handle.get_capability(
             SessionOrchestratorCapability,
             scope=BlackboardScope.SESSION,
-            namespace="session_chat",
+            namespace=SessionOrchestratorCapability.DEFAULT_NAMESPACE,
         )
         bb: EnhancedBlackboard = await cap.get_blackboard()
         logger.info("Got session chat blackboard: scope_id=%s, backend_type=%s", bb.scope_id, bb.backend_type)
@@ -420,6 +420,53 @@ async def _listen_for_agent_messages(
         logger.debug("Agent message listener cancelled for session %s", session_id)
     except Exception as e:
         logger.error("Agent message listener error for session %s: %s", session_id, e)
+
+
+async def _listen_for_action_status(
+    websocket: WebSocket,
+    colony: ColonyConnection,
+    session_id: str,
+    session_info: _SessionInfo,
+) -> None:
+    """Background task: relay action-status records to the WebSocket.
+
+    The session agent's ``CodeGenerationActionPolicy`` publishes a
+    ``running`` record before every action and a ``complete``/``failed``
+    record after. The frontend tracks them in a Map keyed by
+    ``action_id`` and renders a small badge while any are running.
+
+    These records are NOT persisted to the chat history — they are
+    transient UI cues, not real chat messages.
+    """
+    try:
+        from ..chat import SessionChatProtocol
+
+        bb = await _get_session_chat_blackboard(colony, session_info)
+
+        async for event in bb.stream_events(
+            pattern=SessionChatProtocol.action_status_pattern(),
+            timeout=None,
+        ):
+            payload = event.value if isinstance(event.value, dict) else {}
+            await websocket.send_json({
+                "type": "action_status",
+                "agent_id": payload.get("agent_id"),
+                "action_id": payload.get("action_id"),
+                "action_key": payload.get("action_key"),
+                "status": payload.get("status"),
+                "started_at": payload.get("started_at"),
+                "ended_at": payload.get("ended_at"),
+                "wall_time_ms": payload.get("wall_time_ms"),
+                "error": payload.get("error"),
+            })
+    except asyncio.CancelledError:
+        logger.debug(
+            "Action-status listener cancelled for session %s", session_id,
+        )
+    except Exception as e:
+        logger.error(
+            "Action-status listener error for session %s: %s", session_id, e,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -80,6 +80,19 @@ class SessionChatProtocol(BlackboardProtocol):
         """Key for a run lifecycle event (spawning, progress, completed, etc.)."""
         return f"chat:event:{run_id}:{event_name}"
 
+    @staticmethod
+    def action_status_key(agent_id: str, action_id: str) -> str:
+        """Key for a per-action status update.
+
+        Written by ``CodeGenerationActionPolicy`` whenever it dispatches
+        an action (twice: once on entry with ``status="running"``, once on
+        exit with ``status="complete"`` or ``"failed"``). The chat
+        WebSocket relays these to the frontend so the user sees a small
+        "currently running …" badge while a long-running action is in
+        flight.
+        """
+        return f"chat:action_status:{agent_id}:{action_id}"
+
     # --- Pattern construction ---
 
     @staticmethod
@@ -105,6 +118,14 @@ class SessionChatProtocol(BlackboardProtocol):
         if run_id:
             return f"chat:event:{run_id}:*"
         return "chat:event:*"
+
+    @staticmethod
+    def action_status_pattern(agent_id: str | None = None) -> str:
+        """Pattern matching action-status updates, optionally for one
+        agent."""
+        if agent_id:
+            return f"chat:action_status:{agent_id}:*"
+        return "chat:action_status:*"
 
     @staticmethod
     def all_chat_pattern() -> str:

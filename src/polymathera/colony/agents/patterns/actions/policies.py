@@ -530,6 +530,40 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         """Return the streams this policy feeds (events + actions)."""
         return list(self._consciousness_streams)
 
+    def has_pending_work(self) -> bool:
+        """Whether this policy has unfinished work that the next
+        ``plan_step`` call must run *atomically* — without consuming
+        any event from the queue.
+
+        Subclasses override to signal that recovery (or any other
+        in-flight multi-iteration work) is in progress. The canonical
+        use case: an LLM-driven policy whose previous code-generation
+        attempt failed validation and accumulated error feedback —
+        the LLM needs to be re-prompted with that feedback so it can
+        produce corrected code.
+
+        While ``has_pending_work() == True``,
+        ``EventDrivenActionPolicy.plan_step``:
+
+        - Skips the event read entirely (no ``get_next_event`` /
+          ``get_next_event_nowait`` call). Any event that arrives
+          during recovery STAYS QUEUED until recovery finishes and
+          the policy reverts to ``has_pending_work() == False``.
+        - Falls through to the subclass body so the subclass can do
+          its work (re-prompt the LLM, dispatch a recovered action,
+          etc.).
+
+        This contract matters because consuming an unrelated event
+        mid-recovery would conflate two intents into a single LLM
+        prompt — the original (failing) request and the new
+        independent event — leaving the model to guess which one to
+        satisfy. Atomic recovery avoids that whole class of bug.
+
+        Default ``False``: ordinary policies always read the event
+        queue at the top of every ``plan_step`` call.
+        """
+        return False
+
     def _get_event_handlers(self) -> list[Callable]:
         """Get all event handlers from capabilities and action providers.
 
@@ -591,7 +625,22 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             Action to execute, or None
         """
         # 1. Get next event
-        if self._reactive_only:
+        if self.has_pending_work():
+            # The subclass is mid-recovery (e.g., codegen retry after
+            # a validation failure). Do NOT consume any event from
+            # the queue — recovery must be atomic. A new event that
+            # landed while we were retrying belongs to the *next*
+            # planning iteration, not this one. Pulling it now would
+            # silently merge two unrelated user intents into a single
+            # LLM prompt: the prior request + its accumulated error
+            # history + the new message + the new message's context.
+            # The LLM then has to disambiguate, and the outcome is
+            # unpredictable. By leaving the event in the queue,
+            # recovery completes (success or exhaust) and resets
+            # state; the next ``plan_step`` then processes the
+            # queued event with a clean slate.
+            event = None
+        elif self._reactive_only:
             # Block until an event arrives — no LLM calls when idle.
             # This makes the agent purely event-driven: it only acts
             # when something happens (user message, child agent event, etc.)

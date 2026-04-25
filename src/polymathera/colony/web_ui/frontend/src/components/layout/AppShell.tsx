@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { LogOut, LayoutDashboard, Bot, Database, GitFork, ClipboardList, ScrollText, Activity, Gauge, Settings } from "lucide-react";
+import { BookOpen, LogOut, LayoutDashboard, Bot, Database, GitFork, ClipboardList, ScrollText, Activity, Gauge, Settings } from "lucide-react";
 import { TabBar, type Tab } from "./TabBar";
 import { StatusBar } from "./StatusBar";
 import { Sidebar } from "./Sidebar";
@@ -225,6 +225,16 @@ export function AppShell() {
               </select>
             </div>
           )}
+          {/* Docs — opens the published Colony documentation in a new tab */}
+          <a
+            href="https://polymathera.github.io/colony/"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open Colony documentation in a new tab"
+            className="rounded px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/50"
+          >
+            <BookOpen size={14} className="inline -mt-0.5" /> Docs
+          </a>
           {/* User info + logout */}
           <span className="text-xs text-muted-foreground">
             {currentUser.data?.username}

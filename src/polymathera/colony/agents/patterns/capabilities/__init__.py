@@ -40,6 +40,42 @@ from .refinement import RefinementCapability
 from .synthesis import SynthesisCapability
 from .validation import ValidationCapability
 from .vcm_analysis import VCMAnalysisCapability
+from .vcm import VCMCapability
+from .web_search import (
+    ColonyDocsCapability,
+    SearchBackend,
+    SearchHit,
+    TavilyBackend,
+    WebSearchCapability,
+)
+from .sandboxed_shell import SandboxedShellCapability
+from ._sandbox import (
+    ContainerBackend,
+    ContainerHandle,
+    ContainerSpec,
+    DockerCLIBackend,
+    ExecResult,
+    ImageRegistry,
+    ImageSpec,
+    NoSuchContainer,
+    ScriptSpec,
+)
+from .user_plugin import UserPluginCapability
+from ._plugin import (
+    PluginSpec,
+    SkillParam,
+    SkillSource,
+    SkillSpec,
+)
+from .github import GitHubCapability
+from ._github import (
+    GitHubAppAuth,
+    GitHubClient,
+    GitHubError,
+    NotFoundError,
+    RateLimitError,
+    TokenCache,
+)
 
 # Batching policies
 from .batching import (
@@ -108,4 +144,37 @@ __all__ = [
     "ValidationCapability",
     # VCM Analysis Pattern
     "VCMAnalysisCapability",
+    # VCM Control
+    "VCMCapability",
+    # Web retrieval
+    "WebSearchCapability",
+    "ColonyDocsCapability",
+    "SearchBackend",
+    "SearchHit",
+    "TavilyBackend",
+    # Sandboxed shell
+    "SandboxedShellCapability",
+    "ContainerBackend",
+    "ContainerHandle",
+    "ContainerSpec",
+    "DockerCLIBackend",
+    "ExecResult",
+    "ImageRegistry",
+    "ImageSpec",
+    "NoSuchContainer",
+    "ScriptSpec",
+    # User plugins
+    "UserPluginCapability",
+    "PluginSpec",
+    "SkillParam",
+    "SkillSource",
+    "SkillSpec",
+    # GitHub
+    "GitHubCapability",
+    "GitHubAppAuth",
+    "GitHubClient",
+    "GitHubError",
+    "NotFoundError",
+    "RateLimitError",
+    "TokenCache",
 ]

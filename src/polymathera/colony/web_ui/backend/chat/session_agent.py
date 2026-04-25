@@ -8,6 +8,7 @@ specific agents), and relays agent progress back to the user.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -20,6 +21,7 @@ from polymathera.colony.agents.base import Agent, AgentCapability, AgentHandle
 from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.models import AgentMetadata, AgentSuspensionState, RunContext, PolicyREPL
 from polymathera.colony.agents.blackboard import BlackboardEvent
+from polymathera.colony.agents.blackboard.protocol import ActionPolicyLifecycleProtocol
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult, PROCESSED
 from polymathera.colony.agents.patterns.actions import action_executor
 from .chat_protocol import SessionChatProtocol
@@ -38,13 +40,21 @@ class SessionOrchestratorCapability(AgentCapability):
     - @agent routing (forward to specific agent)
     - Plain messages (session agent handles directly)
     - User replies to agent questions (route back to requesting agent)
+    - Bridges generic ``ActionPolicyLifecycleProtocol`` events emitted
+      by the agent's action policy into chat-side updates the WebSocket
+      relay can forward to the browser.
     """
+
+    #: Default sub-namespace under the session blackboard for chat
+    #: traffic. Single source of truth — the chat router and any other
+    #: consumer reach this constant rather than repeating the literal.
+    DEFAULT_NAMESPACE = "session_chat"
 
     def __init__(
         self,
         agent: Agent | None = None,
         scope: BlackboardScope = BlackboardScope.SESSION,
-        namespace: str = "session_chat",
+        namespace: str = DEFAULT_NAMESPACE,
         input_patterns: list[str] | None = None,
         capability_key: str = "session_orchestrator",
         app_name: str | None = None,
@@ -75,6 +85,195 @@ class SessionOrchestratorCapability(AgentCapability):
             capability_key=capability_key,
             app_name=app_name,
         )
+        self._lifecycle_relay_task: asyncio.Task | None = None
+
+    @override
+    async def initialize(self) -> None:
+        """Spin up the policy→chat lifecycle bridge.
+
+        ``ActionPolicyLifecycleProtocol`` events are emitted by the
+        agent's action policy on the agent's primary blackboard. We
+        cannot route them through the policy's own event queue (that
+        would re-enter ``plan_step`` on every emission and form a
+        feedback loop), so a dedicated background task subscribes
+        directly and translates each event into the corresponding
+        chat-blackboard record. The chat WebSocket relay then
+        forwards those records to the browser.
+
+        The task is cancelled on ``shutdown``. Failures inside the
+        loop are logged but never propagated — the chat UI is a
+        downstream consumer; its absence must not break the agent.
+        """
+        await super().initialize()
+        if self._agent is None:
+            # Detached mode: no agent blackboard to subscribe to.
+            return
+        self._lifecycle_relay_task = asyncio.create_task(
+            self._relay_policy_lifecycle_to_chat(),
+            name=f"policy_lifecycle_relay:{self._agent.agent_id}",
+        )
+
+    async def shutdown(self) -> None:
+        """Cancel the lifecycle relay task. Idempotent."""
+        if self._lifecycle_relay_task is not None:
+            self._lifecycle_relay_task.cancel()
+            try:
+                await self._lifecycle_relay_task
+            except (asyncio.CancelledError, Exception):  # pragma: no cover
+                pass
+            self._lifecycle_relay_task = None
+
+    async def _relay_policy_lifecycle_to_chat(self) -> None:
+        """Subscribe to policy lifecycle events on the agent's primary
+        blackboard and translate each into a chat-blackboard write.
+
+        See :class:`ActionPolicyLifecycleProtocol` for the event
+        catalogue. The translation here is the only place that knows
+        about both worlds — the policy emits generic events, the chat
+        UI consumes chat-shaped records, and this method bridges them.
+        """
+        try:
+            agent_bb = await self._agent.get_blackboard()
+            chat_bb = await self.get_blackboard()
+        except Exception as e:
+            logger.warning(
+                "SessionOrchestratorCapability: lifecycle relay "
+                "failed to acquire blackboards (%s); chat-side action "
+                "status will not appear", e,
+            )
+            return
+        try:
+            async for event in agent_bb.stream_events(
+                pattern=ActionPolicyLifecycleProtocol.all_pattern(),
+                event_types={"write"},
+                timeout=None,
+            ):
+                try:
+                    await self._handle_lifecycle_event(event, chat_bb)
+                except Exception as e:  # pragma: no cover — defensive
+                    logger.debug(
+                        "lifecycle relay translation failed for %s: %s",
+                        event.key, e,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # pragma: no cover — defensive
+            logger.error(
+                "SessionOrchestratorCapability: lifecycle relay loop "
+                "crashed: %s", e, exc_info=True,
+            )
+
+    async def _handle_lifecycle_event(
+        self, event: BlackboardEvent, chat_bb,
+    ) -> None:
+        """Translate one lifecycle event into a chat-blackboard write.
+
+        Action started/completed → ``chat:action_status:*`` (drives
+        the spinner badge in ``ChatPanel.ActionStatusBanner``).
+
+        Codegen retry → ``chat:action_status:*`` with a synthetic
+        ``codegen_recovery`` action_id so the banner persists across
+        the whole retry streak.
+
+        Codegen failed (retries exhausted) → both a final
+        ``chat:action_status:*`` clearing the banner AND a
+        ``chat:agent:*`` system_failure message that lands in the
+        user's chat history alongside normal agent replies.
+        """
+        key = event.key
+        payload = event.value if isinstance(event.value, dict) else {}
+        agent_id = payload.get("agent_id") or self._agent.agent_id
+
+        if key.startswith(ActionPolicyLifecycleProtocol._ACTION_STARTED):
+            action_id = payload.get("action_id") or "?"
+            await chat_bb.write(
+                f"chat:action_status:{agent_id}:{action_id}",
+                {
+                    "agent_id": agent_id,
+                    "action_id": action_id,
+                    "action_key": payload.get("action_key", ""),
+                    "status": "running",
+                    "started_at": payload.get("started_at"),
+                },
+            )
+            return
+
+        if key.startswith(ActionPolicyLifecycleProtocol._ACTION_COMPLETED):
+            action_id = payload.get("action_id") or "?"
+            await chat_bb.write(
+                f"chat:action_status:{agent_id}:{action_id}",
+                {
+                    "agent_id": agent_id,
+                    "action_id": action_id,
+                    "action_key": payload.get("action_key", ""),
+                    "status": "complete" if payload.get("success") else "failed",
+                    "started_at": payload.get("started_at"),
+                    "ended_at": payload.get("ended_at"),
+                    "wall_time_ms": payload.get("wall_time_ms"),
+                    "error": payload.get("error"),
+                },
+            )
+            return
+
+        if ActionPolicyLifecycleProtocol.is_codegen_retry_key(key):
+            attempt = payload.get("attempt", 0)
+            max_attempts = payload.get("max_attempts", 0)
+            await chat_bb.write(
+                f"chat:action_status:{agent_id}:codegen_recovery",
+                {
+                    "agent_id": agent_id,
+                    "action_id": "codegen_recovery",
+                    "action_key": (
+                        f"codegen — regenerating after invalid output "
+                        f"(attempt {attempt}/{max_attempts})"
+                    ),
+                    "status": "running",
+                    "started_at": payload.get("ts"),
+                },
+            )
+            return
+
+        if ActionPolicyLifecycleProtocol.is_codegen_failed_key(key):
+            attempts = payload.get("attempts", 0)
+            error = payload.get("error", "")
+            # Clear any lingering codegen_recovery banner.
+            await chat_bb.write(
+                f"chat:action_status:{agent_id}:codegen_recovery",
+                {
+                    "agent_id": agent_id,
+                    "action_id": "codegen_recovery",
+                    "action_key": (
+                        f"codegen — gave up after {attempts} attempts"
+                    ),
+                    "status": "failed",
+                    "started_at": payload.get("ts"),
+                    "ended_at": payload.get("ts"),
+                    "error": error,
+                },
+            )
+            # And surface a regular chat message the user can see in
+            # their history.
+            mid = f"msg_{uuid.uuid4().hex[:12]}"
+            await chat_bb.write(
+                SessionChatProtocol.agent_message_key(agent_id, mid),
+                {
+                    "content": (
+                        f"⚠️ I couldn't produce valid code for your "
+                        f"last request after {attempts} attempts.\n\n"
+                        f"**Last error:** `{error[:300]}`\n\n"
+                        f"This usually means the LLM is producing output "
+                        f"the validator can't parse (e.g., markdown "
+                        f"fences, prose between statements, or "
+                        f"hallucinated action keys). Try rephrasing or "
+                        f"open an issue if it keeps happening."
+                    ),
+                    "agent_id": agent_id,
+                    "agent_type": self._agent.agent_type,
+                    "message_id": mid,
+                    "timestamp": time.time(),
+                    "kind": "system_failure",
+                },
+            )
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:

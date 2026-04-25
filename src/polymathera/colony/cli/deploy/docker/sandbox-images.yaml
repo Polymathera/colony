@@ -1,0 +1,51 @@
+# Curated sandbox image registry.
+#
+# Mounted into the ray-head / ray-worker containers at
+# /etc/colony/sandbox-images.yaml. Agents call
+# SandboxedShellCapability.launch_container(image_role=...) with a role
+# from this list; unknown roles are rejected before any Docker call.
+#
+# Keep entries minimal and pin by digest in production. See
+# colony_docs/markdown/plans/design_SandboxedShellCapability.md §6.1.
+
+images:
+  - role: default
+    # Thin Debian-based Python image that exists on Docker Hub.
+    # Replace with a pinned digest in production.
+    image: python:3.11-slim
+    description: |
+      Minimal Python 3.11 environment. Suitable for ad-hoc scripts,
+      quick experiments, and agents that just need a POSIX shell plus
+      Python's stdlib. No extra toolchain preinstalled — add roles for
+      specific toolchains below.
+    scripts:
+      - name: python_version
+        description: Report the Python version.
+        params: {}
+        cmd: ["python", "-V"]
+      - name: run_python
+        description: Execute a Python one-liner.
+        params:
+          code:
+            type: string
+            required: true
+        cmd: ["python", "-c", "{code}"]
+
+  - role: code_analysis
+    # Image designed for static analysis tasks. Rebuild with ruff +
+    # pyright preinstalled for real use. Default keeps it plain so the
+    # capability works out of the box.
+    image: python:3.11-slim
+    description: |
+      Python 3.11 base. Roles using this image typically install
+      ruff/mypy/pyright via a sidecar init step. Agents should treat
+      this as a *slot* — the operator upgrades the image without
+      touching agent code.
+    scripts:
+      - name: count_lines
+        description: Count lines of code under a path (excluding binaries).
+        params:
+          path:
+            type: string
+            required: true
+        cmd: ["bash", "-lc", "find '{path}' -type f | xargs -I{} wc -l '{}' | sort -rn | head -50"]

@@ -37,11 +37,13 @@ from __future__ import annotations
 import ast
 import inspect
 import logging
+import time
 from typing import Any
 
 from overrides import override
 
 from ...base import Agent
+from ...blackboard.protocol import ActionPolicyLifecycleProtocol
 from ...blueprint import ActionPolicyBlueprint, AgentCapabilityBlueprint
 from ...models import (
     Action,
@@ -503,17 +505,37 @@ def format_planning_context_for_codegen(
     parts.append("## Available Actions\n" + "\n".join(cap_lines))
 
     # Error feedback — show ALL prior failed attempts so the LLM doesn't
-    # repeat the same mistakes.
+    # repeat the same mistakes. ``raw_response`` (when present) is the
+    # exact text the LLM emitted before extraction; we show it back so
+    # the model sees its own malformed output instead of only the
+    # post-extraction string the validator rejected.
     if error_history:
         error_lines = ["## Failed Attempts — Do NOT Repeat These\n"]
         for i, attempt in enumerate(error_history, 1):
             error_lines.append(f"### Attempt {i}")
-            error_lines.append(f"```python\n{attempt['code']}\n```")
+            raw = attempt.get("raw_response")
+            if raw:
+                error_lines.append(
+                    "**Your raw response was (truncated):**\n"
+                    "```\n"
+                    f"{raw}\n"
+                    "```"
+                )
+            code = attempt.get("code") or ""
+            if code and code != raw:
+                error_lines.append(
+                    "**After extraction the code was:**\n"
+                    "```python\n"
+                    f"{code}\n"
+                    "```"
+                )
             error_lines.append(f"**Error:** {attempt['error']}\n")
         error_lines.append(
             "Analyze ALL the above failures. Do NOT use any action key format "
-            "that has already failed. Use the EXACT keys from the Available Actions "
-            "section above."
+            "that has already failed. Emit ONLY raw Python code "
+            "— no markdown fences, no JSON output blocks, no prose "
+            "between statements. Use the EXACT action keys from the "
+            "Available Actions section above."
         )
         parts.append("\n".join(error_lines))
 
@@ -814,6 +836,123 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             return True
         return any(key.endswith(f".{action_key}") for key in planning_action_keys)
 
+    @override
+    def has_pending_work(self) -> bool:
+        """Tell ``EventDrivenActionPolicy`` to skip the event wait when
+        a recovery iteration is in flight.
+
+        Two situations qualify:
+
+        - The previous iteration produced bad code that failed
+          validation. ``_consecutive_failures`` is the per-attempt
+          counter; while it is below ``max_retries`` we have unfinished
+          work — re-prompt the LLM with the accumulated
+          ``_error_history`` instead of waiting for a new user
+          message that may never arrive.
+        - The recovery strategy produced fixed code (``_recovered_code``)
+          that still needs to be executed.
+        """
+        if self._recovered_code is not None:
+            return True
+        if (
+            self._consecutive_failures > 0
+            and self._consecutive_failures < self.max_retries
+        ):
+            return True
+        return False
+
+    async def _handle_codegen_failure(
+        self, *, code: str, error: str, raw: str,
+    ) -> None:
+        """Centralised handling for a failed code-generation attempt.
+
+        Three things happen here, in order:
+
+        1. The bad attempt is recorded in ``_error_history`` so the next
+           prompt iteration shows the LLM exactly what it produced
+           (truncated raw output) plus the validator's error message.
+           The next iteration runs without waiting for a new event
+           because ``has_pending_work()`` returns True.
+        2. A generic ``policy:codegen_retry:*`` lifecycle event is
+           emitted on the agent's blackboard. Subscribers (the chat
+           bridge, traces, log adapters) can react however they want;
+           the policy itself does not know what they will do.
+        3. When ``_consecutive_failures`` reaches ``max_retries``, the
+           policy emits ``policy:codegen_failed:*`` with the same
+           reasoning, and resets state so the agent is ready for the
+           user's next prompt instead of dead-looping.
+
+        Caller still returns ``None`` from ``plan_step``; this method
+        only records and surfaces the failure.
+        """
+        self._consecutive_failures += 1
+        # Show the LLM its own raw output so it doesn't repeat the
+        # same mistake (e.g., re-emitting markdown fences after we
+        # told it not to).
+        self._error_history.append({
+            "code": code,
+            "raw_response": (raw or "")[:1500],
+            "error": error,
+        })
+
+        ts_ms = int(time.time() * 1000)
+        if self._consecutive_failures < self.max_retries:
+            await self._emit_lifecycle_event(
+                key=ActionPolicyLifecycleProtocol.codegen_retry_key(ts_ms),
+                payload={
+                    "attempt": self._consecutive_failures,
+                    "max_attempts": self.max_retries,
+                    "error": error[:300],
+                    "ts": time.time(),
+                },
+            )
+            return
+
+        # Exhausted. Stop the loop, surface the failure, reset state.
+        logger.error(
+            "CodeGenerationActionPolicy: exhausted %d retries; "
+            "abandoning the request to avoid a dead-loop. Last "
+            "error: %s",
+            self._consecutive_failures, error,
+        )
+        await self._emit_lifecycle_event(
+            key=ActionPolicyLifecycleProtocol.codegen_failed_key(ts_ms),
+            payload={
+                "attempts": self._consecutive_failures,
+                "max_attempts": self.max_retries,
+                "error": error[:300],
+                "ts": time.time(),
+            },
+        )
+        # Reset so the agent is ready for the user's next prompt
+        # instead of immediately retrying the same thing.
+        self._consecutive_failures = 0
+        self._error_history.clear()
+        self._recovered_code = None
+
+    async def _emit_lifecycle_event(
+        self, *, key: str, payload: dict[str, Any],
+    ) -> None:
+        """Publish one ``ActionPolicyLifecycleProtocol`` record on the
+        agent's primary blackboard.
+
+        Subscribers — capabilities with ``@event_handler`` matching
+        ``policy:*``, observers, traces — decide what to do with the
+        event. The policy itself knows nothing about how the event is
+        consumed: chat UIs, log adapters, dashboards are all equally
+        valid downstream concerns.
+
+        Best-effort: emission failure never breaks the action itself.
+        """
+        try:
+            bb = await self.agent.get_blackboard()
+            await bb.write(key, payload)
+        except Exception as e:  # pragma: no cover — defensive
+            logger.debug(
+                "CodeGenerationActionPolicy: lifecycle emit failed: %s",
+                e,
+            )
+
     async def _setup_enriched_namespace(self) -> None:
         """Install helper functions into the REPL namespace."""
         repl = self._action_dispatcher.repl
@@ -865,6 +1004,23 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 action_type=action_key,
                 parameters=params,
             )
+            # Publish a generic ``policy:action_started:*`` lifecycle
+            # event on the agent's blackboard. Subscribers — chat UI
+            # bridge, traces, log adapters — decide what to do with it.
+            # The policy itself does not know what a chat or a UI is.
+            _started_at = time.time()
+            await self._emit_lifecycle_event(
+                key=ActionPolicyLifecycleProtocol.action_started_key(
+                    action.action_id,
+                ),
+                payload={
+                    "agent_id": self.agent.agent_id,
+                    "action_id": action.action_id,
+                    "action_key": action_key,
+                    "parameters": dict(params),
+                    "started_at": _started_at,
+                },
+            )
             result = await self._action_dispatcher.dispatch(action)
 
             # Track result in structured PlanExecutionContext
@@ -908,6 +1064,26 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 # First non-planning action → switch to execution mode
                 self._mode = "execution"
                 log("Mode → EXECUTION (first domain action dispatched)")
+
+            # Pair the started event with a terminal one so the
+            # downstream subscribers can finalise their state
+            # (clear a UI banner, close a span, write a log line).
+            ended_at = time.time()
+            await self._emit_lifecycle_event(
+                key=ActionPolicyLifecycleProtocol.action_completed_key(
+                    action.action_id,
+                ),
+                payload={
+                    "agent_id": self.agent.agent_id,
+                    "action_id": action.action_id,
+                    "action_key": resolved_action_key,
+                    "success": result.success,
+                    "started_at": _started_at,
+                    "ended_at": ended_at,
+                    "wall_time_ms": int((ended_at - _started_at) * 1000),
+                    "error": (result.error or None) if not result.success else None,
+                },
+            )
 
             return result
 
@@ -1186,16 +1362,39 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 logger.error(f"CodeGenerationActionPolicy: code generation failed: {e}")
                 return None
 
+        # Snapshot the raw output right after the LLM returns. We feed
+        # it back to the LLM in the error_history when validation fails
+        # so the model sees its own invalid output and (hopefully)
+        # corrects course on the next attempt.
+        raw_llm_output = code if isinstance(code, str) else str(code)
+
         if not code or not code.strip():
-            logger.warning("CodeGenerationActionPolicy: generated empty code")
+            logger.error(
+                "CodeGenerationActionPolicy: generated empty code "
+                "(raw LLM output: %r)",
+                raw_llm_output[:300],
+            )
+            await self._handle_codegen_failure(
+                code="", error=(
+                    "Empty code after extraction. Your last response "
+                    "contained no Python code we could parse. Emit ONLY "
+                    "raw Python statements — no markdown fences, no "
+                    "explanations, no mocked output."
+                ),
+                raw=raw_llm_output,
+            )
             return None
 
         # --- Dimension 2: Code Validation (all validators must pass) ---
         for validator in self._code_validators:
             validation = await validator.validate(code, self.agent)
             if not validation.valid:
-                logger.warning(
-                    f"CodeGenerationActionPolicy: validation failed: {validation.errors}"
+                logger.error(
+                    "CodeGenerationActionPolicy: validation failed for "
+                    "%s: %s. Raw LLM output (truncated): %r",
+                    type(validator).__name__,
+                    validation.errors,
+                    raw_llm_output[:300],
                 )
                 # Dimension 4: Recovery from validation failure
                 recovery = await self._recovery_strategy.recover(
@@ -1208,14 +1407,27 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 if recovery.recovered and recovery.code:
                     code = recovery.code
                     logger.info(f"CodeGenerationActionPolicy: {recovery.strategy_used} produced fixed code")
-                else:
-                    error_msg = recovery.error_context or "\n".join(validation.errors)
-                    self._error_history.append({"code": code, "error": error_msg})
-                    self._consecutive_failures += 1
-                    return None
+                    continue  # re-validate the recovered code
+                error_msg = recovery.error_context or "\n".join(validation.errors)
+                await self._handle_codegen_failure(
+                    code=code, error=error_msg, raw=raw_llm_output,
+                )
+                return None
 
-        # Clear consecutive failure count on successful generation + validation
+        # Clear consecutive failure count on successful generation + validation.
+        # If we were recovering from a previous failure, clear the chat
+        # banner and the error_history so the next user-driven iteration
+        # starts fresh.
+        if self._consecutive_failures > 0:
+            await self._emit_codegen_recovery_banner(
+                attempt=self._consecutive_failures,
+                max_attempts=self.max_retries,
+                last_error="",
+                finished=True,
+                succeeded=True,
+            )
         self._consecutive_failures = 0
+        self._error_history.clear()
 
         # Reset call history for this code execution (Dimension 5 tracking)
         self._call_history.clear()

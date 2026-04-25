@@ -88,6 +88,11 @@ nav:
     - Action Policies: architecture/action-policies.md
     - Planning: architecture/planning.md
     - Consciousness Streams: architecture/consciousness-streams.md
+    - 'Capability — VCM': architecture/vcm-capability.md
+    - 'Capability — Web Search': architecture/web-search-capability.md
+    - 'Capability — Sandboxed Shell': architecture/sandboxed-shell-capability.md
+    - 'Capability — User Plugins': architecture/user-plugin-capability.md
+    - 'Capability — GitHub': architecture/github-capability.md
     - Blackboard Pattern: architecture/blackboard.md
     - Hook System: architecture/hook-system.md
     - Game Patterns: architecture/game-engine.md
@@ -104,6 +109,7 @@ nav:
   - Guides:
     - colony-env: guides/colony-env.md
     - Web Dashboard: guides/web-dashboard.md
+    - Capability Operator Setup: guides/capability-setup.md
     - Publishing & CI/CD: guides/publishing.md
   - API Reference:
     - reference/index.md

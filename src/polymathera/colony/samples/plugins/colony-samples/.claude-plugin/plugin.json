@@ -1,0 +1,11 @@
+{
+  "name": "colony-samples",
+  "version": "0.1.0",
+  "description": "Sample skills bundled with Colony — demonstrate the UserPluginCapability + SandboxedShellCapability integration. Each skill is callable via UserPluginCapability.run_skill('colony-samples/<skill_name>').",
+  "author": "Polymathera",
+  "skills": [
+    "code-complexity",
+    "scientific-debugging",
+    "systemic-vulnerability-scan"
+  ]
+}

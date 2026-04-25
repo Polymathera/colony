@@ -32,12 +32,22 @@ function nextMessageId(): string {
   return `msg_${Date.now()}_${++messageIdCounter}`;
 }
 
+type RunningAction = {
+  action_id: string;
+  action_key: string;
+  agent_id?: string | null;
+  started_at?: number | null;
+};
+
 export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
   const [width, setWidth] = useState(getStoredWidth);
   const [collapsed, setCollapsed] = useState(getStoredCollapsed);
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [messages, setMessages] = useState<ChatMessageData[]>([]);
   const [chatControls, setChatControls] = useState<ChatControlsState>({});
+  // action_id → running record. Cleared on a "complete" / "failed"
+  // record from the same action_id.
+  const [runningActions, setRunningActions] = useState<Record<string, RunningAction>>({});
   const wsRef = useRef<WebSocket | null>(null);
   const isDragging = useRef(false);
 
@@ -145,6 +155,31 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
           if (historyMsgs.length > 0) {
             setMessages((prev) => [...historyMsgs, ...prev]);
           }
+        } else if (data.type === "action_status") {
+          // Action lifecycle: "running" adds a banner entry; the
+          // matching "complete"/"failed" record removes it. Brief
+          // out-of-order arrivals (very fast actions) self-resolve
+          // because the start record only adds, the end only removes.
+          const id = data.action_id as string | undefined;
+          if (!id) return;
+          if (data.status === "running") {
+            setRunningActions((prev) => ({
+              ...prev,
+              [id]: {
+                action_id: id,
+                action_key: data.action_key || "",
+                agent_id: data.agent_id,
+                started_at: data.started_at,
+              },
+            }));
+          } else {
+            setRunningActions((prev) => {
+              if (!(id in prev)) return prev;
+              const next = { ...prev };
+              delete next[id];
+              return next;
+            });
+          }
         } else if (data.type === "tab_activity" && onTabActivity) {
           onTabActivity(data.tab_id, data.count);
         } else if (data.type === "error") {
@@ -186,6 +221,7 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
   // Clear messages when session changes
   useEffect(() => {
     setMessages([]);
+    setRunningActions({});
   }, [sessionId]);
 
   const sendMessage = useCallback((content: string) => {
@@ -329,6 +365,9 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
           />
         </div>
 
+        {/* Currently-running actions banner */}
+        <ActionStatusBanner running={runningActions} />
+
         {/* Controls + Input */}
         <ChatControls controls={chatControls} onChange={setChatControls} />
         <ChatInput
@@ -337,6 +376,52 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
           placeholder={status === "connected" ? "Type a message, /command, or @agent..." : "Connecting..."}
         />
       </div>
+    </div>
+  );
+}
+
+
+function _shortActionName(actionKey: string): string {
+  // GitHubCapability.GitHubCapability.list_issues  →  list_issues
+  // VCMCapability.VCMCapability.mmap_repo          →  mmap_repo
+  // signal_completion                              →  signal_completion
+  if (!actionKey) return "(unknown)";
+  const parts = actionKey.split(".");
+  return parts[parts.length - 1] || actionKey;
+}
+
+
+function ActionStatusBanner({
+  running,
+}: {
+  running: Record<string, RunningAction>;
+}) {
+  const entries = Object.values(running);
+  if (entries.length === 0) return null;
+  // Most recent first so the user sees the latest action at the top.
+  entries.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+  return (
+    <div className="border-t border-border bg-accent/30 px-3 py-2 text-xs">
+      {entries.map((a) => {
+        const elapsed = a.started_at
+          ? Math.max(0, Math.floor(Date.now() / 1000 - a.started_at))
+          : null;
+        return (
+          <div key={a.action_id} className="flex items-center gap-2">
+            <div
+              className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent"
+              aria-hidden
+            />
+            <span className="font-mono text-foreground">
+              {_shortActionName(a.action_key)}
+            </span>
+            <span className="text-muted-foreground">
+              running{elapsed !== null ? ` for ${elapsed}s` : ""}
+              {a.agent_id ? ` · ${a.agent_id.slice(0, 12)}` : ""}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -1339,3 +1339,363 @@ class InterruptionProtocol(BlackboardProtocol):
     def session_interrupt_pattern() -> str:
         """Pattern matching session-level interruption events."""
         return "session_interrupt:*"
+
+
+class VCMEventProtocol(BlackboardProtocol):
+    """Protocol for Virtual Context Manager lifecycle events.
+
+    Emitted by ``VCMCapability`` when it drives the VCM on behalf of the
+    agent (mapping or unmapping a scope, requesting page loads, and — in
+    Phase 3 — re-indexing after a filesystem change). Other agents that
+    want to react to VCM activity subscribe to the relevant pattern.
+
+    Operates at the VCM capability's own partition (typically session
+    scope). Because ``scope_id`` values used by the VCM contain colons,
+    all key parsing uses ``str.split(":", 1)`` / ``split(":", 2)`` to
+    preserve the remainder verbatim.
+
+    Key types:
+
+    - ``mapped:{scope_id}``         — a scope was just mapped
+    - ``unmapped:{scope_id}``       — a scope was just unmapped
+    - ``reindexed:{scope_id}``      — page graph rebuilt (watch-driven)
+    - ``page_fault:{page_id}``      — an agent requested a page load
+    - ``watch_fired:{watch_id}``    — a filesystem watcher triggered
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.SESSION
+
+    _MAPPED_PREFIX: ClassVar[str] = "mapped:"
+    _UNMAPPED_PREFIX: ClassVar[str] = "unmapped:"
+    _REINDEXED_PREFIX: ClassVar[str] = "reindexed:"
+    _PAGE_FAULT_PREFIX: ClassVar[str] = "page_fault:"
+    _WATCH_FIRED_PREFIX: ClassVar[str] = "watch_fired:"
+
+    # --- Key construction ---
+
+    @staticmethod
+    def mapped_key(scope_id: str) -> str:
+        """Key for a 'scope mapped' event."""
+        return f"{VCMEventProtocol._MAPPED_PREFIX}{scope_id}"
+
+    @staticmethod
+    def unmapped_key(scope_id: str) -> str:
+        """Key for a 'scope unmapped' event."""
+        return f"{VCMEventProtocol._UNMAPPED_PREFIX}{scope_id}"
+
+    @staticmethod
+    def reindexed_key(scope_id: str) -> str:
+        """Key for a 'scope reindexed' event."""
+        return f"{VCMEventProtocol._REINDEXED_PREFIX}{scope_id}"
+
+    @staticmethod
+    def page_fault_key(page_id: str) -> str:
+        """Key for a 'page fault issued' event."""
+        return f"{VCMEventProtocol._PAGE_FAULT_PREFIX}{page_id}"
+
+    @staticmethod
+    def watch_fired_key(watch_id: str) -> str:
+        """Key for a 'filesystem watch fired' event."""
+        return f"{VCMEventProtocol._WATCH_FIRED_PREFIX}{watch_id}"
+
+    # --- Pattern construction ---
+
+    @staticmethod
+    def mapped_pattern() -> str:
+        return f"{VCMEventProtocol._MAPPED_PREFIX}*"
+
+    @staticmethod
+    def unmapped_pattern() -> str:
+        return f"{VCMEventProtocol._UNMAPPED_PREFIX}*"
+
+    @staticmethod
+    def reindexed_pattern() -> str:
+        return f"{VCMEventProtocol._REINDEXED_PREFIX}*"
+
+    @staticmethod
+    def page_fault_pattern() -> str:
+        return f"{VCMEventProtocol._PAGE_FAULT_PREFIX}*"
+
+    @staticmethod
+    def watch_fired_pattern() -> str:
+        return f"{VCMEventProtocol._WATCH_FIRED_PREFIX}*"
+
+    # --- Key parsing ---
+
+    @staticmethod
+    def parse_mapped_key(key: str) -> str:
+        """Extract scope_id from a ``mapped:*`` key."""
+        if not key.startswith(VCMEventProtocol._MAPPED_PREFIX):
+            raise ValueError(f"Not a VCMEventProtocol mapped key: {key!r}")
+        return key[len(VCMEventProtocol._MAPPED_PREFIX):]
+
+    @staticmethod
+    def parse_unmapped_key(key: str) -> str:
+        if not key.startswith(VCMEventProtocol._UNMAPPED_PREFIX):
+            raise ValueError(f"Not a VCMEventProtocol unmapped key: {key!r}")
+        return key[len(VCMEventProtocol._UNMAPPED_PREFIX):]
+
+    @staticmethod
+    def parse_reindexed_key(key: str) -> str:
+        if not key.startswith(VCMEventProtocol._REINDEXED_PREFIX):
+            raise ValueError(f"Not a VCMEventProtocol reindexed key: {key!r}")
+        return key[len(VCMEventProtocol._REINDEXED_PREFIX):]
+
+    @staticmethod
+    def parse_page_fault_key(key: str) -> str:
+        if not key.startswith(VCMEventProtocol._PAGE_FAULT_PREFIX):
+            raise ValueError(f"Not a VCMEventProtocol page_fault key: {key!r}")
+        return key[len(VCMEventProtocol._PAGE_FAULT_PREFIX):]
+
+    @staticmethod
+    def parse_watch_fired_key(key: str) -> str:
+        if not key.startswith(VCMEventProtocol._WATCH_FIRED_PREFIX):
+            raise ValueError(f"Not a VCMEventProtocol watch_fired key: {key!r}")
+        return key[len(VCMEventProtocol._WATCH_FIRED_PREFIX):]
+
+
+class GitHubEventProtocol(BlackboardProtocol):
+    """Protocol for GitHub webhook events surfaced on the blackboard.
+
+    A future ``POST /api/v1/github/webhook`` endpoint normalises
+    incoming signed webhooks into writes at these keys; the
+    ``GitHubCapability`` also writes ``audit:github:*`` records for
+    mutations it performs. Other capabilities subscribe to the
+    relevant pattern to react.
+
+    Key formats — each tail contains the repo plus a numeric id (or
+    project item id). Parsing splits on ``:`` with a fixed arity so
+    callers avoid raw ``str.split`` logic.
+
+    - ``github:issue_opened:{owner}/{repo}:{number}``
+    - ``github:issue_commented:{owner}/{repo}:{number}``
+    - ``github:issue_closed:{owner}/{repo}:{number}``
+    - ``github:pr_opened:{owner}/{repo}:{number}``
+    - ``github:pr_review_requested:{owner}/{repo}:{number}``
+    - ``github:pr_merged:{owner}/{repo}:{number}``
+    - ``github:project_item_changed:{project_id}:{item_id}``
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    _ISSUE_OPENED = "github:issue_opened:"
+    _ISSUE_COMMENTED = "github:issue_commented:"
+    _ISSUE_CLOSED = "github:issue_closed:"
+    _PR_OPENED = "github:pr_opened:"
+    _PR_REVIEW_REQUESTED = "github:pr_review_requested:"
+    _PR_MERGED = "github:pr_merged:"
+    _PROJECT_ITEM = "github:project_item_changed:"
+
+    # --- Key construction ---
+
+    @staticmethod
+    def _issue_key(prefix: str, repo: str, number: int) -> str:
+        return f"{prefix}{repo}:{number}"
+
+    @staticmethod
+    def issue_opened_key(repo: str, number: int) -> str:
+        return GitHubEventProtocol._issue_key(
+            GitHubEventProtocol._ISSUE_OPENED, repo, number,
+        )
+
+    @staticmethod
+    def issue_commented_key(repo: str, number: int) -> str:
+        return GitHubEventProtocol._issue_key(
+            GitHubEventProtocol._ISSUE_COMMENTED, repo, number,
+        )
+
+    @staticmethod
+    def issue_closed_key(repo: str, number: int) -> str:
+        return GitHubEventProtocol._issue_key(
+            GitHubEventProtocol._ISSUE_CLOSED, repo, number,
+        )
+
+    @staticmethod
+    def pr_opened_key(repo: str, number: int) -> str:
+        return GitHubEventProtocol._issue_key(
+            GitHubEventProtocol._PR_OPENED, repo, number,
+        )
+
+    @staticmethod
+    def pr_review_requested_key(repo: str, number: int) -> str:
+        return GitHubEventProtocol._issue_key(
+            GitHubEventProtocol._PR_REVIEW_REQUESTED, repo, number,
+        )
+
+    @staticmethod
+    def pr_merged_key(repo: str, number: int) -> str:
+        return GitHubEventProtocol._issue_key(
+            GitHubEventProtocol._PR_MERGED, repo, number,
+        )
+
+    @staticmethod
+    def project_item_key(project_id: str, item_id: str) -> str:
+        return (
+            f"{GitHubEventProtocol._PROJECT_ITEM}"
+            f"{project_id}:{item_id}"
+        )
+
+    # --- Pattern construction ---
+
+    @staticmethod
+    def issue_opened_pattern() -> str:
+        return f"{GitHubEventProtocol._ISSUE_OPENED}*"
+
+    @staticmethod
+    def issue_commented_pattern() -> str:
+        return f"{GitHubEventProtocol._ISSUE_COMMENTED}*"
+
+    @staticmethod
+    def pr_opened_pattern() -> str:
+        return f"{GitHubEventProtocol._PR_OPENED}*"
+
+    @staticmethod
+    def project_item_pattern() -> str:
+        return f"{GitHubEventProtocol._PROJECT_ITEM}*"
+
+    # --- Key parsing ---
+
+    @staticmethod
+    def _parse_issue(prefix: str, key: str) -> tuple[str, int]:
+        if not key.startswith(prefix):
+            raise ValueError(f"Not a GitHubEventProtocol key: {key!r}")
+        tail = key[len(prefix):]
+        # Repo names contain ``/`` (owner/repo); the number is the
+        # final colon-separated segment. ``rsplit`` once isolates it
+        # regardless of the repo's own colon count (never in practice).
+        parts = tail.rsplit(":", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Malformed GitHubEventProtocol key: {key!r}")
+        try:
+            number = int(parts[1])
+        except ValueError as e:
+            raise ValueError(f"Malformed issue number in {key!r}") from e
+        return parts[0], number
+
+    @staticmethod
+    def parse_issue_opened_key(key: str) -> tuple[str, int]:
+        return GitHubEventProtocol._parse_issue(
+            GitHubEventProtocol._ISSUE_OPENED, key,
+        )
+
+    @staticmethod
+    def parse_issue_commented_key(key: str) -> tuple[str, int]:
+        return GitHubEventProtocol._parse_issue(
+            GitHubEventProtocol._ISSUE_COMMENTED, key,
+        )
+
+    @staticmethod
+    def parse_pr_opened_key(key: str) -> tuple[str, int]:
+        return GitHubEventProtocol._parse_issue(
+            GitHubEventProtocol._PR_OPENED, key,
+        )
+
+    @staticmethod
+    def parse_project_item_key(key: str) -> tuple[str, str]:
+        if not key.startswith(GitHubEventProtocol._PROJECT_ITEM):
+            raise ValueError(f"Not a GitHubEventProtocol key: {key!r}")
+        tail = key[len(GitHubEventProtocol._PROJECT_ITEM):]
+        parts = tail.split(":", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Malformed GitHubEventProtocol key: {key!r}")
+        return parts[0], parts[1]
+
+
+class ActionPolicyLifecycleProtocol(BlackboardProtocol):
+    """Generic lifecycle events emitted by every ``BaseActionPolicy``.
+
+    The policy publishes:
+
+    - ``policy:action_started:{action_id}`` — the policy is about to
+      dispatch an action through its dispatcher. The payload carries
+      the action key and any caller-supplied parameters.
+    - ``policy:action_completed:{action_id}`` — the action returned.
+      Payload carries success/error, wall time, and the action key.
+    - ``policy:codegen_retry:{ts}`` — code generation produced
+      invalid output. The policy is about to re-prompt the LLM with
+      accumulated error feedback.
+    - ``policy:codegen_failed:{ts}`` — code generation exhausted its
+      retry budget. The user-visible meaning is "I gave up on the
+      current request"; the agent is ready for the next prompt.
+
+    These events are the **only** way the policy talks to the outside
+    world about its progress. The policy does NOT know what a chat is,
+    a UI is, or a tracing system is. Subscribers — capabilities,
+    dashboards, log adapters — decide what to do with the events.
+
+    Operates on the agent's **primary** blackboard scope so any
+    ``@event_handler`` on a capability of that agent receives them
+    via the standard event broadcast in ``EventDrivenActionPolicy``.
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    _ACTION_STARTED = "policy:action_started:"
+    _ACTION_COMPLETED = "policy:action_completed:"
+    _CODEGEN_RETRY = "policy:codegen_retry:"
+    _CODEGEN_FAILED = "policy:codegen_failed:"
+
+    # --- Key construction ---
+
+    @staticmethod
+    def action_started_key(action_id: str) -> str:
+        return f"{ActionPolicyLifecycleProtocol._ACTION_STARTED}{action_id}"
+
+    @staticmethod
+    def action_completed_key(action_id: str) -> str:
+        return f"{ActionPolicyLifecycleProtocol._ACTION_COMPLETED}{action_id}"
+
+    @staticmethod
+    def codegen_retry_key(timestamp_ms: int) -> str:
+        return f"{ActionPolicyLifecycleProtocol._CODEGEN_RETRY}{timestamp_ms}"
+
+    @staticmethod
+    def codegen_failed_key(timestamp_ms: int) -> str:
+        return f"{ActionPolicyLifecycleProtocol._CODEGEN_FAILED}{timestamp_ms}"
+
+    # --- Pattern construction ---
+
+    @staticmethod
+    def action_started_pattern() -> str:
+        return f"{ActionPolicyLifecycleProtocol._ACTION_STARTED}*"
+
+    @staticmethod
+    def action_completed_pattern() -> str:
+        return f"{ActionPolicyLifecycleProtocol._ACTION_COMPLETED}*"
+
+    @staticmethod
+    def codegen_retry_pattern() -> str:
+        return f"{ActionPolicyLifecycleProtocol._CODEGEN_RETRY}*"
+
+    @staticmethod
+    def codegen_failed_pattern() -> str:
+        return f"{ActionPolicyLifecycleProtocol._CODEGEN_FAILED}*"
+
+    @staticmethod
+    def all_pattern() -> str:
+        """Match every lifecycle event."""
+        return "policy:*"
+
+    # --- Key parsing ---
+
+    @staticmethod
+    def parse_action_started_key(key: str) -> str:
+        prefix = ActionPolicyLifecycleProtocol._ACTION_STARTED
+        if not key.startswith(prefix):
+            raise ValueError(f"Not an action_started key: {key!r}")
+        return key[len(prefix):]
+
+    @staticmethod
+    def parse_action_completed_key(key: str) -> str:
+        prefix = ActionPolicyLifecycleProtocol._ACTION_COMPLETED
+        if not key.startswith(prefix):
+            raise ValueError(f"Not an action_completed key: {key!r}")
+        return key[len(prefix):]
+
+    @staticmethod
+    def is_codegen_retry_key(key: str) -> bool:
+        return key.startswith(ActionPolicyLifecycleProtocol._CODEGEN_RETRY)
+
+    @staticmethod
+    def is_codegen_failed_key(key: str) -> bool:
+        return key.startswith(ActionPolicyLifecycleProtocol._CODEGEN_FAILED)

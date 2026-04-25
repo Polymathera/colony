@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
@@ -829,8 +830,50 @@ class TemporalOrderGuardrail(RuntimeGuardrail):
 # ============================================================================
 
 
+# Each line-anchored ``` fence is one match. Pairing is done in
+# ``_iter_fenced_blocks`` so opener/closer pairs are always
+# consecutive in document order — a regex that captures opener-to-
+# closer in one shot mispairs when blocks of different languages are
+# interleaved (e.g., the LLM emits ```python ... ``` ... ```json ...
+# ``` ... ```python ... ```; the closer of the json block was getting
+# mistaken for the opener of the second python block).
+_FENCE_LINE_RE = re.compile(r"^```([^\n]*)$", re.MULTILINE)
+
+
+def _iter_fenced_blocks(text: str):
+    """Yield ``(lang_token | None, body)`` tuples in document order.
+
+    Pairs consecutive ``` lines. A trailing unpaired opener is
+    silently dropped (the LLM occasionally emits one when it gets
+    truncated mid-block).
+    """
+    fences = list(_FENCE_LINE_RE.finditer(text))
+    for i in range(0, len(fences) - 1, 2):
+        opener, closer = fences[i], fences[i + 1]
+        lang = opener.group(1).strip().lower() or None
+        body = text[opener.end():closer.start()].strip("\n")
+        yield lang, body
+
+
 def _extract_code(response: Any) -> str:
-    """Extract Python code from an LLM response."""
+    """Extract Python code from an LLM response.
+
+    Handles three shapes the LLM tends to produce:
+
+    1. **Bare code, no fences.** Used as-is.
+    2. **One ```` ```python ```` fence wrapping everything.** Fence
+       stripped, body returned.
+    3. **Multiple fenced blocks interleaved with prose / fake "Result"
+       output.** Every ``python`` (or untagged) block is extracted
+       and concatenated with blank-line separators; prose between
+       blocks is dropped.
+
+    Shape (3) is the load-bearing case: instruction-tuned models
+    sometimes ignore the "no markdown" rule and emit a tutorial-style
+    transcript with mocked results. Concatenating the real code
+    blocks turns that mistake into a working iteration instead of a
+    silent validation failure.
+    """
     if hasattr(response, 'generated_text'):
         text = response.generated_text
     elif hasattr(response, 'text'):
@@ -843,14 +886,45 @@ def _extract_code(response: Any) -> str:
         text = str(response)
 
     text = text.strip()
-    if text.startswith("```python"):
-        text = text[len("```python"):].strip()
-    elif text.startswith("```"):
-        text = text[3:].strip()
-    if text.endswith("```"):
-        text = text[:-3].strip()
+    if not text:
+        return ""
 
-    return text
+    blocks = list(_iter_fenced_blocks(text))
+    if blocks:
+        python_blocks = [
+            body for lang, body in blocks
+            if lang in ("python", "py")
+        ]
+        if not python_blocks:
+            # No python-tagged blocks. Accept untagged fences (the
+            # LLM forgot the language hint) but only when no fenced
+            # block claims a non-python language — mixing languages
+            # would be ambiguous, so we'd rather extract nothing than
+            # pull in a JSON blob the LLM left for documentation.
+            tagged_non_python = any(
+                lang not in (None, "python", "py")
+                for lang, _ in blocks
+            )
+            if not tagged_non_python:
+                python_blocks = [body for _, body in blocks]
+        # Once we found fenced blocks at all, the LLM's intent was
+        # clearly "the code is in the fences". Returning "" lets the
+        # policy retry instead of falling back to the legacy
+        # whole-text-as-code path, which would treat the surrounding
+        # markdown as Python and fail validation.
+        return "\n\n".join(b.strip() for b in python_blocks).strip()
+
+    # No paired fences — strip any single leading / trailing fence
+    # marker (the legacy single-block case) and return the rest.
+    if text.startswith("```python"):
+        text = text[len("```python"):].lstrip()
+    elif text.startswith("```py"):
+        text = text[len("```py"):].lstrip()
+    elif text.startswith("```"):
+        text = text[3:].lstrip()
+    if text.endswith("```"):
+        text = text[:-3].rstrip()
+    return text.strip()
 
 
 # ============================================================================

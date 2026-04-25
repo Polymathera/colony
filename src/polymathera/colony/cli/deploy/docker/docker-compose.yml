@@ -16,6 +16,12 @@ services:
       - "${COLONY_METRICS_PORT:-9090}:9090"
     volumes:
       - colony-shared:/mnt/shared
+      # Dev-only: lets SandboxedShellCapability spawn sibling containers
+      # on the host Docker daemon. Production should talk to a remote
+      # daemon over TLS via DOCKER_HOST — see the capability design doc.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Image registry editable by the operator without rebuilding.
+      - ./sandbox-images.yaml:/etc/colony/sandbox-images.yaml:ro
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -49,6 +55,16 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      # WebSearchCapability / ColonyDocsCapability — Tavily backend.
+      # The capability stays disabled until this is set; agents see a
+      # clean error dict from search_web rather than a crash.
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+      # GitHubCapability — App credentials. Without all three the
+      # capability stays disabled (actions return error dicts). See
+      # docs/guides/capability-setup.md for App registration steps.
+      - GITHUB_APP_ID=${GITHUB_APP_ID:-}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID:-}
+      - GITHUB_PRIVATE_KEY_PEM=${GITHUB_PRIVATE_KEY_PEM:-}
       # Slack chat service (optional)
       - SLACK_ENABLED=false
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
@@ -80,6 +96,11 @@ services:
       --block
     volumes:
       - colony-shared:/mnt/shared
+      # Workers also need Docker access so SandboxedShellCapability can
+      # run from agents scheduled on them. Same dev/prod tradeoff as the
+      # ray-head mount.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./sandbox-images.yaml:/etc/colony/sandbox-images.yaml:ro
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -113,6 +134,13 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      # WebSearchCapability / ColonyDocsCapability — Tavily backend.
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+      # GitHubCapability — App credentials. See
+      # docs/guides/capability-setup.md.
+      - GITHUB_APP_ID=${GITHUB_APP_ID:-}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID:-}
+      - GITHUB_PRIVATE_KEY_PEM=${GITHUB_PRIVATE_KEY_PEM:-}
       # Slack chat service (optional)
       - SLACK_ENABLED=false
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}

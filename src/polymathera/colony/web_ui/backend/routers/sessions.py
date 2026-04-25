@@ -9,6 +9,7 @@ calls automatically propagate this context across Ray boundaries.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -21,6 +22,19 @@ from ..services.colony_connection import ColonyConnection
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _bundled_samples_plugins_root() -> str:
+    """Filesystem path to the sample plugins shipped with the package.
+
+    Resolved against the installed ``polymathera.colony.samples`` module
+    so it works whether the package is installed editable, from a wheel,
+    or vendored. Used by ``UserPluginCapability`` to expose the
+    ``colony-samples`` plugin to every session agent without requiring
+    the operator to copy files into ``~/.colony/plugins``.
+    """
+    from polymathera.colony import samples
+    return str(Path(samples.__file__).parent / "plugins")
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +266,21 @@ async def create_session(
             from ..chat import SessionAgent, SessionOrchestratorCapability
             from polymathera.colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
             from polymathera.colony.agents.patterns.capabilities.consciousness import ConsciousnessCapability
+            from polymathera.colony.agents.patterns.capabilities.vcm import VCMCapability
+            from polymathera.colony.agents.patterns.capabilities.web_search import (
+                ColonyDocsCapability,
+                WebSearchCapability,
+            )
+            from polymathera.colony.agents.patterns.capabilities.sandboxed_shell import (
+                SandboxedShellCapability,
+            )
+            from polymathera.colony.agents.patterns.capabilities.user_plugin import (
+                UserPluginCapability,
+            )
+            from polymathera.colony.agents.patterns.capabilities.github import (
+                GitHubCapability,
+            )
+            from polymathera.colony.agents.scopes import BlackboardScope
             from polymathera.colony.agents.patterns.planning.streams import (
                 ConsciousnessStream,
                 ConversationFormatter,
@@ -297,7 +326,19 @@ async def create_session(
                         "coordinator agents (one per analysis type), and you can respond "
                         "directly to user questions. When the user requests an analysis, "
                         "use create_agent to spawn the appropriate coordinator. When the "
-                        "user asks a question or needs information, use respond_to_user."
+                        "user asks a question or needs information, use respond_to_user.\n\n"
+                        "INTERACTION PROTOCOL — long-running actions:\n"
+                        "  Some actions take seconds or minutes (mmap_repo, create_agent, "
+                        "  search_and_fetch, run_skill, claim_unassigned_issue, …). For "
+                        "  any action you suspect will take more than ~2 seconds, FIRST "
+                        "  call respond_to_user with a one-line acknowledgement that "
+                        "  names the action you are about to run, THEN call the action. "
+                        "  This keeps the user informed while the work happens. After "
+                        "  the action returns, respond_to_user again with the outcome.\n\n"
+                        "OUTPUT FORMAT — code generation:\n"
+                        "  Emit ONLY raw Python code. No markdown fences. No mocked "
+                        "  result blocks. No prose between statements. Each iteration "
+                        "  is a single focused snippet that the REPL executes verbatim."
                     ),
                 ),
                 parameters={
@@ -325,6 +366,20 @@ async def create_session(
                     SessionOrchestratorCapability.bind(),
                     AgentPoolCapability.bind(),
                     ConsciousnessCapability.bind(),
+                    VCMCapability.bind(scope=BlackboardScope.SESSION),
+                    WebSearchCapability.bind(scope=BlackboardScope.SESSION),
+                    ColonyDocsCapability.bind(scope=BlackboardScope.SESSION),
+                    SandboxedShellCapability.bind(scope=BlackboardScope.SESSION),
+                    UserPluginCapability.bind(
+                        scope=BlackboardScope.SESSION,
+                        extra_plugin_roots=[_bundled_samples_plugins_root()],
+                    ),
+                    # GitHubCapability starts in a "disabled" state if
+                    # no credentials are configured; the action surface
+                    # surfaces a clean error instead of crashing the
+                    # agent. Operators enable it via env vars or the
+                    # Settings UI (planned).
+                    GitHubCapability.bind(scope=BlackboardScope.SESSION),
                 ],
                 action_policy_blueprints={
                     "consciousness_streams": [
