@@ -449,7 +449,10 @@ def test_colony_docs_resolves_slug_to_full_url():
 # ---------------------------------------------------------------------------
 
 def test_bind_round_trips_through_cloudpickle():
-    import cloudpickle
+    # Ray's vendored cloudpickle — see comment in
+    # test_github_capability for why standalone PyPI cloudpickle is
+    # not the right import here.
+    from ray import cloudpickle
     bp1 = WebSearchCapability.bind(
         scope=BlackboardScope.SESSION,
         allow_domains=["example.com"],

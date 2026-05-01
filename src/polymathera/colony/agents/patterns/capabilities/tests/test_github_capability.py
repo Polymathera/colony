@@ -681,7 +681,12 @@ def test_action_executors_are_registered():
 
 
 def test_bind_round_trips_through_cloudpickle():
-    import cloudpickle
+    # Use Ray's vendored cloudpickle — that's what Ray's IPC actually
+    # serialises through, so it is the right library to verify
+    # bind-record compatibility against. Standalone PyPI ``cloudpickle``
+    # is not a Ray dep (Ray vendors its own copy) and is therefore not
+    # guaranteed to be installed.
+    from ray import cloudpickle
     bp = GitHubCapability.bind(scope=BlackboardScope.SESSION)
     bp2 = cloudpickle.loads(cloudpickle.dumps(bp))
     assert bp2.cls is GitHubCapability

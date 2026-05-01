@@ -203,7 +203,10 @@ def _run(coro):
 # ---------------------------------------------------------------------------
 
 def test_bind_round_trips_through_cloudpickle():
-    import cloudpickle
+    # Ray's vendored cloudpickle — see comment in
+    # test_github_capability for why standalone PyPI cloudpickle is
+    # not the right import here.
+    from ray import cloudpickle
     bp = VCMCapability.bind(scope=BlackboardScope.SESSION)
     raw = cloudpickle.dumps(bp)
     bp2 = cloudpickle.loads(raw)

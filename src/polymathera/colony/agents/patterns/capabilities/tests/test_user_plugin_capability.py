@@ -573,7 +573,10 @@ def test_shell_quote_protects_special_characters():
 # ---------------------------------------------------------------------------
 
 def test_bind_round_trips_through_cloudpickle():
-    import cloudpickle
+    # Ray's vendored cloudpickle — see comment in
+    # test_github_capability for why standalone PyPI cloudpickle is
+    # not the right import here.
+    from ray import cloudpickle
     bp = UserPluginCapability.bind(scope=BlackboardScope.SESSION)
     bp2 = cloudpickle.loads(cloudpickle.dumps(bp))
     assert bp2.cls is UserPluginCapability

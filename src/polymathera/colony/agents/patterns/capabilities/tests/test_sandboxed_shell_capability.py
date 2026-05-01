@@ -661,7 +661,10 @@ def test_write_file_streams_content_through_stdin(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_bind_round_trips_through_cloudpickle():
-    import cloudpickle
+    # Ray's vendored cloudpickle — see comment in
+    # test_github_capability for why standalone PyPI cloudpickle is
+    # not the right import here.
+    from ray import cloudpickle
     bp = SandboxedShellCapability.bind(
         scope=BlackboardScope.SESSION,
         max_concurrent_containers=2,
