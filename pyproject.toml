@@ -268,7 +268,23 @@ testpaths = ["src"]
 asyncio_mode = "auto"
 timeout = 120
 pythonpath = ["src"]
-addopts = "--import-mode=importlib"
+# ``vcm/test_vllm_concurrency.py`` is a runnable benchmark script —
+# its ``__main__`` block + module docstring say so — but the
+# ``test_*`` function names trigger accidental pytest collection.
+# Importing it requires libcuda, which is absent on CPU-only CI
+# runners. Skip collection; users still invoke the script directly
+# via ``python -m polymathera.colony.vcm.test_vllm_concurrency``.
+addopts = "--import-mode=importlib --ignore=src/polymathera/colony/vcm/test_vllm_concurrency.py"
+# Scaffold subtrees (e.g. ``scaffolds/python_lib/``) carry .py files
+# with ``${...}`` template placeholders that are only valid Python
+# after the scaffold renderer materialises them. Pytest's collector
+# tries to AST-parse anything matching ``test_*.py`` — explicitly
+# skip those subtrees here. The ruff config has the parallel
+# ``extend-exclude`` for the same reason.
+norecursedirs = [
+    "*/design_monorepo/scaffolds/*",
+    "design_monorepo/scaffolds/*",
+]
 
 [build-system]
 requires = ["poetry-core"]
