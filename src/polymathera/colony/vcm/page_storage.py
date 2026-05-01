@@ -1381,6 +1381,53 @@ class PageStorage:
         )
         logger.info(f"Persisted page graph for {tenant_id}:{colony_id}")
 
+    async def add_page_graph_node(
+        self,
+        page_id: str,
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically add (or update attributes of) one node in the
+        shared page graph.
+
+        Always reads the durable graph fresh, mutates locally, and
+        persists. Page sources call this instead of holding their own
+        ``nx.DiGraph`` field — the field would silently go stale when
+        another replica or another source mutates the graph in
+        storage. Centralising the load → mutate → store pattern here
+        also gives a single point to add the locking / CAS work the
+        ``update_page_graph`` FIXME calls out.
+
+        ``attributes`` is merged into the node's existing attributes
+        (so the call is idempotent on re-emit). ``None`` is treated as
+        an empty dict.
+        """
+
+        graph = await self.load_page_graph(cached=False)
+        if graph.has_node(page_id):
+            existing = dict(graph.nodes[page_id])
+            existing.update(attributes or {})
+            graph.add_node(page_id, **existing)
+        else:
+            graph.add_node(page_id, **(attributes or {}))
+        await self.store_page_graph(graph_data=graph)
+
+    async def mark_page_graph_node_stale(
+        self,
+        page_id: str,
+    ) -> None:
+        """Set ``stale = True`` on a node in the shared page graph.
+
+        Same load → mutate → store pattern as ``add_page_graph_node``.
+        No-op if the node is not in the current graph (the page may
+        have been evicted by another replica between the trigger and
+        this call — that's not an error)."""
+
+        graph = await self.load_page_graph(cached=False)
+        if not graph.has_node(page_id):
+            return
+        graph.nodes[page_id]["stale"] = True
+        await self.store_page_graph(graph_data=graph)
+
     async def get_page_neighbors(
         self,
         page_id: str,

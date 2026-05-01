@@ -90,7 +90,11 @@ class FileGrouperContextPageSource(ContextPageSource):
         self.file_to_page: dict[str, str] = {}
         self.page_to_file: dict[str, str] = {}
         self.page_keys: dict[str, str] = {}  # page_id → summary (key)
-        self.page_graph: nx.DiGraph | None = None
+        # No ``self.page_graph`` field. The page graph is durable +
+        # shared in ``PageStorage``; reads call
+        # ``self.page_storage.load_page_graph(cached=False)``. A local
+        # field would silently go stale when another replica or
+        # source mutates the graph in storage.
         self._file_relationship_graph: nx.DiGraph | None = None  # From FileGrouperWithGraph
 
         # Local clone path resolved during initialize(); LocalFsWatcher
@@ -103,7 +107,7 @@ class FileGrouperContextPageSource(ContextPageSource):
     @override
     async def initialize(self) -> None:
         """Initialize storage and load/build page graph."""
-        if self.page_storage is not None and self.page_graph is not None:
+        if self.page_storage is not None and self.file_to_page:
             return  # Already initialized
 
         from polymathera.colony.system import get_vcm
@@ -119,11 +123,12 @@ class FileGrouperContextPageSource(ContextPageSource):
         )
         await self.page_storage.initialize()
 
-        # Try to load existing graph
+        # Probe whether the graph has already been built — we keep
+        # only the file/page mappings on the source. The graph itself
+        # stays in PageStorage and is fetched on demand.
         page_graph = await self.page_storage.retrieve_page_graph()
 
         if page_graph and page_graph.number_of_nodes() > 0:
-            self.page_graph = page_graph
             self.file_to_page = await self.page_storage.retrieve_page_graph_level_data(
                 data_key="file_to_page",
             ) or {}
@@ -135,7 +140,7 @@ class FileGrouperContextPageSource(ContextPageSource):
             ) or {}
             logger.info(
                 f"Loaded page graph for {self.scope_id}:{self.syscontext.to_dict()}: "
-                f"{len(self.page_graph.nodes)} nodes, {len(self.page_graph.edges)} edges"
+                f"{page_graph.number_of_nodes()} nodes, {page_graph.number_of_edges()} edges"
             )
             # Loading from PageStorage doesn't clone — but watch() needs
             # a working tree. Retrieve idempotently so a replica that
@@ -221,18 +226,21 @@ class FileGrouperContextPageSource(ContextPageSource):
                 f"({_time.time() - build_start:.1f}s elapsed)"
             )
 
-            # Page graph
+            # Page graph — local to this method. Persisted to
+            # PageStorage below and never stored on ``self``; future
+            # reads come from ``page_storage.load_page_graph(cached=
+            # False)`` so the source never serves a stale snapshot.
             if result.page_graph and result.page_graph.number_of_nodes() > 0:
-                self.page_graph = result.page_graph
+                page_graph: nx.DiGraph = result.page_graph
                 logger.info(
-                    f"Page graph: {self.page_graph.number_of_nodes()} pages, "
-                    f"{self.page_graph.number_of_edges()} cross-page relationships"
+                    f"Page graph: {page_graph.number_of_nodes()} pages, "
+                    f"{page_graph.number_of_edges()} cross-page relationships"
                 )
             else:
                 logger.warning("No page graph from sharding strategy, creating minimal graph")
-                self.page_graph = nx.DiGraph()
+                page_graph = nx.DiGraph()
                 for shard in result.shards:
-                    self.page_graph.add_node(shard.shard_id)
+                    page_graph.add_node(shard.shard_id)
 
             # File-to-page and page-to-file mappings (normalized paths)
             self.file_to_page = result.file_to_page or {}
@@ -283,7 +291,7 @@ class FileGrouperContextPageSource(ContextPageSource):
 
             # Persist graph and mappings
             await self.page_storage.store_page_graph(
-                graph_data=self.page_graph
+                graph_data=page_graph
             )
             await self.page_storage.store_page_graph_level_data(
                 data_key="file_to_page",
@@ -301,7 +309,7 @@ class FileGrouperContextPageSource(ContextPageSource):
             total_time = _time.time() - build_start
             logger.info(
                 f"Persisted page graph for {self.scope_id}:{self.syscontext.to_dict()}: "
-                f"{self.page_graph.number_of_nodes()} pages, "
+                f"{page_graph.number_of_nodes()} pages, "
                 f"{len(self.file_to_page)} files mapped "
                 f"(total build time: {total_time:.1f}s)"
             )
@@ -328,7 +336,6 @@ class FileGrouperContextPageSource(ContextPageSource):
             self._fs_watcher.stop()
             self._fs_watcher = None
         self.page_storage = None
-        self.page_graph = None
 
     @override
     async def watch(self) -> AsyncIterator[PageChangeEvent]:

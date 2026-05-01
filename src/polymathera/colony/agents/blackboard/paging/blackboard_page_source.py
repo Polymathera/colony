@@ -516,8 +516,12 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
         self._tokenizer: TokenizerProtocol | None = None
         self._record_to_page: dict[str, str] = {}
         self._pending_groups: dict[str, list[PendingRecord]] = {}
-        # Page graph reference — set by BlackboardContextPageSource after init
-        self._page_graph: nx.DiGraph | None = None
+        # The page graph is durable, shared, and lives in
+        # ``PageStorage``. Holding a local ``nx.DiGraph`` here would
+        # go stale the moment another replica or source mutates it.
+        # All graph reads/writes go through ``self._page_storage``
+        # methods (``load_page_graph(cached=False)``,
+        # ``add_page_graph_node``, ``mark_page_graph_node_stale``).
 
     async def initialize(
         self,
@@ -618,9 +622,14 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
         for record in group:
             self._record_to_page[record.key] = page_id
 
-        # 6. Update page graph if available
-        if self._page_graph is not None:
-            self._page_graph.add_node(page_id, **page.metadata)
+        # 6. Update the durable shared page graph through
+        # PageStorage. ``add_page_graph_node`` does load → add → store
+        # against the authoritative copy in storage; we never hold a
+        # ``DiGraph`` field on the policy or the source because it
+        # would go stale the moment another replica mutates.
+        await self._page_storage.add_page_graph_node(
+            page_id, attributes=dict(page.metadata),
+        )
 
         logger.info(
             f"GroupAndFlushIngestionPolicy[{self.source.scope_id}]: created page "
@@ -630,9 +639,13 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
         return page_id
 
     async def _mark_page_stale(self, page_id: str) -> None:
-        """Mark a page as stale (used by update/eviction policies)."""
-        if self._page_graph is not None and page_id in self._page_graph:
-            self._page_graph.nodes[page_id]["stale"] = True
+        """Mark a page as stale (used by update/eviction policies).
+
+        Delegates to ``PageStorage.mark_page_graph_node_stale`` so
+        the mutation lands on the durable shared graph rather than
+        on a local ``nx.DiGraph`` reference that would go stale."""
+
+        await self._page_storage.mark_page_graph_node_stale(page_id)
         logger.debug(
             f"GroupAndFlushIngestionPolicy[{self.source.scope_id}]: "
             f"marked page {page_id} as stale"
@@ -722,8 +735,13 @@ class BlackboardContextPageSource(ContextPageSource):
             backend_type=None, # Use the globally configured backend.
         )
 
-        # Internal state
-        self._page_graph: nx.DiGraph = nx.DiGraph()  # TODO: This should be loaded from PageStorage dynamically
+        # Internal state. The page graph itself is durable + shared
+        # across replicas in PageStorage; we never hold a local
+        # ``nx.DiGraph`` field here. Reads call
+        # ``self._page_storage.load_page_graph(cached=False)``;
+        # writes go through ``add_page_graph_node`` /
+        # ``mark_page_graph_node_stale``. Holding a local copy is
+        # what created the staleness bug PR-N fixes.
         self._event_queue: asyncio.Queue[BlackboardEvent] | None = None
         self._event_loop_task: asyncio.Task | None = None
         # Track which records are in which pages (for update/delete handling)
@@ -801,12 +819,14 @@ class BlackboardContextPageSource(ContextPageSource):
             record_to_page=self._record_to_page,
         )
 
-        # Share the page graph reference with the ingestion policy
-        # (so _flush_group can update nodes directly)
-        if isinstance(self.ingestion_policy, GroupAndFlushIngestionPolicy):
-            self.ingestion_policy._page_graph = self._page_graph
+        # No need to share a graph reference with the policy — the
+        # policy reaches the durable graph through ``page_storage``
+        # (see ``GroupAndFlushIngestionPolicy._flush_group``).
 
-        # Backfill: query all existing entries in the scope
+        # Backfill: query all existing entries in the scope. The
+        # policy's ``ingest_record`` / ``flush_all`` calls update the
+        # page graph through ``page_storage`` directly; we no longer
+        # mirror those mutations on a local ``DiGraph``.
         existing = await self.blackboard.query(namespace="*")
         for entry in existing:
             record = PendingRecord(
@@ -816,22 +836,20 @@ class BlackboardContextPageSource(ContextPageSource):
                 timestamp=entry.metadata.get("created_at", time.time())
                 if entry.metadata else time.time(),
             )
-            page_ids = await self.ingestion_policy.ingest_record(record)
-            for pid in page_ids:
-                self._page_graph.add_node(pid)
+            await self.ingestion_policy.ingest_record(record)
 
-        # Flush any remaining buffered records from backfill
-        flush_ids = await self.ingestion_policy.flush_all()
-        for pid in flush_ids:
-            self._page_graph.add_node(pid)
+        # Flush any remaining buffered records from backfill.
+        await self.ingestion_policy.flush_all()
 
-        # TODO: This does not update the edges in the page graph or store the updated graph in PageStorage
-        # Consider adding logic to update edges based on relationships between pages
-        # and persist the updated graph to PageStorage.
+        # TODO: This does not update the edges in the page graph.
+        # Consider adding logic to update edges based on relationships
+        # between pages — that would route through
+        # ``page_storage.update_page_graph``.
 
+        backfilled_graph = await self._page_storage.load_page_graph(cached=False)
         logger.info(
             f"BlackboardContextPageSource[{self.scope_id}]: backfilled "
-            f"{len(existing)} entries, {len(self._page_graph.nodes)} pages"
+            f"{len(existing)} entries, {len(backfilled_graph.nodes)} pages"
         )
 
         # Backfill is over. From here on, the event loop's graph
@@ -893,12 +911,12 @@ class BlackboardContextPageSource(ContextPageSource):
 
         Flushes all pending records and stops the event loop.
         """
-        # Flush all pending records via the ingestion policy
-        page_ids = await self.ingestion_policy.flush_all()
-        for pid in page_ids:
-            self._page_graph.add_node(pid)
+        # Flush all pending records via the ingestion policy. The
+        # policy persists newly-flushed pages to ``page_storage``
+        # itself; no local graph mirroring on shutdown.
+        await self.ingestion_policy.flush_all()
 
-        # TODO: This does not update the edges in the page graph or store the updated graph in PageStorage
+        # TODO: This does not update the edges in the page graph.
 
         # Stop event loop
         if self._event_loop_task:
@@ -1031,7 +1049,14 @@ class BlackboardContextPageSource(ContextPageSource):
         while True:
             try:
                 event = await self._event_queue.get()
-                pages_before = set(self._page_graph.nodes)
+                # Snapshot the durable graph BEFORE the policy mutates
+                # it so ``_enqueue_graph_delta`` can diff. Reading
+                # uncached forces a fresh fetch from PageStorage —
+                # any mutation by another replica between events is
+                # already visible in the snapshot.
+                pages_before = set(
+                    (await self._page_storage.load_page_graph(cached=False)).nodes
+                )
                 page_id_before_for_record = self._record_to_page.get(event.key)
 
                 if event.event_type == "write":
@@ -1042,18 +1067,16 @@ class BlackboardContextPageSource(ContextPageSource):
                             record_to_page=self._record_to_page,
                         )
                     else:
-                        # NEW WRITE
+                        # NEW WRITE — the policy persists newly-flushed
+                        # pages to PageStorage itself; we do not mirror
+                        # them on a local graph field.
                         record = PendingRecord(
                             key=event.key,
                             value=event.value or {},
                             tags=event.tags or set(),
                             timestamp=event.timestamp or time.time(),
                         )
-                        page_ids = await self.ingestion_policy.ingest_record(record)
-                        for pid in page_ids:
-                            self._page_graph.add_node(pid)
-
-                        # TODO: This does not update the edges in the page graph or store the updated graph in PageStorage
+                        await self.ingestion_policy.ingest_record(record)
 
                 elif event.event_type == "delete":
                     await self.ingestion_policy.handle_delete(
@@ -1062,7 +1085,7 @@ class BlackboardContextPageSource(ContextPageSource):
                     )
 
                 if self._publish_events:
-                    self._enqueue_graph_delta(
+                    await self._enqueue_graph_delta(
                         event=event,
                         pages_before=pages_before,
                         page_id_before_for_record=page_id_before_for_record,
@@ -1077,7 +1100,7 @@ class BlackboardContextPageSource(ContextPageSource):
                     exc_info=True,
                 )
 
-    def _enqueue_graph_delta(
+    async def _enqueue_graph_delta(
         self,
         *,
         event: "BlackboardEvent",
@@ -1102,9 +1125,14 @@ class BlackboardContextPageSource(ContextPageSource):
         (``maxsize`` reached) the event is dropped with a warning;
         the runtime layer's rate-limiter is the right place to absorb
         sustained back-pressure.
+
+        Async because it reads the durable page graph from
+        ``PageStorage`` rather than a stale local field.
         """
 
-        pages_after = set(self._page_graph.nodes)
+        pages_after = set(
+            (await self._page_storage.load_page_graph(cached=False)).nodes
+        )
         produced: list[PageChangeEvent] = []
 
         for new_pid in pages_after - pages_before:

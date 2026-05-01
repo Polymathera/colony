@@ -1,6 +1,6 @@
 # Live Context — Watchers + Convergence Runtime
 
-This page documents the **always-live design context** machinery (master design doc §5): the chain that lets a change in an upstream source ripple through subscribed capabilities and converge to a quiescent design state.
+This page documents the **always-live design context** machinery (master design doc §5): the chain that lets a change in an upstream context source (e.g., a git repository) ripple through subscribed `AgentCapabilities` until the VCM contents (e.g., a design and its associated context such as requirements, specifications, codebases, etc.) eventually converge to a quiescent state.
 
 The chain is built from four layers, each in its own colony package:
 
