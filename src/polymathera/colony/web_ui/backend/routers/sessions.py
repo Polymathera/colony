@@ -288,10 +288,16 @@ async def create_session(
                 ActionKeySubstringFilter,
                 SuccessfulActionFilter,
             )
-            from polymathera.colony.cli.polymath import ANALYSIS_REGISTRY
+            from polymathera.colony.agents.analysis_registry import get_analysis_registry
             from polymathera.colony.distributed.ray_utils.serving.context import get_tenant_id, get_colony_id
 
-            # Build the available analysis types info for the LLM planner
+            # Build the available analysis types info for the LLM planner.
+            # ``get_analysis_registry()`` returns the union of colony-builtin
+            # entries and any registered via the
+            # ``polymathera.analysis_types`` entry-point group (master plan
+            # §12.3 — domain packages like polymathera-cps register their
+            # coordinator analyses there so they show up in chat without
+            # colony having to import them).
             available_analyses = {
                 atype: {
                     "label": reg["label"],
@@ -299,7 +305,7 @@ async def create_session(
                     "coordinator_class": reg.get("coordinator_v2", ""),
                     "worker_class": reg.get("worker", ""),
                 }
-                for atype, reg in ANALYSIS_REGISTRY.items()
+                for atype, reg in get_analysis_registry().items()
             }
 
             agent_metadata = AgentMetadata(

@@ -2627,8 +2627,65 @@ def describe(
 # Entry point
 # ===========================================================================
 
+_CLI_EXTENSION_GROUP = "polymathera.cli_extensions"
+"""Entry-point group downstream packages register Typer sub-apps under.
+
+A plugin's entry point is a callable ``() -> tuple[typer.Typer, str]``
+returning ``(sub_app, mount_name)``. The ``polymath`` CLI mounts each
+discovered sub-app at ``mount_name`` so domain packages can ship their
+own commands (e.g. ``polymath cps validate-corpus``,
+``polymath cps inspect-budget``) without colony having to import them.
+
+Distinct from
+:func:`polymathera.colony.agents.analysis_registry.get_analysis_registry`,
+which is the *runtime / chat-driven* analysis registry the SessionAgent
+consults. The two extension points serve different surfaces:
+
+- ``polymathera.cli_extensions``: CLI commands (one-shot, deployment,
+  diagnostics, debug helpers).
+- ``polymathera.analysis_types``: coordinator agent classes the
+  SessionAgent's planner can spawn from chat.
+
+Boundary discipline: colony stays generic; domain CLIs ship in their
+own packages and announce themselves via the standard
+``importlib.metadata`` entry-point mechanism.
+"""
+
+
+def _mount_cli_extensions(target: typer.Typer) -> list[str]:
+    """Discover and mount every ``polymathera.cli_extensions`` plugin.
+
+    Returns the list of mounted ``mount_name`` strings. Plugin
+    failures are isolated — a broken plugin is logged + skipped, not
+    fatal.
+    """
+
+    import logging
+    from importlib.metadata import entry_points
+
+    log = logging.getLogger(__name__)
+    mounted: list[str] = []
+    try:
+        eps = entry_points(group=_CLI_EXTENSION_GROUP)
+    except Exception:  # noqa: BLE001 — older Pythons return a dict-like
+        eps = ()
+    for ep in eps:
+        try:
+            factory = ep.load()
+            sub_app, mount_name = factory()
+            target.add_typer(sub_app, name=mount_name)
+            mounted.append(mount_name)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "polymath: failed to mount CLI extension %r from %r",
+                ep.name, ep.value,
+            )
+    return mounted
+
+
 def main() -> None:
     """Entry point for the polymath CLI."""
+    _mount_cli_extensions(app)
     app()
 
 
