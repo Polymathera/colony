@@ -1,8 +1,10 @@
 
 
+import asyncio
 import logging
 import pickle
 from collections import defaultdict
+from pathlib import Path
 from overrides import override
 from typing import Any, AsyncIterator, Literal
 import networkx as nx
@@ -10,6 +12,8 @@ import networkx as nx
 from polymathera.colony.vcm.sources import ContextPageSource, ContextPageSourceFactory, BuilInContextPageSourceType
 from polymathera.colony.vcm.models import MmapConfig, ContextPageId, VirtualContextPage
 from polymathera.colony.vcm.page_storage import PageStorage, PageStorageConfig
+from polymathera.colony.vcm.page_events import PageChangeEvent
+from polymathera.colony.vcm.watchers import LocalFsWatcher, LocalFsWatcherConfig
 from polymathera.colony.distributed import get_polymathera
 
 from .sharding.file_grouping_wrapper import FileGrouperWithGraph
@@ -31,7 +35,29 @@ class FileGrouperContextPageSource(ContextPageSource):
     - `FileGroup` → `PageCluster`
     - File relationship graph → Page graph
     - File paths → Page IDs
+
+    Live-context contract (master §5.6): the source is non-static
+    (``static = False``). ``watch()`` spins up a ``LocalFsWatcher``
+    against the cloned working tree and translates raw fs events
+    into ``PageChangeEvent``s using the source's ``file_to_page``
+    mapping. The VCM's ``_start_watch_bridge`` automatically drains
+    the iterator into the colony scope's ``vcm:page_events:*`` topic.
+
+    Limitations the operator should know about:
+
+    - Only files known to ``file_to_page`` at the time ``watch()``
+      starts are tracked. New files added to the working tree fire
+      no events; detecting them requires a graph rebuild.
+    - The multi-replica case (multiple VCM replicas materialise the
+      same scope) currently lets every replica spin up an
+      independent watcher; events get N-fold duplicated on the
+      page-event topic. The runtime's per-page rate-limiter absorbs
+      transient bursts but a leader-election story is the durable
+      fix. The same caveat applies to ``BlackboardContextPageSource``.
     """
+
+    static = False
+
     def __init__(
         self,
         *,
@@ -66,6 +92,13 @@ class FileGrouperContextPageSource(ContextPageSource):
         self.page_keys: dict[str, str] = {}  # page_id → summary (key)
         self.page_graph: nx.DiGraph | None = None
         self._file_relationship_graph: nx.DiGraph | None = None  # From FileGrouperWithGraph
+
+        # Local clone path resolved during initialize(); LocalFsWatcher
+        # in watch() roots here. None on replicas where the clone is
+        # not available (those replicas yield no events from watch()).
+        self._repo_path: Path | None = None
+        # Active watcher reference so shutdown() can stop it cleanly.
+        self._fs_watcher: LocalFsWatcher | None = None
 
     @override
     async def initialize(self) -> None:
@@ -104,6 +137,27 @@ class FileGrouperContextPageSource(ContextPageSource):
                 f"Loaded page graph for {self.scope_id}:{self.syscontext.to_dict()}: "
                 f"{len(self.page_graph.nodes)} nodes, {len(self.page_graph.edges)} edges"
             )
+            # Loading from PageStorage doesn't clone — but watch() needs
+            # a working tree. Retrieve idempotently so a replica that
+            # only ever loaded the graph still has somewhere to root the
+            # filesystem watcher. Failure is non-fatal: the source still
+            # serves reads, watch() simply yields nothing on this replica.
+            try:
+                polymathera = get_polymathera()
+                storage = await polymathera.get_storage()
+                repo_path = await storage.git_storage.clone_or_retrieve_repository(
+                    origin_url=self.origin_url,
+                    branch=self.branch,
+                    commit=self.commit,
+                    vmr_id=self.syscontext.colony_id,
+                )
+                self._repo_path = Path(str(repo_path))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"FileGrouperContextPageSource[{self.scope_id}]: "
+                    f"could not resolve working tree for live watch "
+                    f"({e}); watch() will yield no events on this replica."
+                )
         else:
             # No existing graph — build from repository
             logger.info(
@@ -147,6 +201,7 @@ class FileGrouperContextPageSource(ContextPageSource):
             commit=self.commit,
             vmr_id=self.syscontext.colony_id,
         )
+        self._repo_path = Path(str(repo_path))
         logger.info(f"Repository cloned to {repo_path} ({_time.time() - build_start:.1f}s)")
 
         prompt_strategy = IdentityPromptStrategy()
@@ -258,14 +313,96 @@ class FileGrouperContextPageSource(ContextPageSource):
 
     @override
     async def claim_orphaned_events(self) -> None:
-        """No event stream for file-grouper source (files are static)."""
+        """No replica-state to recover — fs watching is local and
+        ephemeral. The colony's BlackboardContextPageSource owns the
+        XAUTOCLAIM path for sources backed by Redis Streams."""
+
         pass
 
     @override
     async def shutdown(self) -> None:
-        """Clean up resources."""
+        """Stop the active filesystem watcher (if any) and release
+        page-storage references."""
+
+        if self._fs_watcher is not None:
+            self._fs_watcher.stop()
+            self._fs_watcher = None
         self.page_storage = None
         self.page_graph = None
+
+    @override
+    async def watch(self) -> AsyncIterator[PageChangeEvent]:
+        """Yield ``PageChangeEvent``s for working-tree mutations.
+
+        Roots a ``LocalFsWatcher`` at the cloned repository path. The
+        watcher's path filter and ``page_id_for`` callback both consult
+        a precomputed ``rel_path → page_id`` map derived from
+        ``self.file_to_page``; events for files outside that mapping
+        are dropped at the watcher level so the topic only carries
+        signals about pages the convergence runtime can reason about.
+
+        ``data_type`` defaults to ``"design_monorepo_file"`` — a coarse
+        label that matches the convention ``DesignMonorepoWatcher``
+        uses, so existing subscriptions written against either source
+        match the same way.
+
+        On replicas where ``self._repo_path`` is ``None`` (the source
+        loaded the graph from storage but the working tree could not
+        be retrieved on this replica) the iterator returns
+        immediately. The bridge in
+        ``VirtualContextManager._start_watch_bridge`` exits cleanly.
+        """
+
+        if self._repo_path is None:
+            return
+
+        # Build a rel_path → page_id lookup. file_to_page keys are
+        # normalised (storage-prefix-stripped); strip the same prefix
+        # off the working-tree root and use the remainder as the
+        # within-root portion of each key.
+        polymathera = get_polymathera()
+        try:
+            root_normalized = await polymathera.normalize_file_path(
+                str(self._repo_path),
+            )
+        except Exception:  # noqa: BLE001
+            root_normalized = ""
+        root_normalized = root_normalized.lstrip("/").rstrip("/")
+
+        rel_to_page: dict[str, str] = {}
+        for key, page_id in self.file_to_page.items():
+            stripped = key.lstrip("/")
+            if root_normalized and stripped.startswith(root_normalized):
+                rel = stripped[len(root_normalized):].lstrip("/")
+            else:
+                rel = stripped
+            if rel:
+                rel_to_page[rel] = page_id
+
+        if not rel_to_page:
+            logger.warning(
+                f"FileGrouperContextPageSource[{self.scope_id}]: "
+                f"no rel_path → page_id entries derivable from "
+                f"file_to_page; watch() will yield no events."
+            )
+            return
+
+        watcher = LocalFsWatcher(
+            root=self._repo_path,
+            scope_id=self.scope_id,
+            source_uri=f"git:{self.origin_url}:{self.branch}:{self.commit}",
+            page_id_for=lambda rel: rel_to_page.get(rel.as_posix(), ""),
+            path_filter=lambda rel: rel.as_posix() in rel_to_page,
+            config=LocalFsWatcherConfig(data_type="design_monorepo_file"),
+        )
+        self._fs_watcher = watcher
+        try:
+            async for event in watcher.watch():
+                yield event
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._fs_watcher = None
 
     @override
     async def get_page_id_for_record(self, record_id: str) -> ContextPageId | None:

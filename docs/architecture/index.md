@@ -76,6 +76,10 @@ Colony is natively distributed. This section covers Colony's serving framework, 
 
 The VCM manages context pages like an OS manages virtual memory with page tables, page faults, and cache-aware scheduling. It operates at the cluster level (across GPU nodes), unlike vLLM which is node-level. Extended VCM combines immutable read-only input pages with read-write blackboard output.
 
+### [Live Context (Watchers + Convergence)](live-context.md)
+
+Source watchers detect upstream mutations, the convergence runtime dispatches them to subscribed capabilities, and `ConvergenceCapability` is the agent-facing surface. Includes an honest map of which layers are wired end-to-end at cluster boot today and which gaps remain.
+
 ### [Agent System](agent-system.md)
 
 Agents are autonomous computational entities with lifecycle states, capabilities, and action policies. The framework supports VCM-bound agents (loaded/unloaded with pages), unbound agents, service agents, and supervisor agents. `AgentCapability` provides the extension point -- each capability is an AOP aspect, and the `ActionPolicy` acts as the aspect weaver.

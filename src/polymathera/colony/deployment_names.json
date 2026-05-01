@@ -8,5 +8,6 @@
   "agent_system": "agent_system",
   "tool_manager": "tool_manager",
   "standalone_agents": "standalone_agents",
-  "embedding": "embedding"
+  "embedding": "embedding",
+  "convergence_runtime": "convergence_runtime"
 }

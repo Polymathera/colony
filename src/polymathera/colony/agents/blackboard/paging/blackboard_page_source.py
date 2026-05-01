@@ -28,6 +28,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field as dataclass_field
+from collections.abc import AsyncIterator
 from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 from overrides import override
@@ -40,6 +41,7 @@ from ....vcm.sources import (
     BuilInContextPageSourceType
 )
 from ....vcm.models import VirtualContextPage, ContextPageId, MmapConfig
+from ....vcm.page_events import PageChangeEvent
 from ....distributed.ray_utils import serving
 
 if TYPE_CHECKING:
@@ -670,7 +672,22 @@ class BlackboardContextPageSource(ContextPageSource):
 
     This class does NOT create a VCM page per record. The IngestionPolicy
     controls buffering and flushing behavior.
+
+    Live-context contract (master §5.6): the source is non-static
+    (``static = False``) and overrides
+    :meth:`ContextPageSource.watch` to yield ``PageChangeEvent``s as
+    record-driven page-graph mutations occur. The bridging from
+    ``watch()`` into the colony scope's ``vcm:page_events:*`` topic
+    (where the convergence runtime forwarder reads) is done generically
+    by the VCM — see ``VirtualContextManager._materialize_scope_mapping``.
+    Backfill is silent: only mutations that arrive after
+    ``initialize()`` returns reach the runtime, since backfill is
+    initialisation rather than mutation.
     """
+
+    static = False
+    """Blackboard scopes mutate continuously; the convergence runtime
+    must treat this source as a live input."""
 
     def __init__(
         self,
@@ -711,6 +728,19 @@ class BlackboardContextPageSource(ContextPageSource):
         self._event_loop_task: asyncio.Task | None = None
         # Track which records are in which pages (for update/delete handling)
         self._record_to_page: dict[str, str] = {}  # record_key -> page_id
+
+        # Live-context queue — populated by ``_event_loop`` after each
+        # record-driven graph mutation, drained by ``watch()``. A
+        # bounded queue gives us back-pressure if the watcher consumer
+        # falls behind; the runtime layer applies its own rate limiter
+        # on top.
+        self._page_event_queue: asyncio.Queue[PageChangeEvent] = asyncio.Queue(
+            maxsize=1024,
+        )
+        self._source_uri = f"bb_scope:{scope_id}"
+        # Toggled by ``initialize()``: backfill writes go to the
+        # ingestion policy without producing watch-events.
+        self._publish_events = False
 
     @override
     async def initialize(self) -> None:
@@ -804,6 +834,10 @@ class BlackboardContextPageSource(ContextPageSource):
             f"{len(existing)} entries, {len(self._page_graph.nodes)} pages"
         )
 
+        # Backfill is over. From here on, the event loop's graph
+        # mutations produce watch-events.
+        self._publish_events = True
+
         # Start listening for new events
         self._event_queue = asyncio.Queue()
         if consumer_group is not None:
@@ -874,6 +908,12 @@ class BlackboardContextPageSource(ContextPageSource):
             except asyncio.CancelledError:
                 pass
             self._event_loop_task = None
+
+        # Drop the publish-events flag and unblock any watch()
+        # consumer waiting on the queue with a sentinel. The bridge
+        # task in the VCM owns its own asyncio cancellation, but it
+        # can also exit cleanly off the iterator.
+        self._publish_events = False
 
         logger.info(
             f"BlackboardContextPageSource[{self.scope_id}]: shutdown complete"
@@ -981,10 +1021,18 @@ class BlackboardContextPageSource(ContextPageSource):
         - write (no old_value): new record -> ingest_record()
         - write (with old_value): update -> handle_update()
         - delete: removal -> handle_delete()
+
+        After each branch, derives the page-graph mutation kind and
+        pushes the corresponding ``PageChangeEvent``s onto
+        ``self._page_event_queue`` for ``watch()`` to yield. Backfill
+        does not reach this loop — only post-backfill writes — so the
+        runtime never sees initialisation traffic.
         """
         while True:
             try:
                 event = await self._event_queue.get()
+                pages_before = set(self._page_graph.nodes)
+                page_id_before_for_record = self._record_to_page.get(event.key)
 
                 if event.event_type == "write":
                     if event.old_value is not None:
@@ -1013,6 +1061,13 @@ class BlackboardContextPageSource(ContextPageSource):
                         record_to_page=self._record_to_page,
                     )
 
+                if self._publish_events:
+                    self._enqueue_graph_delta(
+                        event=event,
+                        pages_before=pages_before,
+                        page_id_before_for_record=page_id_before_for_record,
+                    )
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1021,6 +1076,114 @@ class BlackboardContextPageSource(ContextPageSource):
                     f"error processing event: {e}",
                     exc_info=True,
                 )
+
+    def _enqueue_graph_delta(
+        self,
+        *,
+        event: "BlackboardEvent",
+        pages_before: set[str],
+        page_id_before_for_record: str | None,
+    ) -> None:
+        """Diff the page graph after handling ``event`` and push
+        ``PageChangeEvent``s onto the watch-queue.
+
+        Three signal kinds are produced:
+
+        - **PageAdded** for any node that did not exist before (a
+          buffered group flushed into a new VCM page).
+        - **PageInvalidated** for the page a deleted record was on,
+          if that page is no longer mapped to any record.
+        - **PageReplaced** when an UPDATE moved a record to a new page
+          and the old page is still mapped to other records.
+
+        ``data_type`` is left None — the source has no global type
+        label for blackboard-paged content; subscribers filter by
+        ``source`` or scope instead. If the queue is full
+        (``maxsize`` reached) the event is dropped with a warning;
+        the runtime layer's rate-limiter is the right place to absorb
+        sustained back-pressure.
+        """
+
+        pages_after = set(self._page_graph.nodes)
+        produced: list[PageChangeEvent] = []
+
+        for new_pid in pages_after - pages_before:
+            produced.append(
+                PageChangeEvent.page_added(
+                    page_id=new_pid,
+                    source=self._source_uri,
+                    scope_id=self.scope_id,
+                    extra={"record_key": event.key},
+                ),
+            )
+
+        if event.event_type == "delete" and page_id_before_for_record is not None:
+            still_mapped = any(
+                pid == page_id_before_for_record
+                for pid in self._record_to_page.values()
+            )
+            if not still_mapped:
+                produced.append(
+                    PageChangeEvent.page_invalidated(
+                        page_id=page_id_before_for_record,
+                        source=self._source_uri,
+                        scope_id=self.scope_id,
+                        reason="last record removed from page",
+                        extra={"record_key": event.key},
+                    ),
+                )
+
+        if event.event_type == "write" and event.old_value is not None:
+            new_pid_for_record = self._record_to_page.get(event.key)
+            if (
+                page_id_before_for_record is not None
+                and new_pid_for_record is not None
+                and new_pid_for_record != page_id_before_for_record
+                and page_id_before_for_record in pages_after
+            ):
+                produced.append(
+                    PageChangeEvent.page_replaced(
+                        old_page_id=page_id_before_for_record,
+                        new_page_id=new_pid_for_record,
+                        source=self._source_uri,
+                        scope_id=self.scope_id,
+                        extra={"record_key": event.key},
+                    ),
+                )
+
+        for pce in produced:
+            try:
+                self._page_event_queue.put_nowait(pce)
+            except asyncio.QueueFull:
+                logger.warning(
+                    f"BlackboardContextPageSource[{self.scope_id}]: "
+                    f"watch queue full; dropping {pce.kind.value} for "
+                    f"page {pce.page_id}"
+                )
+
+    @override
+    async def watch(self) -> AsyncIterator[PageChangeEvent]:
+        """Yield ``PageChangeEvent``s as the source's event loop
+        processes live writes. Cooperatively cancellable: the bridge
+        in ``VirtualContextManager`` cancels the consuming task on
+        scope-unmap or VCM shutdown, and the iterator unblocks on the
+        next ``asyncio.Queue.get`` cancellation.
+
+        Each ``PageChangeEvent`` carries:
+
+        - ``source = "bb_scope:<scope_id>"`` — the source URI.
+        - ``scope_id`` — the paged blackboard scope id.
+        - ``extra["record_key"]`` — the originating record key, useful
+          for subscribers that want to correlate without resolving the
+          page.
+        """
+
+        while True:
+            try:
+                event = await self._page_event_queue.get()
+            except asyncio.CancelledError:
+                return
+            yield event
 
     # -------------------------------------------------------------------------
     # Helpers

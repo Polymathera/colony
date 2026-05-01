@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Any, ClassVar
 from pydantic import BaseModel, Field
 from enum import Enum
 
 
 from ..models import ContextPageId
+from ..page_events import PageChangeEvent
 from ...vcm.models import MmapConfig
 from ...distributed.ray_utils import serving
 
@@ -43,7 +45,24 @@ class ContextPageSource(ABC):
     - Semantic: Uses embedding-based clustering
     - Hybrid: Combines multiple signals
     - LLM-learned: Uses LLM to determine clusters
+
+    **Watcher contract** (master §5.6 item 1).
+
+    Sources that can detect upstream changes and translate them into
+    page-graph mutations declare ``static = False`` and override
+    ``watch()``. Sources that cannot — a one-shot static dump, an
+    archived corpus snapshot — leave ``static = True`` (the default);
+    the convergence runtime refuses to subscribe to a static source as
+    a live page-graph input and instead relies on whatever bulk
+    re-ingestion path the source provides.
     """
+
+    static: ClassVar[bool] = True
+    """Whether this source's backing store is static.
+
+    Override to ``False`` in subclasses that implement ``watch()``.
+    The convergence runtime keys off this attribute to decide whether
+    to attach the source as a live input."""
 
     def __init__(
         self,
@@ -98,6 +117,40 @@ class ContextPageSource(ABC):
     async def get_all_mapped_pages(self) -> dict[ContextPageId, list[str]]:
         """Get a mapping of all page IDs to their associated record IDs."""
         pass
+
+    async def watch(self) -> AsyncIterator[PageChangeEvent]:
+        """Yield ``PageChangeEvent``s as the backing store mutates.
+
+        The default raises ``NotImplementedError``; sources that can
+        detect changes override and set ``static = False``. The
+        convergence runtime checks ``static`` before attaching a source
+        as a live input.
+
+        The implementation contract:
+
+        - The iterator must be cooperatively cancellable. The runtime
+          drives it from a long-running task; cancellation should
+          unblock cleanly within ``shutdown``'s grace window.
+        - The iterator must not emit duplicate events for the same
+          underlying mutation; debouncing is the source's
+          responsibility (the convergence runtime layer applies a
+          rate limiter on top, but that is a safety net, not a
+          de-duplicator).
+        - The iterator must propagate ``effective_at`` and ``data_type``
+          on the event when it can, so subscribers can filter without
+          re-resolving the affected page.
+        """
+
+        raise NotImplementedError(
+            f"{type(self).__name__} is a static source (static = "
+            f"{type(self).static}); override watch() and set "
+            "static = False to make it live."
+        )
+        # Make the function an async generator at the bytecode level
+        # so subclasses' overrides match this signature without the
+        # type checker complaining about the abstract default.
+        if False:  # pragma: no cover
+            yield  # type: ignore[unreachable]
 
 
 class BuilInContextPageSourceType(str, Enum):

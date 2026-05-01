@@ -23,7 +23,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Column, DateTime
+from sqlalchemy import Column, DateTime, Index
 import sqlmodel as sqlm
 
 from ..distributed.state_management import SharedState
@@ -73,6 +73,37 @@ class VirtualContextPageMetadata(sqlm.SQLModel, table=True):
     created_by: Optional[str] = sqlm.Field(None, index=True, description="Creator ID for finer-grained tracking within tenant (agent_id, session_id, run_id, etc.)")
     expires_at: Optional[datetime] = sqlm.Field(
         sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+    # Typed metadata for the convergence-runtime subscription engine
+    # (master §5.1 / §5.6 item 6). The free-form ``metadata_json`` above
+    # is preserved verbatim; these typed columns mirror the four
+    # subscription-relevant fields so the index is queryable in SQL.
+    scope_id: Optional[str] = sqlm.Field(
+        None, index=True,
+        description="Page-source scope id; mirrors VirtualContextPage.scope_id "
+        "and feeds the (scope_id, data_type, source) subscription index.",
+    )
+    data_type: Optional[str] = sqlm.Field(
+        None, index=True,
+        description="Open-set page kind (e.g., 'code', 'requirements', "
+        "'standard_clause', 'paper_section'). Subscription engine matches "
+        "exact-equality predicates against this column.",
+    )
+    effective_at: Optional[datetime] = sqlm.Field(
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+        description="Design-time the content represents (distinct from "
+        "created_at, which is when the page was ingested).",
+    )
+
+    __table_args__ = (
+        # Three-column composite index for the subscription engine's
+        # most common query: 'all <data_type> pages from <source> in
+        # <scope_id>'. SQLite ignores extra hints; PostgreSQL uses it.
+        Index(
+            "ix_virtual_context_pages_subscription",
+            "scope_id", "data_type", "source",
+        ),
     )
 
 

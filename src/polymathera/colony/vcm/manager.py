@@ -78,6 +78,11 @@ class MappedScope:
     config: MmapConfig
     scope_id: str
     syscontext: serving.ExecutionContext = field(default_factory=serving.require_execution_context)
+    # Bridge task for non-static sources: drains ``source.watch()``
+    # into a ``PageEventPublisher`` against the colony scope so the
+    # convergence runtime forwarder receives ``PageChangeEvent``s.
+    # ``None`` for static sources (file-based, archived corpora, …).
+    watch_bridge_task: asyncio.Task[None] | None = None
 
 
 
@@ -145,6 +150,14 @@ class VirtualContextManager:
 
         # Application ↔ VCM integration (scope mappings)
         self._local_mapped_scopes: dict[str, MappedScope] = {}
+
+        # Live-context bridge: for each non-static source we drain
+        # ``source.watch()`` into a ``PageEventPublisher`` against the
+        # colony scope so the convergence runtime forwarder receives
+        # ``PageChangeEvent``s. The blackboard handle is shared across
+        # all bridges; it's lazy-initialised on first use in
+        # ``_materialize_scope_mapping``.
+        self._page_event_blackboard: Any | None = None
 
     @staticmethod
     def _local_scope_key(scope_id: str) -> str:
@@ -1884,7 +1897,7 @@ class VirtualContextManager:
         local_key = self._local_scope_key(scope_id)
         if local_key in self._local_mapped_scopes:
             mapped = self._local_mapped_scopes.pop(local_key)
-            await mapped.source.shutdown()
+            await self._shutdown_mapped_scope(mapped)
             logger.info(f"Shut down local page source for scope {scope_id}, syscontext={syscontext.to_dict()}")
 
         # Remove from shared state
@@ -2197,12 +2210,30 @@ class VirtualContextManager:
 
         await source.initialize()
 
+        # Bridge non-static sources into the colony's vcm:page_events:*
+        # topic. The convergence runtime's forwarder reads from there
+        # and dispatches to subscribers — see master §5.6 / live-context
+        # docs. Static sources (file-based, archived corpora) emit no
+        # events; they are kept up to date via the watcher sidecars
+        # (LocalFsWatcher, GitRemoteWatcher, …) instead.
+        watch_bridge_task: asyncio.Task[None] | None = None
+        if not source.static:
+            try:
+                watch_bridge_task = await self._start_watch_bridge(source)
+            except Exception as e:
+                logger.warning(
+                    f"VCM: failed to start watch bridge for scope "
+                    f"{scope_id}: {e}. Page-change events will not "
+                    f"reach the convergence runtime for this scope."
+                )
+
         # Track locally
         self._local_mapped_scopes[scope_key] = MappedScope(
             source=source,
             config=config,
             scope_id=scope_id,
             syscontext=syscontext,
+            watch_bridge_task=watch_bridge_task,
         )
 
         # Pin pages if configured
@@ -2210,6 +2241,88 @@ class VirtualContextManager:
             await self._pin_scope_pages(scope_id)
 
         logger.info(f"Materialized scope mapping: scope={scope_id}, syscontext={syscontext.to_dict()}")
+
+    async def _shutdown_mapped_scope(self, mapped: MappedScope) -> None:
+        """Stop the watch bridge (if any) and the source itself.
+
+        Idempotent and tolerant of partial state — used by all
+        unmount paths (explicit unmap, reconciliation cleanup, VCM
+        shutdown) to keep the cleanup story in one place."""
+
+        if mapped.watch_bridge_task is not None:
+            mapped.watch_bridge_task.cancel()
+            try:
+                await mapped.watch_bridge_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    f"VCM: error awaiting watch bridge task for "
+                    f"scope {mapped.scope_id}"
+                )
+            mapped.watch_bridge_task = None
+        await mapped.source.shutdown()
+
+    async def _start_watch_bridge(
+        self, source: ContextPageSource,
+    ) -> asyncio.Task[None]:
+        """Start a long-running task that drains ``source.watch()`` into
+        the colony scope's ``vcm:page_events:*`` topic.
+
+        Lazy-initialises the shared colony-blackboard handle on first
+        call; subsequent bridges reuse it. The task is cancelled when
+        the corresponding ``MappedScope`` is shut down (see
+        ``_unmount_scope``).
+        """
+
+        from ..agents.blackboard import EnhancedBlackboard
+        from ..agents.scopes import BlackboardScope, get_scope_prefix
+        from .watchers.publisher import PageEventPublisher
+
+        if self._page_event_blackboard is None:
+            self._page_event_blackboard = EnhancedBlackboard(
+                app_name=self.app_name,
+                scope_id=get_scope_prefix(BlackboardScope.COLONY),
+                enable_events=True,
+                backend_type=None,
+            )
+            await self._page_event_blackboard.initialize()
+        publisher = PageEventPublisher(
+            self._page_event_blackboard, source_id=source.scope_id,
+        )
+
+        async def _drain() -> None:
+            try:
+                async for event in source.watch():
+                    try:
+                        await publisher.publish(event)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            f"VCM: failed to publish PageChangeEvent for "
+                            f"scope {source.scope_id}"
+                        )
+            except asyncio.CancelledError:
+                return
+            except NotImplementedError:
+                # Source declares static = False but its watch() is
+                # still the ABC default. This is a programming error
+                # in the source — log and exit instead of crashing
+                # the VCM replica.
+                logger.error(
+                    f"VCM: source {type(source).__name__} for scope "
+                    f"{source.scope_id} declares static = False but "
+                    f"does not override watch(). No events will flow."
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    f"VCM: watch bridge for scope {source.scope_id} "
+                    f"crashed; events will no longer flow"
+                )
+
+        return asyncio.create_task(
+            _drain(),
+            name=f"vcm-watch-bridge:{source.scope_id}",
+        )
 
     async def _reconcile_scope_mappings(self) -> None:
         """Synchronize local scope mappings with shared state.
@@ -2257,7 +2370,7 @@ class VirtualContextManager:
         for scope_key in stale:
             mapped = self._local_mapped_scopes.pop(scope_key)
             try:
-                await mapped.source.shutdown()
+                await self._shutdown_mapped_scope(mapped)
             except Exception as e:
                 logger.warning(f"Error shutting down stale scope mapping {scope_key}: {e}")
             logger.info(f"Reconciliation: cleaned up stale scope mapping {scope_key}")
@@ -2450,11 +2563,20 @@ class VirtualContextManager:
         # Flush and shut down all scope mappings
         for scope_key, mapped in list(self._local_mapped_scopes.items()):
             try:
-                await mapped.source.shutdown()
+                await self._shutdown_mapped_scope(mapped)
                 logger.info(f"Shut down scope mapping: {scope_key}")
             except Exception as e:
                 logger.warning(f"Error shutting down scope mapping {scope_key}: {e}")
         self._local_mapped_scopes.clear()
+
+        # Release the shared page-event blackboard once all bridges
+        # are gone.
+        if self._page_event_blackboard is not None:
+            try:
+                await self._page_event_blackboard.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("VCM: page-event blackboard stop failed")
+            self._page_event_blackboard = None
 
         logger.info("VirtualContextManager cleanup complete")
 

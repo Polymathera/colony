@@ -83,6 +83,7 @@ nav:
     - Distributed Architecture: architecture/distributed.md
     - Execution Context: architecture/execution-context.md
     - Virtual Context Memory: architecture/virtual-context-memory.md
+    - Live Context (Watchers + Convergence): architecture/live-context.md
     - Agent System: architecture/agent-system.md
     - Agent Memory System: architecture/agent-memory-system.md
     - Action Policies: architecture/action-policies.md

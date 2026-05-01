@@ -65,8 +65,8 @@ graph LR
 For example, Colony's `FileGrouperContextPageSource` maps files in a git repository to pages, grouping related files together (e.g., a module and its tests). Agents can edit the git repository directly in the file system, and the context page source will detect the changes and the corresponding VCM pages will be invalidated (i.e., marked as stale) and updated. The `BlackboardContextPageSource` maps blackboard entries to pages, allowing agents to read/write shared state as part of their reasoning process.
 
 
-!!! bug "Automatic Change Detection is Unimplemented"
-    Implement.
+!!! tip "Automatic Change Detection"
+    Filesystem and git-remote changes against a registered design monorepo, and live writes to a paged blackboard scope, both flow as `PageChangeEvent`s into the convergence runtime, which dispatches to subscribed capabilities. See [Live Context (Watchers + Convergence)](live-context.md) for the full chain. The HTTP webhook receiver (a Phase C6 piece) is the only transport still deferred.
 
 
 #### Layout Optimization and Spatial Locality
