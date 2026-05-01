@@ -202,6 +202,15 @@ priority = "explicit"
 target-version = "py311"
 src = ["src"]
 line-length = 120
+# Scaffold subtrees (e.g. ``scaffolds/python_lib/``) carry .py files
+# with ``${...}`` template placeholders that are only valid Python
+# after the scaffold renderer materialises them. The top-level
+# ``scaffolds/__init__.py`` and ``scaffolds/renderer.py`` are real
+# Python and stay lintable — only one-level-deep scaffold trees
+# are excluded.
+extend-exclude = [
+    "**/design_monorepo/scaffolds/*/",
+]
 
 [tool.ruff.lint]
 select = [
