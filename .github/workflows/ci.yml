@@ -53,7 +53,19 @@ jobs:
       - name: Configure Poetry
         run: poetry config virtualenvs.create false
       - name: Install dependencies
-        run: poetry install --no-interaction --extras "code_analysis cpu dashboard observability"
+        # Install every extra whose tests run unignored under ``src/``:
+        # ``knowledge`` brings kuzu / qdrant_client / pypdf for the
+        # knowledge-store tests; ``design_monorepo`` brings watchdog
+        # for the design-monorepo watcher tests. Without these, those
+        # tests would fail on import / first call against the optional
+        # backends — see PR notes.
+        run: poetry install --no-interaction --extras "code_analysis cpu dashboard observability knowledge design_monorepo"
+      - name: Show installed dependency tree (diagnostic)
+        # Surfaces ``ray``, ``kuzu``, ``watchdog`` etc. so a missing or
+        # unexpectedly-missing optional dep is visible in CI logs
+        # without needing a re-run on a debug branch.
+        run: |
+          poetry show --tree | grep -E '^(ray|kuzu|qdrant|cloudpickle|watchdog|pypdf|gitpython|fastapi)( |$)' || true
       - name: Run tests
         run: |
           pytest src/ \

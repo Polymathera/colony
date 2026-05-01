@@ -15,6 +15,10 @@ from typing import Any
 
 import pytest
 
+# qdrant_client lives in the ``knowledge`` extra. CI's matrix job
+# installs that extra; this guard is the fallback for slim envs.
+pytest.importorskip("qdrant_client")
+
 from polymathera.colony.knowledge import (
     Chunk,
     CitationSpan,

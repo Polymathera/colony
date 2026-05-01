@@ -12,6 +12,14 @@ from pathlib import Path
 
 import pytest
 
+# kuzu is in the ``knowledge`` extra; this whole file tests the real
+# Kùzu backend, so without that extra installed (slim ``pip install
+# polymathera-colony`` envs, dev installs without ``[knowledge]``)
+# none of the tests can meaningfully run. CI's matrix job installs
+# the ``knowledge`` extra; this guard is the fallback for any other
+# environment.
+pytest.importorskip("kuzu")
+
 from polymathera.colony.knowledge import (
     CitationSpan,
     Claim,
