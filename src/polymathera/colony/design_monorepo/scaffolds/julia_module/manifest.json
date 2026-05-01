@@ -1,0 +1,11 @@
+{
+  "text_files": [
+    "Project.toml",
+    "README.md",
+    "LICENSE",
+    ".gitignore",
+    "src/${name_snake}.jl",
+    "test/runtests.jl"
+  ],
+  "binary_files": []
+}

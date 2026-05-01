@@ -20,6 +20,14 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 packages = [{include = "polymathera", from = "src"}]
+include = [
+    # Scaffold templates ship as data files alongside the renderer; they
+    # contain non-.py files (README.md, LICENSE, CMakeLists.txt, *.json,
+    # *.h, *.c, *.cpp, *.hpp, *.rs, *.jl, *.toml, scaffold tests/) that
+    # the wildcards in `exclude` below would otherwise drop. This entry
+    # *overrides* the exclude rules for the scaffolds subtree.
+    { path = "src/polymathera/colony/design_monorepo/scaffolds/**/*", format = ["sdist", "wheel"] },
+]
 exclude = [
     "src/**/tests/",
     "src/**/test_*.py",
@@ -159,6 +167,12 @@ dashboard = [
 observability = [
     "aiokafka",
 ]
+
+design_monorepo = [
+    "gitpython",
+    "watchdog",
+]
+
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.2"

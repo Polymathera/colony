@@ -1,0 +1,8 @@
+${license} licence
+
+Copyright (c) ${year} ${author}
+
+This file is a placeholder for the full ${license} licence text. The
+tool-building agent or its supervisor is expected to replace this file
+with the full SPDX-recognised licence text matching ``${license}``
+before the tool is published.

@@ -1,0 +1,11 @@
+{
+  "text_files": [
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    ".gitignore",
+    "src/lib.rs",
+    "tests/smoke.rs"
+  ],
+  "binary_files": []
+}

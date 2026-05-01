@@ -1,0 +1,13 @@
+{
+  "text_files": [
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+    ".gitignore",
+    "src/${name_snake}/__init__.py",
+    "src/${name_snake}/core.py",
+    "tests/__init__.py",
+    "tests/test_smoke.py"
+  ],
+  "binary_files": []
+}

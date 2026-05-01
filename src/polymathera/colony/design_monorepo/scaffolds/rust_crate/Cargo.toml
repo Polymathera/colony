@@ -1,0 +1,13 @@
+[package]
+name = "${name_dash}"
+version = "0.1.0"
+edition = "2021"
+description = "${description}"
+license = "${license}"
+authors = ["${author}"]
+
+[lib]
+name = "${name_snake}"
+path = "src/lib.rs"
+
+[dev-dependencies]

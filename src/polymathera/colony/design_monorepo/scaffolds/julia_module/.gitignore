@@ -1,0 +1,6 @@
+Manifest.toml
+*.cov
+deps/build.log
+deps/deps.jl
+docs/build/
+docs/site/

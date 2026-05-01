@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "${name_dash}"
+version = "0.1.0"
+description = "${description}"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "${license}" }
+authors = [{ name = "${author}" }]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/${name_snake}"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
