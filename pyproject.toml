@@ -216,6 +216,14 @@ ignore = [
     "F841",   # unused variable (cleanup later)
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Tests use compact-setup idioms (semicolon-joined statements,
+# inline imports, long parametrize lines) that are deliberate
+# patterns. The rules waived here catch zero bugs and only enforce
+# one author's stylistic preference; production code keeps them.
+"**/tests/**" = ["E401", "E402", "E501", "E702"]
+"**/test_*.py" = ["E401", "E402", "E501", "E702"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["polymathera"]
 
