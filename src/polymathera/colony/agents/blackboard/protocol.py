@@ -286,6 +286,85 @@ class AgentRunProtocol(BlackboardProtocol):
         return parts[0], parts[1]
 
 
+class HumanApprovalProtocol(BlackboardProtocol):
+    """Protocol for typed human-approval requests/responses on the
+    session blackboard.
+
+    Operates at session scope so multiple agents in the same session
+    share the topic, the SessionAgent can surface requests to the UI,
+    and the Web UI HTTP endpoint can write responses back into the
+    same scope. The ``request_id`` correlates a request with its
+    response.
+
+    Key formats:
+
+    - ``human_approval:request:{request_id}`` — agent posts a typed
+      ``HumanApprovalRequest`` payload.
+    - ``human_approval:response:{request_id}`` — Web UI writes the
+      user's typed ``HumanApprovalResponse`` payload.
+
+    Example::
+
+        # Agent capability publishes a request:
+        key = HumanApprovalProtocol.request_key("appr_abc")
+        await session_blackboard.write(key, request_payload)
+
+        # Web UI HTTP endpoint posts the user's response:
+        key = HumanApprovalProtocol.response_key("appr_abc")
+        await session_blackboard.write(key, response_payload)
+
+        # Agent's HumanApprovalCapability subscribes:
+        @event_handler(pattern=HumanApprovalProtocol.response_pattern())
+        async def on_response(self, event, repl):
+            request_id = HumanApprovalProtocol.parse_response_key(event.key)
+            ...
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.SESSION
+
+    # --- Key construction ---
+
+    @staticmethod
+    def request_key(request_id: str) -> str:
+        """Key for a human-approval request."""
+        return f"human_approval:request:{request_id}"
+
+    @staticmethod
+    def response_key(request_id: str) -> str:
+        """Key for the user's typed response."""
+        return f"human_approval:response:{request_id}"
+
+    # --- Pattern construction ---
+
+    @staticmethod
+    def request_pattern() -> str:
+        """Pattern matching all human-approval requests in the session."""
+        return "human_approval:request:*"
+
+    @staticmethod
+    def response_pattern() -> str:
+        """Pattern matching all human-approval responses in the session."""
+        return "human_approval:response:*"
+
+    # --- Key parsing ---
+
+    @staticmethod
+    def parse_request_key(key: str) -> str:
+        """Extract request_id from a request key."""
+        prefix = "human_approval:request:"
+        if not key.startswith(prefix):
+            raise ValueError(f"Not a HumanApprovalProtocol request key: {key!r}")
+        return key[len(prefix):]
+
+    @staticmethod
+    def parse_response_key(key: str) -> str:
+        """Extract request_id from a response key."""
+        prefix = "human_approval:response:"
+        if not key.startswith(prefix):
+            raise ValueError(f"Not a HumanApprovalProtocol response key: {key!r}")
+        return key[len(prefix):]
+
+
 class WorkAssignmentProtocol(BlackboardProtocol):
     """Protocol for coordinator <-> worker communication via ``AgentPoolCapability``.
 

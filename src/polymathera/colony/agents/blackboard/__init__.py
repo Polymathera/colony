@@ -97,6 +97,7 @@ from .backends import (
 from .protocol import (
     BlackboardProtocol,
     AgentRunProtocol,
+    HumanApprovalProtocol,
     WorkAssignmentProtocol,
     LifecycleSignalProtocol,
     GameStateProtocol,
@@ -192,6 +193,7 @@ __all__ = [
     # Protocols
     "BlackboardProtocol",
     "AgentRunProtocol",
+    "HumanApprovalProtocol",
     "WorkAssignmentProtocol",
     "LifecycleSignalProtocol",
     "GameStateProtocol",

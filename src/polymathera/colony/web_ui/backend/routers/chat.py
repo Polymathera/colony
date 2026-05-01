@@ -498,6 +498,7 @@ async def _backfill_chat_history_from_blackboard(
                 "awaiting_reply": payload.get("awaiting_reply", False),
                 "run_status": payload.get("run_status"),
                 "controls": payload.get("controls"),
+                "kind": payload.get("kind"),
             }
             try:
                 await chat_store.save_message(chat_msg)
@@ -553,6 +554,12 @@ async def _listen_for_agent_messages(
                 "response_options": payload.get("response_options"),
                 "awaiting_reply": payload.get("awaiting_reply", False),
                 "run_status": payload.get("run_status"),
+                # ``kind`` distinguishes a typed human-approval gate
+                # (rendered with option buttons that POST to the
+                # approval HTTP endpoint) from a freeform
+                # ``agent_question`` (replies routed via the chat
+                # WebSocket). Absent for legacy messages.
+                "kind": payload.get("kind"),
             }
 
             # Persist agent message

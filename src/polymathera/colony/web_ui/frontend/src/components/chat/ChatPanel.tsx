@@ -4,6 +4,7 @@ import { ChatMessageList } from "./ChatMessageList";
 import { ChatInput } from "./ChatInput";
 import { ChatControls, type ChatControlsState } from "./ChatControls";
 import type { ChatMessageData } from "./ChatMessage";
+import { apiFetch } from "@/api/client";
 
 type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 
@@ -119,6 +120,7 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             request_id: msg.request_id,
             response_options: msg.response_options,
             awaiting_reply: msg.awaiting_reply,
+            kind: msg.kind,
             run_status: msg.run_status,
           });
         } else if (data.type === "agent_question") {
@@ -134,6 +136,7 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             request_id: msg.request_id,
             response_options: msg.response_options,
             awaiting_reply: true,
+            kind: msg.kind,
           });
         } else if (data.type === "history") {
           // History messages from server (on connect or pagination request)
@@ -150,6 +153,7 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             request_id: m.request_id,
             response_options: m.response_options,
             awaiting_reply: m.awaiting_reply,
+            kind: m.kind,
             run_status: m.run_status,
           }));
           if (historyMsgs.length > 0) {
@@ -244,24 +248,57 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
     });
   }, [addMessage, chatControls]);
 
-  const sendReply = useCallback((requestId: string, agentId: string, content: string) => {
+  const sendReply = useCallback((message: ChatMessageData, content: string) => {
+    const requestId = message.request_id;
+    const agentId = message.agent_id;
+    if (!requestId || !agentId) return;
+
+    // Echo the user's choice into the chat history. Identical for
+    // both reply lanes — the lane only differs on transport.
+    const recordEcho = () => {
+      addMessage({
+        id: nextMessageId(),
+        run_id: null,
+        role: "user",
+        content,
+        timestamp: Date.now(),
+      });
+      setMessages((prev) => prev.map((m) =>
+        m.request_id === requestId ? { ...m, awaiting_reply: false } : m
+      ));
+    };
+
+    if (message.kind === "human_approval" && sessionId) {
+      // Typed human-approval gate. The agent's HumanApprovalCapability
+      // listens on the SESSION blackboard's
+      // ``human_approval:response:*`` topic; the HTTP endpoint writes
+      // there. The WebSocket reply lane is for freeform questions
+      // only — using it here would route into the wrong listener.
+      apiFetch<unknown>(
+        `/sessions/${encodeURIComponent(sessionId)}/human_approval/${encodeURIComponent(requestId)}/respond`,
+        {
+          method: "POST",
+          body: JSON.stringify({ choice: content }),
+        },
+      ).then(
+        () => recordEcho(),
+        (err) => {
+          addMessage({
+            id: nextMessageId(),
+            run_id: null,
+            role: "system",
+            content: `Failed to submit approval: ${err instanceof Error ? err.message : String(err)}`,
+            timestamp: Date.now(),
+          });
+        },
+      );
+      return;
+    }
+
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-
     wsRef.current.send(JSON.stringify({ type: "reply", content, request_id: requestId, agent_id: agentId }));
-
-    addMessage({
-      id: nextMessageId(),
-      run_id: null,
-      role: "user",
-      content,
-      timestamp: Date.now(),
-    });
-
-    // Mark the question as answered
-    setMessages((prev) => prev.map((m) =>
-      m.request_id === requestId ? { ...m, awaiting_reply: false } : m
-    ));
-  }, [addMessage]);
+    recordEcho();
+  }, [addMessage, sessionId]);
 
   // Resize drag handler
   const handleMouseDown = useCallback((e: React.MouseEvent) => {

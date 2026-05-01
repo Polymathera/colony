@@ -16,13 +16,22 @@ export interface ChatMessageData {
   request_id?: string;
   response_options?: string[];
   awaiting_reply?: boolean;
+  // Routing hint for the click on an option button:
+  //  - "human_approval" → POST to /sessions/{id}/human_approval/{request_id}/respond
+  //  - undefined / other → existing WebSocket reply lane
+  kind?: "human_approval" | string;
   // Run lifecycle
   run_status?: "submitted" | "spawning" | "running" | "completed" | "failed";
 }
 
 interface ChatMessageProps {
   message: ChatMessageData;
-  onReply?: (requestId: string, agentId: string, content: string) => void;
+  // Receives the source message so the host can route per ``kind``
+  // (human_approval vs freeform agent_question).
+  onReply?: (
+    message: ChatMessageData,
+    content: string,
+  ) => void;
 }
 
 const ROLE_COLORS: Record<string, string> = {
@@ -89,7 +98,7 @@ export function ChatMessage({ message, onReply }: ChatMessageProps) {
           {response_options.map((option, i) => (
             <button
               key={i}
-              onClick={() => onReply(request_id, agent_id, option)}
+              onClick={() => onReply(message, option)}
               className="rounded border border-primary/30 bg-primary/10 px-2.5 py-1 text-[10px] font-medium text-primary hover:bg-primary/20 transition-colors"
             >
               {option}

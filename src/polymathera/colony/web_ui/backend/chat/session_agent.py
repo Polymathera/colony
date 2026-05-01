@@ -86,6 +86,8 @@ class SessionOrchestratorCapability(AgentCapability):
             app_name=app_name,
         )
         self._lifecycle_relay_task: asyncio.Task | None = None
+        self._human_approval_relay_task: asyncio.Task | None = None
+        self._human_approval_blackboard: Any | None = None
 
     @override
     async def initialize(self) -> None:
@@ -112,9 +114,13 @@ class SessionOrchestratorCapability(AgentCapability):
             self._relay_policy_lifecycle_to_chat(),
             name=f"policy_lifecycle_relay:{self._agent.agent_id}",
         )
+        self._human_approval_relay_task = asyncio.create_task(
+            self._relay_human_approval_to_chat(),
+            name=f"human_approval_relay:{self._agent.agent_id}",
+        )
 
     async def shutdown(self) -> None:
-        """Cancel the lifecycle relay task. Idempotent."""
+        """Cancel the lifecycle + human-approval relay tasks. Idempotent."""
         if self._lifecycle_relay_task is not None:
             self._lifecycle_relay_task.cancel()
             try:
@@ -122,6 +128,22 @@ class SessionOrchestratorCapability(AgentCapability):
             except (asyncio.CancelledError, Exception):  # pragma: no cover
                 pass
             self._lifecycle_relay_task = None
+        if self._human_approval_relay_task is not None:
+            self._human_approval_relay_task.cancel()
+            try:
+                await self._human_approval_relay_task
+            except (asyncio.CancelledError, Exception):  # pragma: no cover
+                pass
+            self._human_approval_relay_task = None
+        if self._human_approval_blackboard is not None:
+            try:
+                await self._human_approval_blackboard.stop()
+            except Exception:  # pragma: no cover
+                logger.exception(
+                    "SessionOrchestratorCapability: failed to stop "
+                    "human-approval blackboard",
+                )
+            self._human_approval_blackboard = None
 
     async def _relay_policy_lifecycle_to_chat(self) -> None:
         """Subscribe to policy lifecycle events on the agent's primary
@@ -162,6 +184,120 @@ class SessionOrchestratorCapability(AgentCapability):
                 "SessionOrchestratorCapability: lifecycle relay loop "
                 "crashed: %s", e, exc_info=True,
             )
+
+    async def _relay_human_approval_to_chat(self) -> None:
+        """Subscribe to ``HumanApprovalProtocol`` requests on the
+        session's ``human_approval`` scope and translate each into a
+        chat-blackboard agent_question record.
+
+        The request payload carries ``options`` and ``request_id``; we
+        write a ``chat:agent:{session_agent_id}:{message_id}`` record
+        with ``awaiting_reply=True`` and ``response_options`` so the
+        existing chat WebSocket relay forwards it as
+        ``agent_question`` to the browser. The frontend recognises
+        ``kind == "human_approval"`` and routes the user's click to
+        the HTTP endpoint instead of the WebSocket reply path —
+        keeping the agent's event handler the single point of truth
+        for the typed response.
+        """
+
+        from polymathera.colony.agents.blackboard.protocol import (
+            HumanApprovalProtocol,
+        )
+        from polymathera.colony.agents.patterns.capabilities.human_approval import (
+            HumanApprovalCapability,
+        )
+
+        try:
+            from polymathera.colony.agents.blackboard import EnhancedBlackboard
+
+            human_bb = EnhancedBlackboard(
+                app_name=self._app_name,
+                scope_id=get_scope_prefix(
+                    BlackboardScope.SESSION,
+                    namespace=HumanApprovalCapability.DEFAULT_NAMESPACE,
+                ),
+                enable_events=True,
+                backend_type=None,
+            )
+            await human_bb.initialize()
+            self._human_approval_blackboard = human_bb
+            chat_bb = await self.get_blackboard()
+        except Exception as e:
+            logger.warning(
+                "SessionOrchestratorCapability: human-approval relay "
+                "failed to acquire blackboards (%s); approval requests "
+                "will not surface in chat", e,
+            )
+            return
+        try:
+            async for event in human_bb.stream_events(
+                pattern=HumanApprovalProtocol.request_pattern(),
+                event_types={"write"},
+                timeout=None,
+            ):
+                try:
+                    await self._handle_human_approval_request(event, chat_bb)
+                except Exception as e:  # pragma: no cover — defensive
+                    logger.debug(
+                        "human-approval relay translation failed for %s: %s",
+                        event.key, e,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # pragma: no cover — defensive
+            logger.error(
+                "SessionOrchestratorCapability: human-approval relay "
+                "loop crashed: %s", e, exc_info=True,
+            )
+
+    async def _handle_human_approval_request(
+        self, event: BlackboardEvent, chat_bb,
+    ) -> None:
+        """Translate one ``HumanApprovalRequest`` into a chat agent_question.
+
+        The chat scope's existing WebSocket relay
+        (:func:`_listen_for_agent_messages`) forwards every
+        ``chat:agent:*`` write whose payload carries
+        ``awaiting_reply=True`` as a typed ``agent_question`` message;
+        the ``kind`` field tells the frontend to send the response via
+        the HTTP endpoint rather than the WebSocket reply lane.
+        """
+
+        from polymathera.colony.agents.blackboard.protocol import (
+            HumanApprovalProtocol,
+        )
+
+        try:
+            request_id = HumanApprovalProtocol.parse_request_key(event.key)
+        except ValueError:
+            return
+        payload = event.value if isinstance(event.value, dict) else {}
+        question = payload.get("question") or "(empty approval request)"
+        options = payload.get("options") or ["approve", "reject"]
+        requester_agent_id = (
+            payload.get("requester_agent_id")
+            or self._agent.agent_id
+        )
+
+        message_id = f"appr_msg_{uuid.uuid4().hex[:12]}"
+        await chat_bb.write(
+            SessionChatProtocol.agent_message_key(
+                requester_agent_id, message_id,
+            ),
+            {
+                "message_id": message_id,
+                "agent_id": requester_agent_id,
+                "agent_type": "human_approval",
+                "content": question,
+                "request_id": request_id,
+                "response_options": list(options),
+                "awaiting_reply": True,
+                "kind": "human_approval",
+                "timestamp": time.time(),
+                "extra": payload.get("extra") or {},
+            },
+        )
 
     async def _handle_lifecycle_event(
         self, event: BlackboardEvent, chat_bb,
@@ -695,6 +831,7 @@ class SessionOrchestratorCapability(AgentCapability):
             "help": self._cmd_help,
             "status": self._cmd_status,
             "agents": self._cmd_agents,
+            "roles": self._cmd_roles,
             "abort": self._cmd_abort,
             "analyze": self._cmd_analyze,
             "map": self._cmd_map,
@@ -715,6 +852,7 @@ class SessionOrchestratorCapability(AgentCapability):
             "/abort [run_id]": "Abort the current or specified run",
             "/status": "Show current session and run status",
             "/agents": "List active agents in this session",
+            "/roles": "List the colony-generic agent roles available to spawn",
             "/set <param>=<value>": "Set session parameters (max-agents, effort, etc.)",
             "/context [add|remove] [#ref]": "Show or modify active VCM context",
             "/help [command]": "Show this help or details for a specific command",
@@ -775,6 +913,42 @@ class SessionOrchestratorCapability(AgentCapability):
             await self._post_response("\n".join(lines))
         except Exception as e:
             await self._post_response(f"Failed to list agents: {e}")
+
+    async def _cmd_roles(self, args: str, controls: dict | None) -> None:
+        """List the colony-generic agent roles the user can spawn (Phase C3).
+
+        This is a *registry view* of the framework's known agent
+        classes (master §3.5), distinct from ``/agents`` which lists
+        the agents currently *running* in the session. The registry
+        is filled at import time from
+        ``polymathera.colony.agents.roles``; CPS-shared roles add
+        themselves the same way in their own package.
+        """
+
+        try:
+            from polymathera.colony.agents.roles import (
+                DataCurationAgent,
+                KnowledgeCuratorAgent,
+            )
+        except ImportError as exc:
+            await self._post_response(
+                f"Cannot load colony agent roles: {exc}",
+            )
+            return
+
+        roles = (
+            ("KnowledgeCuratorAgent",
+             KnowledgeCuratorAgent.agent_type,
+             "Source ingestion, KG maintenance, sampled review queue."),
+            ("DataCurationAgent",
+             DataCurationAgent.agent_type,
+             "Dataset registration, content-hash versioning, lineage."),
+        )
+        lines = ["**Generic colony agent roles:**"]
+        for short, agent_type, summary in roles:
+            lines.append(f"  • **{short}** — {summary}")
+            lines.append(f"    `{agent_type}`")
+        await self._post_response("\n".join(lines))
 
     async def _cmd_abort(self, args: str, controls: dict | None) -> None:
         """Abort a run."""

@@ -32,6 +32,11 @@ from .result import ResultCapability
 from .reputation import ReputationCapability
 from .consistency import ConsistencyCapability
 from .grounding import GroundingCapability
+from .human_approval import (
+    HumanApprovalCapability,
+    HumanApprovalRequest,
+    HumanApprovalResponse,
+)
 from .goal_alignment import ObjectiveGuardCapability
 from .consciousness import ConsciousnessCapability
 from .reflection import ReflectionCapability
@@ -135,6 +140,9 @@ __all__ = [
     "ReputationCapability",
     "ConsistencyCapability",
     "GroundingCapability",
+    "HumanApprovalCapability",
+    "HumanApprovalRequest",
+    "HumanApprovalResponse",
     "ObjectiveGuardCapability",
     "ConsciousnessCapability",
     "ReflectionCapability",

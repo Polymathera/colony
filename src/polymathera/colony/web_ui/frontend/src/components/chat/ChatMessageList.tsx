@@ -3,7 +3,7 @@ import { ChatMessage, type ChatMessageData } from "./ChatMessage";
 
 interface ChatMessageListProps {
   messages: ChatMessageData[];
-  onReply?: (requestId: string, agentId: string, content: string) => void;
+  onReply?: (message: ChatMessageData, content: string) => void;
   emptyText?: string;
 }
 
