@@ -186,6 +186,44 @@ services:
       timeout: 3s
       retries: 5
 
+  qdrant:
+    # Phase C1b — knowledge-corpus vector store (master §3.2 / §6.4).
+    # Storage volume persists across `colony-env up/down` so ingested
+    # corpora survive restarts; HTTP on 6333, gRPC on 6334.
+    image: qdrant/qdrant:v1.16.4
+    container_name: colony-qdrant
+    ports:
+      - "${COLONY_QDRANT_HTTP_PORT:-6333}:6333"
+      - "${COLONY_QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - colony-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/readyz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  grobid:
+    # Phase C1b — PDF -> TEI XML extractor (master §6.3). The "lite"
+    # image trades GROBID's ML-based reference consolidation for a
+    # ~6x smaller footprint; the API surface used by GrobidPdfReader
+    # is identical.
+    image: lfoppiano/grobid:0.8.0
+    container_name: colony-grobid
+    ports:
+      - "${COLONY_GROBID_PORT:-8070}:8070"
+    networks:
+      - colony-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8070/api/isalive || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
   kafka:
     image: apache/kafka:3.9.2
     container_name: colony-kafka
@@ -284,6 +322,7 @@ volumes:
   redis-data:
   postgres-data:
   kafka-data:
+  qdrant-data:
 
 networks:
   colony-net:
