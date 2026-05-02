@@ -1446,6 +1446,7 @@ class VLLMDeployment(AgentManagerBase):
             logger.error(f"Error emitting event {event.event_type}: {e}", exc_info=True)
             return False
 
+    @serving.cleanup_deployment
     async def cleanup(self):
         """Cleanup resources on shutdown."""
         if self._monitoring_task:

@@ -168,6 +168,7 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
             handle = get_convergence_runtime(self._app_name)
             await handle.register_design_monorepo(
                 working_dir=str(self._working_dir.resolve()),
+                watch_remote=True,
             )
         except Exception as exc:  # noqa: BLE001
             logger.info(

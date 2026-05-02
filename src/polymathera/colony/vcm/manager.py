@@ -2540,6 +2540,7 @@ class VirtualContextManager:
 
         return deployment_states
 
+    @serving.cleanup_deployment
     async def cleanup(self):
         """Cleanup VCM resources including event subscriptions."""
         logger.info("Cleaning up VirtualContextManager")

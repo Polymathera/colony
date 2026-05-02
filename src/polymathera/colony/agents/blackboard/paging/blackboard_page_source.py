@@ -1054,6 +1054,8 @@ class BlackboardContextPageSource(ContextPageSource):
                 # uncached forces a fresh fetch from PageStorage —
                 # any mutation by another replica between events is
                 # already visible in the snapshot.
+                # TODO: This is a bit inefficient — we load the full graph on
+                # every event, even though most events only mutate a single page.
                 pages_before = set(
                     (await self._page_storage.load_page_graph(cached=False)).nodes
                 )

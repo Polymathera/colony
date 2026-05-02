@@ -170,6 +170,7 @@ class STEmbeddingDeployment:
         # Setup circuit breakers
         self._setup_circuit_breakers()
 
+    @serving.cleanup_deployment
     async def cleanup(self) -> None:
         """Cleanup background tasks and resources"""
         from ...utils import cleanup_dynamic_asyncio_tasks

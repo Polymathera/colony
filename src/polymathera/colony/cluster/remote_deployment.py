@@ -1108,6 +1108,7 @@ class RemoteLLMDeployment(AgentManagerBase):
         """
         ...
 
+    @serving.cleanup_deployment
     async def cleanup(self):
         """Cleanup resources on shutdown."""
         # TODO: Implement any necessary cleanup, such as closing Redis connections

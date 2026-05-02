@@ -57,9 +57,9 @@ class ConvergenceRuntimeDeployment:
 
     Lifecycle:
 
-    1. ``on_app_ready`` initialises the colony-scope blackboard,
-       constructs the ``ConvergenceRuntime``, and starts the event
-       forwarder task.
+    1. ``initialize`` (``@serving.initialize_deployment``) brings up
+       the colony-scope blackboard, constructs the
+       ``ConvergenceRuntime``, and starts the event forwarder task.
     2. Capabilities call ``subscribe`` / ``unsubscribe`` to register
        page-graph subscriptions.
     3. Page sources / watchers write events to the
@@ -69,7 +69,9 @@ class ConvergenceRuntimeDeployment:
        per-subscriber blackboard scopes; subscribers consume via the
        normal ``EnhancedBlackboard.stream_events_to_queue``
        machinery.
-    5. ``shutdown`` cancels the forwarder and clears the runtime.
+    5. ``cleanup`` (``@serving.cleanup_deployment``) cancels the
+       forwarder, stops live watchers, and releases blackboard
+       handles.
     """
 
     def __init__(
@@ -101,10 +103,15 @@ class ConvergenceRuntimeDeployment:
 
     # -- Lifecycle -------------------------------------------------------
 
-    async def on_app_ready(self, app_name: str) -> None:
-        self._app_name = app_name
+    @serving.initialize_deployment
+    async def initialize(self) -> None:
+        """Bring up the colony-scope blackboard, construct the
+        ``ConvergenceRuntime``, and start the forwarder task that
+        drains ``vcm:page_events:*`` into the runtime."""
+
+        self._app_name = serving.get_my_app_name()
         self._colony_blackboard = EnhancedBlackboard(
-            app_name=app_name,
+            app_name=self._app_name,
             scope_id=get_scope_prefix(BlackboardScope.COLONY),
         )
         await self._colony_blackboard.initialize()
@@ -124,9 +131,14 @@ class ConvergenceRuntimeDeployment:
             self._forward_page_events(),
             name="convergence-runtime-forwarder",
         )
-        logger.info("ConvergenceRuntimeDeployment ready (app=%s)", app_name)
+        logger.info(
+            "ConvergenceRuntimeDeployment ready (app=%s)", self._app_name,
+        )
 
-    async def shutdown(self) -> None:
+    @serving.cleanup_deployment
+    async def cleanup(self) -> None:
+        """Cancel the forwarder, stop watchers, release blackboard handles."""
+
         self._stopped = True
         async with self._watcher_lock:
             for working_dir, watcher in list(self._design_monorepo_watchers.items()):
@@ -261,7 +273,7 @@ class ConvergenceRuntimeDeployment:
                 return False
             if self._app_name is None:
                 raise RuntimeError(
-                    "register_design_monorepo before on_app_ready",
+                    "register_design_monorepo before initialize ran",
                 )
             client = await asyncio.to_thread(DesignMonorepoClient.open, path)
             watcher = DesignMonorepoWatcher(
@@ -305,7 +317,7 @@ class ConvergenceRuntimeDeployment:
         if self._runtime is None:
             raise RuntimeError(
                 "ConvergenceRuntimeDeployment not yet ready; "
-                "call on_app_ready first.",
+                "wait for the @serving.initialize_deployment hook to run.",
             )
         return self._runtime
 
@@ -373,7 +385,10 @@ class ConvergenceRuntimeDeployment:
         if bb is not None:
             return bb
         if self._app_name is None:
-            raise RuntimeError("Cannot dispatch before on_app_ready.")
+            raise RuntimeError(
+                "Cannot dispatch before the @serving.initialize_deployment "
+                "hook has run.",
+            )
         bb = EnhancedBlackboard(
             app_name=self._app_name,
             scope_id=scope_id,

@@ -382,6 +382,7 @@ class EmbeddingDeployment:
             except Exception as e:
                 logger.error(f"Error in GPU monitoring: {e}", exc_info=True)
 
+    @serving.cleanup_deployment
     async def cleanup(self):
         """Cleanup resources on shutdown."""
         if self._monitoring_task:
