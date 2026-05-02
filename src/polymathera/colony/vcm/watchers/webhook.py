@@ -12,7 +12,7 @@ endpoint hands its body to. Keeping the parser here lets:
 
 Each provider's payload has the same essential information — a
 sequence of commits between ``before`` and ``after``, plus a list of
-modified paths — but the JSON shape differs. The builder normalises
+modified paths — but the JSON shape differs. The builder normalizes
 across them.
 
 Verified-payload-handling (HMAC-SHA256 signature verification etc.) is

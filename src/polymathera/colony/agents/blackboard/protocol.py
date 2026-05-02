@@ -1622,7 +1622,7 @@ class ConvergenceQuiescenceProtocol(BlackboardProtocol):
 class GitHubEventProtocol(BlackboardProtocol):
     """Protocol for GitHub webhook events surfaced on the blackboard.
 
-    A future ``POST /api/v1/github/webhook`` endpoint normalises
+    A future ``POST /api/v1/github/webhook`` endpoint normalizes
     incoming signed webhooks into writes at these keys; the
     ``GitHubCapability`` also writes ``audit:github:*`` records for
     mutations it performs. Other capabilities subscribe to the

@@ -72,7 +72,7 @@ class InMemoryEmbedder:
                 # Map 4 bytes → float in [-1, 1].
                 (value,) = struct.unpack(">i", block[i : i + 4])
                 floats.append(value / 0x7FFFFFFF)
-        # L2 normalise.
+        # L2 normalize.
         norm = sum(v * v for v in floats) ** 0.5
         if norm == 0.0:
             return tuple(floats)
@@ -117,7 +117,7 @@ class ColonyEmbeddingClient:
                 len(texts), exc,
             )
             raise
-        # The deployment returns list[list[float]]; normalise to tuple-of-tuples.
+        # The deployment returns list[list[float]]; normalize to tuple-of-tuples.
         return tuple(tuple(float(v) for v in row) for row in result)
 
 

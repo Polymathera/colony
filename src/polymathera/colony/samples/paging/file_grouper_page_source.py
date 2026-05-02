@@ -54,7 +54,7 @@ class FileGrouperContextPageSource(ContextPageSource):
     - Only files known to ``file_to_page`` at the time ``watch()``
       starts are tracked. New files added to the working tree fire
       no events; detecting them requires a graph rebuild.
-    - The multi-replica case (multiple VCM replicas materialise the
+    - The multi-replica case (multiple VCM replicas materialize the
       same scope) currently lets every replica spin up an
       independent watcher; events get N-fold duplicated into the
       convergence runtime. The runtime's per-page rate-limiter

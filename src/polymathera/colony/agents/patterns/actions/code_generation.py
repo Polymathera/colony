@@ -1247,7 +1247,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                         log("Mode → EXECUTION (first domain action dispatched)")
 
                 # Pair the started event with a terminal one so the
-                # downstream subscribers can finalise their state
+                # downstream subscribers can finalize their state
                 # (clear a UI banner, close a span, write a log line).
                 ended_at = time.time()
                 await self._emit_lifecycle_event(

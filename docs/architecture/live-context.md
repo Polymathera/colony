@@ -14,7 +14,7 @@ The chain is built from four layers, each in its own colony package:
 All four layers are implemented and wired end-to-end at cluster boot. The chain runs whenever:
 
 1. `VCMConfig.add_deployments_to_app` registers `ConvergenceRuntimeDeployment` (it always does, unconditionally).
-2. The VCM materialises a scope mapping for any non-static `ContextPageSource` — `_start_watch_bridge` drains the source's `watch()` iterator and calls `ConvergenceRuntimeDeployment.feed_page_event` directly via its deployment handle. There is exactly **one** chain per source: `FileGrouperContextPageSource.watch()` runs both a `LocalFsWatcher` (for in-tree edits) and a `GitRemoteWatcher` (for upstream commits) and merges them; `BlackboardContextPageSource.watch()` drains the source's own record-event loop.
+2. The VCM materializes a scope mapping for any non-static `ContextPageSource` — `_start_watch_bridge` drains the source's `watch()` iterator and calls `ConvergenceRuntimeDeployment.feed_page_event` directly via its deployment handle. There is exactly **one** chain per source: `FileGrouperContextPageSource.watch()` runs both a `LocalFsWatcher` (for in-tree edits) and a `GitRemoteWatcher` (for upstream commits) and merges them; `BlackboardContextPageSource.watch()` drains the source's own record-event loop.
 
 Layer 1 (HTTP webhook receiver) is the only piece deferred — the `WebhookEventBuilder` translator exists; the route lives in Phase C6.
 
@@ -40,11 +40,11 @@ The two shapes differ but the *contract* is uniform: every non-static source exp
 #### Limitations to know about
 
 - **`FileGrouperContextPageSource` only watches files in `file_to_page` at the time `watch()` starts.** A file added to the working tree after the page graph was built fires no events; detecting it requires a graph rebuild, which is a separate pass.
-- **Multi-replica VCMs duplicate events.** Every replica that materialises a non-static scope mapping starts its own watcher; events get N-fold duplicated into the convergence runtime. The runtime's per-page rate-limiter absorbs transient bursts, but a leader-election story is the durable fix. The same caveat applies to `BlackboardContextPageSource`.
+- **Multi-replica VCMs duplicate events.** Every replica that materializes a non-static scope mapping starts its own watcher; events get N-fold duplicated into the convergence runtime. The runtime's per-page rate-limiter absorbs transient bursts, but a leader-election story is the durable fix. The same caveat applies to `BlackboardContextPageSource`.
 
 ### The bridge: `VirtualContextManager._start_watch_bridge`
 
-When the VCM materialises a scope mapping, it inspects `source.static`. If the source is non-static, the VCM starts a long-running task with the canonical shape:
+When the VCM materializes a scope mapping, it inspects `source.static`. If the source is non-static, the VCM starts a long-running task with the canonical shape:
 
 ```python
 async for event in source.watch():
@@ -223,7 +223,7 @@ What's still deferred:
 - **HTTP webhook receiver (Phase C6).** `WebhookEventBuilder` translates Gitea/GitLab/GitHub push payloads into `PageChangeEvent`s today; the HTTP route that takes a payload and calls into the builder lives with the Web UI work in C6.
 - **Edge events from `BlackboardContextPageSource`.** Today the source emits `page_added` / `page_replaced` / `page_invalidated` only. It does not yet produce `page_graph_edge_added` / `page_graph_edge_removed` events; those need IngestionPolicy hooks to surface relationship changes between pages.
 - **Tokenized-content edit_diff.** `PageReplaced` events from the blackboard source carry no `edit_diff`. Producing one requires the IngestionPolicy to retain enough of the previous flush to diff against.
-- **Multi-replica leader election.** Today every VCM replica that materialises a non-static scope spins up its own watch bridge, so events fan in to the runtime N times per change. The runtime's per-page rate-limiter absorbs transient bursts; a leader election among VCM replicas is the durable fix.
+- **Multi-replica leader election.** Today every VCM replica that materializes a non-static scope spins up its own watch bridge, so events fan in to the runtime N times per change. The runtime's per-page rate-limiter absorbs transient bursts; a leader election among VCM replicas is the durable fix.
 
 ---
 

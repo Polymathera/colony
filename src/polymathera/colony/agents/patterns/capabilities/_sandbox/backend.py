@@ -445,7 +445,7 @@ def _safe_name(stem: str) -> str:
     """Return a Docker-safe container name.
 
     Docker names must match ``[a-zA-Z0-9_.-]`` and be <= 253 chars; this
-    helper normalises anything the capability passes in (scope ids can
+    helper normalizes anything the capability passes in (scope ids can
     contain ``:``).
     """
     out = []

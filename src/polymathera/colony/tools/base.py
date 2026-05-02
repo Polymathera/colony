@@ -44,7 +44,7 @@ class HeadlessReadiness(str, Enum):
 
     Values match the Appendix-C tier of every per-domain dossier.
     String values are stable on the wire so JSON / YAML registries
-    serialise readably.
+    serialize readably.
     """
 
     NATIVE = "native"

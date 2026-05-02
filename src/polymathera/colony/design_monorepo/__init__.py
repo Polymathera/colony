@@ -11,7 +11,7 @@ described in the design-automation architecture (master §3.1.6, §3.5.1,
   exact operations the framework needs (clone, commit-with-identity,
   tag/list checkpoints, fork/list forks, restore, merge, cherry-pick,
   diff, find-existing-tool, list-recent-decisions, branch topology).
-- ``bootstrap_design_monorepo`` — initialise a fresh monorepo with the
+- ``bootstrap_design_monorepo`` — initialize a fresh monorepo with the
   framework's directory layout, ``.gitattributes`` (LFS + merge
   drivers), and an opening commit.
 - Three ``AgentCapability`` subclasses — ``RepoStateProvider`` (read-

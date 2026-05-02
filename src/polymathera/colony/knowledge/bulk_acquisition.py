@@ -145,7 +145,7 @@ class CorpusManifest(BaseModel):
 
         # ``mode="json"`` so ``CorpusTier`` (a ``str``-Enum) and
         # ``Path`` round-trip as their string forms — PyYAML's default
-        # representer can't serialise arbitrary Python objects.
+        # representer can't serialize arbitrary Python objects.
         return yaml.safe_dump(
             self.model_dump(mode="json"),
             sort_keys=False,
@@ -175,7 +175,7 @@ class CorpusManifest(BaseModel):
 
 
 class AcquirerStrategy(ABC):
-    """Materialise a :class:`ManifestEntry` to a local file the
+    """Materialize a :class:`ManifestEntry` to a local file the
     :class:`Ingestor` can read.
 
     Concrete strategies are keyed by ``method``. The
@@ -410,7 +410,7 @@ class BulkAcquisitionCapability(AgentCapability):
     """Orchestrates corpus bulk acquisition (master §6.6).
 
     The capability is a thin coordinator: per :class:`ManifestEntry`,
-    it picks an :class:`AcquirerStrategy` by ``method``, materialises
+    it picks an :class:`AcquirerStrategy` by ``method``, materializes
     the file, optionally verifies the SHA-256, and hands off to the
     :class:`Ingestor` under the configured :class:`IngestionPolicy`.
     The default policy is :data:`IngestionPolicy.SKIP_IF_PRESENT` so

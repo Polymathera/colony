@@ -5,7 +5,7 @@ A driver is a small Python entry point invoked by git as
     python -m polymathera.colony.design_monorepo.git_merge.<name> %A %O %B %P
 
 where ``%A``, ``%O``, ``%B``, ``%P`` are the four standard placeholders
-documented in ``gitattributes(5)``. The helpers here normalise that
+documented in ``gitattributes(5)``. The helpers here normalize that
 contract — argument parsing, file IO, conflict-marker fallback — so the
 per-format drivers stay focused on the structural merge.
 """

@@ -77,7 +77,7 @@ class GitRemoteWatcher:
         from git import GitCommandError, Repo
 
         repo = Repo(str(self._repo_path))
-        # Initialise last-observed from the current remote-tracking ref.
+        # Initialize last-observed from the current remote-tracking ref.
         ref = self._remote_tracking_ref()
         try:
             self._last_observed_sha = repo.git.rev_parse(ref).strip()

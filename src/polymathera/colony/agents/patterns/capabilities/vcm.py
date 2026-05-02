@@ -942,7 +942,7 @@ class VCMCapability(AgentCapability):
     # --- Filesystem watcher (Phase 3) --------------------------------------
 
     def _resolve_watch_paths(self, paths: list[str]) -> list[str]:
-        """Validate and canonicalise watch paths.
+        """Validate and canonicalize watch paths.
 
         - Rejects empty lists (caller must give at least one path).
         - Expands ``~`` and resolves relative paths against ``watch_root``.

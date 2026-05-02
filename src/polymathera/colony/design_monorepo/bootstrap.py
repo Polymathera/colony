@@ -1,4 +1,4 @@
-"""``bootstrap_design_monorepo`` — initialise a fresh design monorepo.
+"""``bootstrap_design_monorepo`` — initialize a fresh design monorepo.
 
 This is the operation invoked when a user creates a new program (master
 §3.1.6, "Create new program" wizard). It produces a freshly-initialised

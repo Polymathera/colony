@@ -273,7 +273,7 @@ def discover_plugins(
     *,
     into: DiscoveryResult | None = None,
 ) -> DiscoveryResult:
-    """Walk every plugin root and materialise their skills.
+    """Walk every plugin root and materialize their skills.
 
     A plugin directory is identified by ``.claude-plugin/plugin.json``;
     skills live under ``<plugin>/skills/<name>/SKILL.md``. Skill

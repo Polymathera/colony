@@ -1,7 +1,7 @@
 """Language-agnostic scaffolds for tool-building pools.
 
 A scaffold is a directory of files (with ``$variable`` placeholders) that
-``ToolBuilder.bootstrap_repo`` materialises into ``tools/<purpose>/<name>/``
+``ToolBuilder.bootstrap_repo`` materializes into ``tools/<purpose>/<name>/``
 in the design monorepo. The set of templates the framework ships is the
 language-agnostic minimum (master §9.4):
 

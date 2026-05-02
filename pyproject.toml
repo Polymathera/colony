@@ -217,7 +217,7 @@ src = ["src"]
 line-length = 120
 # Scaffold subtrees (e.g. ``scaffolds/python_lib/``) carry .py files
 # with ``${...}`` template placeholders that are only valid Python
-# after the scaffold renderer materialises them. The top-level
+# after the scaffold renderer materializes them. The top-level
 # ``scaffolds/__init__.py`` and ``scaffolds/renderer.py`` are real
 # Python and stay lintable — only one-level-deep scaffold trees
 # are excluded.
@@ -277,7 +277,7 @@ pythonpath = ["src"]
 addopts = "--import-mode=importlib --ignore=src/polymathera/colony/vcm/test_vllm_concurrency.py"
 # Scaffold subtrees (e.g. ``scaffolds/python_lib/``) carry .py files
 # with ``${...}`` template placeholders that are only valid Python
-# after the scaffold renderer materialises them. Pytest's collector
+# after the scaffold renderer materializes them. Pytest's collector
 # tries to AST-parse anything matching ``test_*.py`` — explicitly
 # skip those subtrees here. The ruff config has the parallel
 # ``extend-exclude`` for the same reason.
