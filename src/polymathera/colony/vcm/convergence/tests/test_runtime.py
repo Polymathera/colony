@@ -23,9 +23,7 @@ def _sub(**kwargs) -> PageSubscription:
     return PageSubscription(
         predicate=kwargs.pop("predicate"),
         dispatch_scope=kwargs.pop("dispatch_scope", "scope"),
-        dispatch_key=kwargs.pop("dispatch_key", "k"),
         capability_key=kwargs.pop("capability_key", "Cap"),
-        declared_outputs=tuple(kwargs.pop("declared_outputs", ())),
         tolerance=kwargs.pop("tolerance", None),
     )
 
@@ -143,44 +141,6 @@ async def test_rate_limit_drops_repeated_writes() -> None:
         ),
     )
     assert fired == ["hot", "cool"]
-
-
-async def test_topo_sort_orders_by_declared_outputs() -> None:
-    order: list[str] = []
-
-    async def cb(sub, ev):
-        order.append(sub.capability_key)
-
-    rt = ConvergenceRuntime(dispatch_callback=cb)
-    # Producer writes evidence; consumer reads evidence.
-    producer = _sub(
-        predicate=PageMetadataPredicate(data_type="requirements"),
-        declared_outputs=[PageMetadataPredicate(data_type="evidence")],
-        capability_key="Producer",
-    )
-    consumer = _sub(
-        predicate=PageMetadataPredicate(data_type="evidence"),
-        capability_key="Consumer",
-    )
-    # Both subscriptions match an event with data_type='evidence' through
-    # the consumer's read predicate, plus a data_type='requirements'
-    # event would only match producer. To test topo order we feed an
-    # event matching both: data_type='evidence' should fire only consumer
-    # (no producer match), so topo doesn't reorder. Instead, configure
-    # both predicates to match a common event:
-    producer = producer.model_copy(update={
-        "predicate": PageMetadataPredicate(data_type="evidence"),
-    })
-    rt.register(producer)
-    rt.register(consumer)
-    await rt.feed_event(
-        PageChangeEvent.page_replaced(
-            old_page_id="e", new_page_id="e",
-            source="x:src", data_type="evidence", scope_id="prog",
-        ),
-    )
-    # Producer (writes evidence) runs before Consumer (reads evidence).
-    assert order == ["Producer", "Consumer"]
 
 
 async def test_subscription_lifecycle() -> None:

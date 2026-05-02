@@ -1,12 +1,8 @@
-"""Tests for ``PageChangeEvent`` and the topic-key convention."""
+"""Tests for ``PageChangeEvent``."""
 
 from __future__ import annotations
 
-from polymathera.colony.vcm.page_events import (
-    PAGE_EVENTS_TOPIC_PREFIX,
-    PageChangeEvent,
-    PageChangeKind,
-)
+from polymathera.colony.vcm.page_events import PageChangeEvent, PageChangeKind
 
 
 def test_page_invalidated_carries_reason() -> None:
@@ -37,16 +33,6 @@ def test_edge_added() -> None:
     assert e.page_id == "a"
     assert e.related_page_ids == ("b",)
     assert e.edge_type == "cites"
-
-
-def test_topic_key() -> None:
-    e = PageChangeEvent.page_added(
-        page_id="p", source="git:repo:main:1",
-    )
-    key = e.topic_key("design_monorepo:program-1")
-    assert key.startswith(f"{PAGE_EVENTS_TOPIC_PREFIX}:")
-    assert "design_monorepo:program-1" in key
-    assert "page_added" in key
 
 
 def test_round_trip_via_pydantic() -> None:

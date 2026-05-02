@@ -335,7 +335,7 @@ class DesignMonorepoClient:
             forks=forks,
             tools=local_tools,
             last_quiescence_at=last_q,
-            uncommitted_changes=self._has_uncommitted_changes(),
+            uncommitted_changes=self.has_uncommitted_changes(),
             imported_tooling_remotes=self._manifest.imports_tooling_from,
         )
 
@@ -346,7 +346,7 @@ class DesignMonorepoClient:
         count = int(repo.git.rev_list("--count", "HEAD"))
         return count == 1
 
-    def _has_uncommitted_changes(self) -> bool:
+    def has_uncommitted_changes(self) -> bool:
         repo = self._repo
         return bool(repo.is_dirty(untracked_files=True))
 
@@ -804,7 +804,7 @@ class DesignMonorepoClient:
             )
 
         # Auto-stash dirty state to a recovery/* branch so nothing is lost.
-        if self._has_uncommitted_changes():
+        if self.has_uncommitted_changes():
             recovery_branch = self._auto_stash_recovery(identity)
             logger.info(
                 "restore_checkpoint(%s): stashed dirty working tree to %s",

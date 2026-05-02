@@ -21,14 +21,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from overrides import override
 
 from ..agents.base import Agent, AgentCapability
+from ..agents.blackboard import BlackboardEvent, ConvergenceQuiescenceProtocol
 from ..agents.models import AgentSuspensionState
 from ..agents.patterns.actions import action_executor
+from ..agents.patterns.events import EventProcessingResult, event_handler
 from .client import (
     DECISIONS_DIR,
     DesignMonorepoClient,
@@ -96,13 +99,20 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
         scope_id: str | None = None,
         *,
         working_dir: Path | str,
+        input_patterns: list[str] | None = None,
         capability_key: str | None = None,
         app_name: str | None = None,
     ) -> None:
+        # ``input_patterns`` defaults to ``None`` so the base class
+        # auto-infers from ``@event_handler`` decorators on the
+        # subclass — DesignCheckpointer's quiescence handler picks up
+        # ``ConvergenceQuiescenceProtocol.quiescence_pattern()`` that
+        # way. Pass ``input_patterns=[]`` explicitly to opt out (e.g.,
+        # for the read-only RepoStateProvider / ToolBuilder).
         super().__init__(
             agent=agent,
             scope_id=scope_id,
-            input_patterns=[],  # opt out of @event_handler inference
+            input_patterns=input_patterns,
             capability_key=capability_key,
             app_name=app_name,
         )
@@ -150,34 +160,13 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
             agent_email_domain=self._manifest().agent_email_domain,
         )
 
-    @override
-    async def initialize(self) -> None:
-        """Register the design monorepo with the convergence runtime so
-        local-fs / git-remote watchers begin publishing page-change
-        events for it. Idempotent — N capabilities binding the same
-        ``working_dir`` produce one watcher.
-
-        Tolerates the runtime not being deployed (tests, smoke
-        contexts): the capability's read/write surface still works,
-        only the live-context dispatch is silent."""
-
-        await super().initialize()
-        try:
-            from ..system import get_convergence_runtime
-
-            handle = get_convergence_runtime(self._app_name)
-            await handle.register_design_monorepo(
-                working_dir=str(self._working_dir.resolve()),
-                watch_remote=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.info(
-                "Design-monorepo watcher not registered for %s "
-                "(convergence runtime unavailable: %s). The capability "
-                "will work; page-change events for working-tree mutations "
-                "will not flow.",
-                self._working_dir, exc,
-            )
+    # Live page-change events for the working tree flow through
+    # ``FileGrouperContextPageSource.watch()`` once the working tree
+    # is mapped into the VCM (the source composes a LocalFsWatcher +
+    # GitRemoteWatcher; VCM feeds the merged stream into the
+    # convergence runtime). Capabilities here do not register a
+    # separate watcher — that produced duplicate events and a
+    # duplicate code path.
 
     # -- Suspension hooks --
     # The design monorepo's state is already durable on disk; the
@@ -303,7 +292,37 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
     level (master §3.1 access-control discipline). Per-commit identity
     is derived from the owning agent so the audit trail is provably
     attributable (master §8.5).
+
+    The capability also subscribes to
+    ``ConvergenceQuiescenceProtocol.quiescence_pattern()`` and emits an
+    ``auto_quiescence_<iso8601>`` checkpoint tag whenever an episode
+    settles with uncommitted changes — the crash-recovery primitive
+    master §8.1 / line 607 calls out (``restore_checkpoint(id=
+    auto_quiescence_<timestamp>)``). The behaviour is opt-out via
+    ``auto_checkpoint_on_quiescence=False``; nothing happens when the
+    working tree is clean (HEAD already represents the settled state).
     """
+
+    AUTO_CHECKPOINT_LABEL_FMT = "auto_quiescence_{timestamp}"
+
+    def __init__(
+        self,
+        agent: Agent | None = None,
+        scope_id: str | None = None,
+        *,
+        working_dir: Path | str,
+        auto_checkpoint_on_quiescence: bool = True,
+        capability_key: str | None = None,
+        app_name: str | None = None,
+    ) -> None:
+        super().__init__(
+            agent=agent,
+            scope_id=scope_id,
+            working_dir=working_dir,
+            capability_key=capability_key,
+            app_name=app_name,
+        )
+        self._auto_checkpoint_on_quiescence = auto_checkpoint_on_quiescence
 
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"design_state", "git", "write"})
@@ -495,6 +514,77 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
     async def diff_design(self, ref_a: str, ref_b: str) -> DesignDiff:
         client = await self._client_async()
         return await asyncio.to_thread(client.diff, ref_a, ref_b)
+
+    # ---- Auto-checkpoint on convergence quiescence -------------------
+
+    @event_handler(pattern=ConvergenceQuiescenceProtocol.quiescence_pattern())
+    async def _on_quiescence(
+        self,
+        event: BlackboardEvent,
+        repl: Any,
+    ) -> EventProcessingResult | None:
+        """Tag an ``auto_quiescence_<iso8601>`` checkpoint when the
+        runtime settles with uncommitted changes. No-op when the
+        working tree is clean — HEAD already represents the settled
+        state and tagging again would just create a duplicate
+        checkpoint pointing to the same SHA."""
+
+        if not self._auto_checkpoint_on_quiescence:
+            return None
+        try:
+            episode_id = ConvergenceQuiescenceProtocol.parse_quiescence_key(
+                event.key,
+            )
+        except ValueError:
+            return None
+        try:
+            client = await self._client_async()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "DesignCheckpointer: client unavailable; skipping "
+                "auto-checkpoint for episode %s", episode_id,
+            )
+            return None
+        try:
+            dirty = await asyncio.to_thread(client.has_uncommitted_changes)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "DesignCheckpointer: dirty-state probe failed for "
+                "episode %s", episode_id,
+            )
+            return None
+        if not dirty:
+            return None
+        identity = self._identity()
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        label = self.AUTO_CHECKPOINT_LABEL_FMT.format(timestamp=timestamp)
+        rationale = f"convergence quiescence (episode {episode_id})"
+        try:
+            await asyncio.to_thread(
+                _commit_all, client, identity,
+                f"checkpoint: {label}",
+            )
+            checkpoint = await asyncio.to_thread(
+                client.tag_checkpoint, identity, label, rationale,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "DesignCheckpointer: auto-checkpoint failed for "
+                "episode %s", episode_id,
+            )
+            return None
+        logger.info(
+            "DesignCheckpointer: tagged auto checkpoint %s at "
+            "episode %s", checkpoint.checkpoint_id, episode_id,
+        )
+        return EventProcessingResult(
+            context_key=f"auto_checkpoint:{episode_id}",
+            context={
+                "episode_id": episode_id,
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "label": label,
+            },
+        )
 
 
 # ---------------------------------------------------------------------------

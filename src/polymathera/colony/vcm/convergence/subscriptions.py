@@ -3,15 +3,14 @@
 A capability registers a subscription with the runtime by supplying:
 
 - ``predicate`` — what to fire on (``PageMetadataPredicate``).
-- ``dispatch_scope`` + ``dispatch_key`` — where the runtime writes the
-  dispatch event on the blackboard. The capability has its own
-  ``@event_handler`` listening on this scope/key, so the dispatch
-  flows through normal blackboard plumbing.
-- ``declared_outputs`` — the set of predicates this subscription is
-  expected to *write into*. Used by the dependency-aware scheduler
-  (master §5.2 mechanism 2) to topo-sort within a wave: a
-  subscription whose predicate matches the *output* predicate of
-  another runs *after* it.
+- ``dispatch_scope`` — the blackboard scope the runtime writes the
+  dispatch event onto (typically the subscribing capability's own
+  scope). The *key* shape is fixed by
+  ``ConvergenceDispatchProtocol`` — the runtime uses the
+  subscription's ``subscription_id`` as the correlator. The
+  capability subscribes via
+  ``@event_handler(pattern=ConvergenceDispatchProtocol.dispatch_pattern())``
+  and routes by the parsed ``subscription_id``.
 - ``tolerance`` — for numeric capabilities, the convergence damper
   (master §5.2 mechanism 3) skips dispatch when ``||new − last|| ≤
   tolerance``.
@@ -29,6 +28,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ...agents.blackboard.protocol import ConvergenceDispatchProtocol
 from .predicates import PageMetadataPredicate
 
 
@@ -65,22 +65,6 @@ class PageSubscription(BaseModel):
     dispatch_scope: str = Field(
         description="Blackboard scope id the dispatch event is written to.",
     )
-    dispatch_key: str = Field(
-        description=(
-            "Blackboard key (within ``dispatch_scope``) the runtime "
-            "writes when the predicate matches. Capability subscribes "
-            "to this key with @event_handler."
-        ),
-    )
-    declared_outputs: tuple[PageMetadataPredicate, ...] = Field(
-        default_factory=tuple,
-        description=(
-            "Set of predicates this subscription is expected to write "
-            "into. Used by the dependency-aware scheduler — within a "
-            "wave, a subscription that *reads* a predicate runs after "
-            "any subscription that *writes* it."
-        ),
-    )
     tolerance: NumericTolerance | None = None
     capability_key: str = Field(
         default="",
@@ -92,10 +76,21 @@ class PageSubscription(BaseModel):
     )
 
     @property
+    def dispatch_key(self) -> str:
+        """The scope-relative key the runtime writes for this
+        subscription. Derived from
+        ``ConvergenceDispatchProtocol.dispatch_key(subscription_id)``;
+        the protocol owns the key shape so the runtime and subscribing
+        capability never disagree."""
+
+        return ConvergenceDispatchProtocol.dispatch_key(self.subscription_id)
+
+    @property
     def dispatch_topic(self) -> str:
-        """Convenience: the absolute pattern that subscribers should
-        match against (``<scope>:<key>``). Matches the format the
-        blackboard transport uses internally."""
+        """The absolute pattern subscribers should match against
+        (``<scope>:<key>``). Matches the format the blackboard
+        transport uses internally."""
+
         return f"{self.dispatch_scope}:{self.dispatch_key}"
 
 

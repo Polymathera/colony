@@ -371,10 +371,8 @@ class BootstrapResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Page-change events — emitted on the blackboard 'vcm:page_events:*' topic
-# when a context source detects a remote push, a local file edit, or
-# a git fetch produces new content. Defined here so the convergence
-# runtime and the design monorepo wrapper share one shape.
+# Page-change events — yielded by ``ContextPageSource.watch()`` and fed
+# directly into the convergence runtime by VCM's watch bridge.
 # ---------------------------------------------------------------------------
 
 

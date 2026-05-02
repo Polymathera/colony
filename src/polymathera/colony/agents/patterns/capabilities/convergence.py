@@ -1,12 +1,13 @@
 """``ConvergenceCapability`` — agent-facing surface for the convergence runtime.
 
-Per master §3.4 (Layer 3 capabilities), the runtime exposes four
-agent-facing primitives plus the user-visible surfaces from §5.4:
+Per master §3.4 (Layer 3 capabilities), the runtime exposes:
 
-- ``subscribe_pattern(predicate, dispatch_key, ...)`` — register a
-  page-graph subscription. The runtime fires the dispatch event on the
-  capability's blackboard scope; the capability picks it up via its
-  normal ``@event_handler`` infrastructure.
+- ``subscribe_pattern(predicate, ...)`` — register a page-graph
+  subscription. The runtime writes the dispatch event onto this
+  capability's blackboard scope under
+  ``ConvergenceDispatchProtocol.dispatch_key(subscription_id)``; the
+  capability's ``@event_handler`` (below) picks it up and surfaces it
+  as planner context.
 - ``unsubscribe(subscription_id)`` — drop a subscription.
 - ``dispatch_change(event)`` — manually emit a page-change event into
   the runtime (used by tests and by capabilities that synthesise
@@ -16,12 +17,9 @@ agent-facing primitives plus the user-visible surfaces from §5.4:
   ``converged``.
 - ``get_convergence_status()`` — current state + counters.
 - ``get_change_feed(limit)`` — recent dispatches (master §5.4).
-- ``detect_cycle()`` — true while a cycle break is in flight in the
-  current episode.
 
 The capability resolves the ``ConvergenceRuntimeDeployment`` lazily on
-first call via the ``get_convergence_runtime`` helper. Agents do not
-need to construct a deployment handle by hand.
+first call via the ``get_convergence_runtime`` helper.
 """
 
 from __future__ import annotations
@@ -31,9 +29,11 @@ from typing import Any
 
 from overrides import override
 
+from ...blackboard import BlackboardEvent, ConvergenceDispatchProtocol
 from ...models import AgentSuspensionState
 from ...base import Agent, AgentCapability
 from ..actions import action_executor
+from ..events import EventProcessingResult, event_handler
 
 from polymathera.colony.vcm.convergence import (
     ChangeFeedEntry,
@@ -85,33 +85,30 @@ class ConvergenceCapability(AgentCapability):
     # ---- Subscription management --------------------------------------
 
     @action_executor(
-        planning_summary="Subscribe to a page-graph pattern; runtime fires "
-        "the dispatch_key on this scope when the pattern matches.",
+        planning_summary=(
+            "Subscribe to a page-graph pattern. The runtime will fire "
+            "a dispatch on this capability's scope when the pattern "
+            "matches; the dispatch is surfaced to the planner as a "
+            "convergence:dispatch:{subscription_id} context entry."
+        ),
     )
     async def subscribe_pattern(
         self,
         predicate: PageMetadataPredicate,
-        dispatch_key: str,
         *,
-        declared_outputs: list[PageMetadataPredicate] | None = None,
         tolerance: NumericTolerance | None = None,
     ) -> str:
         """Register a subscription on the convergence runtime.
 
-        ``dispatch_key`` is a key within the *capability's* blackboard
-        scope; the runtime writes the dispatch event there, and the
-        capability's existing ``@event_handler`` machinery picks it up.
-
         Returns the subscription id; pass it to ``unsubscribe`` to drop
-        the registration.
+        the registration. The dispatch key is owned by
+        ``ConvergenceDispatchProtocol`` — callers do not pick it.
         """
 
         rt = await self._handle()
         sub_id = await rt.subscribe(
             predicate=predicate,
             dispatch_scope=self.scope_id,
-            dispatch_key=dispatch_key,
-            declared_outputs=declared_outputs,
             tolerance=tolerance,
             capability_key=self.capability_key,
             agent_id=self._agent.agent_id if self._agent is not None else None,
@@ -154,12 +151,49 @@ class ConvergenceCapability(AgentCapability):
         rt = await self._handle()
         return await rt.wait_for_quiescence(timeout=timeout)
 
-    @action_executor(
-        planning_summary="True while the current episode broke a cycle.",
-    )
-    async def detect_cycle(self) -> bool:
-        rt = await self._handle()
-        return await rt.detect_cycle()
+    # ---- Receive side -------------------------------------------------
+
+    @event_handler(pattern=ConvergenceDispatchProtocol.dispatch_pattern())
+    async def _on_dispatch(
+        self,
+        event: BlackboardEvent,
+        repl: Any,
+    ) -> EventProcessingResult | None:
+        """Translate a runtime dispatch into planner context.
+
+        The runtime writes one dispatch per matched subscription onto
+        this capability's blackboard scope under
+        ``ConvergenceDispatchProtocol.dispatch_key(subscription_id)``.
+        We only react to dispatches that target subscriptions this
+        capability owns; everything else is left for sibling
+        capabilities (or simply ignored).
+        """
+
+        try:
+            subscription_id = ConvergenceDispatchProtocol.parse_dispatch_key(
+                event.key,
+            )
+        except ValueError:
+            return None
+        if subscription_id not in self._owned_subscription_ids:
+            return None
+        if not isinstance(event.value, dict):
+            return None
+        try:
+            page_event = PageChangeEvent.model_validate(event.value)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "ConvergenceCapability: dropping malformed dispatch %s",
+                event.key,
+            )
+            return None
+        return EventProcessingResult(
+            context_key=event.key,
+            context={
+                "subscription_id": subscription_id,
+                "page_event": page_event.model_dump(mode="json"),
+            },
+        )
 
     # ---- Suspension hooks ---------------------------------------------
 

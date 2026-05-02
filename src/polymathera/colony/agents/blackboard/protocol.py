@@ -1533,6 +1533,92 @@ class VCMEventProtocol(BlackboardProtocol):
         return key[len(VCMEventProtocol._WATCH_FIRED_PREFIX):]
 
 
+class ConvergenceDispatchProtocol(BlackboardProtocol):
+    """Protocol for ``ConvergenceRuntime`` -> ``ConvergenceCapability`` dispatch.
+
+    The runtime writes one event per matched ``PageSubscription`` to the
+    subscribing capability's blackboard scope under this key shape. The
+    capability subscribes via ``@event_handler(pattern=...)`` and uses
+    the embedded ``subscription_id`` to correlate the dispatch back to
+    the subscription it owns.
+
+    Operates at agent scope — each capability has its own dispatch
+    mailbox on its primary blackboard. The runtime is the sole writer;
+    the owning capability is the sole reader.
+
+    Key format:
+
+    - ``convergence:dispatch:{subscription_id}``
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.AGENT
+
+    _PREFIX: ClassVar[str] = "convergence:dispatch:"
+
+    @staticmethod
+    def dispatch_key(subscription_id: str) -> str:
+        """Key the runtime writes when a subscription matches."""
+        return f"{ConvergenceDispatchProtocol._PREFIX}{subscription_id}"
+
+    @staticmethod
+    def dispatch_pattern() -> str:
+        """Pattern matching every dispatch on the subscriber's scope."""
+        return f"{ConvergenceDispatchProtocol._PREFIX}*"
+
+    @staticmethod
+    def parse_dispatch_key(key: str) -> str:
+        """Extract ``subscription_id`` from a dispatch key."""
+        prefix = ConvergenceDispatchProtocol._PREFIX
+        if not key.startswith(prefix):
+            raise ValueError(
+                f"Not a ConvergenceDispatchProtocol key: {key!r}",
+            )
+        return key[len(prefix):]
+
+
+class ConvergenceQuiescenceProtocol(BlackboardProtocol):
+    """Protocol for ``ConvergenceRuntime`` quiescence events.
+
+    The runtime emits one event per episode boundary onto the colony
+    blackboard scope. Subscribers — typically ``DesignCheckpointer``
+    auto-tagging an ``auto_quiescence_<iso8601>`` checkpoint, and
+    future analogous "react when the design has settled" agents —
+    listen via ``@event_handler(pattern=...)``.
+
+    Operates at colony scope: quiescence is a colony-wide observable,
+    not a per-agent one. The episode_id correlates the event with the
+    counters carried in the payload.
+
+    Key format:
+
+    - ``convergence:quiescence:{episode_id}``
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    _PREFIX: ClassVar[str] = "convergence:quiescence:"
+
+    @staticmethod
+    def quiescence_key(episode_id: str) -> str:
+        """Key the runtime writes when an episode reaches quiescence."""
+        return f"{ConvergenceQuiescenceProtocol._PREFIX}{episode_id}"
+
+    @staticmethod
+    def quiescence_pattern() -> str:
+        """Pattern matching every quiescence event on the colony scope."""
+        return f"{ConvergenceQuiescenceProtocol._PREFIX}*"
+
+    @staticmethod
+    def parse_quiescence_key(key: str) -> str:
+        """Extract ``episode_id`` from a quiescence key."""
+        prefix = ConvergenceQuiescenceProtocol._PREFIX
+        if not key.startswith(prefix):
+            raise ValueError(
+                f"Not a ConvergenceQuiescenceProtocol key: {key!r}",
+            )
+        return key[len(prefix):]
+
+
 class GitHubEventProtocol(BlackboardProtocol):
     """Protocol for GitHub webhook events surfaced on the blackboard.
 

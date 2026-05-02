@@ -68,6 +68,46 @@ class PendingRecord:
     timestamp: float = 0.0  # When the record was written
 
 
+@dataclass(frozen=True)
+class PageGraphDelta:
+    """What an ``IngestionPolicy`` operation did to the page graph.
+
+    Returned by every policy method (``ingest_record``,
+    ``handle_update``, ``handle_delete``, ``flush_all``) so the page
+    source can emit ``PageChangeEvent``s directly from the policy's
+    declared mutations — no diff against the durable graph required.
+
+    Three kinds of mutations:
+
+    - ``created``: brand-new page ids (subscribers see ``PageAdded``).
+    - ``invalidated``: pages explicitly retired with a reason
+      (subscribers see ``PageInvalidated``).
+    - ``replaced``: ``(old_page_id, new_page_id)`` pairs. Use this
+      when the same conceptual content moved to a new page id (e.g.,
+      a Rebuild-policy update) — subscribers see ``PageReplaced``.
+      Use ``invalidated`` + ``created`` separately when the two events
+      are unrelated.
+    """
+
+    created: tuple[str, ...] = ()
+    invalidated: tuple[tuple[str, str], ...] = ()
+    replaced: tuple[tuple[str, str], ...] = ()
+
+    @classmethod
+    def empty(cls) -> "PageGraphDelta":
+        return cls()
+
+    def merge(self, other: "PageGraphDelta") -> "PageGraphDelta":
+        return PageGraphDelta(
+            created=self.created + other.created,
+            invalidated=self.invalidated + other.invalidated,
+            replaced=self.replaced + other.replaced,
+        )
+
+    def is_empty(self) -> bool:
+        return not (self.created or self.invalidated or self.replaced)
+
+
 
 # =============================================================================
 # SimpleTokenizer — Fallback when VCM has no real tokenizer
@@ -278,6 +318,8 @@ class PageUpdatePolicy(ABC):
 
     When a blackboard key is overwritten, the page source receives a
     write event with old_value set. This policy decides what to do.
+    Returns a :class:`PageGraphDelta` describing the page-graph
+    mutations the source should emit ``PageChangeEvent``s for.
     """
 
     @abstractmethod
@@ -286,7 +328,7 @@ class PageUpdatePolicy(ABC):
         event: "BlackboardEvent",
         record_to_page: dict[str, str],
         ingestion_policy: "GroupAndFlushIngestionPolicy",
-    ) -> None:
+    ) -> PageGraphDelta:
         ...
 
 
@@ -297,6 +339,11 @@ class AppendOnlyUpdatePolicy(PageUpdatePolicy):
     enters the pending buffer. Consumers see both versions until
     the old page is rebuilt during maintenance.
     Simple and low-overhead. Best for append-heavy workloads.
+
+    If the new record flushes into a different page than the record
+    previously occupied, the delta is reported as ``replaced`` so
+    subscribers see one ``PageReplaced`` event rather than an
+    ambiguous ``PageAdded``.
     """
 
     async def handle_update(
@@ -304,15 +351,28 @@ class AppendOnlyUpdatePolicy(PageUpdatePolicy):
         event: "BlackboardEvent",
         record_to_page: dict[str, str],
         ingestion_policy: "GroupAndFlushIngestionPolicy",
-    ) -> None:
-        # Treat as a new record
+    ) -> PageGraphDelta:
+        old_page_id = record_to_page.get(event.key)
         record = PendingRecord(
             key=event.key,
             value=event.value or {},
             tags=event.tags or set(),
             timestamp=event.timestamp or time.time(),
         )
-        await ingestion_policy.ingest_record(record)
+        delta = await ingestion_policy.ingest_record(record)
+        # Promote a single created page into a 'replaced' event when
+        # the record moved to a different page id (the old page
+        # survives with other records — that's the AppendOnly
+        # invariant).
+        if (
+            old_page_id
+            and len(delta.created) == 1
+            and delta.created[0] != old_page_id
+        ):
+            return PageGraphDelta(
+                replaced=((old_page_id, delta.created[0]),),
+            )
+        return delta
 
 
 class RebuildPageUpdatePolicy(PageUpdatePolicy):
@@ -328,19 +388,36 @@ class RebuildPageUpdatePolicy(PageUpdatePolicy):
         event: "BlackboardEvent",
         record_to_page: dict[str, str],
         ingestion_policy: "GroupAndFlushIngestionPolicy",
-    ) -> None:
+    ) -> PageGraphDelta:
         old_page_id = record_to_page.get(event.key)
+        invalidated: tuple[tuple[str, str], ...] = ()
         if old_page_id:
             await ingestion_policy._mark_page_stale(old_page_id)
             del record_to_page[event.key]
-        # Re-ingest as new record
+            invalidated = ((old_page_id, "rebuild requested by update"),)
         record = PendingRecord(
             key=event.key,
             value=event.value or {},
             tags=event.tags or set(),
             timestamp=event.timestamp or time.time(),
         )
-        await ingestion_policy.ingest_record(record)
+        delta = await ingestion_policy.ingest_record(record)
+        # When the rebuild had a single new flushed page AND the same
+        # record had an old page, surface the move as ``replaced`` —
+        # cleaner signal than separate invalidated + created pair.
+        if (
+            old_page_id
+            and len(delta.created) == 1
+            and delta.created[0] != old_page_id
+        ):
+            return PageGraphDelta(
+                replaced=((old_page_id, delta.created[0]),),
+            )
+        return PageGraphDelta(
+            created=delta.created,
+            invalidated=invalidated + delta.invalidated,
+            replaced=delta.replaced,
+        )
 
 
 # =============================================================================
@@ -353,6 +430,8 @@ class PageEvictionPolicy(ABC):
 
     When a blackboard key is deleted, the page source receives a
     delete event. This policy decides how to handle the stale page.
+    Returns a :class:`PageGraphDelta` describing the page-graph
+    mutations the source should emit ``PageChangeEvent``s for.
     """
 
     @abstractmethod
@@ -361,7 +440,7 @@ class PageEvictionPolicy(ABC):
         event: "BlackboardEvent",
         record_to_page: dict[str, str],
         ingestion_policy: "GroupAndFlushIngestionPolicy",
-    ) -> None:
+    ) -> PageGraphDelta:
         ...
 
 
@@ -369,7 +448,9 @@ class LazyEvictionPolicy(PageEvictionPolicy):
     """Do nothing on deletion. Default policy.
 
     Pages become stale naturally and are cleaned up during periodic
-    VCM maintenance. Lowest overhead.
+    VCM maintenance. Lowest overhead. The page is marked invalidated
+    only when the deleted record was the *last* record mapping to
+    that page — otherwise it persists with the remaining records.
     """
 
     async def handle_delete(
@@ -377,8 +458,16 @@ class LazyEvictionPolicy(PageEvictionPolicy):
         event: "BlackboardEvent",
         record_to_page: dict[str, str],
         ingestion_policy: "GroupAndFlushIngestionPolicy",
-    ) -> None:
-        record_to_page.pop(event.key, None)
+    ) -> PageGraphDelta:
+        old_page_id = record_to_page.pop(event.key, None)
+        if old_page_id is None:
+            return PageGraphDelta.empty()
+        still_mapped = any(pid == old_page_id for pid in record_to_page.values())
+        if still_mapped:
+            return PageGraphDelta.empty()
+        return PageGraphDelta(
+            invalidated=((old_page_id, "last record removed from page"),),
+        )
 
 
 class MarkStaleEvictionPolicy(PageEvictionPolicy):
@@ -393,10 +482,14 @@ class MarkStaleEvictionPolicy(PageEvictionPolicy):
         event: "BlackboardEvent",
         record_to_page: dict[str, str],
         ingestion_policy: "GroupAndFlushIngestionPolicy",
-    ) -> None:
-        page_id = record_to_page.pop(event.key, None)
-        if page_id:
-            await ingestion_policy._mark_page_stale(page_id)
+    ) -> PageGraphDelta:
+        old_page_id = record_to_page.pop(event.key, None)
+        if old_page_id is None:
+            return PageGraphDelta.empty()
+        await ingestion_policy._mark_page_stale(old_page_id)
+        return PageGraphDelta(
+            invalidated=((old_page_id, "marked stale by record deletion"),),
+        )
 
 
 # =============================================================================
@@ -448,13 +541,12 @@ class IngestionPolicy(ABC):
         ...
 
     @abstractmethod
-    async def ingest_record(self, record: PendingRecord) -> list[str]:
+    async def ingest_record(self, record: PendingRecord) -> PageGraphDelta:
         """Ingest a new record.
 
-        Returns:
-            List of page_ids of any VCM pages created (empty if record
-            was buffered and no flush occurred).
-        """
+        Returns the page-graph mutations the source should emit
+        ``PageChangeEvent``s for. Empty when the record was buffered
+        and no flush occurred."""
         ...
 
     @abstractmethod
@@ -462,7 +554,7 @@ class IngestionPolicy(ABC):
         self,
         event: "BlackboardEvent",
         record_to_page: dict[str, str],
-    ) -> None:
+    ) -> PageGraphDelta:
         """Handle an update to an already-ingested record."""
         ...
 
@@ -471,13 +563,13 @@ class IngestionPolicy(ABC):
         self,
         event: "BlackboardEvent",
         record_to_page: dict[str, str],
-    ) -> None:
+    ) -> PageGraphDelta:
         """Handle deletion of an already-ingested record."""
         ...
 
     @abstractmethod
-    async def flush_all(self) -> list[str]:
-        """Flush all pending records. Returns page_ids of pages created."""
+    async def flush_all(self) -> PageGraphDelta:
+        """Flush all pending records and return the resulting delta."""
         ...
 
 
@@ -533,37 +625,38 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
         self._tokenizer = tokenizer
         self._record_to_page = record_to_page
 
-    async def ingest_record(self, record: PendingRecord) -> list[str]:
+    async def ingest_record(self, record: PendingRecord) -> PageGraphDelta:
         locality_key = self.locality_policy.assign_group(record.value, record.tags)
         group = self._pending_groups.setdefault(locality_key, [])
         group.append(record)
 
         if self.flush_policy.should_flush(group, self._tokenizer):
             page_id = await self._flush_group(locality_key)
-            return [page_id] if page_id else []
-        return []
+            if page_id:
+                return PageGraphDelta(created=(page_id,))
+        return PageGraphDelta.empty()
 
     async def handle_update(
         self,
         event: "BlackboardEvent",
         record_to_page: dict[str, str],
-    ) -> None:
-        await self.update_policy.handle_update(event, record_to_page, self)
+    ) -> PageGraphDelta:
+        return await self.update_policy.handle_update(event, record_to_page, self)
 
     async def handle_delete(
         self,
         event: "BlackboardEvent",
         record_to_page: dict[str, str],
-    ) -> None:
-        await self.eviction_policy.handle_delete(event, record_to_page, self)
+    ) -> PageGraphDelta:
+        return await self.eviction_policy.handle_delete(event, record_to_page, self)
 
-    async def flush_all(self) -> list[str]:
-        page_ids = []
+    async def flush_all(self) -> PageGraphDelta:
+        delta = PageGraphDelta.empty()
         for locality_key in list(self._pending_groups.keys()):
             pid = await self._flush_group(locality_key)
             if pid:
-                page_ids.append(pid)
-        return page_ids
+                delta = delta.merge(PageGraphDelta(created=(pid,)))
+        return delta
 
     async def _flush_group(self, locality_key: str) -> str:
         """Create a VCM page from all pending records in a locality group.
@@ -690,12 +783,12 @@ class BlackboardContextPageSource(ContextPageSource):
     (``static = False``) and overrides
     :meth:`ContextPageSource.watch` to yield ``PageChangeEvent``s as
     record-driven page-graph mutations occur. The bridging from
-    ``watch()`` into the colony scope's ``vcm:page_events:*`` topic
-    (where the convergence runtime forwarder reads) is done generically
-    by the VCM — see ``VirtualContextManager._materialize_scope_mapping``.
-    Backfill is silent: only mutations that arrive after
-    ``initialize()`` returns reach the runtime, since backfill is
-    initialisation rather than mutation.
+    ``watch()`` into ``ConvergenceRuntimeDeployment.feed_page_event``
+    is done generically by the VCM — see
+    ``VirtualContextManager._materialize_scope_mapping``. Backfill is
+    silent: only mutations that arrive after ``initialize()`` returns
+    reach the runtime, since backfill is initialisation rather than
+    mutation.
     """
 
     static = False
@@ -1036,62 +1129,47 @@ class BlackboardContextPageSource(ContextPageSource):
         """Process events from the EnhancedBlackboard.
 
         Dispatches to the IngestionPolicy based on event type:
-        - write (no old_value): new record -> ingest_record()
-        - write (with old_value): update -> handle_update()
-        - delete: removal -> handle_delete()
 
-        After each branch, derives the page-graph mutation kind and
-        pushes the corresponding ``PageChangeEvent``s onto
-        ``self._page_event_queue`` for ``watch()`` to yield. Backfill
-        does not reach this loop — only post-backfill writes — so the
-        runtime never sees initialisation traffic.
+        - write (no old_value): new record → ``ingest_record``
+        - write (with old_value): update → ``handle_update``
+        - delete: removal → ``handle_delete``
+
+        Each policy method returns a :class:`PageGraphDelta` describing
+        the page-graph mutations it performed. The source converts
+        that delta directly into ``PageChangeEvent``s on the
+        watch-queue — no diff against the durable graph required.
+
+        Backfill does not reach this loop — only post-backfill writes
+        do — so the runtime never sees initialisation traffic.
         """
         while True:
             try:
                 event = await self._event_queue.get()
-                # Snapshot the durable graph BEFORE the policy mutates
-                # it so ``_enqueue_graph_delta`` can diff. Reading
-                # uncached forces a fresh fetch from PageStorage —
-                # any mutation by another replica between events is
-                # already visible in the snapshot.
-                # TODO: This is a bit inefficient — we load the full graph on
-                # every event, even though most events only mutate a single page.
-                pages_before = set(
-                    (await self._page_storage.load_page_graph(cached=False)).nodes
-                )
-                page_id_before_for_record = self._record_to_page.get(event.key)
 
                 if event.event_type == "write":
                     if event.old_value is not None:
-                        # UPDATE: old_value present means this key was overwritten
-                        await self.ingestion_policy.handle_update(
+                        delta = await self.ingestion_policy.handle_update(
                             event=event,
                             record_to_page=self._record_to_page,
                         )
                     else:
-                        # NEW WRITE — the policy persists newly-flushed
-                        # pages to PageStorage itself; we do not mirror
-                        # them on a local graph field.
                         record = PendingRecord(
                             key=event.key,
                             value=event.value or {},
                             tags=event.tags or set(),
                             timestamp=event.timestamp or time.time(),
                         )
-                        await self.ingestion_policy.ingest_record(record)
-
+                        delta = await self.ingestion_policy.ingest_record(record)
                 elif event.event_type == "delete":
-                    await self.ingestion_policy.handle_delete(
+                    delta = await self.ingestion_policy.handle_delete(
                         event=event,
                         record_to_page=self._record_to_page,
                     )
+                else:
+                    delta = PageGraphDelta.empty()
 
-                if self._publish_events:
-                    await self._enqueue_graph_delta(
-                        event=event,
-                        pages_before=pages_before,
-                        page_id_before_for_record=page_id_before_for_record,
-                    )
+                if self._publish_events and not delta.is_empty():
+                    self._enqueue_delta_events(event, delta)
 
             except asyncio.CancelledError:
                 break
@@ -1102,85 +1180,53 @@ class BlackboardContextPageSource(ContextPageSource):
                     exc_info=True,
                 )
 
-    async def _enqueue_graph_delta(
+    def _enqueue_delta_events(
         self,
-        *,
         event: "BlackboardEvent",
-        pages_before: set[str],
-        page_id_before_for_record: str | None,
+        delta: PageGraphDelta,
     ) -> None:
-        """Diff the page graph after handling ``event`` and push
-        ``PageChangeEvent``s onto the watch-queue.
+        """Translate a ``PageGraphDelta`` into ``PageChangeEvent``s and
+        push them onto the watch-queue.
 
-        Three signal kinds are produced:
-
-        - **PageAdded** for any node that did not exist before (a
-          buffered group flushed into a new VCM page).
-        - **PageInvalidated** for the page a deleted record was on,
-          if that page is no longer mapped to any record.
-        - **PageReplaced** when an UPDATE moved a record to a new page
-          and the old page is still mapped to other records.
-
-        ``data_type`` is left None — the source has no global type
-        label for blackboard-paged content; subscribers filter by
-        ``source`` or scope instead. If the queue is full
-        (``maxsize`` reached) the event is dropped with a warning;
-        the runtime layer's rate-limiter is the right place to absorb
-        sustained back-pressure.
-
-        Async because it reads the durable page graph from
-        ``PageStorage`` rather than a stale local field.
+        The policy already told us what changed; we just shape the
+        events. ``data_type`` is left ``None`` — the source has no
+        global type label for blackboard-paged content; subscribers
+        filter by ``source`` or scope instead. Queue overflow drops
+        the event with a warning (the runtime's per-page rate-limiter
+        is the safety net for sustained back-pressure).
         """
 
-        pages_after = set(
-            (await self._page_storage.load_page_graph(cached=False)).nodes
-        )
+        record_key = event.key
         produced: list[PageChangeEvent] = []
-
-        for new_pid in pages_after - pages_before:
+        for new_pid in delta.created:
             produced.append(
                 PageChangeEvent.page_added(
                     page_id=new_pid,
                     source=self._source_uri,
                     scope_id=self.scope_id,
-                    extra={"record_key": event.key},
+                    extra={"record_key": record_key},
                 ),
             )
-
-        if event.event_type == "delete" and page_id_before_for_record is not None:
-            still_mapped = any(
-                pid == page_id_before_for_record
-                for pid in self._record_to_page.values()
+        for old_pid, reason in delta.invalidated:
+            produced.append(
+                PageChangeEvent.page_invalidated(
+                    page_id=old_pid,
+                    source=self._source_uri,
+                    scope_id=self.scope_id,
+                    reason=reason,
+                    extra={"record_key": record_key},
+                ),
             )
-            if not still_mapped:
-                produced.append(
-                    PageChangeEvent.page_invalidated(
-                        page_id=page_id_before_for_record,
-                        source=self._source_uri,
-                        scope_id=self.scope_id,
-                        reason="last record removed from page",
-                        extra={"record_key": event.key},
-                    ),
-                )
-
-        if event.event_type == "write" and event.old_value is not None:
-            new_pid_for_record = self._record_to_page.get(event.key)
-            if (
-                page_id_before_for_record is not None
-                and new_pid_for_record is not None
-                and new_pid_for_record != page_id_before_for_record
-                and page_id_before_for_record in pages_after
-            ):
-                produced.append(
-                    PageChangeEvent.page_replaced(
-                        old_page_id=page_id_before_for_record,
-                        new_page_id=new_pid_for_record,
-                        source=self._source_uri,
-                        scope_id=self.scope_id,
-                        extra={"record_key": event.key},
-                    ),
-                )
-
+        for old_pid, new_pid in delta.replaced:
+            produced.append(
+                PageChangeEvent.page_replaced(
+                    old_page_id=old_pid,
+                    new_page_id=new_pid,
+                    source=self._source_uri,
+                    scope_id=self.scope_id,
+                    extra={"record_key": record_key},
+                ),
+            )
         for pce in produced:
             try:
                 self._page_event_queue.put_nowait(pce)

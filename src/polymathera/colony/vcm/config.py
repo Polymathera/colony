@@ -45,12 +45,12 @@ class VCMConfig:
                 name="vcm",
             )
 
-        # Master §5: the always-live design context. The runtime drains
-        # vcm:page_events:* on the colony scope and dispatches to
-        # subscribed capabilities. Without this deployment, every call
-        # through ConvergenceCapability would fail with "deployment not
-        # found"; with it, capabilities can subscribe and receive
-        # ripple-on-change dispatches as soon as a watcher publishes.
+        # Master §5: the always-live design context. VCM feeds each
+        # PageChangeEvent straight into the runtime via
+        # feed_page_event (KERNEL ring); the runtime then writes one
+        # dispatch per matched subscription onto the subscribing
+        # capability's blackboard scope (key shape owned by
+        # ConvergenceDispatchProtocol).
         from .convergence import ConvergenceRuntimeDeployment
 
         app.add_deployment(

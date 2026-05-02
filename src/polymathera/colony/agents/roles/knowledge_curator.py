@@ -80,9 +80,10 @@ class ReviewItem(BaseModel):
 
 
 PageEventEmitter = Callable[[PageChangeEvent], Awaitable[None]]
-"""Callback that publishes a ``PageChangeEvent`` for the convergence
-runtime. Wired to ``ConvergenceCapability.dispatch_change`` (or to
-the ``PageEventPublisher`` on the colony scope) by the deployment."""
+"""Callback that emits a ``PageChangeEvent`` into the convergence
+runtime. Wired to ``ConvergenceCapability.dispatch_change`` (or, for
+non-capability deployments, directly to
+``ConvergenceRuntimeDeployment.feed_page_event``) by the deployment."""
 
 
 class _DesignMonorepoMirror:

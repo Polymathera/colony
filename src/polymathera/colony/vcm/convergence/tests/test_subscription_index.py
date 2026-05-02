@@ -17,7 +17,6 @@ def _sub(**kwargs) -> PageSubscription:
     return PageSubscription(
         predicate=pred,
         dispatch_scope=kwargs.pop("dispatch_scope", "scope"),
-        dispatch_key=kwargs.pop("dispatch_key", "k"),
         capability_key=kwargs.pop("capability_key", "Cap"),
     )
 

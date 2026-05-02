@@ -1,6 +1,5 @@
 
 
-import asyncio
 import logging
 import pickle
 from collections import defaultdict
@@ -13,7 +12,13 @@ from polymathera.colony.vcm.sources import ContextPageSource, ContextPageSourceF
 from polymathera.colony.vcm.models import MmapConfig, ContextPageId, VirtualContextPage
 from polymathera.colony.vcm.page_storage import PageStorage, PageStorageConfig
 from polymathera.colony.vcm.page_events import PageChangeEvent
-from polymathera.colony.vcm.watchers import LocalFsWatcher, LocalFsWatcherConfig
+from polymathera.colony.vcm.watchers import (
+    CompositeWatcher,
+    GitRemoteWatcher,
+    GitRemoteWatcherConfig,
+    LocalFsWatcher,
+    LocalFsWatcherConfig,
+)
 from polymathera.colony.distributed import get_polymathera
 
 from .sharding.file_grouping_wrapper import FileGrouperWithGraph
@@ -40,8 +45,9 @@ class FileGrouperContextPageSource(ContextPageSource):
     (``static = False``). ``watch()`` spins up a ``LocalFsWatcher``
     against the cloned working tree and translates raw fs events
     into ``PageChangeEvent``s using the source's ``file_to_page``
-    mapping. The VCM's ``_start_watch_bridge`` automatically drains
-    the iterator into the colony scope's ``vcm:page_events:*`` topic.
+    mapping. The VCM's ``_start_watch_bridge`` drains the iterator
+    and feeds each event into the convergence runtime via the
+    deployment's ``feed_page_event`` endpoint.
 
     Limitations the operator should know about:
 
@@ -50,10 +56,11 @@ class FileGrouperContextPageSource(ContextPageSource):
       no events; detecting them requires a graph rebuild.
     - The multi-replica case (multiple VCM replicas materialise the
       same scope) currently lets every replica spin up an
-      independent watcher; events get N-fold duplicated on the
-      page-event topic. The runtime's per-page rate-limiter absorbs
-      transient bursts but a leader-election story is the durable
-      fix. The same caveat applies to ``BlackboardContextPageSource``.
+      independent watcher; events get N-fold duplicated into the
+      convergence runtime. The runtime's per-page rate-limiter
+      absorbs transient bursts but a leader-election story is the
+      durable fix. The same caveat applies to
+      ``BlackboardContextPageSource``.
     """
 
     static = False
@@ -97,12 +104,13 @@ class FileGrouperContextPageSource(ContextPageSource):
         # source mutates the graph in storage.
         self._file_relationship_graph: nx.DiGraph | None = None  # From FileGrouperWithGraph
 
-        # Local clone path resolved during initialize(); LocalFsWatcher
-        # in watch() roots here. None on replicas where the clone is
-        # not available (those replicas yield no events from watch()).
+        # Local clone path resolved during initialize(); the watchers
+        # in watch() root here. ``None`` on replicas where the clone
+        # is not available (those replicas yield no events from
+        # watch()).
         self._repo_path: Path | None = None
-        # Active watcher reference so shutdown() can stop it cleanly.
-        self._fs_watcher: LocalFsWatcher | None = None
+        # Active composite watcher so shutdown() can stop it cleanly.
+        self._composite_watcher: CompositeWatcher | None = None
 
     @override
     async def initialize(self) -> None:
@@ -329,29 +337,32 @@ class FileGrouperContextPageSource(ContextPageSource):
 
     @override
     async def shutdown(self) -> None:
-        """Stop the active filesystem watcher (if any) and release
+        """Stop the composite watcher (if any) and release
         page-storage references."""
 
-        if self._fs_watcher is not None:
-            self._fs_watcher.stop()
-            self._fs_watcher = None
+        if self._composite_watcher is not None:
+            self._composite_watcher.stop()
+            self._composite_watcher = None
         self.page_storage = None
 
     @override
     async def watch(self) -> AsyncIterator[PageChangeEvent]:
-        """Yield ``PageChangeEvent``s for working-tree mutations.
+        """Yield ``PageChangeEvent``s for working-tree mutations and
+        upstream-remote commits.
 
-        Roots a ``LocalFsWatcher`` at the cloned repository path. The
-        watcher's path filter and ``page_id_for`` callback both consult
-        a precomputed ``rel_path → page_id`` map derived from
-        ``self.file_to_page``; events for files outside that mapping
-        are dropped at the watcher level so the topic only carries
-        signals about pages the convergence runtime can reason about.
+        Two watchers run side by side rooted at the cloned working
+        tree: a ``LocalFsWatcher`` for in-tree edits (debounced
+        filesystem events) and a ``GitRemoteWatcher`` for new commits
+        landing on the tracked remote branch (periodic ``git fetch``
+        + diff against the local clone). Events from both are merged
+        into one iterator. The path filter + ``page_id_for`` callback
+        on ``LocalFsWatcher`` both consult a precomputed
+        ``rel_path → page_id`` map derived from ``self.file_to_page``,
+        so events for files outside that mapping are dropped at the
+        source.
 
-        ``data_type`` defaults to ``"design_monorepo_file"`` — a coarse
-        label that matches the convention ``DesignMonorepoWatcher``
-        uses, so existing subscriptions written against either source
-        match the same way.
+        ``data_type`` defaults to ``"design_monorepo_file"`` for
+        both watchers — subscriptions key off this label.
 
         On replicas where ``self._repo_path`` is ``None`` (the source
         loaded the graph from storage but the working tree could not
@@ -394,22 +405,35 @@ class FileGrouperContextPageSource(ContextPageSource):
             )
             return
 
-        watcher = LocalFsWatcher(
-            root=self._repo_path,
+        source_uri = f"git:{self.origin_url}:{self.branch}:{self.commit}"
+        composite = CompositeWatcher(
+            (
+                LocalFsWatcher(
+                    root=self._repo_path,
+                    scope_id=self.scope_id,
+                    source_uri=source_uri,
+                    page_id_for=lambda rel: rel_to_page.get(rel.as_posix(), ""),
+                    path_filter=lambda rel: rel.as_posix() in rel_to_page,
+                    config=LocalFsWatcherConfig(data_type="design_monorepo_file"),
+                ),
+                GitRemoteWatcher(
+                    repo_path=self._repo_path,
+                    scope_id=self.scope_id,
+                    source_uri=source_uri,
+                    config=GitRemoteWatcherConfig(
+                        branch=self.branch,
+                        data_type="design_monorepo_file",
+                    ),
+                ),
+            ),
             scope_id=self.scope_id,
-            source_uri=f"git:{self.origin_url}:{self.branch}:{self.commit}",
-            page_id_for=lambda rel: rel_to_page.get(rel.as_posix(), ""),
-            path_filter=lambda rel: rel.as_posix() in rel_to_page,
-            config=LocalFsWatcherConfig(data_type="design_monorepo_file"),
         )
-        self._fs_watcher = watcher
+        self._composite_watcher = composite
         try:
-            async for event in watcher.watch():
+            async for event in composite.watch():
                 yield event
-        except asyncio.CancelledError:
-            return
         finally:
-            self._fs_watcher = None
+            self._composite_watcher = None
 
     @override
     async def get_page_id_for_record(self, record_id: str) -> ContextPageId | None:

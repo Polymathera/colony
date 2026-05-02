@@ -7,15 +7,14 @@ The chain is built from four layers, each in its own colony package:
 | Layer | Package | Role |
 |-------|---------|------|
 | 1. Source watchers | [polymathera.colony.vcm.watchers](../../src/polymathera/colony/vcm/watchers/) | Detect upstream mutations and emit `PageChangeEvent`s |
-| 2. Page-event topic | `EnhancedBlackboard` (colony scope), key prefix `vcm:page_events:*` | Transport — decouples watchers from runtime initialisation order |
+| 2. VCM watch bridge | [polymathera.colony.vcm.manager.VirtualContextManager._start_watch_bridge](../../src/polymathera/colony/vcm/manager.py) | Drains each non-static source's `watch()` and feeds events directly into the runtime via the deployment handle (KERNEL ring) |
 | 3. Convergence runtime | [polymathera.colony.vcm.convergence](../../src/polymathera/colony/vcm/convergence/) | Subscriptions, topological dispatch, quiescence detection, cycle break, rate limit, damping |
 | 4. Agent surface | [polymathera.colony.agents.patterns.capabilities.ConvergenceCapability](../../src/polymathera/colony/agents/patterns/capabilities/convergence.py) | `subscribe_pattern`, `unsubscribe`, `dispatch_change`, `wait_for_quiescence`, `get_convergence_status`, `get_change_feed`, `detect_cycle` |
 
 All four layers are implemented and wired end-to-end at cluster boot. The chain runs whenever:
 
 1. `VCMConfig.add_deployments_to_app` registers `ConvergenceRuntimeDeployment` (it always does, unconditionally).
-2. A capability inheriting from `_DesignMonorepoCapabilityBase` initialises against a working tree — its `initialize()` registers a `DesignMonorepoWatcher` with the convergence runtime, idempotently keyed by the absolute working-tree path so N agents binding to the same monorepo produce one watcher.
-3. The VCM materialises a scope mapping for any non-static `ContextPageSource` (e.g., `BlackboardContextPageSource`) — `_start_watch_bridge` automatically drains the source's `watch()` iterator into the colony scope's `vcm:page_events:*` topic.
+2. The VCM materialises a scope mapping for any non-static `ContextPageSource` — `_start_watch_bridge` drains the source's `watch()` iterator and calls `ConvergenceRuntimeDeployment.feed_page_event` directly via its deployment handle. There is exactly **one** chain per source: `FileGrouperContextPageSource.watch()` runs both a `LocalFsWatcher` (for in-tree edits) and a `GitRemoteWatcher` (for upstream commits) and merges them; `BlackboardContextPageSource.watch()` drains the source's own record-event loop.
 
 Layer 1 (HTTP webhook receiver) is the only piece deferred — the `WebhookEventBuilder` translator exists; the route lives in Phase C6.
 
@@ -33,7 +32,7 @@ End-to-end smoke tests live in [`vcm/convergence/tests/test_chain_smoke.py`](../
 
 | Source | `static` | `watch()` shape | Live-event production |
 |--------|----------|----------------|-----------------------|
-| [`FileGrouperContextPageSource`](../../src/polymathera/colony/samples/paging/file_grouper_page_source.py) | `False` | Yields from a wrapped `LocalFsWatcher` rooted at the cloned working tree | Filesystem events on tracked files (those in `file_to_page`) become `PageChangeEvent`s with `data_type="design_monorepo_file"` and the affected page's id |
+| [`FileGrouperContextPageSource`](../../src/polymathera/colony/samples/paging/file_grouper_page_source.py) | `False` | Merges a `LocalFsWatcher` (in-tree edits) and a `GitRemoteWatcher` (upstream commits) rooted at the cloned working tree, into one async iterator | Filesystem events on tracked files (those in `file_to_page`) become `PageChangeEvent`s with `data_type="design_monorepo_file"` and the affected page's id |
 | [`BlackboardContextPageSource`](../../src/polymathera/colony/agents/blackboard/paging/blackboard_page_source.py) | `False` | Yields from an internal `asyncio.Queue` populated by the source's record-event loop | Each blackboard write/update/delete diffs the page graph; new pages emit `PageAdded`, retired pages emit `PageInvalidated`, page reassignments emit `PageReplaced` |
 
 The two shapes differ but the *contract* is uniform: every non-static source exposes mutations as an `AsyncIterator[PageChangeEvent]`. The runtime side does not know or care whether the iterator delegates to a sidecar watcher (`LocalFsWatcher`) or pulls from the source's own internal event loop.
@@ -41,7 +40,7 @@ The two shapes differ but the *contract* is uniform: every non-static source exp
 #### Limitations to know about
 
 - **`FileGrouperContextPageSource` only watches files in `file_to_page` at the time `watch()` starts.** A file added to the working tree after the page graph was built fires no events; detecting it requires a graph rebuild, which is a separate pass.
-- **Multi-replica VCMs duplicate events.** Every replica that materialises a non-static scope mapping starts its own watcher; events get N-fold duplicated on the page-event topic. The runtime's per-page rate-limiter absorbs transient bursts, but a leader-election story is the durable fix. The same caveat applies to `BlackboardContextPageSource`.
+- **Multi-replica VCMs duplicate events.** Every replica that materialises a non-static scope mapping starts its own watcher; events get N-fold duplicated into the convergence runtime. The runtime's per-page rate-limiter absorbs transient bursts, but a leader-election story is the durable fix. The same caveat applies to `BlackboardContextPageSource`.
 
 ### The bridge: `VirtualContextManager._start_watch_bridge`
 
@@ -49,10 +48,10 @@ When the VCM materialises a scope mapping, it inspects `source.static`. If the s
 
 ```python
 async for event in source.watch():
-    await publisher.publish(event)
+    await convergence_runtime.feed_page_event(event=event, source_id=source.scope_id)
 ```
 
-`publisher` is a `PageEventPublisher` against the colony scope's `vcm:page_events:*` topic, where the convergence runtime forwarder reads. The bridge task lifetime is owned by the `MappedScope` — `_shutdown_mapped_scope` cancels it on unmap. One shared `EnhancedBlackboard` handle backs all bridges in a VCM replica; it is released when the last scope is unmounted.
+The convergence runtime handle is resolved once per VCM replica via `get_convergence_runtime(self.app_name)` and reused across all bridges. `feed_page_event` is a `Ring.KERNEL` endpoint — it is the privileged ingestion path between sibling deployments and bypasses any blackboard mediation. The bridge task's lifetime is owned by the `MappedScope` — `_shutdown_mapped_scope` cancels it on unmap.
 
 This means: any future `ContextPageSource` subclass that sets `static = False` and implements `watch()` is automatically wired into the convergence chain. No special hook on the source, no new code in the bridge, no additional registration call.
 
@@ -66,18 +65,15 @@ Three transport classes plus a webhook payload translator, all in [vcm/watchers/
 - **`GitRemoteWatcher`** — periodic `git fetch` + `git diff --name-only` against a local clone; covers remote-driven push fallback when no webhook is available.
 - **`SourcePollWatcher`** — generic interval poll over any `ContextPageSource`'s `get_all_mapped_pages()` snapshot; the catch-all transport for sources behind APIs (arXiv RSS, supplier catalogues) with no push notification.
 - **`WebhookEventBuilder`** — translates a Gitea / GitLab / GitHub git-push webhook payload into a sequence of `PageChangeEvent`s. (HTTP receiver is a Phase C6 concern; the translator lives here so the watcher contract stays in one place.)
+- **`CompositeWatcher`** — merges N child watchers into one async iterator. Used when a single source needs more than one watch transport against the same backing store (e.g., `FileGrouperContextPageSource` couples a `LocalFsWatcher` and a `GitRemoteWatcher` against the cloned working tree).
 
-All four set `static = False` and emit `PageChangeEvent`s. Watchers are **not** subclasses of `ContextPageSource` — they are sidecar classes that operate alongside a source. This decouples watch lifecycle from page-source lifecycle and lets multiple watchers cover one source (LocalFs *and* GitRemote on the same working tree, for example).
+All set `static = False` and emit `PageChangeEvent`s. Watchers are **not** subclasses of `ContextPageSource` — they are sidecar classes that operate alongside a source. This decouples watch lifecycle from page-source lifecycle and lets multiple watchers cover one source (LocalFs *and* GitRemote on the same working tree, for example).
 
-### Publisher
+### Bridge: `FileGrouperContextPageSource.watch`
 
-[`PageEventPublisher`](../../src/polymathera/colony/vcm/watchers/publisher.py) is the small adapter that takes events from a watcher loop and writes them to the colony scope's `vcm:page_events:*` topic. The convergence runtime's forwarder consumes from that topic — never from a watcher directly.
+The page source itself is the bridge. When a working tree is mapped into the VCM as a `FileGrouperContextPageSource` (via `mmap_application_scope` with `source_type="file_grouper"`), the VCM's `_start_watch_bridge` drains the source's `watch()` iterator and feeds each event into the runtime. `watch()` runs both watchers (LocalFs + GitRemote) inside the source itself — via `CompositeWatcher` — and merges them into one stream. There is no separate registration call from any capability.
 
-### Bridge: `DesignMonorepoWatcher`
-
-[`design_monorepo/watcher.py`](../../src/polymathera/colony/design_monorepo/watcher.py) glues a `DesignMonorepoClient` to the runtime by spinning up `LocalFsWatcher` + `GitRemoteWatcher` against the working tree and feeding both through one `PageEventPublisher`. It is the canonical "high-level live source" composition.
-
-The watcher's lifetime is owned by `ConvergenceRuntimeDeployment`. Capabilities that bind to a working tree call `register_design_monorepo(working_dir)` on the runtime (transparently — `_DesignMonorepoCapabilityBase.initialize()` does this on every agent that uses any of the three design-monorepo capabilities). The runtime dedups by absolute path, so N agents on the same program produce one watcher; the watcher shuts down on cluster shutdown.
+There used to be a parallel `DesignMonorepoWatcher` registered through `ConvergenceRuntimeDeployment.register_design_monorepo`; that produced duplicate watchers when the same working tree was both registered AND mapped. It was removed — the sole place a working tree's filesystem + remote are watched is `FileGrouperContextPageSource.watch()`. See `colony_docs/markdown/convergence_flow_review.md` §P0 for the rationale.
 
 ---
 
@@ -87,7 +83,7 @@ The watcher's lifetime is owned by `ConvergenceRuntimeDeployment`. Capabilities 
 
 ```
 PageChangeEvent  ─┐
-                  │  forwarder (in ConvergenceRuntimeDeployment)
+                  │  VCM watch bridge → ConvergenceRuntimeDeployment.feed_page_event
                   ▼
        ConvergenceRuntime.feed_event
                   │
@@ -104,29 +100,63 @@ PageChangeEvent  ─┐
         dispatch_callback(sub, event)
                   │
                   ▼
-        EnhancedBlackboard.write to sub.dispatch_scope/sub.dispatch_key
+        EnhancedBlackboard.write(
+            scope=sub.dispatch_scope,
+            key=ConvergenceDispatchProtocol.dispatch_key(sub.subscription_id),
+        )
                   │
                   ▼
-   subscriber's @event_handler picks it up and fires
+   ConvergenceCapability's @event_handler(pattern=
+        ConvergenceDispatchProtocol.dispatch_pattern()) picks it up
 ```
 
 Module map:
 
-- [`runtime.py`](../../src/polymathera/colony/vcm/convergence/runtime.py) — `ConvergenceRuntime` (pure dispatch logic), `ConvergenceState`, `ConvergenceStatus`, `ConvergenceCounters`, `ChangeFeedEntry`. Tracks the current episode, detects quiescence, breaks cycles when the episode budget is exhausted.
-- [`subscriptions.py`](../../src/polymathera/colony/vcm/convergence/subscriptions.py) — `PageSubscription`, `NumericTolerance`.
+- [`runtime.py`](../../src/polymathera/colony/vcm/convergence/runtime.py) — `ConvergenceRuntime` (pure dispatch logic), `ConvergenceState`, `ConvergenceStatus`, `ConvergenceCounters`, `ChangeFeedEntry`. Tracks the current episode, applies damping, rate-limits per-page writes, enforces a per-episode budget, detects quiescence.
+- [`subscriptions.py`](../../src/polymathera/colony/vcm/convergence/subscriptions.py) — `PageSubscription`, `NumericTolerance`. The dispatch *key* is derived from `ConvergenceDispatchProtocol` + the subscription_id; callers do not pick it.
 - [`predicates.py`](../../src/polymathera/colony/vcm/convergence/predicates.py) — `PageMetadataPredicate` (typed match expression over page metadata) + `EdgeReachResolver` for graph-aware predicates.
 - [`index.py`](../../src/polymathera/colony/vcm/convergence/index.py) — `SubscriptionIndex` (fast lookup by event metadata).
 - [`damping.py`](../../src/polymathera/colony/vcm/convergence/damping.py) — numeric-tolerance check that suppresses dispatches inside a configured tolerance.
 - [`rate_limit.py`](../../src/polymathera/colony/vcm/convergence/rate_limit.py) — `WriteRateLimiter` (per-page write throttle).
-- [`deployment.py`](../../src/polymathera/colony/vcm/convergence/deployment.py) — `ConvergenceRuntimeDeployment`, the Ray-serving singleton wrapping the runtime; runs the forwarder task that consumes `vcm:page_events:*` from the colony blackboard.
+- [`deployment.py`](../../src/polymathera/colony/vcm/convergence/deployment.py) — `ConvergenceRuntimeDeployment`, the Ray-serving singleton wrapping the runtime; exposes `feed_page_event` (KERNEL ring, called by VCM's watch bridge), `subscribe`/`unsubscribe`, the read-side polling surfaces (`get_status`, `get_change_feed`, `wait_for_quiescence`), and emits `ConvergenceQuiescenceProtocol` events on the colony scope.
 
-The runtime emits three surfaces back onto the colony blackboard for the SessionAgent's UI panel (master §5.4): a `ConvergenceStatus` snapshot, per-episode quiescence markers, and the change feed.
+### Mechanism scope (what's in v1, what's not)
+
+| Mechanism | In v1 | Notes |
+|---|---|---|
+| Predicate dispatch (`PageMetadataPredicate`) | ✓ | Justifies the runtime's existence — typed metadata matching that `@event_handler` glob patterns can't express. |
+| Per-page rate limit (`WriteRateLimiter`) | ✓ | Catches runaway loops modifying the same page. |
+| Episode budget (default 1000 dispatches) | ✓ | Catches runaway loops at the episode level. |
+| Quiescence detection + emit | ✓ | Wakes `wait_for_quiescence` callers and writes `ConvergenceQuiescenceProtocol` events on the colony scope (consumer: `DesignCheckpointer` auto-tagging an `auto_quiescence_<iso8601>` checkpoint, master §8.1). |
+| Numeric damping (`NumericTolerance`) | ✓ | Asymptotic-convergence absorber for capabilities producing scalar outputs (optimization loops, error-budget reconciliation, confidence-interval narrowing). A subscription with `tolerance=NumericTolerance(...)` is skipped when `event.extra["value"]` is within tolerance of the previous run for the same `(subscription_id, page_id)`. The producing capability is responsible for publishing the scalar in `extra["value"]`. |
+| Topo-sort within an episode | ✗ | Cut. Was an optimization (order subscribers within a wave by declared output predicates), not correctness; the system converges through repeated waves without it. Re-add when there's a real subscription topology that benefits. |
+| Cycle detection + leader-pick break | ✗ | Cut. Hostile to legitimate iterative design loops (requirements ↔ code ↔ simulation). The pathology it was nominally targeting (a single subscription thrashing the same page) is already caught by the per-page rate limit + episode budget. |
+| `convergence:status` blackboard mirror | ✗ | Cut. UI polls `get_status()`. |
+| `convergence:change_feed` blackboard mirror | ✗ | Cut. UI polls `get_change_feed(limit)`. |
+
+### `ConvergenceDispatchProtocol`
+
+[`ConvergenceDispatchProtocol`](../../src/polymathera/colony/agents/blackboard/protocol.py) defines the key shape between the runtime (sole writer) and the subscribing capability (sole reader):
+
+- `dispatch_key(subscription_id) -> "convergence:dispatch:<sub_id>"`
+- `dispatch_pattern() -> "convergence:dispatch:*"`
+- `parse_dispatch_key(key) -> subscription_id`
+
+### `ConvergenceQuiescenceProtocol`
+
+[`ConvergenceQuiescenceProtocol`](../../src/polymathera/colony/agents/blackboard/protocol.py) defines the colony-scope event the runtime emits at each episode boundary:
+
+- `quiescence_key(episode_id) -> "convergence:quiescence:<episode_id>"`
+- `quiescence_pattern() -> "convergence:quiescence:*"`
+- `parse_quiescence_key(key) -> episode_id`
+
+The payload is a serialized `ConvergenceCounters`. The reference consumer is [`DesignCheckpointer`](../../src/polymathera/colony/design_monorepo/capabilities.py) — its `@event_handler(pattern=ConvergenceQuiescenceProtocol.quiescence_pattern())` tags an `auto_quiescence_<iso8601>` checkpoint when the working tree has uncommitted changes, giving the master §8.1 `restore_checkpoint(id=auto_quiescence_<timestamp>)` crash-recovery primitive a real producer.
 
 ---
 
 ## 4. The agent-facing surface
 
-[`ConvergenceCapability`](../../src/polymathera/colony/agents/patterns/capabilities/convergence.py) gives any agent the seven primitives master §3.4 / §5.4 specify:
+[`ConvergenceCapability`](../../src/polymathera/colony/agents/patterns/capabilities/convergence.py) gives any agent the primitives master §3.4 / §5.4 specifies — `subscribe_pattern`, `unsubscribe`, `dispatch_change`, `wait_for_quiescence`, `get_convergence_status`, `get_change_feed`:
 
 ```python
 class MyCoordinator(Agent):
@@ -136,12 +166,46 @@ class MyCoordinator(Agent):
         # Register a subscription; the runtime dispatches onto our scope.
         cc = self.get_capability(ConvergenceCapability)
         await cc.subscribe_pattern(
-            predicate=PageMetadataPredicate.equals("data_type", "design_monorepo_file"),
-            dispatch_key="convergence:design_change",
+            predicate=PageMetadataPredicate.equals(
+                "data_type", "design_monorepo_file",
+            ),
         )
 ```
 
+The capability owns the receive side via:
+
+```python
+@event_handler(pattern=ConvergenceDispatchProtocol.dispatch_pattern())
+async def _on_dispatch(self, event, repl) -> EventProcessingResult | None:
+    sub_id = ConvergenceDispatchProtocol.parse_dispatch_key(event.key)
+    if sub_id not in self._owned_subscription_ids:
+        return None
+    page_event = PageChangeEvent.model_validate(event.value)
+    return EventProcessingResult(
+        context_key=event.key,
+        context={"subscription_id": sub_id, "page_event": page_event.model_dump(mode="json")},
+    )
+```
+
 The capability tracks its own subscription ids so a clean shutdown unregisters them automatically — agents that suspend or terminate do not leak subscriptions. Subscription ids are checkpointed in `serialize_suspension_state` / `deserialize_suspension_state`.
+
+---
+
+## 5. Concrete consumers in colony
+
+### `DesignCheckpointer` quiescence handler
+
+[`DesignCheckpointer`](../../src/polymathera/colony/design_monorepo/capabilities.py) consumes `ConvergenceQuiescenceProtocol` events. When an episode settles with uncommitted changes in the working tree, the capability commits and tags an `auto_quiescence_<iso8601>` checkpoint, giving master §8.1's `restore_checkpoint(id=auto_quiescence_<timestamp>)` crash-recovery primitive a real producer. The behavior is opt-out via the `auto_checkpoint_on_quiescence=False` constructor flag for agents that need fully manual checkpointing.
+
+### How a downstream capability wires damping
+
+To consume the runtime's numeric damping in a domain-specific way, a downstream capability:
+
+1. Constructs a `PageSubscription` with `tolerance=NumericTolerance(...)` matched to the engineering tolerance of the value being tracked.
+2. Ensures the *producer* of the matching `PageChangeEvent`s populates `extra["value"]` with the new scalar (the runtime's damper reads it from there).
+3. Adds an `@event_handler(pattern=ConvergenceDispatchProtocol.dispatch_pattern())` that filters by its own `subscription_id`, validates the payload, and republishes a typed event under a domain-defined `BlackboardProtocol` so further downstream consumers don't have to know about the convergence runtime's wire mechanics.
+
+Downstream domain packages (e.g. CPS-domain capabilities for budget reconciliation in error-budget designs) implement this pattern in their own repos.
 
 ---
 
@@ -150,8 +214,8 @@ The capability tracks its own subscription ids so a clean shutdown unregisters t
 What's wired:
 
 - `ConvergenceRuntimeDeployment` is registered by `VCMConfig.add_deployments_to_app` and starts unconditionally with the rest of the VCM subsystem.
-- `_DesignMonorepoCapabilityBase.initialize()` calls `register_design_monorepo(working_dir)` on the runtime, which spins up a `DesignMonorepoWatcher` (idempotent per absolute working-tree path).
-- `BlackboardContextPageSource` declares `static = False` and overrides `watch()` to yield `PageChangeEvent`s as its event loop processes live writes. The VCM's `_start_watch_bridge` automatically drains the iterator into the colony scope's `vcm:page_events:*` topic — the same generic bridge applies to any future non-static source.
+- `FileGrouperContextPageSource` declares `static = False` and `watch()` runs `LocalFsWatcher` + `GitRemoteWatcher` against the working tree (merged via `CompositeWatcher`). The VCM's `_start_watch_bridge` drains them and feeds events directly into the runtime. There is no separate registration call — mapping the working tree as a `FileGrouperContextPageSource` is the registration.
+- `BlackboardContextPageSource` declares `static = False` and overrides `watch()` to yield `PageChangeEvent`s as its event loop processes live writes. The VCM's `_start_watch_bridge` automatically drains the iterator into the runtime — the same generic bridge applies to any future non-static source.
 - End-to-end smoke tests in [`test_chain_smoke.py`](../../src/polymathera/colony/vcm/convergence/tests/test_chain_smoke.py) exercise watcher → runtime → subscription dispatch with no Ray.
 
 What's still deferred:
@@ -159,13 +223,14 @@ What's still deferred:
 - **HTTP webhook receiver (Phase C6).** `WebhookEventBuilder` translates Gitea/GitLab/GitHub push payloads into `PageChangeEvent`s today; the HTTP route that takes a payload and calls into the builder lives with the Web UI work in C6.
 - **Edge events from `BlackboardContextPageSource`.** Today the source emits `page_added` / `page_replaced` / `page_invalidated` only. It does not yet produce `page_graph_edge_added` / `page_graph_edge_removed` events; those need IngestionPolicy hooks to surface relationship changes between pages.
 - **Tokenized-content edit_diff.** `PageReplaced` events from the blackboard source carry no `edit_diff`. Producing one requires the IngestionPolicy to retain enough of the previous flush to diff against.
+- **Multi-replica leader election.** Today every VCM replica that materialises a non-static scope spins up its own watch bridge, so events fan in to the runtime N times per change. The runtime's per-page rate-limiter absorbs transient bursts; a leader election among VCM replicas is the durable fix.
 
 ---
 
 ## What this means for application code
 
-- **Subscribe early.** Calling `ConvergenceCapability.subscribe_pattern(...)` from a coordinator's `initialize()` is the canonical pattern. Once the agent is up, mutations on watched sources flow back as `@event_handler(pattern="convergence:...")` dispatches.
-- **`@event_handler` is the receive end.** The runtime writes to `sub.dispatch_scope/sub.dispatch_key`; the capability's existing event-handler machinery picks it up. No special hook on the capability side.
+- **Subscribe early.** Calling `ConvergenceCapability.subscribe_pattern(...)` from a coordinator's `initialize()` is the canonical pattern. Once the agent is up, mutations on watched sources flow back through the capability's `@event_handler(pattern=ConvergenceDispatchProtocol.dispatch_pattern())` and become planner context bindings.
+- **The dispatch key is not a parameter.** It is owned by `ConvergenceDispatchProtocol` and derived from the subscription_id the runtime returns. No caller picks the key; that prevents the LLM action surface from carrying a free-form string the planner can not meaningfully fill in.
 - **`dispatch_change` is for synthesis.** Use it when a capability *itself* derives a graph mutation (a deduplication step that retracts a citation, a coordinator that confirms a hypothesis), rather than waiting for the source to surface it. Tests use it to inject events without standing up watchers.
 
 ---
@@ -174,5 +239,3 @@ What's still deferred:
 
 - Master design doc §5 ("the always-live design context"), §5.2 (convergence-runtime mechanics), §5.6 (the immutability gap and watcher transports) — [`colony_docs/markdown/apps/design_automation_architecture.md`](../../../colony_docs/markdown/apps/design_automation_architecture.md).
 - Phase plan + progress — `colony/phase_c4_convergence_runtime_progress.md`.
-- VCM page-source overview — [Virtual Context Memory](virtual-context-memory.md).
-- Agent-facing capability — referenced from [Agent System](agent-system.md) and [Action Policies](action-policies.md).

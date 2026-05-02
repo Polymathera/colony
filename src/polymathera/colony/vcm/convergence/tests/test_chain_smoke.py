@@ -6,13 +6,13 @@ These verify that the four layers documented in
     Watcher → PageChangeEvent → ConvergenceRuntime.feed_event →
     SubscriptionIndex.match → dispatch_callback fires.
 
-The deployment/forwarder transport (the bit that drains
-``vcm:page_events:*`` from the colony blackboard) is bypassed here —
-events go directly from the watcher into ``feed_event``. The
-deployment is independently tested, and exercising it requires Ray +
-Redis. What's important here is that the contract between layers
-holds: a watcher's event reaches the runtime untouched, and a
-matching subscription fires.
+The deployment transport (VCM's watch bridge calling the runtime
+deployment's ``feed_page_event`` endpoint) is bypassed here — events
+go directly from the watcher into ``feed_event``. The deployment is
+independently tested, and exercising it requires Ray + Redis. What's
+important here is that the contract between layers holds: a
+watcher's event reaches the runtime untouched, and a matching
+subscription fires.
 
 The chain is the master design doc §5 promise. Running this test on
 the wired-up tree proves we're past "infrastructure exists in
@@ -98,7 +98,6 @@ async def test_local_fs_change_dispatches_subscription(tmp_path: Path) -> None:
         PageSubscription(
             predicate=PageMetadataPredicate(data_type="design_monorepo_file"),
             dispatch_scope="capability:test",
-            dispatch_key="convergence:design_change",
             capability_key="TestCap",
         ),
     )
@@ -160,7 +159,6 @@ async def test_unmatched_data_type_does_not_dispatch(tmp_path: Path) -> None:
         PageSubscription(
             predicate=PageMetadataPredicate(data_type="paper_section"),
             dispatch_scope="capability:test",
-            dispatch_key="dispatch",
             capability_key="TestCap",
         ),
     )
@@ -255,13 +253,13 @@ async def test_watch_method_is_the_uniform_contract(_exec_context) -> None:
     shape ``VirtualContextManager._start_watch_bridge`` consumes:
 
         async for event in source.watch():
-            await publisher.publish(event)
+            await convergence_runtime.feed_page_event(event=event, ...)
 
-    A real bridge writes onto the colony scope's ``vcm:page_events:*``
-    topic; the convergence runtime forwarder reads from there. This
-    test bypasses the blackboard transport (it's tested by the
-    runtime's own forwarder unit tests) and feeds events directly
-    into ``feed_event``.
+    A real bridge calls the ``ConvergenceRuntimeDeployment``'s
+    KERNEL-ring ``feed_page_event`` endpoint via its deployment
+    handle. This test bypasses the deployment hop (which requires
+    Ray + Redis) and feeds events directly into ``feed_event`` on the
+    runtime instance.
 
     The point: every layer above the source agrees on ``watch()`` as
     the contract, regardless of whether the source achieves it via a
@@ -335,14 +333,13 @@ async def test_watch_method_is_the_uniform_contract(_exec_context) -> None:
         PageSubscription(
             predicate=PageMetadataPredicate(data_type="design_decision"),
             dispatch_scope="capability:test",
-            dispatch_key="dispatch",
             capability_key="TestCap",
         ),
     )
 
     # Stand in for VCM._start_watch_bridge: drain watch() and feed
-    # the runtime. A real bridge goes through a PageEventPublisher
-    # and the runtime's forwarder; the contract is identical.
+    # the runtime. A real bridge calls the runtime deployment's
+    # ``feed_page_event`` endpoint; the contract is identical.
     bridge_task = asyncio.create_task(_run_bridge(src, runtime))
 
     await src.add_page("page-1", ["r1"])
@@ -368,8 +365,9 @@ async def test_watch_method_is_the_uniform_contract(_exec_context) -> None:
 
 async def _run_bridge(src, runtime) -> None:
     """Same shape as ``VirtualContextManager._start_watch_bridge``,
-    minus the ``PageEventPublisher`` hop (the publisher → forwarder
-    → feed_event chain is tested elsewhere)."""
+    minus the ``ConvergenceRuntimeDeployment.feed_page_event``
+    deployment hop (the deployment-handle path is tested in the
+    runtime deployment's own integration tests)."""
 
     async for event in src.watch():
         await runtime.feed_event(event, source_id=src.scope_id)
@@ -391,7 +389,6 @@ async def test_source_poll_watcher_dispatches_through_runtime(_exec_context) -> 
         PageSubscription(
             predicate=PageMetadataPredicate(),  # match anything
             dispatch_scope="capability:test",
-            dispatch_key="dispatch",
             capability_key="TestCap",
         ),
     )

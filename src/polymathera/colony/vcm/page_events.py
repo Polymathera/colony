@@ -1,17 +1,19 @@
 """Page-change events — the canonical signalling shape for VCM mutations.
 
 Per the design-automation architecture (master §5.6 item 2), context
-sources emit ``PageChangeEvent``s onto the colony blackboard topic
-``vcm:page_events:*``. Capabilities and agents subscribe through the
-existing ``EnhancedBlackboard.stream_events_to_queue`` machinery; the
-convergence runtime subscribes to the topic centrally and dispatches
-typed-predicate subscriptions on the basis of those events.
+sources expose mutations via ``ContextPageSource.watch()`` as a stream
+of ``PageChangeEvent``s. ``VirtualContextManager`` drains each
+non-static source's ``watch()`` and feeds events directly into
+``ConvergenceRuntimeDeployment.feed_page_event`` (KERNEL-ring path).
+The runtime then dispatches typed-predicate subscriptions; each
+matched subscription is written onto the subscribing capability's
+blackboard scope under the key shape owned by
+``ConvergenceDispatchProtocol``.
 
 Five kinds, distinguished by ``PageChangeKind``. The shape is a single
 discriminated union (one Pydantic model with a ``kind`` field) rather
-than five subclasses — that keeps blackboard transport, JSON
-serialisation, and pattern matching straightforward without the
-overhead of polymorphic dispatch.
+than five subclasses — that keeps wire serialisation and pattern
+matching straightforward without polymorphic-dispatch overhead.
 """
 
 from __future__ import annotations
@@ -48,47 +50,20 @@ class PageChangeKind(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# Blackboard topic constants
-# ---------------------------------------------------------------------------
-
-
-PAGE_EVENTS_TOPIC_PREFIX = "vcm:page_events"
-"""All page-change events are written under this prefix on the colony
-blackboard scope. The runtime subscribes to ``vcm:page_events:*``.
-
-Per-source subkeys follow the convention
-``vcm:page_events:<source-id>:<kind>``, where ``<source-id>`` is a
-free-form source-stable id (typically the source's ``scope_id``).
-This lets a downstream consumer filter by source via the existing
-``KeyPatternFilter``.
-"""
-
-
-CONVERGENCE_STATUS_KEY = "convergence:status"
-"""Singleton key the runtime updates with the current
-``ConvergenceStatus`` snapshot. Subscribed by the SessionAgent's
-"converging / converged / cycling" indicator (master §5.4)."""
-
-
-CONVERGENCE_QUIESCENCE_TOPIC = "convergence:quiescence"
-"""Event the runtime emits each time a dispatch wave settles with no
-new triggered work. Carries the episode id and the dispatch count.
-The DesignCheckpointer waits for this before tagging a checkpoint
-(master §8.1)."""
-
-
-CONVERGENCE_CHANGE_FEED_KEY = "convergence:change_feed"
-"""Singleton key the runtime updates with the bounded change-feed
-(most recent N dispatches). Master §5.4 surface."""
-
-
-CONVERGENCE_DISPATCH_PREFIX = "convergence:dispatch"
-"""Per-subscription dispatch events. The runtime writes
-``convergence:dispatch:<subscription_id>`` on the subscription's
-declared scope, and the subscribing capability's ``@event_handler``
-picks it up through the normal blackboard event machinery."""
-
-
+# Convergence runtime blackboard keys are owned by the protocols in
+# ``polymathera.colony.agents.blackboard.protocol``:
+#
+# - ``ConvergenceDispatchProtocol``  — per-subscription dispatch keys.
+# - ``ConvergenceQuiescenceProtocol`` — per-episode quiescence events.
+#
+# Both have a single writer (the runtime) and well-defined readers
+# (the subscribing capability for dispatch, ``DesignCheckpointer`` and
+# similar consumers for quiescence). ``ConvergenceStatus`` and the
+# bounded change feed are read-side surfaces accessed via the
+# deployment-handle endpoints ``get_status`` / ``get_change_feed``;
+# they do not have blackboard mirrors because the access pattern is
+# poll-on-demand from a UI, not event-subscribe.
+#
 # ---------------------------------------------------------------------------
 # The event shape
 # ---------------------------------------------------------------------------
@@ -97,10 +72,12 @@ picks it up through the normal blackboard event machinery."""
 class PageChangeEvent(BaseModel):
     """One page-graph mutation event.
 
-    Carried as the ``value`` of a blackboard write under the
-    ``vcm:page_events:*`` topic. The blackboard's ``BlackboardEvent``
-    wraps this with timestamps, key, etc.; this is the *payload*
-    semantically owned by the VCM source layer.
+    Passed by VCM's watch bridge directly to
+    ``ConvergenceRuntimeDeployment.feed_page_event`` — there is no
+    intermediate blackboard topic for raw page events. After
+    dispatch, the runtime writes one event per matched subscription
+    onto the subscribing capability's blackboard scope (key shape:
+    ``ConvergenceDispatchProtocol.dispatch_key(subscription_id)``).
 
     Field discipline:
 
@@ -222,19 +199,8 @@ class PageChangeEvent(BaseModel):
             extra=extra or {},
         )
 
-    def topic_key(self, source_id: str) -> str:
-        """Return the canonical blackboard key under which this event
-        should be written: ``vcm:page_events:<source_id>:<kind>``."""
-
-        return f"{PAGE_EVENTS_TOPIC_PREFIX}:{source_id}:{self.kind.value}"
-
 
 __all__ = (
     "PageChangeEvent",
     "PageChangeKind",
-    "PAGE_EVENTS_TOPIC_PREFIX",
-    "CONVERGENCE_STATUS_KEY",
-    "CONVERGENCE_QUIESCENCE_TOPIC",
-    "CONVERGENCE_CHANGE_FEED_KEY",
-    "CONVERGENCE_DISPATCH_PREFIX",
 )

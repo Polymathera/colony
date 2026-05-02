@@ -78,10 +78,10 @@ class MappedScope:
     config: MmapConfig
     scope_id: str
     syscontext: serving.ExecutionContext = field(default_factory=serving.require_execution_context)
-    # Bridge task for non-static sources: drains ``source.watch()``
-    # into a ``PageEventPublisher`` against the colony scope so the
-    # convergence runtime forwarder receives ``PageChangeEvent``s.
-    # ``None`` for static sources (file-based, archived corpora, …).
+    # Bridge task for non-static sources: drains ``source.watch()`` and
+    # feeds each event directly into ``ConvergenceRuntimeDeployment``
+    # via its KERNEL-ring ``feed_page_event`` endpoint. ``None`` for
+    # static sources (file-based, archived corpora, …).
     watch_bridge_task: asyncio.Task[None] | None = None
 
 
@@ -152,12 +152,11 @@ class VirtualContextManager:
         self._local_mapped_scopes: dict[str, MappedScope] = {}
 
         # Live-context bridge: for each non-static source we drain
-        # ``source.watch()`` into a ``PageEventPublisher`` against the
-        # colony scope so the convergence runtime forwarder receives
-        # ``PageChangeEvent``s. The blackboard handle is shared across
-        # all bridges; it's lazy-initialised on first use in
-        # ``_materialize_scope_mapping``.
-        self._page_event_blackboard: Any | None = None
+        # ``source.watch()`` and feed each event straight into the
+        # ``ConvergenceRuntimeDeployment`` via its KERNEL-ring
+        # ``feed_page_event`` endpoint. The handle is resolved
+        # lazily on first bridge start.
+        self._convergence_runtime_handle: serving.DeploymentHandle | None = None
 
     @staticmethod
     def _local_scope_key(scope_id: str) -> str:
@@ -2210,11 +2209,10 @@ class VirtualContextManager:
 
         await source.initialize()
 
-        # Bridge non-static sources into the colony's vcm:page_events:*
-        # topic. The convergence runtime's forwarder reads from there
-        # and dispatches to subscribers — see master §5.6 / live-context
-        # docs. Static sources (file-based, archived corpora) emit no
-        # events; they are kept up to date via the watcher sidecars
+        # Bridge non-static sources directly into the convergence
+        # runtime via its KERNEL-ring ``feed_page_event`` endpoint.
+        # Static sources (file-based, archived corpora) emit no events;
+        # they are kept up to date via the watcher sidecars
         # (LocalFsWatcher, GitRemoteWatcher, …) instead.
         watch_bridge_task: asyncio.Task[None] | None = None
         if not source.static:
@@ -2267,39 +2265,40 @@ class VirtualContextManager:
         self, source: ContextPageSource,
     ) -> asyncio.Task[None]:
         """Start a long-running task that drains ``source.watch()`` into
-        the colony scope's ``vcm:page_events:*`` topic.
+        the convergence runtime via a direct deployment-handle call.
 
-        Lazy-initialises the shared colony-blackboard handle on first
-        call; subsequent bridges reuse it. The task is cancelled when
-        the corresponding ``MappedScope`` is shut down (see
-        ``_unmount_scope``).
+        Lazy-resolves the runtime handle on first call; subsequent
+        bridges reuse it. The task is cancelled when the corresponding
+        ``MappedScope`` is shut down (see ``_unmount_scope``).
         """
 
-        from ..agents.blackboard import EnhancedBlackboard
-        from ..agents.scopes import BlackboardScope, get_scope_prefix
-        from .watchers.publisher import PageEventPublisher
+        from ..system import get_convergence_runtime
 
-        if self._page_event_blackboard is None:
-            self._page_event_blackboard = EnhancedBlackboard(
-                app_name=self.app_name,
-                scope_id=get_scope_prefix(BlackboardScope.COLONY),
-                enable_events=True,
-                backend_type=None,
-            )
-            await self._page_event_blackboard.initialize()
-        publisher = PageEventPublisher(
-            self._page_event_blackboard, source_id=source.scope_id,
-        )
+        if self._convergence_runtime_handle is None:
+            try:
+                self._convergence_runtime_handle = get_convergence_runtime(
+                    self.app_name,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"VCM: ConvergenceRuntimeDeployment unavailable for "
+                    f"scope {source.scope_id}: {e}",
+                ) from e
+
+        runtime_handle = self._convergence_runtime_handle
+        source_id = source.scope_id
 
         async def _drain() -> None:
             try:
                 async for event in source.watch():
                     try:
-                        await publisher.publish(event)
+                        await runtime_handle.feed_page_event(
+                            event=event, source_id=source_id,
+                        )
                     except Exception:  # noqa: BLE001
                         logger.exception(
-                            f"VCM: failed to publish PageChangeEvent for "
-                            f"scope {source.scope_id}"
+                            f"VCM: feed_page_event failed for "
+                            f"scope {source_id}"
                         )
             except asyncio.CancelledError:
                 return
@@ -2310,18 +2309,18 @@ class VirtualContextManager:
                 # the VCM replica.
                 logger.error(
                     f"VCM: source {type(source).__name__} for scope "
-                    f"{source.scope_id} declares static = False but "
-                    f"does not override watch(). No events will flow."
+                    f"{source_id} declares static = False but does "
+                    f"not override watch(). No events will flow."
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    f"VCM: watch bridge for scope {source.scope_id} "
+                    f"VCM: watch bridge for scope {source_id} "
                     f"crashed; events will no longer flow"
                 )
 
         return asyncio.create_task(
             _drain(),
-            name=f"vcm-watch-bridge:{source.scope_id}",
+            name=f"vcm-watch-bridge:{source_id}",
         )
 
     async def _reconcile_scope_mappings(self) -> None:
@@ -2570,14 +2569,9 @@ class VirtualContextManager:
                 logger.warning(f"Error shutting down scope mapping {scope_key}: {e}")
         self._local_mapped_scopes.clear()
 
-        # Release the shared page-event blackboard once all bridges
-        # are gone.
-        if self._page_event_blackboard is not None:
-            try:
-                await self._page_event_blackboard.stop()
-            except Exception:  # noqa: BLE001
-                logger.exception("VCM: page-event blackboard stop failed")
-            self._page_event_blackboard = None
+        # Drop the convergence runtime handle; the deployment owns its
+        # own lifecycle.
+        self._convergence_runtime_handle = None
 
         logger.info("VirtualContextManager cleanup complete")
 
