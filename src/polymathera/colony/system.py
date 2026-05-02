@@ -323,16 +323,6 @@ def get_vcm(app_name: str | None = None) -> serving.DeploymentHandle:
     return _get_deployment_by_name("vcm", app_name, deployment_class=VirtualContextManager)
 
 
-def get_convergence_runtime(app_name: str | None = None) -> serving.DeploymentHandle:
-    """Get convergence runtime deployment via serving (Phase C4)."""
-    from .vcm.convergence import ConvergenceRuntimeDeployment
-    return _get_deployment_by_name(
-        "convergence_runtime",
-        app_name,
-        deployment_class=ConvergenceRuntimeDeployment,
-    )
-
-
 def get_standalone_agents(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get standalone agents deployment via serving."""
     from .agents.standalone import StandaloneAgentDeployment

@@ -685,6 +685,14 @@ class VirtualPageTableState(SharedState):
         description="branch_key -> set of page_ids created on that branch"
     )
 
+    # Convergence runtime persisted state (subscriptions, damper cache,
+    # rate buckets, last-episode counters, change feed). Embedded here
+    # so all VCM replicas see the same dispatch decisions via the
+    # page-table StateManager — no separate convergence deployment.
+    convergence: "ConvergencePersistedState" = Field(
+        default_factory=lambda: _default_convergence_state(),
+    )
+
     # --- Composite key helpers ---
     # All composite keys use ":" as separator. Components are identifiers
     # that must not contain ":".
@@ -1820,4 +1828,21 @@ class PageAccessPattern(BaseModel):
     access_recency: float  # seconds since last access
     co_accessed_pages: list[tuple[str, float]] = Field(default_factory=list)  # (page_id, correlation)
     requesting_tenants: set[str] = Field(default_factory=set)
+
+
+# ---------------------------------------------------------------------------
+# Convergence persisted state — defined in convergence/runtime.py to keep
+# the runtime types co-located. Imported lazily here so the model_rebuild
+# below can resolve the forward reference on VirtualPageTableState.
+# ---------------------------------------------------------------------------
+
+
+def _default_convergence_state():
+    from .convergence.runtime import ConvergencePersistedState
+    return ConvergencePersistedState()
+
+
+from .convergence.runtime import ConvergencePersistedState  # noqa: E402
+
+VirtualPageTableState.model_rebuild()
 

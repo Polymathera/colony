@@ -32,7 +32,6 @@ from polymathera.colony.distributed.ray_utils.serving import (
     execution_context,
 )
 from polymathera.colony.vcm.convergence import (
-    ConvergenceRuntime,
     PageMetadataPredicate,
     PageSubscription,
 )
@@ -85,16 +84,19 @@ def _force_polling(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_local_fs_change_dispatches_subscription(tmp_path: Path) -> None:
+async def test_local_fs_change_dispatches_subscription(
+    convergence_runtime, tmp_path: Path,
+) -> None:
     """A file write under a watched root reaches a matching subscription."""
 
+    runtime = convergence_runtime
     fired_events: list[PageChangeEvent] = []
 
-    async def cb(sub: PageSubscription, ev: PageChangeEvent) -> None:
+    async def cb(sub, ev):
         fired_events.append(ev)
 
-    runtime = ConvergenceRuntime(dispatch_callback=cb)
-    runtime.register(
+    runtime._dispatch_via_blackboard = cb
+    await runtime.register(
         PageSubscription(
             predicate=PageMetadataPredicate(data_type="design_monorepo_file"),
             dispatch_scope="capability:test",
@@ -144,18 +146,21 @@ async def test_local_fs_change_dispatches_subscription(tmp_path: Path) -> None:
     )
 
 
-async def test_unmatched_data_type_does_not_dispatch(tmp_path: Path) -> None:
+async def test_unmatched_data_type_does_not_dispatch(
+    convergence_runtime, tmp_path: Path,
+) -> None:
     """A file write whose data_type does not match the subscription's
     predicate does NOT trigger a dispatch — this is the runtime's
     job and its test for the watcher chain."""
 
+    runtime = convergence_runtime
     fired: list[str] = []
 
     async def cb(sub, ev):
         fired.append(sub.subscription_id)
 
-    runtime = ConvergenceRuntime(dispatch_callback=cb)
-    runtime.register(
+    runtime._dispatch_via_blackboard = cb
+    await runtime.register(
         PageSubscription(
             predicate=PageMetadataPredicate(data_type="paper_section"),
             dispatch_scope="capability:test",
@@ -247,7 +252,9 @@ class _ProgrammableSource(ContextPageSource):
         return {pid: list(rs) for pid, rs in self._pages.items()}
 
 
-async def test_watch_method_is_the_uniform_contract(_exec_context) -> None:
+async def test_watch_method_is_the_uniform_contract(
+    convergence_runtime, _exec_context,
+) -> None:
     """A non-static ``ContextPageSource`` exposes its mutations via
     ``watch()`` — the formal ABC contract. This test demonstrates the
     shape ``VirtualContextManager._start_watch_bridge`` consumes:
@@ -322,14 +329,14 @@ async def test_watch_method_is_the_uniform_contract(_exec_context) -> None:
                 yield event
 
     src = _LiveDictSource()
-
+    runtime = convergence_runtime
     fired: list[PageChangeEvent] = []
 
     async def cb(sub, ev):
         fired.append(ev)
 
-    runtime = ConvergenceRuntime(dispatch_callback=cb)
-    runtime.register(
+    runtime._dispatch_via_blackboard = cb
+    await runtime.register(
         PageSubscription(
             predicate=PageMetadataPredicate(data_type="design_decision"),
             dispatch_scope="capability:test",
@@ -373,19 +380,22 @@ async def _run_bridge(src, runtime) -> None:
         await runtime.feed_event(event, source_id=src.scope_id)
 
 
-async def test_source_poll_watcher_dispatches_through_runtime(_exec_context) -> None:
+async def test_source_poll_watcher_dispatches_through_runtime(
+    convergence_runtime, _exec_context,
+) -> None:
     """SourcePollWatcher snapshots → diff → ConvergenceRuntime → fire."""
 
     src = _ProgrammableSource()
     src.set_pages({"page-a": ["r1"]})
-
+    runtime = convergence_runtime
+    runtime._rate_burst = 16  # widen so multiple events in the window pass
     fired: list[PageChangeEvent] = []
 
     async def cb(sub, ev):
         fired.append(ev)
 
-    runtime = ConvergenceRuntime(dispatch_callback=cb)
-    runtime.register(
+    runtime._dispatch_via_blackboard = cb
+    await runtime.register(
         PageSubscription(
             predicate=PageMetadataPredicate(),  # match anything
             dispatch_scope="capability:test",

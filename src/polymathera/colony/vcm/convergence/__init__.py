@@ -7,8 +7,10 @@ Public API:
 - ``SubscriptionIndex`` — fast lookup of subscriptions by event metadata.
 - ``ConvergenceDamper`` — numeric tolerance check.
 - ``WriteRateLimiter`` — per-page write throttle.
-- ``ConvergenceRuntime`` — pure dispatch logic.
-- ``ConvergenceRuntimeDeployment`` — Ray-serving singleton wrapping the runtime.
+- ``ConvergenceRuntime`` — dispatch loop, hosted as a member of
+  ``VirtualContextManager`` (per-replica instance with authoritative
+  state in ``VirtualPageTableState.convergence``).
+- ``ConvergencePersistedState`` — the runtime's persisted state.
 - ``ConvergenceStatus`` / ``ConvergenceCounters`` / ``ChangeFeedEntry`` — surfaces.
 
 See `colony_docs/markdown/apps/design_automation_architecture.md` §5 and
@@ -19,13 +21,13 @@ package implements.
 from __future__ import annotations
 
 from .damping import ConvergenceDamper
-from .deployment import ConvergenceRuntimeDeployment
 from .index import SubscriptionIndex, SubscriptionRegistryFull
 from .predicates import EdgeReachResolver, PageMetadataPredicate
 from .rate_limit import WriteRateLimiter
 from .runtime import (
     ChangeFeedEntry,
     ConvergenceCounters,
+    ConvergencePersistedState,
     ConvergenceRuntime,
     ConvergenceState,
     ConvergenceStatus,
@@ -43,9 +45,9 @@ __all__ = (
     "ConvergenceDamper",
     "WriteRateLimiter",
     "ConvergenceRuntime",
+    "ConvergencePersistedState",
     "ConvergenceState",
     "ConvergenceStatus",
     "ConvergenceCounters",
     "ChangeFeedEntry",
-    "ConvergenceRuntimeDeployment",
 )

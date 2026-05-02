@@ -1,14 +1,16 @@
-"""Tests for ``ConvergenceRuntime``."""
+"""Tests for ``ConvergenceRuntime``.
+
+The runtime now persists state in ``VirtualPageTableState.convergence``
+(a colony-wide ``SharedState``); the ``convergence_runtime`` fixture
+provides a runtime backed by an in-memory state manager so tests
+don't need Redis.
+"""
 
 from __future__ import annotations
-
-import asyncio
-from typing import Any
 
 import pytest
 
 from polymathera.colony.vcm.convergence import (
-    ConvergenceRuntime,
     NumericTolerance,
     PageMetadataPredicate,
     PageSubscription,
@@ -28,134 +30,38 @@ def _sub(**kwargs) -> PageSubscription:
     )
 
 
-async def test_dispatch_matching_subscription() -> None:
-    fired: list[str] = []
+async def _read_state(rt):
+    sm = rt._state_manager
+    async for s in sm.read_transaction():
+        return s.model_copy(deep=True)
+    raise AssertionError("read_transaction yielded nothing")
+
+
+def _capture_dispatches(rt) -> list[tuple[PageSubscription, PageChangeEvent]]:
+    captured: list[tuple[PageSubscription, PageChangeEvent]] = []
 
     async def cb(sub, ev):
-        fired.append(sub.subscription_id)
+        captured.append((sub, ev))
 
-    rt = ConvergenceRuntime(dispatch_callback=cb)
-    a = _sub(predicate=PageMetadataPredicate(data_type="code"))
-    b = _sub(predicate=PageMetadataPredicate(data_type="paper_section"))
-    rt.register(a)
-    rt.register(b)
-    await rt.feed_event(
-        PageChangeEvent.page_replaced(
-            old_page_id="p", new_page_id="p",
-            source="git:r:main:1", data_type="code", scope_id="s",
-        ),
-    )
-    assert fired == [a.subscription_id]
+    rt._dispatch_via_blackboard = cb
+    return captured
 
 
-async def test_quiescence_emitted() -> None:
-    quiescent: list[Any] = []
-
-    async def cb(sub, ev):
-        return None
-
-    async def q_emit(counters):
-        quiescent.append(counters)
-
-    rt = ConvergenceRuntime(
-        dispatch_callback=cb, quiescence_emit_callback=q_emit,
-    )
-    rt.register(_sub(predicate=PageMetadataPredicate()))
-    await rt.feed_event(
-        PageChangeEvent.page_added(
-            page_id="p", source="x:src", data_type="t", scope_id="s",
-        ),
-    )
-    assert len(quiescent) == 1
-    assert quiescent[0].dispatches_emitted == 1
+# ---------------------------------------------------------------------------
+# Subscription lifecycle
+# ---------------------------------------------------------------------------
 
 
-async def test_status_state_transitions() -> None:
-    in_flight_states = []
-
-    async def cb(sub, ev):
-        # While dispatch is in flight, status is 'converging'.
-        in_flight_states.append(rt.get_status().state)
-
-    rt = ConvergenceRuntime(dispatch_callback=cb)
-    rt.register(_sub(predicate=PageMetadataPredicate()))
-    await rt.feed_event(
-        PageChangeEvent.page_added(
-            page_id="p", source="x:src", data_type="t", scope_id="s",
-        ),
-    )
-    assert in_flight_states == ["converging"]
-    assert rt.get_status().state == "converged"
-
-
-async def test_damping_skips_within_tolerance() -> None:
-    fired: list[float] = []
-
-    async def cb(sub, ev):
-        fired.append(ev.extra["value"])
-
-    rt = ConvergenceRuntime(dispatch_callback=cb, rate_burst=10)
-    sub = _sub(
-        predicate=PageMetadataPredicate(data_type="budget"),
-        tolerance=NumericTolerance(mode="absolute", value=0.5),
-    )
-    rt.register(sub)
-    for v in (1.0, 1.2, 1.4, 2.0, 2.05):
-        await rt.feed_event(
-            PageChangeEvent.page_replaced(
-                old_page_id="b", new_page_id="b",
-                source="bb:budget", data_type="budget", scope_id="prog",
-                extra={"value": v},
-            ),
-        )
-    assert fired == [1.0, 2.0]
-
-
-async def test_rate_limit_drops_repeated_writes() -> None:
-    fired: list[str] = []
-
-    async def cb(sub, ev):
-        fired.append(ev.page_id)
-
-    rt = ConvergenceRuntime(dispatch_callback=cb, rate_interval_s=10.0, rate_burst=1)
-    rt.register(_sub(predicate=PageMetadataPredicate()))
-    await rt.feed_event(
-        PageChangeEvent.page_replaced(
-            old_page_id="hot", new_page_id="hot",
-            source="x:src", data_type="t", scope_id="s",
-        ),
-    )
-    # Second write to the same page within the window — rate limited.
-    await rt.feed_event(
-        PageChangeEvent.page_replaced(
-            old_page_id="hot", new_page_id="hot",
-            source="x:src", data_type="t", scope_id="s",
-        ),
-    )
-    assert fired == ["hot"]
-    # Different page — passes.
-    await rt.feed_event(
-        PageChangeEvent.page_replaced(
-            old_page_id="cool", new_page_id="cool",
-            source="x:src", data_type="t", scope_id="s",
-        ),
-    )
-    assert fired == ["hot", "cool"]
-
-
-async def test_subscription_lifecycle() -> None:
-    fired: list[str] = []
-
-    async def cb(sub, ev):
-        fired.append(sub.subscription_id)
-
-    rt = ConvergenceRuntime(dispatch_callback=cb)
+async def test_subscription_lifecycle(convergence_runtime) -> None:
+    rt = convergence_runtime
     sub = _sub(predicate=PageMetadataPredicate())
-    sid = rt.register(sub)
-    assert rt.subscription_count == 1
-    assert rt.unregister(sid) is True
-    assert rt.subscription_count == 0
+    sid = await rt.register(sub)
+    assert await rt.subscription_count() == 1
+    assert (await rt.get(sid)).capability_key == "Cap"
+    assert await rt.unregister(sid) is True
+    assert await rt.subscription_count() == 0
     # Subsequent events fire nothing.
+    fired = _capture_dispatches(rt)
     await rt.feed_event(
         PageChangeEvent.page_added(
             page_id="p", source="x:src", data_type="t", scope_id="s",
@@ -164,12 +70,118 @@ async def test_subscription_lifecycle() -> None:
     assert fired == []
 
 
-async def test_change_feed_records_skips() -> None:
-    async def cb(sub, ev):
-        return None
+# ---------------------------------------------------------------------------
+# Dispatch + matching
+# ---------------------------------------------------------------------------
 
-    rt = ConvergenceRuntime(dispatch_callback=cb, rate_interval_s=10.0, rate_burst=1)
-    rt.register(_sub(predicate=PageMetadataPredicate()))
+
+async def test_dispatch_matching_subscription(convergence_runtime) -> None:
+    rt = convergence_runtime
+    a = await rt.register(_sub(predicate=PageMetadataPredicate(data_type="code")))
+    await rt.register(_sub(predicate=PageMetadataPredicate(data_type="paper_section")))
+    fired = _capture_dispatches(rt)
+    await rt.feed_event(
+        PageChangeEvent.page_replaced(
+            old_page_id="p", new_page_id="p",
+            source="git:r:main:1", data_type="code", scope_id="s",
+        ),
+    )
+    assert [s.subscription_id for s, _ in fired] == [a]
+
+
+async def test_quiescence_emit_called(convergence_runtime) -> None:
+    """Each ``feed_event`` writes a quiescence event onto the colony
+    blackboard via ``ConvergenceQuiescenceProtocol``."""
+
+    rt = convergence_runtime
+    await rt.register(_sub(predicate=PageMetadataPredicate()))
+    await rt.feed_event(
+        PageChangeEvent.page_added(
+            page_id="p", source="x:src", data_type="t", scope_id="s",
+        ),
+    )
+    rt._colony_blackboard.write.assert_called_once()
+    call = rt._colony_blackboard.write.call_args
+    assert call.args[0].startswith("convergence:quiescence:")
+
+
+async def test_status_state_transitions(convergence_runtime) -> None:
+    in_flight_states: list[str] = []
+    rt = convergence_runtime
+    await rt.register(_sub(predicate=PageMetadataPredicate()))
+
+    async def cb(sub, ev):
+        # While dispatch is in flight on this replica, status is 'converging'.
+        status = await rt.get_status()
+        in_flight_states.append(status.state)
+
+    rt._dispatch_via_blackboard = cb
+    await rt.feed_event(
+        PageChangeEvent.page_added(
+            page_id="p", source="x:src", data_type="t", scope_id="s",
+        ),
+    )
+    # The dispatch happens after the CAS commit, so the in-flight
+    # episode is still set when cb runs.
+    assert in_flight_states == ["converging"]
+    assert (await rt.get_status()).state == "converged"
+
+
+# ---------------------------------------------------------------------------
+# Damping
+# ---------------------------------------------------------------------------
+
+
+async def test_damping_skips_within_tolerance(convergence_runtime) -> None:
+    rt = convergence_runtime
+    rt._rate_burst = 10
+    await rt.register(_sub(
+        predicate=PageMetadataPredicate(data_type="budget"),
+        tolerance=NumericTolerance(mode="absolute", value=0.5),
+    ))
+    fired = _capture_dispatches(rt)
+    for v in (1.0, 1.2, 1.4, 2.0, 2.05):
+        await rt.feed_event(
+            PageChangeEvent.page_replaced(
+                old_page_id="b", new_page_id="b",
+                source="bb:budget", data_type="budget", scope_id="prog",
+                extra={"value": v},
+            ),
+        )
+    assert [ev.extra["value"] for _, ev in fired] == [1.0, 2.0]
+
+
+# ---------------------------------------------------------------------------
+# Rate limit
+# ---------------------------------------------------------------------------
+
+
+async def test_rate_limit_drops_repeated_writes(convergence_runtime) -> None:
+    rt = convergence_runtime
+    rt._rate_interval_s = 10.0
+    rt._rate_burst = 1
+    await rt.register(_sub(predicate=PageMetadataPredicate()))
+    fired = _capture_dispatches(rt)
+    for page_id in ("hot", "hot", "cool"):
+        await rt.feed_event(
+            PageChangeEvent.page_replaced(
+                old_page_id=page_id, new_page_id=page_id,
+                source="x:src", data_type="t", scope_id="s",
+            ),
+        )
+    assert [ev.page_id for _, ev in fired] == ["hot", "cool"]
+
+
+# ---------------------------------------------------------------------------
+# Change feed bookkeeping
+# ---------------------------------------------------------------------------
+
+
+async def test_change_feed_records_skips(convergence_runtime) -> None:
+    rt = convergence_runtime
+    rt._rate_interval_s = 10.0
+    rt._rate_burst = 1
+    await rt.register(_sub(predicate=PageMetadataPredicate()))
     for _ in range(3):
         await rt.feed_event(
             PageChangeEvent.page_replaced(
@@ -177,38 +189,33 @@ async def test_change_feed_records_skips() -> None:
                 source="x:src", data_type="t", scope_id="s",
             ),
         )
-    feed = rt.get_change_feed()
+    feed = await rt.get_change_feed()
     reasons = [e.skipped_reason for e in feed]
-    # First event dispatched (no skipped_reason); the rest are
-    # rate-limited (which records a 'rate_limited' entry without a
-    # matching subscription).
     assert "rate_limited" in reasons
 
 
-async def test_wait_for_quiescence_immediate_when_idle() -> None:
+async def test_dispatch_callback_failures_do_not_break_others(
+    convergence_runtime,
+) -> None:
+    rt = convergence_runtime
+    bad = await rt.register(_sub(
+        predicate=PageMetadataPredicate(), capability_key="Bad",
+    ))
+    good = await rt.register(_sub(
+        predicate=PageMetadataPredicate(), capability_key="Good",
+    ))
+
+    fired_good: list[str] = []
+
     async def cb(sub, ev):
-        return None
-
-    rt = ConvergenceRuntime(dispatch_callback=cb)
-    assert await rt.wait_for_quiescence(timeout=0.1) is True
-
-
-async def test_dispatch_callback_failures_do_not_break_others() -> None:
-    fired: list[str] = []
-
-    async def cb(sub, ev):
-        if sub.capability_key == "Bad":
+        if sub.subscription_id == bad:
             raise RuntimeError("boom")
-        fired.append(sub.subscription_id)
+        fired_good.append(sub.subscription_id)
 
-    rt = ConvergenceRuntime(dispatch_callback=cb)
-    bad = _sub(predicate=PageMetadataPredicate(), capability_key="Bad")
-    good = _sub(predicate=PageMetadataPredicate(), capability_key="Good")
-    rt.register(bad)
-    rt.register(good)
+    rt._dispatch_via_blackboard = cb
     await rt.feed_event(
         PageChangeEvent.page_added(
             page_id="p", source="x:src", data_type="t", scope_id="s",
         ),
     )
-    assert good.subscription_id in fired
+    assert good in fired_good

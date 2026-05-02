@@ -29,7 +29,11 @@ from typing import Any
 
 from overrides import override
 
-from ...blackboard import BlackboardEvent, ConvergenceDispatchProtocol
+from ...blackboard import (
+    BlackboardEvent,
+    ConvergenceDispatchProtocol,
+    ConvergenceQuiescenceProtocol,
+)
 from ...models import AgentSuspensionState
 from ...base import Agent, AgentCapability
 from ..actions import action_executor
@@ -37,6 +41,7 @@ from ..events import EventProcessingResult, event_handler
 
 from polymathera.colony.vcm.convergence import (
     ChangeFeedEntry,
+    ConvergenceCounters,
     ConvergenceStatus,
     NumericTolerance,
     PageMetadataPredicate,
@@ -146,11 +151,6 @@ class ConvergenceCapability(AgentCapability):
         rt = await self._handle()
         return await rt.get_change_feed(limit)
 
-    @action_executor(planning_summary="Block until the runtime is converged.")
-    async def wait_for_quiescence(self, timeout: float | None = None) -> bool:
-        rt = await self._handle()
-        return await rt.wait_for_quiescence(timeout=timeout)
-
     # ---- Receive side -------------------------------------------------
 
     @event_handler(pattern=ConvergenceDispatchProtocol.dispatch_pattern())
@@ -192,6 +192,41 @@ class ConvergenceCapability(AgentCapability):
             context={
                 "subscription_id": subscription_id,
                 "page_event": page_event.model_dump(mode="json"),
+            },
+        )
+
+    @event_handler(pattern=ConvergenceQuiescenceProtocol.quiescence_pattern())
+    async def _on_quiescence(
+        self,
+        event: BlackboardEvent,
+        repl: Any,
+    ) -> EventProcessingResult | None:
+        """Surface a quiescence event as planner context so the agent
+        can react when the design state has just settled."""
+
+        try:
+            episode_id = ConvergenceQuiescenceProtocol.parse_quiescence_key(
+                event.key,
+            )
+        except ValueError:
+            return None
+        counters: ConvergenceCounters | None = None
+        if isinstance(event.value, dict):
+            try:
+                counters = ConvergenceCounters.model_validate(event.value)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "ConvergenceCapability: malformed quiescence payload at %s",
+                    event.key,
+                )
+        return EventProcessingResult(
+            context_key=event.key,
+            context={
+                "episode_id": episode_id,
+                "counters": (
+                    counters.model_dump(mode="json") if counters is not None
+                    else None
+                ),
             },
         )
 
@@ -239,9 +274,9 @@ class ConvergenceCapability(AgentCapability):
     # ---- Internal -----------------------------------------------------
 
     async def _handle(self):
-        from polymathera.colony.system import get_convergence_runtime
+        from polymathera.colony.system import get_vcm
 
-        return get_convergence_runtime(self._app_name)
+        return get_vcm(self._app_name)
 
 
 __all__ = ("ConvergenceCapability",)

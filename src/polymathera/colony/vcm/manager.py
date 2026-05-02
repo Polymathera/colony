@@ -61,6 +61,14 @@ from .page_storage import PageStorage, PageStorageConfig
 from .page_table import VirtualPageTable
 from .allocation import AllocationStrategy, DEFAULT_ALLOCATION_STRATEGY
 from .events import PageLoadedEvent, PageEvictedEvent, PageLoadFailedEvent
+from .page_events import PageChangeEvent
+from .convergence import (
+    ChangeFeedEntry,
+    ConvergenceStatus,
+    NumericTolerance,
+    PageMetadataPredicate,
+    PageSubscription,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,12 +159,12 @@ class VirtualContextManager:
         # Application ↔ VCM integration (scope mappings)
         self._local_mapped_scopes: dict[str, MappedScope] = {}
 
-        # Live-context bridge: for each non-static source we drain
-        # ``source.watch()`` and feed each event straight into the
-        # ``ConvergenceRuntimeDeployment`` via its KERNEL-ring
-        # ``feed_page_event`` endpoint. The handle is resolved
-        # lazily on first bridge start.
-        self._convergence_runtime_handle: serving.DeploymentHandle | None = None
+        # Convergence runtime — per-replica instance with authoritative
+        # state in VirtualPageTableState.convergence (shared across all
+        # VCM replicas via the page-table StateManager). Watch bridges
+        # call self.convergence_runtime.feed_event(...) in-process.
+        from .convergence import ConvergenceRuntime
+        self.convergence_runtime: ConvergenceRuntime | None = None
 
     @staticmethod
     def _local_scope_key(scope_id: str) -> str:
@@ -182,6 +190,16 @@ class VirtualContextManager:
         # Initialize page table
         self.page_table = VirtualPageTable()
         await self.page_table.initialize()
+
+        # Initialize convergence runtime — per-replica instance with
+        # state stored in VirtualPageTableState.convergence (shared
+        # across replicas via the page-table StateManager).
+        from .convergence import ConvergenceRuntime
+        self.convergence_runtime = ConvergenceRuntime(
+            state_manager=self.page_table.state_manager,
+            app_name=self.app_name,
+        )
+        await self.convergence_runtime.initialize()
 
         # Initialize allocation strategy
         if self.allocation_strategy is None:
@@ -2265,40 +2283,31 @@ class VirtualContextManager:
         self, source: ContextPageSource,
     ) -> asyncio.Task[None]:
         """Start a long-running task that drains ``source.watch()`` into
-        the convergence runtime via a direct deployment-handle call.
-
-        Lazy-resolves the runtime handle on first call; subsequent
-        bridges reuse it. The task is cancelled when the corresponding
-        ``MappedScope`` is shut down (see ``_unmount_scope``).
+        this replica's local convergence runtime in-process. The
+        runtime persists all dispatch state in
+        ``VirtualPageTableState.convergence`` (compare-and-swap), so
+        events processed by any replica land in the same shared view.
+        The task is cancelled when the corresponding ``MappedScope``
+        is shut down (see ``_unmount_scope``).
         """
 
-        from ..system import get_convergence_runtime
-
-        if self._convergence_runtime_handle is None:
-            try:
-                self._convergence_runtime_handle = get_convergence_runtime(
-                    self.app_name,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"VCM: ConvergenceRuntimeDeployment unavailable for "
-                    f"scope {source.scope_id}: {e}",
-                ) from e
-
-        runtime_handle = self._convergence_runtime_handle
+        if self.convergence_runtime is None:
+            raise RuntimeError(
+                f"VCM: convergence runtime not initialized; cannot start "
+                f"watch bridge for scope {source.scope_id}.",
+            )
+        runtime = self.convergence_runtime
         source_id = source.scope_id
 
         async def _drain() -> None:
             try:
                 async for event in source.watch():
                     try:
-                        await runtime_handle.feed_page_event(
-                            event=event, source_id=source_id,
-                        )
+                        await runtime.feed_event(event, source_id=source_id)
                     except Exception:  # noqa: BLE001
                         logger.exception(
-                            f"VCM: feed_page_event failed for "
-                            f"scope {source_id}"
+                            f"VCM: convergence_runtime.feed_event failed "
+                            f"for scope {source_id}"
                         )
             except asyncio.CancelledError:
                 return
@@ -2539,6 +2548,84 @@ class VirtualContextManager:
 
         return deployment_states
 
+    # ---- Convergence runtime endpoints --------------------------------
+    #
+    # The convergence runtime is hosted by VCM (per-replica instance,
+    # shared state in VirtualPageTableState.convergence). These
+    # endpoints forward to the local runtime; calls landing on any
+    # replica see the same shared view via the StateManager's CAS.
+
+    @serving.endpoint(ring=serving.Ring.KERNEL)
+    async def feed_page_event(
+        self, event: PageChangeEvent, *, source_id: str = "unknown",
+    ) -> None:
+        """Privileged ingestion path for callers outside this VCM
+        replica's own watch bridges. Most events flow through the
+        local in-process bridge call; this endpoint covers the rare
+        cross-replica case."""
+
+        runtime = self._require_convergence_runtime()
+        await runtime.feed_event(event, source_id=source_id)
+
+    @serving.endpoint
+    async def subscribe(
+        self,
+        *,
+        predicate: PageMetadataPredicate,
+        dispatch_scope: str,
+        tolerance: NumericTolerance | None = None,
+        capability_key: str = "",
+        agent_id: str | None = None,
+    ) -> str:
+        runtime = self._require_convergence_runtime()
+        sub = PageSubscription(
+            predicate=predicate,
+            dispatch_scope=dispatch_scope,
+            tolerance=tolerance,
+            capability_key=capability_key,
+            agent_id=agent_id,
+        )
+        return await runtime.register(sub)
+
+    @serving.endpoint
+    async def unsubscribe(self, subscription_id: str) -> bool:
+        runtime = self._require_convergence_runtime()
+        return await runtime.unregister(subscription_id)
+
+    @serving.endpoint
+    async def get_subscription(
+        self, subscription_id: str,
+    ) -> PageSubscription | None:
+        runtime = self._require_convergence_runtime()
+        return await runtime.get(subscription_id)
+
+    @serving.endpoint
+    async def dispatch_change(
+        self, event: PageChangeEvent, *, source_id: str = "manual",
+    ) -> None:
+        runtime = self._require_convergence_runtime()
+        await runtime.dispatch_change(event, source_id=source_id)
+
+    @serving.endpoint
+    async def get_status(self) -> ConvergenceStatus:
+        runtime = self._require_convergence_runtime()
+        return await runtime.get_status()
+
+    @serving.endpoint
+    async def get_change_feed(
+        self, limit: int = 50,
+    ) -> list[ChangeFeedEntry]:
+        runtime = self._require_convergence_runtime()
+        return await runtime.get_change_feed(limit)
+
+    def _require_convergence_runtime(self):
+        if self.convergence_runtime is None:
+            raise RuntimeError(
+                "VCM convergence runtime not initialized; wait for "
+                "@serving.initialize_deployment to run.",
+            )
+        return self.convergence_runtime
+
     @serving.cleanup_deployment
     async def cleanup(self):
         """Cleanup VCM resources including event subscriptions."""
@@ -2569,9 +2656,14 @@ class VirtualContextManager:
                 logger.warning(f"Error shutting down scope mapping {scope_key}: {e}")
         self._local_mapped_scopes.clear()
 
-        # Drop the convergence runtime handle; the deployment owns its
-        # own lifecycle.
-        self._convergence_runtime_handle = None
+        # Cleanup the local convergence runtime (releases per-replica
+        # blackboard handles; shared state stays in storage).
+        if self.convergence_runtime is not None:
+            try:
+                await self.convergence_runtime.cleanup()
+            except Exception:  # noqa: BLE001
+                logger.exception("convergence_runtime cleanup failed")
+            self.convergence_runtime = None
 
         logger.info("VirtualContextManager cleanup complete")
 

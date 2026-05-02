@@ -45,15 +45,6 @@ class VCMConfig:
                 name="vcm",
             )
 
-        # Master §5: the always-live design context. VCM feeds each
-        # PageChangeEvent straight into the runtime via
-        # feed_page_event (KERNEL ring); the runtime then writes one
-        # dispatch per matched subscription onto the subscribing
-        # capability's blackboard scope (key shape owned by
-        # ConvergenceDispatchProtocol).
-        from .convergence import ConvergenceRuntimeDeployment
-
-        app.add_deployment(
-            ConvergenceRuntimeDeployment.bind(),
-            name="convergence_runtime",
-        )
+        # Master §5: the always-live design context. The convergence
+        # runtime is hosted by VCM (per-replica instance, shared state
+        # in VirtualPageTableState.convergence). No separate deployment.

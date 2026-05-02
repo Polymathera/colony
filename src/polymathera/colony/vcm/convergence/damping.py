@@ -94,6 +94,33 @@ class ConvergenceDamper:
             self._cache[key] = _CachedOutput(new_vec)
             return converged
 
+    # ---- Shared-state round-trip --------------------------------------
+    #
+    # The runtime persists the damper's cache in
+    # ``VirtualPageTableState.convergence`` so all VCM replicas use the
+    # same previous-output baseline. The runtime constructs a damper
+    # inside each write transaction via ``from_cache`` and writes the
+    # updated cache back via ``dump_cache``.
+
+    def dump_cache(self) -> dict[str, list[float]]:
+        """Serialize the cache to a Pydantic-friendly dict."""
+
+        with self._lock:
+            return {
+                f"{sid}|{pid}": list(co.value)
+                for (sid, pid), co in self._cache.items()
+            }
+
+    @classmethod
+    def from_cache(cls, cache: dict[str, list[float]]) -> "ConvergenceDamper":
+        """Reconstruct from a dict produced by ``dump_cache``."""
+
+        d = cls()
+        for key, value in cache.items():
+            sid, pid = key.split("|", 1)
+            d._cache[(sid, pid)] = _CachedOutput(tuple(value))
+        return d
+
     def reset(
         self,
         *,

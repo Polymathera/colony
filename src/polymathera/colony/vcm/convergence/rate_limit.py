@@ -87,6 +87,39 @@ class WriteRateLimiter:
             bucket.last_at = ts
             return True
 
+    # ---- Shared-state round-trip --------------------------------------
+    #
+    # The runtime persists rate-bucket state in
+    # ``VirtualPageTableState.convergence`` so per-page rate limits
+    # apply across all VCM replicas. The runtime constructs a limiter
+    # inside each write transaction via ``from_buckets`` and writes
+    # the updated buckets back via ``dump_buckets``.
+
+    def dump_buckets(self) -> dict[str, list[float]]:
+        """Serialize buckets to a Pydantic-friendly dict
+        ``key -> [last_at, tokens]``."""
+
+        with self._lock:
+            return {
+                key: [bucket.last_at, bucket.tokens]
+                for key, bucket in self._buckets.items()
+            }
+
+    @classmethod
+    def from_buckets(
+        cls,
+        buckets: dict[str, list[float]],
+        *,
+        min_interval_s: float = 1.0,
+        burst_size: int = 1,
+    ) -> "WriteRateLimiter":
+        """Reconstruct from a dict produced by ``dump_buckets``."""
+
+        rl = cls(min_interval_s=min_interval_s, burst_size=burst_size)
+        for key, (last_at, tokens) in buckets.items():
+            rl._buckets[key] = _Bucket(last_at=float(last_at), tokens=float(tokens))
+        return rl
+
     def reset(self, key: str | None = None) -> None:
         with self._lock:
             if key is None:

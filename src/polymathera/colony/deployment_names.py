@@ -92,10 +92,6 @@ class DeploymentNames(BaseModel):
         default="embedding",
         description="Embedding service deployment name"
     )
-    convergence_runtime: str = Field(
-        default="convergence_runtime",
-        description="Convergence runtime deployment name (Phase C4 — VCM page-event dispatcher)"
-    )
 
     class Config:
         frozen = True  # Make immutable after creation
@@ -119,7 +115,6 @@ def load_deployment_names_from_env() -> dict[str, Any]:
         "standalone_agents": "POLYMATHERA_DEPLOYMENT_STANDALONE_AGENTS",
         "session_manager": "POLYMATHERA_DEPLOYMENT_SESSION_MANAGER",
         "embedding": "POLYMATHERA_DEPLOYMENT_EMBEDDING",
-        "convergence_runtime": "POLYMATHERA_DEPLOYMENT_CONVERGENCE_RUNTIME",
     }
 
     config = {}
