@@ -264,12 +264,6 @@ class ConfigSource(Enum):
     DEFAULT = "default"
 
 
-class EnvironmentType(str, Enum):
-    DEVELOPMENT = "development"
-    STAGING = "staging"
-    PRODUCTION = "production"
-
-
 AWS_CONFIG_PATH = "aws"
 
 
@@ -366,7 +360,7 @@ CLOUD_SYSTEM_CONFIG_PATH = "cloud_system"
 class CloudSystemConfig(ConfigComponent):
     """System-wide configuration"""
 
-    environment: EnvironmentType = EnvironmentType.DEVELOPMENT
+    environment: str = "development"
     deployment_type: str = "kubernetes"  # kubernetes, ecs, ec2, etc.
     region: str = "us-east-1"
     availability_zones: list[str] = Field(default_factory=list)

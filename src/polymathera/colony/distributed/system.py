@@ -13,7 +13,7 @@ import ray
 from pydantic import BaseModel
 
 from .caching.simple import CacheConfig, DistributedSimpleCache
-from .config.manager import ConfigurationManager, EnvironmentType
+from .config.manager import ConfigurationManager
 from .ray_utils import serving
 from .redis_utils import RedisClient
 from .configs import (
@@ -45,7 +45,6 @@ class PolymatheraApp:
     def __init__(
         self,
         config_path: str | None = None,
-        environment: EnvironmentType | None = None,
         head: bool = False,
     ):
         self._id: str = str(uuid.uuid4())
@@ -58,12 +57,7 @@ class PolymatheraApp:
         # Cache for StateManager instances (keyed by state_key)
         self._state_managers: dict[str, StateManager] = {}
 
-        # Initialize configuration manager
-        self._config_manager = ConfigurationManager(
-            config_path=config_path,
-            environment=environment,
-            distributed=False,  # Disable distributed configuration
-        )
+        self._config_manager = ConfigurationManager(config_path=config_path)
 
         # Initialize core attributes
         self.sys_config: SystemConfig | None = None
@@ -312,8 +306,6 @@ class PolymatheraApp:
 
             self._cache_registry.clear()
 
-        await self._config_manager.cleanup()  # Cleanup config manager resources
-
         logger.info("Polymathera system stopped successfully")
 
 
@@ -329,9 +321,6 @@ logger.info(f"Initializing Polymathera {'head' if is_head else 'worker'} node")
 
 polymathera = PolymatheraApp(
     config_path=os.getenv("POLYMATHERA_CONFIG"),
-    environment=EnvironmentType(
-        os.getenv("POLYMATHERA_ENV", EnvironmentType.DEVELOPMENT)
-    ),
     head=is_head,  # Determine head status from environment
 )
 
