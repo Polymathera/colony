@@ -222,7 +222,7 @@ class VCMCapability(AgentCapability):
 
     # --- Internal -----------------------------------------------------------
 
-    def _get_vcm(self):
+    async def _get_vcm(self):
         """Lazily resolve the VCM deployment handle.
 
         Caches the handle on the capability so we don't pay the
@@ -230,7 +230,7 @@ class VCMCapability(AgentCapability):
         """
         if self._vcm_handle is None:
             from ....system import get_vcm
-            self._vcm_handle = get_vcm(self._app_name)
+            self._vcm_handle = await get_vcm(self._app_name)
         return self._vcm_handle
 
     async def _emit_event(self, key: str, value: dict[str, Any]) -> None:
@@ -367,7 +367,8 @@ class VCMCapability(AgentCapability):
         mmap_config = config or self._default_mmap_config or MmapConfig()
 
         try:
-            raw = await self._get_vcm().mmap_application_scope(
+            vcm = await self._get_vcm()
+            raw = await vcm.mmap_application_scope(
                 scope_id=target_scope_id,
                 source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
                 config=mmap_config,
@@ -453,7 +454,8 @@ class VCMCapability(AgentCapability):
         mmap_config = config or self._default_mmap_config or MmapConfig()
 
         try:
-            raw = await self._get_vcm().mmap_application_scope(
+            vcm = await self._get_vcm()
+            raw = await vcm.mmap_application_scope(
                 scope_id=target_scope_id,
                 source_type=BuilInContextPageSourceType.BLACKBOARD.value,
                 config=mmap_config,
@@ -499,7 +501,8 @@ class VCMCapability(AgentCapability):
                 ``mmap_blackboard_scope``.
         """
         try:
-            raw = await self._get_vcm().munmap_application_scope(
+            vcm = await self._get_vcm()
+            raw = await vcm.munmap_application_scope(
                 scope_id=scope_id,
             )
         except Exception as e:
@@ -538,7 +541,8 @@ class VCMCapability(AgentCapability):
             "not mapped" from "lookup failed".
         """
         try:
-            mapped = await self._get_vcm().is_application_scope_mapped(
+            vcm = await self._get_vcm()
+            mapped = await vcm.is_application_scope_mapped(
                 scope_id=scope_id,
             )
         except Exception as e:
@@ -566,7 +570,8 @@ class VCMCapability(AgentCapability):
             on failure.
         """
         try:
-            status = await self._get_vcm().get_application_scope_mapping_status(
+            vcm = await self._get_vcm()
+            status = await vcm.get_application_scope_mapping_status(
                 scope_id=scope_id,
             )
         except Exception as e:
@@ -594,7 +599,8 @@ class VCMCapability(AgentCapability):
             on failure.
         """
         try:
-            mappings = await self._get_vcm().get_all_mapped_scopes()
+            vcm = await self._get_vcm()
+            mappings = await vcm.get_all_mapped_scopes()
         except Exception as e:
             logger.warning(
                 "VCMCapability.list_mapped_scopes failed: %s", e,
@@ -644,14 +650,15 @@ class VCMCapability(AgentCapability):
             }
         requester_id = self.agent.agent_id if self._agent is not None else "unknown"
         try:
-            fault_id = await self._get_vcm().issue_page_fault(
+            vcm = await self._get_vcm()
+            fault_id = await vcm.issue_page_fault(
                 page_ids=list(page_ids),
                 requester_id=requester_id,
                 priority=priority,
                 lock_duration_s=lock_duration_s,
                 lock_reason=lock_reason,
             )
-            loaded = await self._get_vcm().wait_for_pages(
+            loaded = await vcm.wait_for_pages(
                 fault_id=fault_id, timeout_s=timeout_s,
             )
         except Exception as e:
@@ -716,7 +723,7 @@ class VCMCapability(AgentCapability):
         locker = self.agent.agent_id if self._agent is not None else "unknown"
         locked: list[str] = []
         failed: list[dict[str, str]] = []
-        vcm = self._get_vcm()
+        vcm = await self._get_vcm()
         for page_id in page_ids:
             try:
                 await vcm.lock_page(
@@ -752,7 +759,7 @@ class VCMCapability(AgentCapability):
         unlocked: list[str] = []
         already: list[str] = []
         failed: list[dict[str, str]] = []
-        vcm = self._get_vcm()
+        vcm = await self._get_vcm()
         for page_id in page_ids:
             try:
                 ok = await vcm.unlock_page(page_id=page_id)
@@ -790,7 +797,8 @@ class VCMCapability(AgentCapability):
                 "message": "additional_s must be positive",
             }
         try:
-            ok = await self._get_vcm().extend_page_lock(
+            vcm = await self._get_vcm()
+            ok = await vcm.extend_page_lock(
                 page_id=page_id, additional_duration_s=additional_s,
             )
         except Exception as e:
@@ -826,7 +834,8 @@ class VCMCapability(AgentCapability):
             design doc §6 for context).
         """
         try:
-            graph = await self._get_vcm().get_page_graph_data(
+            vcm = await self._get_vcm()
+            graph = await vcm.get_page_graph_data(
                 max_nodes=max_nodes,
             )
         except Exception as e:
@@ -866,7 +875,8 @@ class VCMCapability(AgentCapability):
             ``{"pages": [...], "count": int, "message": str}``.
         """
         try:
-            pages = await self._get_vcm().list_stored_pages(
+            vcm = await self._get_vcm()
+            pages = await vcm.list_stored_pages(
                 source_pattern=source_pattern, limit=limit, offset=offset,
             )
         except Exception as e:
@@ -901,7 +911,8 @@ class VCMCapability(AgentCapability):
             "message": str}``.
         """
         try:
-            pages = await self._get_vcm().get_pages_for_scope(
+            vcm = await self._get_vcm()
+            pages = await vcm.get_pages_for_scope(
                 scope_id=scope_id,
                 include_metadata=include_metadata,
             )
@@ -931,7 +942,8 @@ class VCMCapability(AgentCapability):
         ``{"stats": None, "message": "<err>"}`` rather than raising.
         """
         try:
-            stats = await self._get_vcm().get_stats()
+            vcm = await self._get_vcm()
+            stats = await vcm.get_stats()
         except Exception as e:
             logger.warning(
                 "VCMCapability.get_vcm_stats failed: %s", e,
@@ -1202,7 +1214,8 @@ class VCMCapability(AgentCapability):
         # invalidate + reindex both unmap the scope in v1 because the VCM
         # does not yet expose a per-page "evict and re-fetch" path.
         try:
-            await self._get_vcm().munmap_application_scope(
+            vcm = await self._get_vcm()
+            await vcm.munmap_application_scope(
                 scope_id=handle.scope_id,
             )
             await self._emit_event(

@@ -57,7 +57,7 @@ async def get_vcm_stats(
 
     # AuthMiddleware sets USER context; no explicit context needed
     try:
-        stats = await colony.get_vcm().get_stats()
+        stats = await (await colony.get_vcm()).get_stats()
         pt = stats.get("page_table", {})
         storage = stats.get("storage", {})
         return VCMStats( # TODO: Add more stats
@@ -85,7 +85,7 @@ async def list_pages(
     # AuthMiddleware sets USER context; no explicit context needed
     try:
 
-        summaries = await colony.get_vcm().list_stored_pages(
+        summaries = await (await colony.get_vcm()).list_stored_pages(
             limit=limit,
             offset=offset,
         )
@@ -116,7 +116,7 @@ async def get_working_set(
     # AuthMiddleware sets USER context; no explicit context needed
     try:
 
-        loaded = await colony.get_vcm().get_all_loaded_pages()
+        loaded = await (await colony.get_vcm()).get_all_loaded_pages()
         return {"pages": loaded}
     except Exception as e:
         logger.warning("Failed to get working set: %s", e)
@@ -135,7 +135,7 @@ async def list_loaded_pages(
     # AuthMiddleware sets USER context; no explicit context needed
     try:
 
-        return await colony.get_vcm().list_loaded_page_entries()
+        return await (await colony.get_vcm()).list_loaded_page_entries()
     except Exception as e:
         logger.warning("Failed to list loaded pages: %s", e)
         return []
@@ -154,7 +154,7 @@ async def get_page_detail(
         return {"error": "not connected"}
 
     try:
-        page = await colony.get_vcm().get_virtual_page(page_id)
+        page = await (await colony.get_vcm()).get_virtual_page(page_id)
         if page is None:
             return {"error": "page not found", "page_id": page_id}
         if hasattr(page, "model_dump"):
@@ -178,7 +178,7 @@ async def get_page_locations(
 
     # AuthMiddleware sets USER context; no explicit context needed
     try:
-        locations = await colony.get_vcm().get_page_locations(page_id)
+        locations = await (await colony.get_vcm()).get_page_locations(page_id)
         return {
             "page_id": page_id,
             "colony_id": colony_id,
@@ -300,7 +300,7 @@ async def _run_mapping(
             from polymathera.colony.vcm.sources import BuilInContextPageSourceType
             from polymathera.colony.agents import ScopeUtils
 
-            vcm = colony.get_vcm()
+            vcm = await colony.get_vcm()
 
             mmap_config = MmapConfig(
                 flush_threshold=request.flush_threshold,
@@ -394,7 +394,7 @@ async def upload_and_map(
         from polymathera.colony.vcm.sources import BuilInContextPageSourceType
         from polymathera.colony.agents import ScopeUtils
 
-        vcm = colony.get_vcm()
+        vcm = await colony.get_vcm()
         scope_id = ScopeUtils.get_colony_level_scope()
 
         mmap_config = MmapConfig(

@@ -489,7 +489,7 @@ class AgentPoolCapability(AgentCapability):
         """
         try:
             from ....system import get_agent_system
-            agent_system = get_agent_system()
+            agent_system = await get_agent_system()
             new_agent_id = await agent_system.resume_agent(agent_id)
 
             if new_agent_id:

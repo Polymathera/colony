@@ -161,7 +161,7 @@ class LLMCluster:
 
         # Initialize distributed tracing from typed ObservabilityConfig.
         from ..distributed.configs import get_observability_config
-        obs = get_observability_config()
+        obs = await get_observability_config()
         if obs.tracing_enabled:
             from ..distributed.observability import TracingConfig
             from .observability import ClusterTracingFacility
@@ -308,7 +308,7 @@ class LLMCluster:
 
         # Get embedding deployment handle if any embedding backend is configured (GPU, API, or SentenceTransformers)
         if self.config.embedding_config or self.config.remote_embedding_config or self.config.st_embedding_config:
-            self.embedding_deployment_handle = get_embedding_deployment(self.app_name)
+            self.embedding_deployment_handle = await get_embedding_deployment(self.app_name)
             logger.debug("Connected to embedding deployment")
 
         # Per-deployment state managers (for reading deployment states)

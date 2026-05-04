@@ -316,9 +316,11 @@ class ObservabilityConfig(ConfigComponent):
     CONFIG_PATH: ClassVar[str] = "distributed.observability"
 
 
-def get_observability_config() -> "ObservabilityConfig":
+async def get_observability_config() -> "ObservabilityConfig":
     """Sync fetch of the registered :class:`ObservabilityConfig` (defaults if uninit)."""
+    from . import get_initialized_polymathera
     from .config.manager import get_component_or_default
+    await get_initialized_polymathera()
     return get_component_or_default(ObservabilityConfig.CONFIG_PATH, ObservabilityConfig)
 
 

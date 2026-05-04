@@ -278,10 +278,10 @@ class BatchedLLMAttention(AttentionScoringMechanism):
         self.batch_size = batch_size
         self._llm_cluster = None
 
-    def _get_llm_cluster(self) -> serving.DeploymentHandle:
+    async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
-            self._llm_cluster = get_llm_cluster()
+            self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 
     @override
@@ -298,7 +298,7 @@ class BatchedLLMAttention(AttentionScoringMechanism):
         if not keys:
             return []
 
-        llm_cluster = self._get_llm_cluster()
+        llm_cluster = await self._get_llm_cluster()
 
         # Process keys in batches
         all_scores = []
@@ -441,10 +441,10 @@ class EmbeddingBasedAttention(AttentionScoringMechanism):
         self.top_k = top_k
         self._llm_cluster = None
 
-    def _get_llm_cluster(self) -> serving.DeploymentHandle:
+    async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
-            self._llm_cluster = get_llm_cluster()
+            self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 
     @override
@@ -457,7 +457,7 @@ class EmbeddingBasedAttention(AttentionScoringMechanism):
         """Compute attention using embedding cosine similarity."""
         # Get query embedding
         if query.query_embedding is None:
-            llm_cluster = self._get_llm_cluster()
+            llm_cluster = await self._get_llm_cluster()
             embeddings = await llm_cluster.embed([query.query_text])
             query_emb = np.array(embeddings[0])
         else:
@@ -513,10 +513,10 @@ class StructuralKeyGenerator(KeyGenerator):
         super().__init__(agent)
         self._llm_cluster = None
 
-    def _get_llm_cluster(self) -> serving.DeploymentHandle:
+    async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
-            self._llm_cluster = get_llm_cluster()
+            self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 
     async def generate_key(
@@ -531,7 +531,7 @@ class StructuralKeyGenerator(KeyGenerator):
         Returns:
             PageKey with structural features extracted from code
         """
-        llm_cluster = self._get_llm_cluster()
+        llm_cluster = await self._get_llm_cluster()
 
         # Build prompt for structural extraction
         prompt = """Analyze this code and extract its structure.
@@ -584,10 +584,10 @@ class SemanticKeyGenerator(KeyGenerator):
         super().__init__(agent)
         self._llm_cluster = None
 
-    def _get_llm_cluster(self) -> serving.DeploymentHandle:
+    async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
-            self._llm_cluster = get_llm_cluster()
+            self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 
     async def generate_key(
@@ -602,7 +602,7 @@ class SemanticKeyGenerator(KeyGenerator):
         Returns:
             PageKey with semantic embedding and summary
         """
-        llm_cluster = self._get_llm_cluster()
+        llm_cluster = await self._get_llm_cluster()
 
         # First, generate summary using LLM via VCM
         summary_prompt = "Summarize this code in 1-2 sentences, focusing on its purpose and main functionality."
@@ -698,10 +698,10 @@ class LLMQueryGenerator(QueryGenerator):
         self.max_queries = max_queries
         self._llm_cluster = None
 
-    def _get_llm_cluster(self) -> serving.DeploymentHandle:
+    async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
-            self._llm_cluster = get_llm_cluster()
+            self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 
     @override
@@ -724,7 +724,7 @@ class LLMQueryGenerator(QueryGenerator):
         if not findings:
             return []
 
-        llm_cluster = self._get_llm_cluster()
+        llm_cluster = await self._get_llm_cluster()
 
         # Build prompt for query generation
         import json
@@ -915,10 +915,10 @@ class SemanticQueryGenerator(QueryGenerator):
         self.max_queries = max_queries
         self._llm_cluster = None
 
-    def _get_llm_cluster(self) -> serving.DeploymentHandle:
+    async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
-            self._llm_cluster = get_llm_cluster()
+            self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 
     @override
@@ -940,7 +940,7 @@ class SemanticQueryGenerator(QueryGenerator):
         Returns:
             List of PageQuery objects for semantic search
         """
-        llm_cluster = self._get_llm_cluster()
+        llm_cluster = await self._get_llm_cluster()
         queries = []
 
         for finding in findings[:self.max_queries]:

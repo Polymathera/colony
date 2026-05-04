@@ -324,7 +324,7 @@ class SemanticAnalyzer(BaseAnalyzer):
 
     async def _embed_with_chunking(self, content: str, language: str | None = None) -> np.ndarray:
         """Embed text, chunking first if configured and content is long."""
-        embedder = get_llm_cluster()
+        embedder = await get_llm_cluster()
 
         if self.config.chunk_large_files and len(content) > self.config.max_content_length:
             chunker = LanguageAwareTextChunker(language, self.config.chunking)

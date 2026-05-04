@@ -1348,7 +1348,7 @@ async def run_integration_test(
     # -----------------------------------------------------------------------
     if config.agent_system.enable_sessions:
         with console.status("[magenta]Creating session..."):
-            sm_handle = get_session_manager(effective_app_name)
+            sm_handle = await get_session_manager(effective_app_name)
             session = await sm_handle.create_session()
             # Handle both Pydantic model and dict from DeploymentHandle
             if isinstance(session, dict):
@@ -1383,7 +1383,7 @@ async def run_integration_test(
         border_style="cyan",
     ))
 
-    vcm_handle = get_vcm(effective_app_name)
+    vcm_handle = await get_vcm(effective_app_name)
 
     mmap_config = MmapConfig(
         flush_policy_type=config.paging.flush_policy_type,
@@ -1552,7 +1552,7 @@ async def run_integration_test(
     async def _get_run_cost(run_id: str) -> dict[str, Any]:
         """Query SessionManagerDeployment for accumulated cost data for a run."""
         try:
-            sm_handle = get_session_manager(effective_app_name)
+            sm_handle = await get_session_manager(effective_app_name)
             run: AgentRun = await sm_handle.get_run(run_id=run_id)
             if run and run.resource_usage:
                 usage = run.resource_usage

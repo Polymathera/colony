@@ -38,7 +38,7 @@ async def get_token_usage(
         return {"runs": [], "totals": {}, "error": "not connected"}
 
     try:
-        handle = colony.get_session_manager()
+        handle = await colony.get_session_manager()
 
         if session_id:
             runs = await handle.get_session_runs(session_id=session_id, limit=200)
@@ -156,7 +156,7 @@ async def get_metrics_debug(
         return result
 
     try:
-        handle = colony.get_session_manager()
+        handle = await colony.get_session_manager()
         result["handle_type"] = str(type(handle))
     except Exception as e:
         result["errors"].append(f"get_session_manager failed: {e}")

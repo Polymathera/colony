@@ -546,7 +546,7 @@ class SessionOrchestratorCapability(AgentCapability):
             # @agent_type or @agent_id — forward message to that agent
             try:
                 from polymathera.colony.system import get_agent_system
-                agent_system = get_agent_system()
+                agent_system = await get_agent_system()
 
                 # Try to find by ID first, then by type
                 agent_ids = await agent_system.list_all_agents()
@@ -890,7 +890,7 @@ class SessionOrchestratorCapability(AgentCapability):
         # Query agent system for agents in this session
         try:
             from polymathera.colony.system import get_agent_system
-            agent_system = get_agent_system()
+            agent_system = await get_agent_system()
             agent_ids = await agent_system.list_all_agents()
 
             if not agent_ids:

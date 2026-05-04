@@ -56,7 +56,7 @@ async def analyze_repository(
         run_id="run-abc",
         origin="cli",
     ):
-        vcm_handle = get_vcm()
+        vcm_handle = await get_vcm()
         mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
             scope_id="repo-123",
             source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
@@ -69,7 +69,7 @@ async def analyze_repository(
     logger.info("ContextPageSource initialized")
 
     # 2. Get AgentSystemDeployment handle
-    agent_system = get_agent_system()
+    agent_system = await get_agent_system()
 
     # 3. Spawn CodeAnalysisCoordinator
     logger.info("Spawning CodeAnalysisCoordinator...")

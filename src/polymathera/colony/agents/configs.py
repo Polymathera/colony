@@ -385,13 +385,11 @@ class PluginsConfig(ConfigComponent):
     )
 
 
-def get_plugins_config() -> PluginsConfig:
-    """Best-effort sync fetch of the registered ``PluginsConfig``.
-
-    Falls back to defaults when the global ``ConfigurationManager`` has not
-    been initialized yet (e.g. unit tests that build capabilities directly).
-    """
-    return _get_component_or_default("plugins", PluginsConfig)
+async def get_plugins_config() -> PluginsConfig:
+    """Async fetch of the registered ``PluginsConfig`` — initializes the
+    global ``ConfigurationManager`` first so the returned component
+    reflects YAML + env-var values, not bare class defaults."""
+    return await _get_component_or_default("plugins", PluginsConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -443,9 +441,9 @@ class SandboxImagesConfig(ConfigComponent):
     )
 
 
-def get_sandbox_images_config() -> SandboxImagesConfig:
-    """Best-effort sync fetch of the registered ``SandboxImagesConfig``."""
-    return _get_component_or_default("sandbox_images", SandboxImagesConfig)
+async def get_sandbox_images_config() -> SandboxImagesConfig:
+    """Async fetch — see :func:`get_plugins_config`."""
+    return await _get_component_or_default("sandbox_images", SandboxImagesConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -486,8 +484,8 @@ class WebSearchConfig(ConfigComponent):
     )
 
 
-def get_web_search_config() -> WebSearchConfig:
-    return _get_component_or_default("capabilities.web_search", WebSearchConfig)
+async def get_web_search_config() -> WebSearchConfig:
+    return await _get_component_or_default("capabilities.web_search", WebSearchConfig)
 
 
 @register_polymathera_config(path="capabilities.github")
@@ -508,8 +506,8 @@ class GitHubAuthConfig(ConfigComponent):
     )
 
 
-def get_github_auth_config() -> GitHubAuthConfig:
-    return _get_component_or_default("capabilities.github", GitHubAuthConfig)
+async def get_github_auth_config() -> GitHubAuthConfig:
+    return await _get_component_or_default("capabilities.github", GitHubAuthConfig)
 
 
 @register_polymathera_config(path="memory.chroma")
@@ -522,19 +520,24 @@ class ChromaConfig(ConfigComponent):
     )
 
 
-def get_chroma_config() -> ChromaConfig:
-    return _get_component_or_default("memory.chroma", ChromaConfig)
+async def get_chroma_config() -> ChromaConfig:
+    return await _get_component_or_default("memory.chroma", ChromaConfig)
 
 
 # ---------------------------------------------------------------------------
-# Sync-fetch helper (capability constructors are sync; manager init may have
-# completed but is awaited from elsewhere — degrade to defaults on miss).
+# Async-fetch helper. The underlying ``get_component_or_default`` is sync
+# and degrades to bare defaults when the global ``ConfigurationManager`` has
+# not loaded YAML / env vars yet — which is the state in fresh deployment
+# worker processes. This wrapper awaits the shared init coroutine first so
+# the returned component reflects the operator's actual configuration.
 # ---------------------------------------------------------------------------
 
 
-def _get_component_or_default(path: str, cls: type[ConfigComponent]):
+async def _get_component_or_default(path: str, cls: type[ConfigComponent]):
     """Forward to the shared helper in ``distributed.config.manager``."""
+    from ..distributed import get_initialized_polymathera
     from ..distributed.config import get_component_or_default
+    await get_initialized_polymathera()
     return get_component_or_default(path, cls)
 
 

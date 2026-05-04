@@ -458,7 +458,7 @@ class MemoryCapability(AgentCapability):
             try:
                 from ....system import get_vcm
 
-                vcm_handle = get_vcm()
+                vcm_handle = await get_vcm()
                 # TODO: This only works if the memory storage backend is BlackboardStorageBackend. Generalize?
                 result = await vcm_handle.mmap_application_scope(
                     scope_id=self.scope_id,

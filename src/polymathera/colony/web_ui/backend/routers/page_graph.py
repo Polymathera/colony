@@ -25,7 +25,7 @@ async def list_all_mapped_memory_scopes(
         return []
 
     try:
-        raw = await colony.get_vcm().get_all_mapped_scopes()
+        raw = await (await colony.get_vcm()).get_all_mapped_scopes()
         # Flatten: backend returns {syscontext: {tenant_id, colony_id, ...}, scope_id}
         # Frontend expects {tenant_id, colony_id, scope_id}
         return [
@@ -54,7 +54,7 @@ async def get_page_graph(
         return {"nodes": [], "edges": [], "node_count": 0, "edge_count": 0}
 
     try:
-        return await colony.get_vcm().get_page_graph_data(
+        return await (await colony.get_vcm()).get_page_graph_data(
             max_nodes=max_nodes,
         )
     except Exception as e:

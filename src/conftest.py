@@ -7,7 +7,42 @@ collection (e.g., once as ``polymathera.colony.vcm.models`` and once as
 ``colony.vcm.models`` from the src-layout namespace package).
 """
 
+import os
+
 from prometheus_client import REGISTRY
+
+
+# Test-only defaults for env vars that ConfigComponents tag as required
+# (``json_schema_extra={"env": "..."}`` without ``optional: True``).
+# When any test transitively imports the registering module *and* later
+# calls ``ConfigurationManager.initialize()`` without a YAML config path,
+# ``PolymatheraConfig()`` eagerly instantiates every registered component
+# and ``_read_env_vars`` raises if these are unset. Production deployments
+# always set these (Docker compose env, EKS env), so these defaults only
+# affect the test process. ``setdefault`` preserves whatever a developer
+# already has exported.
+_TEST_ENV_DEFAULTS = {
+    "REDIS_HOST": "localhost",
+    "REDIS_PORT": "6379",
+    "OBJECT_STORAGE_BACKEND": "disabled",
+    "JSON_STORAGE_BACKEND": "local",
+    "JSON_STORAGE_LOCAL_PATH": "/tmp/colony_test_json_storage",
+    "GIT_COLD_STORAGE_ENABLED": "false",
+    "DISTRIBUTED_FS_BACKEND": "local",
+    "LOCAL_FS_ROOT_PATH": "/tmp/colony_test_local_fs",
+    "AUTH_ENABLED": "false",
+    "RELATIONAL_STORAGE_BACKEND": "local",
+    "RDS_USER": "test",
+    "RDS_PASSWORD": "test",
+    "RDS_HOST": "localhost",
+    "RDS_PORT": "5432",
+    "RDS_DB_NAME": "test",
+    "SLACK_ENABLED": "false",
+    "GITHUB_TOKEN": "",
+    "GITLAB_TOKEN": "",
+}
+for _k, _v in _TEST_ENV_DEFAULTS.items():
+    os.environ.setdefault(_k, _v)
 
 
 def pytest_configure(config):

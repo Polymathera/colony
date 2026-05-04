@@ -276,7 +276,7 @@ class ConvergenceCapability(AgentCapability):
     async def _handle(self):
         from polymathera.colony.system import get_vcm
 
-        return get_vcm(self._app_name)
+        return await get_vcm(self._app_name)
 
 
 __all__ = ("ConvergenceCapability",)

@@ -254,7 +254,7 @@ class RemoteLLMDeployment(AgentManagerBase):
 
         # Initialize distributed tracing from typed ObservabilityConfig.
         from ..distributed.configs import get_observability_config
-        obs = get_observability_config()
+        obs = await get_observability_config()
         if obs.tracing_enabled:
             from .observability import ClusterTracingFacility
             self._tracing_facility = ClusterTracingFacility(
@@ -802,7 +802,7 @@ class RemoteLLMDeployment(AgentManagerBase):
             )
 
             from ..system import get_llm_cluster
-            llm_cluster_handle = get_llm_cluster()
+            llm_cluster_handle = await get_llm_cluster()
 
             try:
                 success = await llm_cluster_handle.load_page(

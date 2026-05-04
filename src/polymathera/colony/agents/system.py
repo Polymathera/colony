@@ -164,9 +164,9 @@ class AgentSystemDeployment:
             get_session_manager,
         )
 
-        self.vcm_handle = get_vcm()
+        self.vcm_handle = await get_vcm()
         try:
-            self.session_manager_handle = get_session_manager()
+            self.session_manager_handle = await get_session_manager()
         except Exception as e:
             logger.warning(f"SessionManager deployment not found: {e}")
             # This is optional - don't fail initialization
@@ -330,7 +330,7 @@ class AgentSystemDeployment:
         has_affinity = blueprint.has_deployment_affinity() or (requirements is not None)
 
         if has_affinity:
-            llm_cluster_handle = get_llm_cluster()
+            llm_cluster_handle = await get_llm_cluster()
             # Use LLMCluster to select deployment based on requirements
             try:
                 deployment_name, deployment_kind = await llm_cluster_handle.select_deployment(
@@ -378,7 +378,7 @@ class AgentSystemDeployment:
                 raise
 
         else:
-            standalone_handle = get_standalone_agents()
+            standalone_handle = await get_standalone_agents()
             try:
                 spawned_id = await self._start_agent(
                     standalone_handle,

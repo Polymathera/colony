@@ -219,7 +219,7 @@ async def _run_job(
             run_id = f"run_{uuid.uuid4().hex[:8]}"
 
             # Pre-create the run for token tracking
-            sm = colony.get_session_manager()
+            sm = await colony.get_session_manager()
             await sm.create_run(
                 session_id=session_id,
                 agent_id="coordinator",

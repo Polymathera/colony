@@ -90,10 +90,8 @@ async def lifespan(app: FastAPI):
     logger.info("Dashboard services shut down")
 
 
-def create_app(config: DashboardConfig | None = None) -> FastAPI:
+def create_app(config: DashboardConfig) -> FastAPI:
     """Create and configure the FastAPI application."""
-    if config is None:
-        config = DashboardConfig.from_env()
 
     app = FastAPI(
         title="Colony Dashboard",
@@ -199,7 +197,7 @@ def cli_main():
     # with "Database not available".
     asyncio.run(get_initialized_polymathera())
 
-    config = DashboardConfig.from_env()
+    config = asyncio.run(DashboardConfig.from_env())
     logger.info(f"Starting Colony Dashboard on {config.host}:{config.port}")
     uvicorn.run(
         create_app(config),

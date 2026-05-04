@@ -49,7 +49,7 @@ from .blueprint import (
 from .blackboard import EnhancedBlackboard, BlackboardEvent
 from .blackboard.types import KeyPatternFilter, EventFilter
 from .sessions.models import AgentRun, AgentRunConfig, AgentRunEvent, RunStatus, RunResourceUsage
-from ..distributed import get_polymathera
+from ..distributed import get_initialized_polymathera
 from ..distributed.state_management import StateManager
 from ..distributed.ray_utils import serving
 from .routing import AgentAffinityRouter, SoftPageAffinityRouter
@@ -951,7 +951,7 @@ class AgentHandle:
         """Load agent registration info from AgentSystemDeployment."""
         from ..system import get_agent_system
 
-        agent_system = get_agent_system(app_name=self._app_name)
+        agent_system = await get_agent_system(app_name=self._app_name)
         agent_info = await agent_system.get_agent_info(self.child_agent_id)
 
         if agent_info is None:
@@ -1155,7 +1155,7 @@ class AgentHandle:
         run_id: str | None = None
         if session_id:
             try:
-                session_manager_handle = get_session_manager(app_name=self._app_name)
+                session_manager_handle = await get_session_manager(app_name=self._app_name)
 
                 run_result = await session_manager_handle.create_run(
                     session_id=effective_session_id,
@@ -1342,7 +1342,7 @@ class AgentHandle:
 
         if session_id:
             try:
-                session_manager_handle = get_session_manager(app_name=self._app_name)
+                session_manager_handle = await get_session_manager(app_name=self._app_name)
 
                 if run_id:
                     # Caller pre-created the run — just mark it as running
@@ -1530,7 +1530,7 @@ class AgentHandle:
         """Request the target agent to stop."""
         from ..system import get_agent_system
 
-        agent_system = get_agent_system(app_name=self._app_name)
+        agent_system = await get_agent_system(app_name=self._app_name)
         await agent_system.stop_agent(self.child_agent_id, reason=reason)
 
 
@@ -2044,7 +2044,7 @@ class Agent(BaseModel):
             from ..system import get_tool_manager
 
             # Delegate to manager's tool manager handle
-            tool_manager = get_tool_manager()
+            tool_manager = await get_tool_manager()
             if category:
                 tool_ids = await tool_manager.find_tools_by_category(category)
             else:
@@ -2088,7 +2088,7 @@ class Agent(BaseModel):
             )
 
             # Delegate to manager's tool manager handle
-            tool_manager = get_tool_manager()
+            tool_manager = await get_tool_manager()
             completed_call = await tool_manager.execute_tool(tool_call)
 
             # Check if successful
@@ -2152,7 +2152,7 @@ class Agent(BaseModel):
         # before any deployment calls (page storage, memory hierarchy, etc.).
         # DeploymentHandle.call_method() reads _current_span to propagate
         # parent_span_id to remote hooks.
-        self._init_tracing_config()
+        await self._init_tracing_config()
 
         # Add AgentTracingFacility if tracing is enabled
         if self._tracing_config and self._tracing_config.enabled:
@@ -2164,7 +2164,7 @@ class Agent(BaseModel):
                 logger.warning(f"Failed to initialize tracing for agent {self.agent_id}: {e}")
 
         # Reconstruct or create PageStorage
-        vcm_handle = get_vcm()
+        vcm_handle = await get_vcm()
         config: PageStorageConfig | None = await vcm_handle.get_page_storage_config()
         if not config:
             raise ValueError("Missing PageStorageConfig in VCM")
@@ -2182,10 +2182,10 @@ class Agent(BaseModel):
 
         await self._create_action_policy()
 
-    def _init_tracing_config(self) -> None:
+    async def _init_tracing_config(self) -> None:
         """Initialize tracing config from the typed ObservabilityConfig."""
         from ..distributed.configs import get_observability_config
-        cfg = get_observability_config()
+        cfg = await get_observability_config()
         if cfg.tracing_enabled:
             self._tracing_config = TracingConfig(
                 enabled=True,
@@ -2386,7 +2386,7 @@ class Agent(BaseModel):
         try:
             # Load suspension state from StateManager
             app_name = serving.get_my_app_name()
-            polymathera = get_polymathera()
+            polymathera = await get_initialized_polymathera()
             state_key = AgentSuspensionState.get_state_key(app_name, suspended_agent_id)
 
             state_manager: StateManager = await polymathera.get_state_manager(
@@ -2897,7 +2897,7 @@ class Agent(BaseModel):
 
         try:
             from ..system import get_session_manager
-            handle = get_session_manager(app_name=serving.get_my_app_name())
+            handle = await get_session_manager(app_name=serving.get_my_app_name())
             result = await handle.update_run_resources(
                 run_id=run_id,
                 input_tokens=input_tokens,
@@ -3042,7 +3042,7 @@ class Agent(BaseModel):
         """
         from ..system import get_agent_system
 
-        agent_system_handle = get_agent_system()
+        agent_system_handle = await get_agent_system()
         await agent_system_handle.stop_agent(agent_id, reason=reason)
 
     async def spawn_child_agents(
@@ -3431,10 +3431,10 @@ class AgentManagerBase:
             get_tool_manager,
             get_vcm,
         )
-        self._agent_system_handle = get_agent_system()
-        self._tool_manager_handle = get_tool_manager()
-        self._llm_cluster_handle = get_llm_cluster()
-        self._vcm_handle = get_vcm()
+        self._agent_system_handle = await get_agent_system()
+        self._tool_manager_handle = await get_tool_manager()
+        self._llm_cluster_handle = await get_llm_cluster()
+        self._vcm_handle = await get_vcm()
 
     @serving.endpoint(
         router_class=SoftPageAffinityRouter,
@@ -3735,7 +3735,7 @@ class AgentManagerBase:
 
             # 2. Persist suspension state to StateManager
             app_name = serving.get_my_app_name()
-            polymathera = get_polymathera()
+            polymathera = await get_initialized_polymathera()
             state_key = AgentSuspensionState.get_state_key(app_name, agent_id)
             state_manager = await polymathera.get_state_manager(
                 state_type=AgentSuspensionState,
@@ -4073,7 +4073,7 @@ class AgentManagerBase:
 
         try:
             from ..system import get_session_manager
-            session_mgr = get_session_manager()
+            session_mgr = await get_session_manager()
             await session_mgr.update_run_status.remote(
                 run_id=run_id,
                 status=status,

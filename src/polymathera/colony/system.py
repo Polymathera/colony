@@ -165,7 +165,7 @@ class PolymatheraCluster:
         )
         await polycluster.deploy()
 
-        agent_system = get_agent_system()
+        agent_system = await get_agent_system()
         # Use agent_system handle to interact with agents...
         agent_ids = await agent_system.spawn_agent(
             role="research_assistant",
@@ -281,8 +281,8 @@ class PolymatheraCluster:
         await self.app.start()
 
         # Get handles to deployed components for convenience
-        self.llm_cluster_handle = get_llm_cluster(self.app_name)
-        self.vcm_handle = get_vcm(self.app_name)
+        self.llm_cluster_handle = await get_llm_cluster(self.app_name)
+        self.vcm_handle = await get_vcm(self.app_name)
 
         logger.info(f"Polymathera cluster '{self.app_name}' deployed successfully")
 
@@ -307,14 +307,14 @@ class PolymatheraCluster:
 
 
 
-def _get_deployment_by_name(
+async def _get_deployment_by_name(
     name_attr: str,
     app_name: str | None = None,
     deployment_class: Type[Any] | None = None,
 ) -> serving.DeploymentHandle:
     """Get agent system deployment via serving."""
     try:
-        names = get_deployment_names()
+        names = await get_deployment_names()
         handle = serving.get_deployment(
             app_name or serving.get_my_app_name(),
             getattr(names, name_attr),
@@ -327,40 +327,40 @@ def _get_deployment_by_name(
         raise e
 
 
-def get_agent_system(app_name: str | None = None) -> serving.DeploymentHandle:
+async def get_agent_system(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get agent system deployment via serving."""
     from .agents.system import AgentSystemDeployment
-    return _get_deployment_by_name("agent_system", app_name, deployment_class=AgentSystemDeployment)
+    return await _get_deployment_by_name("agent_system", app_name, deployment_class=AgentSystemDeployment)
 
 
-def get_llm_cluster(app_name: str | None = None) -> serving.DeploymentHandle:
+async def get_llm_cluster(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get LLM deployment via serving."""
     from .cluster.cluster import LLMCluster
-    return _get_deployment_by_name("llm_cluster", app_name, deployment_class=LLMCluster)
+    return await _get_deployment_by_name("llm_cluster", app_name, deployment_class=LLMCluster)
 
 
-def get_tool_manager(app_name: str | None = None) -> serving.DeploymentHandle:
+async def get_tool_manager(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get tool manager deployment via serving."""
     from .agents.tools import ToolManagerDeployment
-    return _get_deployment_by_name("tool_manager", app_name, deployment_class=ToolManagerDeployment)
+    return await _get_deployment_by_name("tool_manager", app_name, deployment_class=ToolManagerDeployment)
 
 
-def get_vcm(app_name: str | None = None) -> serving.DeploymentHandle:
+async def get_vcm(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get VCM deployment via serving."""
     from .vcm.manager import VirtualContextManager
-    return _get_deployment_by_name("vcm", app_name, deployment_class=VirtualContextManager)
+    return await _get_deployment_by_name("vcm", app_name, deployment_class=VirtualContextManager)
 
 
-def get_standalone_agents(app_name: str | None = None) -> serving.DeploymentHandle:
+async def get_standalone_agents(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get standalone agents deployment via serving."""
     from .agents.standalone import StandaloneAgentDeployment
-    return _get_deployment_by_name("standalone_agents", app_name, deployment_class=StandaloneAgentDeployment)
+    return await _get_deployment_by_name("standalone_agents", app_name, deployment_class=StandaloneAgentDeployment)
 
 
-def get_session_manager(app_name: str | None = None) -> serving.DeploymentHandle:
+async def get_session_manager(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get session manager deployment via serving."""
     from .agents.sessions import SessionManagerDeployment
-    return _get_deployment_by_name("session_manager", app_name, deployment_class=SessionManagerDeployment)
+    return await _get_deployment_by_name("session_manager", app_name, deployment_class=SessionManagerDeployment)
 
 
 def get_vllm_deployment(deployment_name: str, app_name: str | None = None) -> serving.DeploymentHandle:
@@ -397,8 +397,8 @@ def get_remote_llm_deployment(deployment_name: str, app_name: str | None = None)
         raise e
 
 
-def get_embedding_deployment(app_name: str | None = None) -> serving.DeploymentHandle:
-    return _get_deployment_by_name("embedding", app_name)
+async def get_embedding_deployment(app_name: str | None = None) -> serving.DeploymentHandle:
+    return await _get_deployment_by_name("embedding", app_name)
 
 
 
@@ -432,7 +432,7 @@ async def spawn_agents(
     Returns:
         List of spawned agent IDs
     """
-    agent_system = get_agent_system(app_name)
+    agent_system = await get_agent_system(app_name)
     agent_ids = await agent_system.spawn_agents(
         blueprints=blueprints,
         requirements=requirements,

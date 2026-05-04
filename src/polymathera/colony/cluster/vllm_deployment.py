@@ -911,7 +911,7 @@ class VLLMDeployment(AgentManagerBase):
             )
 
             # Get LLMCluster handle
-            llm_cluster_handle = get_llm_cluster()
+            llm_cluster_handle = await get_llm_cluster()
 
             # Load page in target deployment with specific client targeting
             try:

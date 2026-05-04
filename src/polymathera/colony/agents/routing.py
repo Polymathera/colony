@@ -55,7 +55,7 @@ class SoftPageAffinityRouter(RequestRouter):
         if self._vcm_handle is None:
             from ..system import get_vcm
             # Get deployment names
-            self._vcm_handle = get_vcm()
+            self._vcm_handle = await get_vcm()
         return self._vcm_handle
 
     @staticmethod
@@ -296,7 +296,7 @@ class AgentAffinityRouter(RequestRouter):
         """Lazy init agent system handle."""
         if self._agent_system_handle is None:
             from ..system import get_agent_system
-            self._agent_system_handle = get_agent_system()
+            self._agent_system_handle = await get_agent_system()
         return self._agent_system_handle
 
     @staticmethod

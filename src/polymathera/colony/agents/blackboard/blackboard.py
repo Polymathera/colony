@@ -337,7 +337,7 @@ class EnhancedBlackboard:
         """Get the configured default blackboard backend type from AgentSystemDeployment."""
         try:
             from ...system import get_agent_system
-            handle = get_agent_system(self.app_name)
+            handle = await get_agent_system(self.app_name)
             return await handle.get_blackboard_backend_type()
         except Exception:
             return "distributed"
@@ -348,7 +348,7 @@ class EnhancedBlackboard:
             return  # LOCAL blackboards are not discoverable
         try:
             from ...system import get_agent_system
-            handle = get_agent_system(self.app_name)
+            handle = await get_agent_system(self.app_name)
             await handle.register_blackboard_scope(
                 scope_id=self.scope_id,
                 backend_type=self.backend_type,

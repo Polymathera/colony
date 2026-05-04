@@ -21,7 +21,7 @@ Example:
         origin="cli",
     ):
         # Create context page source
-        vcm_handle = get_vcm()
+        vcm_handle = await get_vcm()
         mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
             scope_id="repo-123",
             source_type=BuilInContextPageSourceType.FILE_GROUPER.value,

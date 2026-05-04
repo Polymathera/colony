@@ -127,29 +127,54 @@ class UserPluginCapability(AgentCapability):
             capability_key=capability_key,
             app_name=app_name,
         )
-        # Pull defaults from the typed PluginsConfig (operator YAML / runtime
-        # overlays). Caller-supplied ``workspace_root`` overrides the typed
-        # default; ``extra_*`` from both sources are merged.
-        from ...configs import get_plugins_config
-        cfg = get_plugins_config()
-        self._workspace_root = (
-            cfg.workspace_root if workspace_root == _DEFAULT_WORKSPACE_ROOT
-            else workspace_root
-        )
-        self._user_root = cfg.user_root
-        self._system_root = cfg.system_root
-        merged_extra_skill = list(extra_skill_roots or []) + list(cfg.extra_skill_roots)
-        merged_extra_plugin = list(extra_plugin_roots or []) + list(cfg.extra_plugin_roots)
+        # PluginsConfig (operator YAML / runtime overlays) is resolved in
+        # ``initialize`` — it requires an awaitable manager init that
+        # ``__init__`` cannot perform. Pre-seed the attributes with the
+        # constructor-supplied values so callers that touch them before
+        # ``initialize`` (tests, ``get_action_group_description`` early
+        # introspection) see a coherent object.
+        self._ctor_workspace_root = workspace_root
+        self._ctor_skill_roots = skill_roots
+        self._ctor_plugin_roots = plugin_roots
+        self._ctor_extra_skill_roots = list(extra_skill_roots or [])
+        self._ctor_extra_plugin_roots = list(extra_plugin_roots or [])
+        self._workspace_root = workspace_root
+        self._user_root = _DEFAULT_USER_ROOT
+        self._system_root = _DEFAULT_SYSTEM_ROOT
+        # Resolve roots from constructor args + defaults so callers that touch
+        # the capability before ``initialize`` (sync tests, early introspection)
+        # see real discovery results. ``initialize`` re-resolves with extras
+        # from the typed PluginsConfig and re-runs ``_load``.
         self._skill_roots = self._resolve_roots(
-            skill_roots, kind="skills", extra=merged_extra_skill,
+            skill_roots, kind="skills", extra=self._ctor_extra_skill_roots,
         )
         self._plugin_roots = self._resolve_roots(
-            plugin_roots, kind="plugins", extra=merged_extra_plugin,
+            plugin_roots, kind="plugins", extra=self._ctor_extra_plugin_roots,
         )
         self._default_sandbox_image_role = default_sandbox_image_role
         self._sandbox_capability_key = sandbox_capability_key
         self._allow_model_invocation_override = allow_model_invocation_override
         self._discovery: DiscoveryResult = DiscoveryResult()
+        self._load()
+
+    async def initialize(self) -> None:
+        await super().initialize()
+        from ...configs import get_plugins_config
+        cfg = await get_plugins_config()
+        self._workspace_root = (
+            cfg.workspace_root if self._ctor_workspace_root == _DEFAULT_WORKSPACE_ROOT
+            else self._ctor_workspace_root
+        )
+        self._user_root = cfg.user_root
+        self._system_root = cfg.system_root
+        merged_extra_skill = self._ctor_extra_skill_roots + list(cfg.extra_skill_roots)
+        merged_extra_plugin = self._ctor_extra_plugin_roots + list(cfg.extra_plugin_roots)
+        self._skill_roots = self._resolve_roots(
+            self._ctor_skill_roots, kind="skills", extra=merged_extra_skill,
+        )
+        self._plugin_roots = self._resolve_roots(
+            self._ctor_plugin_roots, kind="plugins", extra=merged_extra_plugin,
+        )
         self._load()
 
     def get_action_group_description(self) -> str:

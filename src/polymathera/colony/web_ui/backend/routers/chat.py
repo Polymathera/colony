@@ -276,7 +276,7 @@ async def _get_session_info(colony: ColonyConnection, session_id: str) -> _Sessi
     """Look up session metadata needed for the chat WebSocket."""
     try:
         with colony.kernel_execution_context(origin="dashboard_chat"):
-            sm = colony.get_session_manager()
+            sm = await colony.get_session_manager()
             session = await sm.get_session(session_id=session_id)
             if session is None:
                 return None
@@ -633,7 +633,7 @@ async def _handle_list_agents(websocket: WebSocket, colony: ColonyConnection) ->
     """List active agents and send to client."""
     with colony.kernel_execution_context(origin="dashboard_chat"):
         try:
-            handle = colony.get_agent_system()
+            handle = await colony.get_agent_system()
             agent_ids: list[str] = await handle.list_all_agents()
 
             agents = []

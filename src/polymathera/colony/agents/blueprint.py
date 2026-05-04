@@ -335,7 +335,7 @@ class AgentBlueprint(Blueprint["Agent"]):
         """
         from ..system import get_agent_system
 
-        agent_system = get_agent_system(app_name)
+        agent_system = await get_agent_system(app_name)
         try:
             return await agent_system.spawn_from_blueprint(
                 blueprint=self,

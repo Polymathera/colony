@@ -42,10 +42,10 @@ class DashboardConfig:
     pg_database: str = "colony"
 
     @classmethod
-    def from_env(cls) -> DashboardConfig:
+    async def from_env(cls) -> DashboardConfig:
         """Materialise from the registered :class:`WebUIConfig`."""
         from .configs import get_web_ui_config
-        c = get_web_ui_config()
+        c = await get_web_ui_config()
         return cls(
             host=c.host,
             port=c.port,

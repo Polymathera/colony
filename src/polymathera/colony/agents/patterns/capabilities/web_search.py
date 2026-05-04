@@ -120,11 +120,18 @@ class TavilyBackend(SearchBackend):
         timeout_s: float = 15.0,
     ):
         # Explicit ``api_key`` overrides; otherwise read from typed
-        # ``WebSearchConfig`` (env-bound: ``TAVILY_API_KEY``).
-        from ...configs import get_web_search_config
-        self._api_key = api_key or get_web_search_config().api_key
+        # ``WebSearchConfig`` (env-bound: ``TAVILY_API_KEY``) on first use —
+        # ``__init__`` is sync, but the config getter is async because it
+        # awaits ``ConfigurationManager.initialize()``.
+        self._api_key = api_key
         self._timeout_s = timeout_s
         self._client = None  # lazy-init
+
+    async def _resolve_api_key(self) -> str:
+        if self._api_key is None:
+            from ...configs import get_web_search_config
+            self._api_key = (await get_web_search_config()).api_key or ""
+        return self._api_key
 
     def _get_client(self):
         import httpx
@@ -141,13 +148,14 @@ class TavilyBackend(SearchBackend):
         site: str | None,
         freshness_days: int | None,
     ) -> list[SearchHit]:
-        if not self._api_key:
+        api_key = await self._resolve_api_key()
+        if not api_key:
             raise RuntimeError(
                 "TavilyBackend: no API key. Pass api_key=... to the "
                 "backend or set TAVILY_API_KEY in the environment."
             )
         payload: dict[str, Any] = {
-            "api_key": self._api_key,
+            "api_key": api_key,
             "query": query,
             "max_results": max(1, min(max_results, 20)),
             "search_depth": "basic",

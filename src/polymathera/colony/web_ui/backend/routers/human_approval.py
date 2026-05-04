@@ -239,7 +239,7 @@ async def _get_session_meta(
 
     try:
         with colony.kernel_execution_context(origin="human_approval_endpoint"):
-            sm = colony.get_session_manager()
+            sm = await colony.get_session_manager()
             session = await sm.get_session(session_id=session_id)
             if session is None:
                 return None

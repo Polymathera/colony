@@ -37,7 +37,7 @@ async def get_status(
         deployments_ready = False
         if colony.is_connected:
             try:
-                handle = colony.get_agent_system()
+                handle = await colony.get_agent_system()
                 infra = await handle.get_infrastructure_status()
                 redis_connected = infra.get("redis_connected", False)
             except Exception as e:
@@ -46,7 +46,7 @@ async def get_status(
             # Probe session manager — only True after on_app_ready has fired
             # and all sibling handles (VCM, etc.) are discovered.
             try:
-                sm = colony.get_session_manager()
+                sm = await colony.get_session_manager()
                 deployments_ready = await sm.is_ready()
             except Exception as e:
                 logger.debug("Session manager not ready: %s", e)
@@ -72,7 +72,7 @@ async def get_redis_info(
         origin="dashboard",
     ):
         try:
-            handle = colony.get_agent_system()
+            handle = await colony.get_agent_system()
             infra = await handle.get_infrastructure_status()
             info = infra.get("redis_info", {})
             return RedisInfo(

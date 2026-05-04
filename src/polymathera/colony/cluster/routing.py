@@ -278,7 +278,7 @@ class ContextAwareRouter(RequestRouter):
 
             # Get VCM handle for page fault issuing
             try:
-                self._vcm_handle = get_vcm()
+                self._vcm_handle = await get_vcm()
                 logger.info("ContextAwareRouter connected to VCM for page fault handling")
             except Exception as e:
                 logger.warning(f"VCM deployment not found, page fault handling disabled: {e}")

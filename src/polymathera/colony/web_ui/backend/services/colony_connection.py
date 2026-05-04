@@ -98,7 +98,7 @@ class ColonyConnection:
     def is_connected(self) -> bool:
         return self._connected
 
-    def _get_handle(self, name_attr: str) -> Any:
+    async def _get_handle(self, name_attr: str) -> Any:
         """Get a cached deployment handle using colony.system helpers.
 
         Uses get_deployment_names() to resolve the actual deployment name,
@@ -111,7 +111,7 @@ class ColonyConnection:
         from polymathera.colony.deployment_names import get_deployment_names
         from polymathera.colony.distributed.ray_utils.serving import get_deployment
 
-        names = get_deployment_names()
+        names = await get_deployment_names()
         deployment_name = getattr(names, name_attr)
         logger.info(
             "Resolving deployment: %s → %s (app=%s)",
@@ -122,25 +122,25 @@ class ColonyConnection:
         logger.info("Resolved deployment handle: %s → %s", name_attr, deployment_name)
         return handle
 
-    def get_session_manager(self) -> Any:
+    async def get_session_manager(self) -> Any:
         """Get SessionManagerDeployment handle."""
-        return self._get_handle("session_manager")
+        return await self._get_handle("session_manager")
 
-    def get_agent_system(self) -> Any:
+    async def get_agent_system(self) -> Any:
         """Get AgentSystemDeployment handle."""
-        return self._get_handle("agent_system")
+        return await self._get_handle("agent_system")
 
-    def get_vcm(self) -> Any:
+    async def get_vcm(self) -> Any:
         """Get VirtualContextManager handle."""
-        return self._get_handle("vcm")
+        return await self._get_handle("vcm")
 
-    def get_llm_cluster(self) -> Any:
+    async def get_llm_cluster(self) -> Any:
         """Get LLM cluster handle."""
-        return self._get_handle("llm_cluster")
+        return await self._get_handle("llm_cluster")
 
-    def get_tool_manager(self) -> Any:
+    async def get_tool_manager(self) -> Any:
         """Get ToolManager handle."""
-        return self._get_handle("tool_manager")
+        return await self._get_handle("tool_manager")
 
     def get_deployment_handle(self, app_name: str, deployment_name: str) -> Any:
         """Get a deployment handle by explicit app/deployment name.

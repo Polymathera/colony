@@ -251,7 +251,7 @@ class VirtualContextManager:
         # chain: cluster/models → vcm/__init__ → vcm/manager → system → agents → cluster/models
         from ..system import get_llm_cluster
         try:
-            self.llm_cluster_handle = get_llm_cluster()
+            self.llm_cluster_handle = await get_llm_cluster()
             logger.info("Connected to LLMCluster deployment")
         except Exception as e:
             logger.warning(f"LLMCluster deployment not found (allocation will use default strategies): {e}")

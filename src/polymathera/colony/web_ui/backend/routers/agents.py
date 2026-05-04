@@ -68,7 +68,7 @@ async def list_agents(
     # Try live system first
     if colony.is_connected:
         try:
-            handle = colony.get_agent_system()
+            handle = await colony.get_agent_system()
             agent_ids: list[str] = await handle.list_all_agents()
 
             summaries = []
@@ -119,7 +119,7 @@ async def get_agent_hierarchy(
     # Try live system first
     if colony.is_connected:
         try:
-            handle = colony.get_agent_system()
+            handle = await colony.get_agent_system()
             agent_ids: list[str] = await handle.list_all_agents()
 
             nodes = []
@@ -179,7 +179,7 @@ async def get_agent_detail(
     # Try live system first
     if colony.is_connected:
         try:
-            handle = colony.get_agent_system()
+            handle = await colony.get_agent_system()
             info = await handle.get_agent_info(agent_id=agent_id)
             if info is not None:
                 if hasattr(info, "model_dump"):
@@ -213,7 +213,7 @@ async def get_agent_capabilities(
         return {"error": "not connected"}
 
     try:
-        handle = colony.get_agent_system()
+        handle = await colony.get_agent_system()
         info = await handle.get_agent_info(agent_id=agent_id)
         if info is None:
             return {"error": "agent not found", "agent_id": agent_id}
@@ -257,7 +257,7 @@ async def get_system_stats(
         return {"status": "disconnected"}
 
     try:
-        handle = colony.get_agent_system()
+        handle = await colony.get_agent_system()
         return await handle.get_system_stats()
     except Exception as e:
         return {"error": str(e)}
@@ -360,7 +360,7 @@ async def interrupt_agent(
 
     try:
         if request.action == "cancel":
-            handle = colony.get_agent_system()
+            handle = await colony.get_agent_system()
             await handle.stop_agent(agent_id=agent_id, reason=request.reason)
             return InterruptAgentResponse(
                 agent_id=agent_id, action="cancel", success=True,

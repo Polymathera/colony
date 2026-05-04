@@ -100,9 +100,11 @@ class DeploymentNames(ConfigComponent):
     )
 
 
-def get_deployment_names() -> DeploymentNames:
+async def get_deployment_names() -> DeploymentNames:
     """Return the registered :class:`DeploymentNames` (defaults if uninit)."""
+    from .distributed import get_initialized_polymathera
     from .distributed.config import get_component_or_default
+    await get_initialized_polymathera()
     return get_component_or_default("deployment_names", DeploymentNames)
 
 

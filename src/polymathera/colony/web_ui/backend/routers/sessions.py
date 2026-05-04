@@ -91,7 +91,7 @@ async def list_sessions(
     from polymathera.colony.distributed.ray_utils.serving.context import get_tenant_id, get_colony_id
 
     try:
-        handle = colony.get_session_manager()
+        handle = await colony.get_session_manager()
         sessions = await handle.list_sessions(
             tenant_id=get_tenant_id(),
             colony_id=get_colony_id(),
@@ -127,7 +127,7 @@ async def get_session_detail(
         return {"error": "not connected"}
 
     try:
-        handle = colony.get_session_manager()
+        handle = await colony.get_session_manager()
         session = await handle.get_session(session_id=session_id)
         if session is None:
             return {"error": "session not found", "session_id": session_id}
@@ -160,7 +160,7 @@ async def get_session_runs(
         return []
 
     try:
-        handle = colony.get_session_manager()
+        handle = await colony.get_session_manager()
         runs = await handle.get_session_runs(session_id=session_id, limit=limit)
 
         result = []
@@ -194,7 +194,7 @@ async def get_run_detail(
         return {"error": "not connected"}
 
     try:
-        handle = colony.get_session_manager()
+        handle = await colony.get_session_manager()
         run = await handle.get_run(run_id=run_id)
         if run is None:
             return {"error": "run not found", "run_id": run_id}
@@ -218,7 +218,7 @@ async def get_session_stats(
         return {"status": "disconnected"}
 
     try:
-        handle = colony.get_session_manager()
+        handle = await colony.get_session_manager()
         return await handle.get_stats()
     except Exception as e:
         return {"error": str(e)}
@@ -248,7 +248,7 @@ async def create_session(
         from polymathera.colony.agents.sessions.models import SessionMetadata
         metadata = SessionMetadata(name=request.name) if request.name else None
 
-        sm = colony.get_session_manager()
+        sm = await colony.get_session_manager()
         session = await sm.create_session(
             metadata=metadata,
             ttl_seconds=request.ttl_seconds,
@@ -446,7 +446,7 @@ async def suspend_session(
         return SessionActionResponse(session_id=session_id, success=False, message="Not connected")
 
     try:
-        handle = colony.get_session_manager()
+        handle = await colony.get_session_manager()
         success = await handle.suspend_session(session_id=session_id)
         return SessionActionResponse(
             session_id=session_id,
@@ -468,7 +468,7 @@ async def resume_session(
         return SessionActionResponse(session_id=session_id, success=False, message="Not connected")
 
     try:
-        handle = colony.get_session_manager()
+        handle = await colony.get_session_manager()
         success = await handle.activate_session(session_id=session_id)
         return SessionActionResponse(
             session_id=session_id,
@@ -491,7 +491,7 @@ async def close_session(
         return SessionActionResponse(session_id=session_id, success=False, message="Not connected")
 
     try:
-        handle = colony.get_session_manager()
+        handle = await colony.get_session_manager()
         success = await handle.close_session(session_id=session_id, archive=archive)
         return SessionActionResponse(
             session_id=session_id,
@@ -514,7 +514,7 @@ async def cancel_run(
         return SessionActionResponse(session_id=session_id, success=False, message="Not connected")
 
     try:
-        handle = colony.get_session_manager()
+        handle = await colony.get_session_manager()
         success = await handle.cancel_run(run_id=run_id)
         return SessionActionResponse(
             session_id=session_id,

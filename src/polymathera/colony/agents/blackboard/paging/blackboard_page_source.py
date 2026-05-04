@@ -889,7 +889,7 @@ class BlackboardContextPageSource(ContextPageSource):
             logger.info("Using SimpleTokenizer fallback for scope mapping")
 
         from ....system import get_vcm
-        vcm_handle = get_vcm()
+        vcm_handle = await get_vcm()
         config: PageStorageConfig | None = vcm_handle.get_page_storage_config()
         if not config:
             raise ValueError("Missing PageStorageConfig in VCM")

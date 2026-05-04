@@ -30,7 +30,7 @@ async def list_blackboard_scopes(
         return []
 
     try:
-        handle = colony.get_agent_system()
+        handle = await colony.get_agent_system()
         return await handle.get_blackboard_scopes()
     except Exception as e:
         logger.warning("Failed to list blackboard scopes: %s", e)
@@ -50,7 +50,7 @@ async def get_blackboard_entries(
         return []
 
     try:
-        handle = colony.get_agent_system()
+        handle = await colony.get_agent_system()
         return await handle.get_blackboard_entries(
             scope_id=scope_id, limit=limit,
             backend_type=backend_type,

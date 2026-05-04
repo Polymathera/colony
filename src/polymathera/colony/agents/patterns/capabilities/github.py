@@ -172,20 +172,22 @@ class GitHubCapability(AgentCapability):
         self._audit_enabled = audit_enabled
         self._http_owned = httpx_client is None
         self._httpx_client = httpx_client
-        if client is not None:
-            self._client: GitHubClient | None = client
-            self._init_error: str | None = None
-            return
+        self._app_id = app_id
+        self._private_key_pem = private_key_pem
+        self._private_key_path = private_key_path
+        self._installation_id = installation_id
+        self._client: GitHubClient | None = client
+        self._init_error: str | None = None
+
+    async def initialize(self) -> None:
         # Build a live client; any configuration error is captured so
         # the action surface can return it as a normal error dict
         # rather than raising at construction time.
+        await super().initialize()
+        if self._client is not None:
+            return
         try:
-            self._client = self._build_live_client(
-                app_id=app_id,
-                private_key_pem=private_key_pem,
-                private_key_path=private_key_path,
-                installation_id=installation_id,
-            )
+            self._client = await self._build_live_client()
             self._init_error = None
         except Exception as e:
             self._client = None
@@ -196,26 +198,16 @@ class GitHubCapability(AgentCapability):
 
     # --- Internal construction --------------------------------------------
 
-    def _build_live_client(
-        self,
-        *,
-        app_id: str | None,
-        private_key_pem: str | None,
-        private_key_path: str | None,
-        installation_id: str | None,
-    ) -> GitHubClient:
+    async def _build_live_client(self) -> GitHubClient:
         # Explicit kwargs override; otherwise read from typed
         # ``GitHubAuthConfig`` (env-bound). Empty defaults remain falsy so the
         # downstream "all required" check still triggers when nothing is set.
         from ...configs import get_github_auth_config
-        gh = get_github_auth_config()
-        app_id = app_id or gh.app_id or None
-        installation_id = installation_id or gh.installation_id or None
-        private_key_pem = private_key_pem or gh.private_key_pem or None
-        if not private_key_pem and private_key_path:
-            with open(private_key_path, "r", encoding="utf-8") as fh:
+        gh = await get_github_auth_config()
+        if not private_key_pem and self._private_key_path:
+            with open(self._private_key_path, "r", encoding="utf-8") as fh:
                 private_key_pem = fh.read()
-        if not app_id or not installation_id or not private_key_pem:
+        if not self._app_id or not self._installation_id or not private_key_pem:
             raise RuntimeError(
                 "GitHubCapability: app_id, installation_id, and a "
                 "private key are all required (explicit kwargs, "
@@ -228,11 +220,11 @@ class GitHubCapability(AgentCapability):
                 ),
             )
         auth = GitHubAppAuth(
-            app_id=app_id, private_key_pem=private_key_pem,
+            app_id=self._app_id, private_key_pem=private_key_pem,
         )
         tokens = TokenCache(
             app_auth=auth,
-            installation_id=installation_id,
+            installation_id=self._installation_id,
             client=self._httpx_client,
         )
         return GitHubClient(tokens=tokens, client=self._httpx_client)

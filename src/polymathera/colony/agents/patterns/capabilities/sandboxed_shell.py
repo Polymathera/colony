@@ -154,18 +154,11 @@ class SandboxedShellCapability(AgentCapability):
             app_name=app_name,
         )
         self._backend = backend or DockerCLIBackend()
-        if registry is not None:
-            self._registry = registry
-        else:
-            # Typed config first (operator YAML / runtime overlays); fall back
-            # to the legacy on-disk registry mounted at ``registry_path`` so
-            # existing Docker deployments keep working unchanged.
-            from ...configs import get_sandbox_images_config
-            cfg = get_sandbox_images_config()
-            if cfg.images:
-                self._registry = ImageRegistry.from_config(cfg)
-            else:
-                self._registry = ImageRegistry.from_path(registry_path)
+        # Registry is resolved lazily — typed config first (operator YAML /
+        # runtime overlays), fall back to legacy on-disk path. The config
+        # getter is async, but ``__init__`` is sync.
+        self._registry = registry
+        self._registry_path = registry_path
         self._host_workspace_root = host_workspace_root
         self._default_network_mode = default_network_mode
         self._max_concurrent = max_concurrent_containers
@@ -187,6 +180,19 @@ class SandboxedShellCapability(AgentCapability):
 
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"sandbox", "shell", "docker", "external"})
+
+    async def _get_registry(self) -> ImageRegistry:
+        # Typed config first (operator YAML / runtime overlays); fall back
+        # to the legacy on-disk registry mounted at ``registry_path`` so
+        # existing Docker deployments keep working unchanged.
+        if self._registry is None:
+            from ...configs import get_sandbox_images_config
+            cfg = await get_sandbox_images_config()
+            if cfg.images:
+                self._registry = ImageRegistry.from_config(cfg)
+            else:
+                self._registry = ImageRegistry.from_path(self._registry_path)
+        return self._registry
 
     @override
     async def serialize_suspension_state(
@@ -392,7 +398,8 @@ class SandboxedShellCapability(AgentCapability):
             "started": True}``. On failure: the same fields plus a
             non-empty ``"message"`` and ``"started": False``.
         """
-        spec = self._registry.get(image_role)
+        registry = await self._get_registry()
+        spec = registry.get(image_role)
         if spec is None:
             return {
                 "started": False,
@@ -401,7 +408,7 @@ class SandboxedShellCapability(AgentCapability):
                 "owner_agent_id": self._agent_id(), "shared": shared,
                 "message": (
                     f"unknown image_role {image_role!r}; registered "
-                    f"roles: {self._registry.roles()}"
+                    f"roles: {registry.roles()}"
                 ),
             }
         nm = network_mode or self._default_network_mode
@@ -962,7 +969,8 @@ class SandboxedShellCapability(AgentCapability):
             stream_to_blackboard: Forwarded to ``execute_command``.
         """
         args = dict(args or {})
-        found = self._registry.find_script(
+        registry = await self._get_registry()
+        found = registry.find_script(
             script_name, image_role=image_role,
         )
         if found is None:
@@ -995,9 +1003,10 @@ class SandboxedShellCapability(AgentCapability):
     ) -> dict[str, Any]:
         """List registered scripts, optionally narrowed to one role."""
         scripts: list[dict[str, Any]] = []
-        roles = [image_role] if image_role else self._registry.roles()
+        registry = await self._get_registry()
+        roles = [image_role] if image_role else registry.roles()
         for r in roles:
-            spec = self._registry.get(r)
+            spec = registry.get(r)
             if spec is None:
                 continue
             for s in spec.scripts:
@@ -1009,7 +1018,8 @@ class SandboxedShellCapability(AgentCapability):
     @action_executor()
     async def list_images(self) -> dict[str, Any]:
         """List every role currently available in the image registry."""
-        images = self._registry.summaries()
+        registry = await self._get_registry()
+        images = registry.summaries()
         return {"images": images, "count": len(images)}
 
     # --- File transfer ---------------------------------------------------

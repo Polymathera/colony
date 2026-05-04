@@ -444,7 +444,7 @@ class CodeAnalysisCoordinatorCapability(BaseCodeAnalysisCoordinatorCapability):
             if not self.agent._manager:
                 raise RuntimeError("No manager attached")
 
-            agent_system = get_agent_system()
+            agent_system = await get_agent_system()
 
             from polymathera.colony.samples.code_analysis.basic.cluster_analyzer import ClusterAnalyzer
             from polymathera.colony.cluster import LLMClientRequirements

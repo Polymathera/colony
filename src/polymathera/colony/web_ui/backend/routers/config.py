@@ -83,21 +83,21 @@ async def get_colony_config(
 
     # VCM stats
     try:
-        vcm_stats = await colony.get_vcm().get_stats()
+        vcm_stats = await (await colony.get_vcm()).get_stats()
         result["vcm"] = vcm_stats
     except Exception as e:
         result["vcm_error"] = str(e)
 
     # Session stats
     try:
-        session_stats = await colony.get_session_manager().get_stats()
+        session_stats = await (await colony.get_session_manager()).get_stats()
         result["sessions"] = session_stats
     except Exception as e:
         result["sessions_error"] = str(e)
 
     # Agent system stats
     try:
-        agent_stats = await colony.get_agent_system().get_system_stats()
+        agent_stats = await (await colony.get_agent_system()).get_system_stats()
         result["agents"] = agent_stats
     except Exception as e:
         result["agents_error"] = str(e)
@@ -120,7 +120,7 @@ async def get_tenant_quota(
         return TenantQuotaResponse(tenant_id=tenant_id, quota={}, usage={})
 
     try:
-        sm = colony.get_session_manager()
+        sm = await colony.get_session_manager()
         quota = await sm.get_tenant_quota(tenant_id=tenant_id)
         usage = await sm.get_tenant_resource_usage(tenant_id=tenant_id)
 
@@ -155,7 +155,7 @@ async def set_tenant_quota(
     try:
         from polymathera.colony.agents.sessions.models import TenantQuota
 
-        sm = colony.get_session_manager()
+        sm = await colony.get_session_manager()
         tenant_quota = TenantQuota(**quota.model_dump())
         await sm.set_tenant_quota(tenant_id=tenant_id, quota=tenant_quota)
 
@@ -182,7 +182,7 @@ async def list_tenant_quotas(
         return []
 
     try:
-        sm = colony.get_session_manager()
+        sm = await colony.get_session_manager()
         stats = await sm.get_stats()
 
         if not isinstance(stats, dict):

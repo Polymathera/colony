@@ -112,9 +112,11 @@ class WebUIConfig(ConfigComponent):
     )
 
 
-def get_web_ui_config() -> WebUIConfig:
+async def get_web_ui_config() -> WebUIConfig:
     """Sync fetch of the registered :class:`WebUIConfig` (defaults if uninit)."""
+    from ...distributed import get_initialized_polymathera
     from ...distributed.config import get_component_or_default
+    await get_initialized_polymathera()
     return get_component_or_default("web_ui", WebUIConfig)
 
 

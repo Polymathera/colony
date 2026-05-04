@@ -599,7 +599,7 @@ class CacheAnalysisCapability(AgentCapability):
             from .....system import get_vcm
 
             # Get VCM handle
-            vcm_handle = get_vcm()
+            vcm_handle = await get_vcm()
 
             # Query VCM for all loaded pages
             cached_pages = await vcm_handle.get_all_loaded_pages()

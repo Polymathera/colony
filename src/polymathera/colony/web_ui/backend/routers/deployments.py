@@ -30,7 +30,7 @@ async def list_deployments(
         return []
 
     try:
-        handle = colony.get_agent_system()
+        handle = await colony.get_agent_system()
         infra = await handle.get_infrastructure_status()
 
         apps = []
