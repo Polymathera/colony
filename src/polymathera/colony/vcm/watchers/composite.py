@@ -2,7 +2,7 @@
 
 Useful when a single page source needs to combine multiple watch
 transports against the same backing store. The canonical example is
-``FileGrouperContextPageSource``, which couples a ``LocalFsWatcher``
+``GitRepoContextPageSource``, which couples a ``LocalFsWatcher``
 (for in-tree edits) with a ``GitRemoteWatcher`` (for upstream commits)
 on the same cloned working tree — both watchers' events should reach
 the convergence runtime through one stream.

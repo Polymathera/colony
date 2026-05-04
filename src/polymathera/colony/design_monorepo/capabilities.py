@@ -161,7 +161,7 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
         )
 
     # Live page-change events for the working tree flow through
-    # ``FileGrouperContextPageSource.watch()`` once the working tree
+    # ``GitRepoContextPageSource.watch()`` once the working tree
     # is mapped into the VCM (the source composes a LocalFsWatcher +
     # GitRemoteWatcher; VCM feeds the merged stream into the
     # convergence runtime). Capabilities here do not register a

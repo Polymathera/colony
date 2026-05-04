@@ -4,9 +4,9 @@ This module implements the BlackboardContextPageSource, which runs inside the VC
 deployment and pages any EnhancedBlackboard scope into VirtualContextPages via a
 pluggable IngestionPolicy.
 
-Analogous to FileGrouperContextPageSource (which pages git repo files), this pages
+Analogous to GitRepoContextPageSource (which pages git repo files), this pages
 blackboard/memory scope contents. The key difference:
-- FileGrouperContextPageSource: static content (files), loaded once
+- GitRepoContextPageSource: static content (files), loaded once
 - BlackboardContextPageSource: dynamic content (live writes), event-driven
 
 Architecture:
@@ -757,9 +757,9 @@ class BlackboardContextPageSource(ContextPageSource):
     Runs inside the VirtualContextManager deployment. Created by
     ``mmap_application_scope()`` — never instantiated directly by agents.
 
-    Analogous to FileGrouperContextPageSource (which pages git repo files),
+    Analogous to GitRepoContextPageSource (which pages git repo files),
     this pages blackboard/memory scope contents. The key difference:
-    - FileGrouperContextPageSource: static content (files), loaded once
+    - GitRepoContextPageSource: static content (files), loaded once
     - BlackboardContextPageSource: dynamic content (live writes), event-driven
 
     This creates the actual infrastructure needed to watch a blackboard

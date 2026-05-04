@@ -17,7 +17,7 @@ Plus a composite + a payload-to-events translator:
 - ``CompositeWatcher`` — merges N child watchers into one cancellable
   async iterator. Used when a single source needs more than one watch
   transport against the same backing store (e.g.,
-  ``FileGrouperContextPageSource`` couples a ``LocalFsWatcher`` and a
+  ``GitRepoContextPageSource`` couples a ``LocalFsWatcher`` and a
   ``GitRemoteWatcher`` against the cloned working tree).
 - ``WebhookEventBuilder`` — turns a Gitea / GitLab / GitHub git-push
   webhook payload into a sequence of ``PageChangeEvent``s. The HTTP

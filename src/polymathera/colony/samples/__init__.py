@@ -1,5 +1,5 @@
-from .paging import FileGrouperContextPageSource
+from .paging import GitRepoContextPageSource
 
 __all__ = [
-    "FileGrouperContextPageSource",
+    "GitRepoContextPageSource",
 ]

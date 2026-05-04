@@ -72,7 +72,7 @@ The coordinator **does not poll** worker agents. It subscribes to blackboard eve
 
 ### 1. Page Sharding
 
-Colony shards the repository into VCM pages (typically 20-40K tokens each) using `FileGrouperContextPageSource`. Related files are grouped together using import analysis, git co-change history, and semantic similarity:
+Colony shards the repository into VCM pages (typically 20-40K tokens each) using `GitRepoContextPageSource`. Related files are grouped together using import analysis, git co-change history, and semantic similarity:
 
 ```python
 # From the CLI — this happens automatically when you run colony-env run

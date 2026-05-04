@@ -30,7 +30,7 @@ from .sharding.strategy import GitRepoShardingStrategy
 logger = logging.getLogger(__name__)
 
 @ContextPageSourceFactory.register_new_source_type(BuilInContextPageSourceType.FILE_GROUPER.value)
-class FileGrouperContextPageSource(ContextPageSource):
+class GitRepoContextPageSource(ContextPageSource):
     """ContextPageSource backed by EFS/S3 storage using `FileGrouper`.
 
     This is NOT a Ray Deployment - just a regular class that uses
@@ -171,7 +171,7 @@ class FileGrouperContextPageSource(ContextPageSource):
                 self._repo_path = Path(str(repo_path))
             except Exception as e:  # noqa: BLE001
                 logger.warning(
-                    f"FileGrouperContextPageSource[{self.scope_id}]: "
+                    f"GitRepoContextPageSource[{self.scope_id}]: "
                     f"could not resolve working tree for live watch "
                     f"({e}); watch() will yield no events on this replica."
                 )
@@ -289,7 +289,7 @@ class FileGrouperContextPageSource(ContextPageSource):
                     text=shard.raw_content,
                     size=shard.metadata.token_count or max(1, len(shard.raw_content) // 4),
                     metadata={
-                        "source": FileGrouperContextPageSource.get_source_metadata(self.scope_id),
+                        "source": GitRepoContextPageSource.get_source_metadata(self.scope_id),
                         "files": [seg.file_path for seg in shard.metadata.file_segments],
                         "file_count": len(shard.metadata.file_segments),
                         "content_size_bytes": shard.metadata.content_size_bytes,
@@ -403,7 +403,7 @@ class FileGrouperContextPageSource(ContextPageSource):
 
         if not rel_to_page:
             logger.warning(
-                f"FileGrouperContextPageSource[{self.scope_id}]: "
+                f"GitRepoContextPageSource[{self.scope_id}]: "
                 f"no rel_path → page_id entries derivable from "
                 f"file_to_page; watch() will yield no events."
             )

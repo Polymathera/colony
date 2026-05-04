@@ -56,7 +56,7 @@ class ContextPageSource(ABC):
     subscribe to a static instance as a live page-graph input and
     instead relies on whatever bulk re-ingestion path the source
     provides. The same source class can produce both kinds of
-    instance — see ``FileGrouperContextPageSource`` for the canonical
+    instance — see ``GitRepoContextPageSource`` for the canonical
     mixed-mode use case.
     """
 

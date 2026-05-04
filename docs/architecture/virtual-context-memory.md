@@ -62,7 +62,7 @@ graph LR
     Agent -->|write| blackboard
 ```
 
-For example, Colony's `FileGrouperContextPageSource` maps files in a git repository to pages, grouping related files together (e.g., a module and its tests). Agents can edit the git repository directly in the file system, and the context page source will detect the changes and the corresponding VCM pages will be invalidated (i.e., marked as stale) and updated. The `BlackboardContextPageSource` maps blackboard entries to pages, allowing agents to read/write shared state as part of their reasoning process.
+For example, Colony's `GitRepoContextPageSource` maps files in a git repository to pages, grouping related files together (e.g., a module and its tests). Agents can edit the git repository directly in the file system, and the context page source will detect the changes and the corresponding VCM pages will be invalidated (i.e., marked as stale) and updated. The `BlackboardContextPageSource` maps blackboard entries to pages, allowing agents to read/write shared state as part of their reasoning process.
 
 
 !!! tip "Automatic Change Detection"

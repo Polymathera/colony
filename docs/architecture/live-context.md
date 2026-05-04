@@ -14,7 +14,7 @@ The chain is built from four layers, each in its own colony package:
 All four layers are implemented and wired end-to-end at cluster boot. The chain runs whenever:
 
 1. `VCMConfig.add_deployments_to_app` registers `ConvergenceRuntimeDeployment` (it always does, unconditionally).
-2. The VCM materializes a scope mapping for any non-static `ContextPageSource` — `_start_watch_bridge` drains the source's `watch()` iterator and calls `ConvergenceRuntimeDeployment.feed_page_event` directly via its deployment handle. There is exactly **one** chain per source: `FileGrouperContextPageSource.watch()` runs both a `LocalFsWatcher` (for in-tree edits) and a `GitRemoteWatcher` (for upstream commits) and merges them; `BlackboardContextPageSource.watch()` drains the source's own record-event loop.
+2. The VCM materializes a scope mapping for any non-static `ContextPageSource` — `_start_watch_bridge` drains the source's `watch()` iterator and calls `ConvergenceRuntimeDeployment.feed_page_event` directly via its deployment handle. There is exactly **one** chain per source: `GitRepoContextPageSource.watch()` runs both a `LocalFsWatcher` (for in-tree edits) and a `GitRemoteWatcher` (for upstream commits) and merges them; `BlackboardContextPageSource.watch()` drains the source's own record-event loop.
 
 Layer 1 (HTTP webhook receiver) is the only piece deferred — the `WebhookEventBuilder` translator exists; the route lives in Phase C6.
 
@@ -32,14 +32,14 @@ End-to-end smoke tests live in [`vcm/convergence/tests/test_chain_smoke.py`](../
 
 | Source | `static` | `watch()` shape | Live-event production |
 |--------|----------|----------------|-----------------------|
-| [`FileGrouperContextPageSource`](../../src/polymathera/colony/samples/paging/file_grouper_page_source.py) | `False` | Merges a `LocalFsWatcher` (in-tree edits) and a `GitRemoteWatcher` (upstream commits) rooted at the cloned working tree, into one async iterator | Filesystem events on tracked files (those in `file_to_page`) become `PageChangeEvent`s with `data_type="design_monorepo_file"` and the affected page's id |
+| [`GitRepoContextPageSource`](../../src/polymathera/colony/samples/paging/git_repo_page_source.py) | `False` | Merges a `LocalFsWatcher` (in-tree edits) and a `GitRemoteWatcher` (upstream commits) rooted at the cloned working tree, into one async iterator | Filesystem events on tracked files (those in `file_to_page`) become `PageChangeEvent`s with `data_type="design_monorepo_file"` and the affected page's id |
 | [`BlackboardContextPageSource`](../../src/polymathera/colony/agents/blackboard/paging/blackboard_page_source.py) | `False` | Yields from an internal `asyncio.Queue` populated by the source's record-event loop | Each blackboard write/update/delete diffs the page graph; new pages emit `PageAdded`, retired pages emit `PageInvalidated`, page reassignments emit `PageReplaced` |
 
 The two shapes differ but the *contract* is uniform: every non-static source exposes mutations as an `AsyncIterator[PageChangeEvent]`. The runtime side does not know or care whether the iterator delegates to a sidecar watcher (`LocalFsWatcher`) or pulls from the source's own internal event loop.
 
 #### Limitations to know about
 
-- **`FileGrouperContextPageSource` only watches files in `file_to_page` at the time `watch()` starts.** A file added to the working tree after the page graph was built fires no events; detecting it requires a graph rebuild, which is a separate pass.
+- **`GitRepoContextPageSource` only watches files in `file_to_page` at the time `watch()` starts.** A file added to the working tree after the page graph was built fires no events; detecting it requires a graph rebuild, which is a separate pass.
 - **Multi-replica VCMs duplicate events.** Every replica that materializes a non-static scope mapping starts its own watcher; events get N-fold duplicated into the convergence runtime. The runtime's per-page rate-limiter absorbs transient bursts, but a leader-election story is the durable fix. The same caveat applies to `BlackboardContextPageSource`.
 
 ### The bridge: `VirtualContextManager._start_watch_bridge`
@@ -65,15 +65,15 @@ Three transport classes plus a webhook payload translator, all in [vcm/watchers/
 - **`GitRemoteWatcher`** — periodic `git fetch` + `git diff --name-only` against a local clone; covers remote-driven push fallback when no webhook is available.
 - **`SourcePollWatcher`** — generic interval poll over any `ContextPageSource`'s `get_all_mapped_pages()` snapshot; the catch-all transport for sources behind APIs (arXiv RSS, supplier catalogues) with no push notification.
 - **`WebhookEventBuilder`** — translates a Gitea / GitLab / GitHub git-push webhook payload into a sequence of `PageChangeEvent`s. (HTTP receiver is a Phase C6 concern; the translator lives here so the watcher contract stays in one place.)
-- **`CompositeWatcher`** — merges N child watchers into one async iterator. Used when a single source needs more than one watch transport against the same backing store (e.g., `FileGrouperContextPageSource` couples a `LocalFsWatcher` and a `GitRemoteWatcher` against the cloned working tree).
+- **`CompositeWatcher`** — merges N child watchers into one async iterator. Used when a single source needs more than one watch transport against the same backing store (e.g., `GitRepoContextPageSource` couples a `LocalFsWatcher` and a `GitRemoteWatcher` against the cloned working tree).
 
 All set `static = False` and emit `PageChangeEvent`s. Watchers are **not** subclasses of `ContextPageSource` — they are sidecar classes that operate alongside a source. This decouples watch lifecycle from page-source lifecycle and lets multiple watchers cover one source (LocalFs *and* GitRemote on the same working tree, for example).
 
-### Bridge: `FileGrouperContextPageSource.watch`
+### Bridge: `GitRepoContextPageSource.watch`
 
-The page source itself is the bridge. When a working tree is mapped into the VCM as a `FileGrouperContextPageSource` (via `mmap_application_scope` with `source_type="file_grouper"`), the VCM's `_start_watch_bridge` drains the source's `watch()` iterator and feeds each event into the runtime. `watch()` runs both watchers (LocalFs + GitRemote) inside the source itself — via `CompositeWatcher` — and merges them into one stream. There is no separate registration call from any capability.
+The page source itself is the bridge. When a working tree is mapped into the VCM as a `GitRepoContextPageSource` (via `mmap_application_scope` with `source_type="file_grouper"`), the VCM's `_start_watch_bridge` drains the source's `watch()` iterator and feeds each event into the runtime. `watch()` runs both watchers (LocalFs + GitRemote) inside the source itself — via `CompositeWatcher` — and merges them into one stream. There is no separate registration call from any capability.
 
-There used to be a parallel `DesignMonorepoWatcher` registered through `ConvergenceRuntimeDeployment.register_design_monorepo`; that produced duplicate watchers when the same working tree was both registered AND mapped. It was removed — the sole place a working tree's filesystem + remote are watched is `FileGrouperContextPageSource.watch()`. See `colony_docs/markdown/convergence_flow_review.md` §P0 for the rationale.
+There used to be a parallel `DesignMonorepoWatcher` registered through `ConvergenceRuntimeDeployment.register_design_monorepo`; that produced duplicate watchers when the same working tree was both registered AND mapped. It was removed — the sole place a working tree's filesystem + remote are watched is `GitRepoContextPageSource.watch()`. See `colony_docs/markdown/convergence_flow_review.md` §P0 for the rationale.
 
 ---
 
@@ -214,7 +214,7 @@ Downstream domain packages (e.g. CPS-domain capabilities for budget reconciliati
 What's wired:
 
 - `ConvergenceRuntimeDeployment` is registered by `VCMConfig.add_deployments_to_app` and starts unconditionally with the rest of the VCM subsystem.
-- `FileGrouperContextPageSource` declares `static = False` and `watch()` runs `LocalFsWatcher` + `GitRemoteWatcher` against the working tree (merged via `CompositeWatcher`). The VCM's `_start_watch_bridge` drains them and feeds events directly into the runtime. There is no separate registration call — mapping the working tree as a `FileGrouperContextPageSource` is the registration.
+- `GitRepoContextPageSource` declares `static = False` and `watch()` runs `LocalFsWatcher` + `GitRemoteWatcher` against the working tree (merged via `CompositeWatcher`). The VCM's `_start_watch_bridge` drains them and feeds events directly into the runtime. There is no separate registration call — mapping the working tree as a `GitRepoContextPageSource` is the registration.
 - `BlackboardContextPageSource` declares `static = False` and overrides `watch()` to yield `PageChangeEvent`s as its event loop processes live writes. The VCM's `_start_watch_bridge` automatically drains the iterator into the runtime — the same generic bridge applies to any future non-static source.
 - End-to-end smoke tests in [`test_chain_smoke.py`](../../src/polymathera/colony/vcm/convergence/tests/test_chain_smoke.py) exercise watcher → runtime → subscription dispatch with no Ray.
 

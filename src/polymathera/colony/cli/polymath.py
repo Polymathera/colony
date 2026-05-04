@@ -5,7 +5,7 @@ This tool runs a complete analysis workflow on a codebase using the Polymathera 
 multi-agent framework. It demonstrates:
 
 1. **Context Paging** — Using VirtualContextManager.mmap_application_scope with
-   FileGrouperContextPageSource to page a codebase into VCM pages.
+   GitRepoContextPageSource to page a codebase into VCM pages.
 
 2. **Agent Hierarchies** — Spawning coordinator agents that in turn spawn
    teams of specialized page-level analysis agents, creating rich parent-child
@@ -1304,7 +1304,7 @@ async def run_integration_test(
     This is the main entry point that:
     1. Deploys the Colony cluster via deploy_cluster()
     2. Creates a session for tracking
-    3. Pages the codebase into VCM using FileGrouperContextPageSource
+    3. Pages the codebase into VCM using GitRepoContextPageSource
     4. Spawns coordinator agents via AgentHandle.from_blueprint()
     5. Monitors progress via handle.run_streamed() and collects results
     6. Returns a list of result dictionaries
@@ -1322,7 +1322,7 @@ async def run_integration_test(
     This is the main entry point that:
     1. Connects to the Ray cluster via PolymatheraApp.setup_ray()
     2. Deploys PolymatheraCluster (LLM deployments, VCM, agent system)
-    3. Pages the codebase into VCM using FileGrouperContextPageSource
+    3. Pages the codebase into VCM using GitRepoContextPageSource
     4. Spawns coordinator agents via AgentHandle.from_blueprint()
     5. Monitors progress via handle.run_streamed() and collects results
     6. Returns a list of result dictionaries
