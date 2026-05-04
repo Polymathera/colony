@@ -178,13 +178,14 @@ class GitHubCapability(AgentCapability):
         self._installation_id = installation_id
         self._client: GitHubClient | None = client
         self._init_error: str | None = None
+        self._client_initialized = client is not None
 
     async def initialize(self) -> None:
         # Build a live client; any configuration error is captured so
         # the action surface can return it as a normal error dict
         # rather than raising at construction time.
         await super().initialize()
-        if self._client is not None:
+        if self._client_initialized:
             return
         try:
             self._client = await self._build_live_client()
@@ -195,6 +196,7 @@ class GitHubCapability(AgentCapability):
             logger.warning(
                 "GitHubCapability: live client disabled: %s", e,
             )
+        self._client_initialized = True
 
     # --- Internal construction --------------------------------------------
 
@@ -204,10 +206,13 @@ class GitHubCapability(AgentCapability):
         # downstream "all required" check still triggers when nothing is set.
         from ...configs import get_github_auth_config
         gh = await get_github_auth_config()
+        app_id = self._app_id or gh.app_id or None
+        installation_id = self._installation_id or gh.installation_id or None
+        private_key_pem = self._private_key_pem or gh.private_key_pem or None
         if not private_key_pem and self._private_key_path:
             with open(self._private_key_path, "r", encoding="utf-8") as fh:
                 private_key_pem = fh.read()
-        if not self._app_id or not self._installation_id or not private_key_pem:
+        if not app_id or not installation_id or not private_key_pem:
             raise RuntimeError(
                 "GitHubCapability: app_id, installation_id, and a "
                 "private key are all required (explicit kwargs, "
@@ -220,11 +225,11 @@ class GitHubCapability(AgentCapability):
                 ),
             )
         auth = GitHubAppAuth(
-            app_id=self._app_id, private_key_pem=private_key_pem,
+            app_id=app_id, private_key_pem=private_key_pem,
         )
         tokens = TokenCache(
             app_auth=auth,
-            installation_id=self._installation_id,
+            installation_id=installation_id,
             client=self._httpx_client,
         )
         return GitHubClient(tokens=tokens, client=self._httpx_client)
@@ -267,7 +272,9 @@ class GitHubCapability(AgentCapability):
 
     # --- Internal helpers -------------------------------------------------
 
-    def _ensure_client(self) -> tuple[GitHubClient | None, str | None]:
+    async def _ensure_client(self) -> tuple[GitHubClient | None, str | None]:
+        if not self._client_initialized:
+            await self.initialize()
         if self._client is None:
             return None, self._init_error or "GitHub client not configured"
         return self._client, None
@@ -317,7 +324,7 @@ class GitHubCapability(AgentCapability):
     @action_executor()
     async def list_repos(self) -> dict[str, Any]:
         """List the repositories this App installation can access."""
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "", repos=[])
         try:
@@ -342,7 +349,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         try:
@@ -366,7 +373,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set", branches=[])
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "", branches=[])
         branches: list[dict[str, Any]] = []
@@ -404,7 +411,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         try:
@@ -458,7 +465,7 @@ class GitHubCapability(AgentCapability):
         When ``repo`` is provided, the query is automatically narrowed
         to that repo via the ``repo:`` qualifier.
         """
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "", hits=[])
         full_query = query
@@ -508,7 +515,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set", issues=[])
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "", issues=[])
         params: dict[str, Any] = {"state": state, "per_page": 100}
@@ -538,7 +545,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         try:
@@ -561,7 +568,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         payload: dict[str, Any] = {"title": title, "body": body}
@@ -594,7 +601,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         try:
@@ -625,7 +632,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         try:
@@ -648,7 +655,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         try:
@@ -675,7 +682,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         try:
@@ -708,7 +715,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set", prs=[])
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "", prs=[])
         prs: list[dict[str, Any]] = []
@@ -736,7 +743,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         try:
@@ -757,7 +764,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         try:
@@ -805,7 +812,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         payload = {
@@ -853,7 +860,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         payload: dict[str, Any] = {"event": event, "body": body}
@@ -884,7 +891,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         try:
@@ -973,7 +980,7 @@ class GitHubCapability(AgentCapability):
                 "no project_id provided and no default_project_id set",
                 items=[],
             )
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "", items=[])
         try:
@@ -1041,7 +1048,7 @@ class GitHubCapability(AgentCapability):
             return _err(
                 "no repo provided and no default_repo set", claimed=False,
             )
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "", claimed=False)
         params: dict[str, Any] = {
@@ -1121,7 +1128,7 @@ class GitHubCapability(AgentCapability):
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
-        client, err = self._ensure_client()
+        client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
         agent_label = self._label_for_agent(self._agent_id())

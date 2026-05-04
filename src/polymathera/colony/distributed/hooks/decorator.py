@@ -112,9 +112,14 @@ def _discover_hook_handlers(obj: Any) -> list[tuple[Callable, dict]]:
             continue
         try:
             attr = getattr(obj, name)
-            if callable(attr) and hasattr(attr, _HOOK_REGISTRATION_ATTR):
-                reg_info = getattr(attr, _HOOK_REGISTRATION_ATTR)
-                handlers.append((attr, reg_info))
+            if not callable(attr):
+                continue
+            reg_info = getattr(attr, _HOOK_REGISTRATION_ATTR, None)
+            # Strict isinstance(dict) — a MagicMock attribute auto-creates
+            # a non-None reg_info that would otherwise pass a truthy check.
+            if not isinstance(reg_info, dict):
+                continue
+            handlers.append((attr, reg_info))
         except Exception:
             # Skip attributes that raise on access
             pass
