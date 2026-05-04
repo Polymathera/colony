@@ -536,15 +536,9 @@ class ClusterConfig(BaseModel):
                 f"replicas={rconf.num_replicas}"
             )
 
-            # Select deployment class based on provider
-            if rconf.provider == "anthropic":
-                from .anthropic_deployment import AnthropicLLMDeployment
-                deployment_cls = AnthropicLLMDeployment
-            elif rconf.provider == "openrouter":
-                from .openrouter_deployment import OpenRouterLLMDeployment
-                deployment_cls = OpenRouterLLMDeployment
-            else:
-                raise ValueError(f"Unknown remote provider: {rconf.provider}")
+            # Select deployment class via the remote-provider registry.
+            from .remote_registry import get_remote_llm_deployment_class
+            deployment_cls = get_remote_llm_deployment_class(rconf.provider)
 
             from .routing import get_routing_policy_class
             default_router_class = get_routing_policy_class(rconf.default_router_class)

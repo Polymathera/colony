@@ -145,6 +145,24 @@ class PolymatheraApp:
         await self.initialize()
         return self._config_manager
 
+    @property
+    def config_manager(self) -> ConfigurationManager:
+        """Sync accessor. Does NOT trigger ``initialize()``; callers needing
+        loaded state should use the async :meth:`get_config_manager` instead.
+        Useful for capability constructors that must remain sync and degrade
+        to component defaults when the manager has not loaded yet."""
+        return self._config_manager
+
+    def set_config_path(self, path: str | None) -> None:
+        """Update the path the manager loads on the next ``initialize()``.
+
+        Sync-callable so the CLI can wire ``--config`` in before any code that
+        awaits ``get_initialized_polymathera`` downstream. Delegates to
+        :meth:`ConfigurationManager.set_config_path`; if the manager has
+        already initialized, it will reload on the next ``initialize()`` call.
+        """
+        self._config_manager.set_config_path(path)
+
     async def get_storage(self):
         await self.initialize()
         if self._storage is None:

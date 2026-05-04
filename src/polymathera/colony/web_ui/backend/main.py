@@ -179,13 +179,27 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
 
 def cli_main():
     """CLI entry point for the dashboard server."""
+    import asyncio
     import uvicorn
 
-    config = DashboardConfig.from_env()
+    from polymathera.colony.distributed import get_initialized_polymathera
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+
+    # Initialize the global ConfigurationManager once at startup so every
+    # sync ``get_*_config()`` helper used by routers / capabilities sees the
+    # operator YAML at $POLYMATHERA_CONFIG and the per-field env-var
+    # bindings (``RDS_*``, ``KAFKA_*``, ``RAY_*``, ...) declared on the
+    # registered ConfigComponents. Without this, ``DashboardConfig.from_env``
+    # would fall through to bare Pydantic defaults — e.g. ``pg_password=""``
+    # — and Postgres-backed routes (auth, chat, observability) would fail
+    # with "Database not available".
+    asyncio.run(get_initialized_polymathera())
+
+    config = DashboardConfig.from_env()
     logger.info(f"Starting Colony Dashboard on {config.host}:{config.port}")
     uvicorn.run(
         create_app(config),

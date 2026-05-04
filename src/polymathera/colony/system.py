@@ -6,10 +6,17 @@ This module provides the PolymatheraCluster class for managing a cluster of Poly
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from typing import Any, Type, TYPE_CHECKING
 
+from pydantic import ConfigDict, Field
+
 from .distributed import get_polymathera
+from .distributed.config import (
+    ConfigComponent,
+    Tier,
+    register_polymathera_config,
+    tier_metadata,
+)
 from .distributed.state_management import SharedState, StateManager
 from .distributed.ray_utils import serving
 from .cluster.config import ClusterConfig
@@ -25,21 +32,42 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class PolymatheraClusterConfig:
+@register_polymathera_config(path="polymathera_cluster")
+class PolymatheraClusterConfig(ConfigComponent):
     """Configuration for the complete Polymathera system stack.
 
-    Includes LLM cluster, VCM, and optional agent system.
+    Includes LLM cluster, VCM, and optional agent system. ``app_name`` and
+    ``llm_cluster_config`` are ``Optional`` so the config-registry can default-
+    instantiate this component at startup; ``validate_config()`` enforces both
+    are set before deploy.
     """
 
-    app_name: str
-    llm_cluster_config: ClusterConfig
-    vcm_config: VCMConfig = field(default_factory=VCMConfig)
-    agent_system_config: AgentSystemConfig = field(default_factory=AgentSystemConfig)
-    cleanup_on_init: bool = False
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def validate_config(self) -> None:
-        """Validate all sub-configurations."""
+    app_name: str | None = Field(
+        default=None,
+        json_schema_extra=tier_metadata(tier=Tier.L1_OPERATOR),
+    )
+    llm_cluster_config: ClusterConfig | None = None
+    vcm_config: VCMConfig = Field(default_factory=VCMConfig)
+    agent_system_config: AgentSystemConfig = Field(default_factory=AgentSystemConfig)
+    cleanup_on_init: bool = Field(
+        default=False,
+        json_schema_extra=tier_metadata(tier=Tier.L1_OPERATOR),
+    )
+
+    def assert_ready_for_deploy(self) -> None:
+        """Fail fast if any deploy-required field is unset.
+
+        Not named ``validate_*`` so the ``ConfigComponent`` auto-validator does
+        not run it at construction time — defaults would always trip it.
+        """
+        if self.app_name is None:
+            raise ValueError("PolymatheraClusterConfig.app_name is required for deploy")
+        if self.llm_cluster_config is None:
+            raise ValueError(
+                "PolymatheraClusterConfig.llm_cluster_config is required for deploy"
+            )
         self.llm_cluster_config.validate_config()
 
     def add_deployments_to_app(self, app: serving.Application, top_level: bool) -> None:
@@ -182,7 +210,7 @@ class PolymatheraCluster:
         self.top_level = top_level
 
         # Validate all deployment configurations
-        self.config.validate_config()
+        self.config.assert_ready_for_deploy()
 
         # Store app name
         self.app_name = self.config.app_name

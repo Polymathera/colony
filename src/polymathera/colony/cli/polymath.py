@@ -155,254 +155,11 @@ class AnalysisType(str, Enum):
     BASIC = "basic"  # General code structure analysis
 
 
-# Maps analysis types to their coordinator and worker agent class paths.
-# These are the fully-qualified Python class paths used by the agent system
-# to instantiate agent classes dynamically.
-#
-# NOTE on worker_capabilities: These are DOCUMENTATION-ONLY. Workers are
-# self-configuring — each worker agent class adds its own capabilities in its
-# initialize() method (e.g., ChangeImpactAnalysisAgent extends HypothesisGameAgent
-# which adds HypothesisGameProtocol automatically). The lists here are used by
-# the `describe` and `list` commands to show what each worker provides.
-
-# TODO: This registry should be allowed to be injected using a JSON or Markdown file.
-
-ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = {
-    "impact": {
-        "label": "Change Impact Analysis",
-        "description": (
-            "Analyzes the ripple effects of code changes across a codebase. "
-            "Uses multi-hop dependency propagation, hypothesis games for "
-            "validating critical impacts, and game-theoretic merge policies."
-        ),
-        "coordinator_v1": "polymathera.colony.samples.code_analysis.impact.coordinator.ChangeImpactAnalysisCoordinator",
-        "coordinator_v2": "polymathera.colony.samples.code_analysis.impact.coordinator.ChangeImpactAnalysisCoordinator",
-        "worker": "polymathera.colony.samples.code_analysis.impact.page_analyzer.ChangeImpactAnalysisAgent",
-        "coordinator_capabilities": [
-            "ChangeImpactAnalysisCoordinatorCapability",
-            "WorkingSetCapability",
-            "AgentPoolCapability",
-            "PageGraphCapability",
-            "ResultCapability",
-            "CriticCapability",
-            "SynthesisCapability",
-        ],
-        "worker_capabilities": [
-            "ChangeImpactAnalysisCapability",
-            "MergeCapability",
-            "GroundingCapability",
-            "DynamicGameCapability",  # via HypothesisGameAgent base class
-        ],
-        "extra_metadata_keys": ["changes", "change_description"],
-        "self_concept": {
-            "description": (
-                "Coordinates change impact analysis across a codebase by spawning "
-                "worker agents, propagating dependency chains, and synthesizing "
-                "a unified impact report."
-            ),
-            "goals": [
-                "Identify all code regions affected by the specified changes",
-                "Propagate impact through multi-hop dependency chains",
-                "Validate critical impacts via hypothesis games",
-                "Produce a ranked, grounded impact report with confidence scores",
-            ],
-            "constraints": [
-                "Every impact claim must be grounded in source code evidence",
-                "Do not hallucinate dependencies that are not in the codebase",
-            ],
-        },
-    },
-    "slicing": {
-        "label": "Program Slicing",
-        "description": (
-            "Extracts the minimal code subset affecting a target variable or "
-            "expression. Supports backward, forward, chopping, dynamic, and "
-            "conditioned slices with LLM-based dependency reasoning."
-        ),
-        "coordinator_v1": "polymathera.colony.samples.code_analysis.slicing.agents.ProgramSlicingCoordinator",
-        "coordinator_v2": "polymathera.colony.samples.code_analysis.slicing.agents.ProgramSlicingCoordinator",
-        "worker": "polymathera.colony.samples.code_analysis.slicing.agents.ProgramSlicingAgent",
-        "coordinator_capabilities": [
-            "SlicingAnalysisCapability",
-            "MergeCapability",
-            "WorkingSetCapability",
-            "AgentPoolCapability",
-            "PageGraphCapability",
-        ],
-        "worker_capabilities": [
-            "ProgramSlicingCapability",
-            "MergeCapability",
-        ],
-        "extra_metadata_keys": ["slice_criteria"],
-        "self_concept": {
-            "description": (
-                "Coordinates program slicing by distributing slice criteria across "
-                "workers and merging partial slices into minimal complete subsets."
-            ),
-            "goals": [
-                "Extract the minimal code subset that affects the target criteria",
-                "Preserve soundness — never omit statements that influence the target",
-                "Maximize precision — exclude statements irrelevant to the target",
-            ],
-            "constraints": [
-                "Slices must be complete — every data and control dependency on the target must be included",
-                "Do not include code that has no influence path to the slice criterion",
-            ],
-        },
-    },
-    "compliance": {
-        "label": "Compliance Analysis",
-        "description": (
-            "Checks license, regulatory, security, and organizational compliance. "
-            "Uses LLM-based semantic understanding of license terms and builds "
-            "obligation graphs for tracking compliance requirements."
-        ),
-        "coordinator_v1": "polymathera.colony.samples.code_analysis.compliance.agents.ComplianceAnalysisCoordinator",
-        "coordinator_v2": "polymathera.colony.samples.code_analysis.compliance.agents.ComplianceAnalysisCoordinator",
-        "worker": "polymathera.colony.samples.code_analysis.compliance.agents.ComplianceAnalysisAgent",
-        "coordinator_capabilities": [
-            "ComplianceVCMCapability",
-            "MergeCapability",
-            "WorkingSetCapability",
-            "AgentPoolCapability",
-            "PageGraphCapability",
-        ],
-        "worker_capabilities": [
-            "ComplianceAnalysisCapability",
-            "MergeCapability",
-        ],
-        "extra_metadata_keys": ["compliance_types"],
-        "self_concept": {
-            "description": (
-                "Coordinates compliance analysis by distributing license, regulatory, "
-                "and security checks across workers and building obligation graphs."
-            ),
-            "goals": [
-                "Identify all license obligations and compatibility conflicts",
-                "Detect regulatory and security compliance violations",
-                "Build obligation graphs linking requirements to source evidence",
-                "Produce actionable compliance reports with remediation guidance",
-            ],
-            "constraints": [
-                "Every compliance finding must cite the specific license clause or regulation",
-                "Do not make legal conclusions — report obligations and conflicts factually",
-            ],
-        },
-    },
-    "intent": {
-        "label": "Intent Inference",
-        "description": (
-            "Infers code purpose and developer intentions — business goals vs. "
-            "implementation details. Builds intent graphs and detects "
-            "misalignments using consensus game protocols."
-        ),
-        "coordinator_v1": "polymathera.colony.samples.code_analysis.intent.agents.IntentInferenceCoordinator",
-        "coordinator_v2": "polymathera.colony.samples.code_analysis.intent.agents.IntentInferenceCoordinator",
-        "worker": "polymathera.colony.samples.code_analysis.intent.agents.IntentInferenceAgent",
-        "coordinator_capabilities": [
-            "IntentAnalysisCapability",
-            "MergeCapability",
-            "SynthesisCapability",
-            "WorkingSetCapability",
-            "AgentPoolCapability",
-            "PageGraphCapability",
-        ],
-        "worker_capabilities": [
-            "IntentInferenceCapability",
-            "MergeCapability",
-            "DynamicGameCapability",
-        ],
-        "extra_metadata_keys": ["granularity"],
-        "self_concept": {
-            "description": (
-                "Coordinates intent inference by distributing analysis across workers "
-                "and building intent graphs that map code to business purposes."
-            ),
-            "goals": [
-                "Infer the business-level purpose behind each code component",
-                "Distinguish business logic from implementation scaffolding",
-                "Detect misalignments between stated intent and actual behavior",
-                "Build intent graphs linking code regions to inferred purposes",
-            ],
-            "constraints": [
-                "Clearly separate high-confidence inferences from speculative ones",
-                "Use consensus game validation for contested intent claims",
-            ],
-        },
-    },
-    "contracts": {
-        "label": "Contract Inference",
-        "description": (
-            "Infers function contracts — preconditions, postconditions, and "
-            "invariants. Uses hypothesis games to validate contracts and "
-            "produces specifications at configurable formalism levels."
-        ),
-        "coordinator_v1": "polymathera.colony.samples.code_analysis.contracts.agents.ContractInferenceCoordinator",
-        "coordinator_v2": "polymathera.colony.samples.code_analysis.contracts.agents.ContractInferenceCoordinator",
-        "worker": "polymathera.colony.samples.code_analysis.contracts.agents.ContractInferenceAgent",
-        "coordinator_capabilities": [
-            "ContractAnalysisCapability",
-            "MergeCapability",
-            "SynthesisCapability",
-            "WorkingSetCapability",
-            "AgentPoolCapability",
-            "PageGraphCapability",
-        ],
-        "worker_capabilities": [
-            "ContractInferenceCapability",
-            "MergeCapability",
-            "DynamicGameCapability",
-        ],
-        "extra_metadata_keys": ["formalism"],
-        "self_concept": {
-            "description": (
-                "Coordinates contract inference by distributing function analysis "
-                "across workers and validating inferred contracts via hypothesis games."
-            ),
-            "goals": [
-                "Infer preconditions, postconditions, and invariants for each function",
-                "Validate contracts against actual code behavior",
-                "Produce specifications at the requested formalism level",
-            ],
-            "constraints": [
-                "Inferred contracts must be consistent with the code — no aspirational specs",
-                "Use hypothesis games to challenge and validate each contract before accepting",
-            ],
-        },
-    },
-    "basic": {
-        "label": "Basic Code Analysis",
-        "description": (
-            "General-purpose code structure analysis. The coordinator spawns "
-            "ClusterAnalyzer agents that perform key generation, local page "
-            "analysis, cross-page query resolution, and cluster-level synthesis."
-        ),
-        "coordinator_v1": "polymathera.colony.samples.code_analysis.basic.coordinator.CodeAnalysisCoordinator",
-        "coordinator_v2": "polymathera.colony.samples.code_analysis.basic.coordinator.CodeAnalysisCoordinatorV2",
-        "worker": "polymathera.colony.samples.code_analysis.basic.cluster_analyzer.ClusterAnalyzer",
-        "coordinator_capabilities": [
-            "CodeAnalysisCoordinatorCapability",
-            "CriticCapability",
-        ],
-        "worker_capabilities": [
-            "ClusterAnalyzerCapability",
-        ],
-        "extra_metadata_keys": [],
-        "self_concept": {
-            "description": (
-                "Coordinates general-purpose code structure analysis by spawning "
-                "cluster analyzers and synthesizing their findings."
-            ),
-            "goals": [
-                "Analyze code structure, patterns, and relationships across the codebase",
-                "Synthesize findings from individual cluster analyses into a coherent report",
-            ],
-            "constraints": [
-                "Ground all findings in actual code evidence from the analyzed pages",
-            ],
-        },
-    },
-}
+# Source of truth for analysis specs lives in
+# ``polymathera.colony.agents.configs:_BUILTIN_ANALYSES``. Re-exported here
+# under the historical ``ANALYSIS_REGISTRY`` name so existing call sites and
+# the ``polymathera.cli.polymath.ANALYSIS_REGISTRY`` import path keep working.
+from polymathera.colony.agents.configs import ANALYSIS_REGISTRY  # noqa: E402, F401
 
 
 # Capabilities that can be attached to any agent for cross-cutting concerns.
@@ -643,7 +400,16 @@ class LLMClusterYAMLConfig:
 
 @dataclass
 class TestConfig:
-    """Complete integration test configuration."""
+    """Complete integration test configuration.
+
+    .. deprecated::
+        Kept as a shim for the legacy CLI loader. Source-of-truth for
+        topology/cluster/agent-system/vcm config now lives in registered
+        ``ConfigComponent`` slots driven by ``ConfigurationManager`` (steps
+        4–10 of the system-config refactor). ``load_config_from_yaml`` mirrors
+        the ``--config`` path into the global manager so typed components are
+        populated alongside this dataclass; future work removes the shim.
+    """
     repo_id: str = "polymath-test"
     tenant_id: str = "test-tenant"
     session_id: str = field(default_factory=lambda: f"polymath-{uuid.uuid4().hex[:8]}")
@@ -702,6 +468,14 @@ def load_config_from_yaml(path: str) -> TestConfig:
 
     with open(config_path) as f:
         raw = yaml.safe_load(f)
+
+    # Mirror ``--config`` into the global ConfigurationManager so the typed
+    # components added in steps 4–10 (cluster, agent_system, plugins, sandbox
+    # images, observability, deployment_names, custom_deployments, ...) are
+    # populated from the operator's YAML when ``polymathera.initialize()`` is
+    # awaited downstream (e.g. inside ``deploy_cluster``).
+    from polymathera.colony.distributed import get_polymathera
+    get_polymathera().set_config_path(str(config_path))
 
     if not raw:
         return TestConfig()

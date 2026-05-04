@@ -63,6 +63,19 @@ from .scopes import (
 from .system import AgentSystemDeployment, AgentSystemState
 
 from .config import AgentSystemConfig
+from .configs import (
+    AnalysisRegistryConfig,
+    AnalysisSelfConcept,
+    AnalysisSpec,
+    ChromaConfig,
+    GitHubAuthConfig,
+    PluginsConfig,
+    SandboxImage,
+    SandboxImageScript,
+    SandboxImagesConfig,
+    TaskImagesConfig,
+    WebSearchConfig,
+)
 
 # Blackboard (new enhanced implementation)
 from .blackboard import (
@@ -143,6 +156,18 @@ __all__ = [
     "AgentSystemDeployment",
     "AgentSystemState",
     "AgentSystemConfig",
+    # Configs
+    "AnalysisRegistryConfig",
+    "AnalysisSelfConcept",
+    "AnalysisSpec",
+    "ChromaConfig",
+    "GitHubAuthConfig",
+    "PluginsConfig",
+    "SandboxImage",
+    "SandboxImageScript",
+    "SandboxImagesConfig",
+    "TaskImagesConfig",
+    "WebSearchConfig",
     # Blackboard
     "Blackboard",
     "EnhancedBlackboard",

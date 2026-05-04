@@ -171,6 +171,18 @@ class ImageRegistry:
         return cls.from_yaml_text(p.read_text())
 
     @classmethod
+    def from_config(cls, config: Any) -> "ImageRegistry":
+        """Build the registry from a ``SandboxImagesConfig`` instance.
+
+        ``config`` is typed loosely to avoid an import cycle with
+        ``agents.configs``; in practice it is a ``SandboxImagesConfig``.
+        """
+        images = [
+            ImageSpec.from_dict(img.model_dump()) for img in config.images
+        ]
+        return cls(images)
+
+    @classmethod
     def empty(cls) -> "ImageRegistry":
         return cls([])
 

@@ -2183,13 +2183,14 @@ class Agent(BaseModel):
         await self._create_action_policy()
 
     def _init_tracing_config(self) -> None:
-        """Initialize tracing config from environment variables."""
-        tracing_enabled = os.environ.get("TRACING_ENABLED", "").lower() in ("true", "1", "yes")
-        if tracing_enabled:
+        """Initialize tracing config from the typed ObservabilityConfig."""
+        from ..distributed.configs import get_observability_config
+        cfg = get_observability_config()
+        if cfg.tracing_enabled:
             self._tracing_config = TracingConfig(
                 enabled=True,
-                kafka_bootstrap=os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092"),
-                kafka_topic=os.environ.get("KAFKA_SPANS_TOPIC", "colony.spans"),
+                kafka_bootstrap=cfg.kafka_bootstrap,
+                kafka_topic=cfg.kafka_spans_topic,
             )
 
     async def emit_lifecycle_stop_event(self, stop_reason: str, error_msg: str | None = None, iteration: int | None = None) -> None:

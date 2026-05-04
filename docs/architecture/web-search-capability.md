@@ -37,7 +37,7 @@ class SearchBackend(ABC):
     async def close(self): ...
 ```
 
-Default: `TavilyBackend` — uses raw `httpx.AsyncClient` against `POST https://api.tavily.com/search`. No SDK dependency. API key from constructor or `TAVILY_API_KEY` env var.
+Default: `TavilyBackend` — uses raw `httpx.AsyncClient` against `POST https://api.tavily.com/search`. No SDK dependency. API key resolution: constructor arg → typed `WebSearchConfig.api_key` → env var `TAVILY_API_KEY` (the binding declared on the field). See [Configuration System](configuration.md) for the full override chain.
 
 To add SerpAPI / Bing / Brave, subclass `SearchBackend` and pass `backend=` to the capability blueprint.
 

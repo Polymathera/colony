@@ -298,8 +298,28 @@ class ObservabilityConfig(ConfigComponent):
     prometheus_port: int = Field(default=8000)
     cloudwatch_namespace: str = Field(default="Polymathera")
 
+    # Tracing — Wired through this config so the operator YAML and
+    # L2/L3 overlays can override per-deployment.
+    tracing_enabled: bool = Field(
+        default=False,
+        json_schema_extra={"env": "TRACING_ENABLED", "optional": True},
+    )
+    kafka_bootstrap: str = Field(
+        default="kafka:9092",
+        json_schema_extra={"env": "KAFKA_BOOTSTRAP", "optional": True},
+    )
+    kafka_spans_topic: str = Field(
+        default="colony.spans",
+        json_schema_extra={"env": "KAFKA_SPANS_TOPIC", "optional": True},
+    )
+
     CONFIG_PATH: ClassVar[str] = "distributed.observability"
 
+
+def get_observability_config() -> "ObservabilityConfig":
+    """Sync fetch of the registered :class:`ObservabilityConfig` (defaults if uninit)."""
+    from .config.manager import get_component_or_default
+    return get_component_or_default(ObservabilityConfig.CONFIG_PATH, ObservabilityConfig)
 
 
 @register_polymathera_config()

@@ -46,7 +46,16 @@ A list `command` is passed verbatim. A string is wrapped in `bash -lc` so shell 
 
 ## Image registry
 
-YAML at `colony/cli/deploy/docker/sandbox-images.yaml`, mounted into ray-head/ray-worker at `/etc/colony/sandbox-images.yaml:ro`:
+Two equivalent surfaces:
+
+1. The typed `SandboxImagesConfig` (path `sandbox_images`) loaded by
+   `ConfigurationManager` from the operator YAML at `--config`. Recommended
+   for new deployments — see [Configuration System](configuration.md).
+2. The legacy YAML at `colony/cli/deploy/docker/sandbox-images.yaml`, mounted
+   into ray-head/ray-worker at `/etc/colony/sandbox-images.yaml:ro`. Kept as
+   a fallback when the typed config is empty (no operator override).
+
+Schema is identical:
 
 ```yaml
 images:

@@ -37,12 +37,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING, Literal
-
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...agents.blackboard import EnhancedBlackboard
-from ...agents.blackboard.protocol import ConvergenceQuiescenceProtocol
-from ...agents.scopes import BlackboardScope, get_scope_prefix
 from ..page_events import PageChangeEvent, PageChangeKind
 from .damping import ConvergenceDamper
 from .index import SubscriptionIndex
@@ -53,6 +49,7 @@ from .subscriptions import PageSubscription
 
 if TYPE_CHECKING:
     from ...distributed.state_management import StateManager
+    from ...agents.blackboard import EnhancedBlackboard
 
 
 logger = logging.getLogger(__name__)
@@ -201,16 +198,22 @@ class ConvergenceRuntime:
     # -- Lifecycle -------------------------------------------------------
 
     async def initialize(self) -> None:
-        """Bring up the colony-scope blackboard handle (used for
-        quiescence emit)."""
+        logger.info("ConvergenceRuntime ready (app=%s)", self._app_name)
 
+    async def _get_colony_blackboard(self) -> EnhancedBlackboard:
+        """Get or create a blackboard handle for the colony scope.
+        The colony-scope blackboard is created lazily in :meth:`_emit_quiescence` —
+        at deployment-init time the execution context is KERNEL with no colony_id,
+        so the colony scope cannot yet be resolved."""
         if self._colony_blackboard is None:
+            from ...agents.blackboard import EnhancedBlackboard
+            from ...agents.scopes import BlackboardScope, get_scope_prefix
             self._colony_blackboard = EnhancedBlackboard(
                 app_name=self._app_name,
                 scope_id=get_scope_prefix(BlackboardScope.COLONY),
             )
             await self._colony_blackboard.initialize()
-        logger.info("ConvergenceRuntime ready (app=%s)", self._app_name)
+        return self._colony_blackboard
 
     async def cleanup(self) -> None:
         """Release per-replica blackboard handles. Shared state stays
@@ -571,16 +574,19 @@ class ConvergenceRuntime:
         bb = self._dispatch_blackboards.get(scope_id)
         if bb is not None:
             return bb
+
+        from ...agents.blackboard import EnhancedBlackboard
         bb = EnhancedBlackboard(app_name=self._app_name, scope_id=scope_id)
         await bb.initialize()
         self._dispatch_blackboards[scope_id] = bb
         return bb
 
     async def _emit_quiescence(self, counters: ConvergenceCounters) -> None:
-        if self._colony_blackboard is None:
-            return
+        bb = await self._get_colony_blackboard()
+
+        from ...agents.blackboard.protocol import ConvergenceQuiescenceProtocol
         try:
-            await self._colony_blackboard.write(
+            await bb.write(
                 ConvergenceQuiescenceProtocol.quiescence_key(counters.episode_id),
                 value=counters.model_dump(mode="json"),
                 tags={"convergence", "quiescence"},

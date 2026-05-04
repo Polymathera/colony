@@ -28,6 +28,13 @@ services:
       - RAY_CLUSTER_ENVIRONMENT=true
       - POLYMATHERA_ENV=development
       - POLYMATHERA_RUNNING_LOCALLY=true
+      # Operator YAML path — the global ConfigurationManager loads this at
+      # startup. ``colony-env up --config`` `docker cp`s the file into
+      # /mnt/shared/config.yaml on the colony-shared volume mounted into
+      # every container below. If the file is not yet present (the cp is
+      # async w.r.t. container start), ConfigurationManager falls through to
+      # defaults + env vars cleanly.
+      - POLYMATHERA_CONFIG=/mnt/shared/config.yaml
       - PROMETHEUS_PORT=9090
       # Authentication - local mode
       - AUTH_ENABLED=False
@@ -107,6 +114,13 @@ services:
       - RAY_CLUSTER_ENVIRONMENT=true
       - POLYMATHERA_ENV=development
       - POLYMATHERA_RUNNING_LOCALLY=true
+      # Operator YAML path — the global ConfigurationManager loads this at
+      # startup. ``colony-env up --config`` `docker cp`s the file into
+      # /mnt/shared/config.yaml on the colony-shared volume mounted into
+      # every container below. If the file is not yet present (the cp is
+      # async w.r.t. container start), ConfigurationManager falls through to
+      # defaults + env vars cleanly.
+      - POLYMATHERA_CONFIG=/mnt/shared/config.yaml
       - PROMETHEUS_PORT=9090
       # Authentication - local mode
       - AUTH_ENABLED=False
@@ -190,7 +204,7 @@ services:
     # Phase C1b — knowledge-corpus vector store (master §3.2 / §6.4).
     # Storage volume persists across `colony-env up/down` so ingested
     # corpora survive restarts; HTTP on 6333, gRPC on 6334.
-    image: qdrant/qdrant:v1.16.4
+    image: qdrant/qdrant:v1.16.3
     container_name: colony-qdrant
     ports:
       - "${COLONY_QDRANT_HTTP_PORT:-6333}:6333"
@@ -280,6 +294,13 @@ services:
       - RAY_CLUSTER_ENVIRONMENT=true
       - POLYMATHERA_ENV=development
       - POLYMATHERA_RUNNING_LOCALLY=true
+      # Operator YAML path — the global ConfigurationManager loads this at
+      # startup. ``colony-env up --config`` `docker cp`s the file into
+      # /mnt/shared/config.yaml on the colony-shared volume mounted into
+      # every container below. If the file is not yet present (the cp is
+      # async w.r.t. container start), ConfigurationManager falls through to
+      # defaults + env vars cleanly.
+      - POLYMATHERA_CONFIG=/mnt/shared/config.yaml
       - PROMETHEUS_PORT=9090
       # Authentication - local mode
       - AUTH_ENABLED=False

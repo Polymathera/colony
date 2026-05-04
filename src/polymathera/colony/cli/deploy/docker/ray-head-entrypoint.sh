@@ -24,30 +24,20 @@ until ray status > /dev/null 2>&1; do
 done
 echo "[colony] Ray head node ready."
 
-# Auto-deploy Colony cluster
+# Auto-deploy Colony cluster.
+#
+# Choice of CLI --config path is now: an alternate /etc/colony/cluster.yaml
+# (operator-mounted), otherwise the canonical /mnt/shared/config.yaml the
+# colony-env CLI `docker cp`s in. Both ConfigurationManager and
+# load_config_from_yaml tolerate the file being absent at boot — the
+# manager waits up to ``wait_for_config_seconds`` for the docker-cp race
+# (default 15 s, set in ConfigurationManager.__init__), then falls through
+# to defaults + env vars cleanly. No shell-side wait loop required.
 if [ "${COLONY_AUTO_DEPLOY:-true}" = "true" ]; then
-    CONFIG_FLAG=""
     if [ -f "/etc/colony/cluster.yaml" ]; then
         CONFIG_FLAG="--config /etc/colony/cluster.yaml"
     else
-        # Wait for config file to be copied in by `colony-env up --config`
-        # (docker cp happens after container starts). Timeout after 15s.
-        echo "[colony] Waiting for config file..."
-        for i in $(seq 1 15); do
-            if [ -f "/mnt/shared/config.yaml" ]; then
-                CONFIG_FLAG="--config /mnt/shared/config.yaml"
-                break
-            elif [ -f "/mnt/shared/cluster.yaml" ]; then
-                CONFIG_FLAG="--config /mnt/shared/cluster.yaml"
-                break
-            fi
-            sleep 1
-        done
-        if [ -z "$CONFIG_FLAG" ]; then
-            echo "[colony] WARNING: No config file found after 15s. Deploying with defaults."
-        else
-            echo "[colony] Found config: $CONFIG_FLAG"
-        fi
+        CONFIG_FLAG="--config /mnt/shared/config.yaml"
     fi
 
     echo "[colony] Deploying Colony cluster (blocking — keeps actors alive)..."

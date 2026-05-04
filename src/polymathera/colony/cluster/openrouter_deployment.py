@@ -16,6 +16,7 @@ from typing import Any
 from ..distributed.hooks import hookable
 from .remote_config import RemoteLLMDeploymentConfig, get_pricing_for_model
 from .remote_deployment import APIResponse, RemoteLLMDeployment
+from .remote_registry import register_remote_llm_provider
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+@register_remote_llm_provider("openrouter")
 class OpenRouterLLMDeployment(RemoteLLMDeployment):
     """OpenRouter LLM deployment with cache passthrough for Claude models.
 

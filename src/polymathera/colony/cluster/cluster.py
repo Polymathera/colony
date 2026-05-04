@@ -159,14 +159,18 @@ class LLMCluster:
             state_key=cluster_state_key,
         )
 
-        # Initialize distributed tracing
-        import os
-        tracing_enabled = os.environ.get("TRACING_ENABLED", "").lower() in ("true", "1", "yes")
-        if tracing_enabled:
+        # Initialize distributed tracing from typed ObservabilityConfig.
+        from ..distributed.configs import get_observability_config
+        obs = get_observability_config()
+        if obs.tracing_enabled:
             from ..distributed.observability import TracingConfig
             from .observability import ClusterTracingFacility
             self._tracing_facility = ClusterTracingFacility(
-                config=TracingConfig(enabled=True),
+                config=TracingConfig(
+                    enabled=True,
+                    kafka_bootstrap=obs.kafka_bootstrap,
+                    kafka_topic=obs.kafka_spans_topic,
+                ),
                 owner=self,
                 service_name="LLMCluster",
                 deployment_name="llm_cluster",

@@ -1,8 +1,12 @@
-"""Dashboard configuration loaded from environment variables."""
+"""Runtime API for the dashboard backend.
+
+The frozen dataclass is the surface FastAPI consumes. Source-of-truth fields
+live in the typed :class:`WebUIConfig` (env-bound + tier-aware); ``from_env``
+materialises the dataclass from there, preserving the existing call sites.
+"""
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 
@@ -39,18 +43,20 @@ class DashboardConfig:
 
     @classmethod
     def from_env(cls) -> DashboardConfig:
-        """Load configuration from environment variables."""
+        """Materialise from the registered :class:`WebUIConfig`."""
+        from .configs import get_web_ui_config
+        c = get_web_ui_config()
         return cls(
-            host=os.environ.get("DASHBOARD_HOST", "0.0.0.0"),
-            port=int(os.environ.get("DASHBOARD_PORT", "8080")),
-            ray_client_address=os.environ.get("RAY_CLIENT_ADDRESS", "ray://ray-head:10001"),
-            ray_dashboard_url=os.environ.get("RAY_DASHBOARD_URL", "http://ray-head:8265"),
-            prometheus_url=os.environ.get("PROMETHEUS_URL", "http://ray-head:9090"),
-            static_dir=os.environ.get("DASHBOARD_STATIC_DIR"),
-            kafka_bootstrap=os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092"),
-            pg_host=os.environ.get("RDS_HOST", "postgres"),
-            pg_port=int(os.environ.get("RDS_PORT", "5432")),
-            pg_user=os.environ.get("RDS_USER", "colony"),
-            pg_password=os.environ.get("RDS_PASSWORD", ""),
-            pg_database=os.environ.get("RDS_DB_NAME", "colony"),
+            host=c.host,
+            port=c.port,
+            ray_client_address=c.ray_client_address,
+            ray_dashboard_url=c.ray_dashboard_url,
+            prometheus_url=c.prometheus_url,
+            static_dir=c.static_dir,
+            kafka_bootstrap=c.kafka_bootstrap,
+            pg_host=c.pg_host,
+            pg_port=c.pg_port,
+            pg_user=c.pg_user,
+            pg_password=c.pg_password,
+            pg_database=c.pg_database,
         )

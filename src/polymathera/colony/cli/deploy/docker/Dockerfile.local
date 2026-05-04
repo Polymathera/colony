@@ -19,16 +19,23 @@ COPY pyproject.toml poetry.lock ./
 
 # Install Poetry
 ARG POLYMATHERA_PYTHON_CMD=python3.11
-RUN ${POLYMATHERA_PYTHON_CMD} -m pip install --no-cache-dir poetry
+RUN ${POLYMATHERA_PYTHON_CMD} -m pip install --no-cache-dir poetry==1.7.1
 
 # Upgrade virtualenv to avoid stale cache conflicts (virtualenv.seed.embed)
-RUN pip install --no-cache-dir --upgrade virtualenv
+# RUN pip install --no-cache-dir --upgrade virtualenv==20.36.1
 
-# Install Python dependencies
+# Install Python dependencies.
+#
+# python-louvain is sdist-only and triggers a poetry-internal virtualenv bug
+# during its source build (``VirtualEnvOptions`` missing ``py_version``) when
+# poetry runs in the middle of this large install set. pip's build isolation
+# is unaffected. Pre-installing it here makes poetry see ``Already installed``
+# during ``poetry install`` and skip the source build entirely. Pin matches
+# the committed ``poetry.lock``.
 RUN --mount=type=cache,target=/root/.cache \
     poetry config virtualenvs.create false && \
     poetry config virtualenvs.in-project false && \
-    poetry lock --no-ansi --no-interaction && \
+    pip install --no-cache-dir python-louvain==0.16 && \
     poetry install --only main --extras "code_analysis cpu dashboard observability" --no-interaction --no-ansi --no-root && \
     pip install --no-cache-dir faiss-cpu==1.7.4
 

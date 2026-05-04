@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 _chroma_client = None
 _chroma_lock = asyncio.Lock()
 
-DEFAULT_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", "/tmp/colony_chromadb")
 DEFAULT_COLLECTION_PREFIX = "colony_memory"
 
 
@@ -99,9 +98,12 @@ class ChromaStorageBackend:
     """
 
     def __init__(self, scope_id: str, persist_dir: str | None = None):
+        from ....configs import get_chroma_config
         self._scope_id = scope_id
-        self._persist_dir = persist_dir or os.environ.get(
-            "COLONY_CHROMADB_DIR", DEFAULT_PERSIST_DIR
+        self._persist_dir = (
+            persist_dir
+            or os.environ.get("COLONY_CHROMADB_DIR")
+            or get_chroma_config().persist_dir
         )
         self._collection = None
         self._initialized = False

@@ -19,7 +19,6 @@ concurrent caller sees the label and backs off.
 from __future__ import annotations
 
 import logging
-import os
 import time
 import uuid
 from typing import Any, Literal, TYPE_CHECKING
@@ -205,13 +204,14 @@ class GitHubCapability(AgentCapability):
         private_key_path: str | None,
         installation_id: str | None,
     ) -> GitHubClient:
-        app_id = app_id or os.environ.get("GITHUB_APP_ID")
-        installation_id = (
-            installation_id or os.environ.get("GITHUB_INSTALLATION_ID")
-        )
-        private_key_pem = private_key_pem or os.environ.get(
-            "GITHUB_PRIVATE_KEY_PEM",
-        )
+        # Explicit kwargs override; otherwise read from typed
+        # ``GitHubAuthConfig`` (env-bound). Empty defaults remain falsy so the
+        # downstream "all required" check still triggers when nothing is set.
+        from ...configs import get_github_auth_config
+        gh = get_github_auth_config()
+        app_id = app_id or gh.app_id or None
+        installation_id = installation_id or gh.installation_id or None
+        private_key_pem = private_key_pem or gh.private_key_pem or None
         if not private_key_pem and private_key_path:
             with open(private_key_path, "r", encoding="utf-8") as fh:
                 private_key_pem = fh.read()

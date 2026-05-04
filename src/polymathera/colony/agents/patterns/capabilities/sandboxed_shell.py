@@ -157,7 +157,15 @@ class SandboxedShellCapability(AgentCapability):
         if registry is not None:
             self._registry = registry
         else:
-            self._registry = ImageRegistry.from_path(registry_path)
+            # Typed config first (operator YAML / runtime overlays); fall back
+            # to the legacy on-disk registry mounted at ``registry_path`` so
+            # existing Docker deployments keep working unchanged.
+            from ...configs import get_sandbox_images_config
+            cfg = get_sandbox_images_config()
+            if cfg.images:
+                self._registry = ImageRegistry.from_config(cfg)
+            else:
+                self._registry = ImageRegistry.from_path(registry_path)
         self._host_workspace_root = host_workspace_root
         self._default_network_mode = default_network_mode
         self._max_concurrent = max_concurrent_containers

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -8,6 +9,13 @@ from typing import Any, TypeVar
 import yaml
 
 from .configs import ConfigComponent, PolymatheraConfig
+from .extensions import discover_config_components
+from .overlays import (
+    OverlayScope,
+    OverlayStore,
+    assert_writable_at_scope,
+    compose_overlays,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +38,37 @@ class ConfigurationManager:
     registered in ``_config_update_handlers``.
     """
 
-    def __init__(self, config_path: str | None = None):
+    def __init__(
+        self,
+        config_path: str | None = None,
+        overlay_store: OverlayStore | None = None,
+        wait_for_config_seconds: float = 15.0,
+    ):
         """Initialize the configuration manager.
 
         ``config_path`` is the single YAML/JSON file to load (after defaults,
         before env-var overrides). When ``None``, only defaults + env vars apply.
 
+        ``overlay_store`` (optional) is the StateManager-backed sink for
+        L2/L3/L4 overlays — see :mod:`.overlays`. When ``None``, only the
+        in-process L1 view is available; ``get_component_for`` collapses to
+        ``get_component`` and ``update_overlay`` raises.
+
+        ``wait_for_config_seconds`` is the deadline ``initialize()`` waits for
+        ``config_path`` to materialise before falling through to defaults +
+        env vars. The default tolerates the colony-env ``docker cp`` race
+        (file copied into the shared volume *after* containers start) without
+        each consumer having to re-implement the loop. Set to ``0`` to skip
+        the wait — useful for tests and for processes that intentionally run
+        without an operator YAML. Ignored when ``config_path`` is ``None`` or
+        when the file already exists.
+
         NOTE: Config field names must be lowercase (with underscores) so they
         match the env-var suffixes used by ``_apply_env_vars``.
         """
         self.config_path = config_path
+        self._overlay_store = overlay_store
+        self._wait_for_config_seconds = wait_for_config_seconds
         self._initialized = False  # Prevent re-initialization
         self._config: PolymatheraConfig | None = None
         self._config_update_handlers = []
@@ -53,14 +82,72 @@ class ConfigurationManager:
             )
         return self._config
 
+    @property
+    def is_initialized(self) -> bool:
+        """Whether ``initialize()`` has populated the in-memory config."""
+        return self._initialized
+
     async def initialize(self) -> None:
-        """Load configuration. Idempotent."""
+        """Load configuration. Idempotent.
+
+        Discovers extension-supplied ``ConfigComponent``s before loading so any
+        components they register participate in defaults + YAML resolution.
+        It waits up to ``wait_for_config_seconds`` for ``config_path`` to
+        materialise (a no-op when ``config_path`` is ``None`` or the file already
+        exists), then loads defaults + YAML + env-var overrides.
+        """
         if self._initialized:
             return
 
+        discover_config_components()
+        await self._wait_for_config_path()
         await self._load_config()
 
         self._initialized = True
+
+    async def _wait_for_config_path(self) -> None:
+        """Poll until ``self.config_path`` exists or the deadline passes.
+
+        Tolerates the ``colony-env up`` ``docker cp`` race: the operator YAML
+        is copied into the shared volume *after* containers start, so a
+        Python process that calls ``initialize()`` early would otherwise
+        miss it. On timeout we log a warning and let ``_load_config`` fall
+        through to the defaults + env-var path — same behaviour as if no
+        ``config_path`` had been set, plus a visible warning so an operator
+        can diagnose the missing file.
+        """
+        path = self.config_path
+        timeout = self._wait_for_config_seconds
+        if not path or timeout <= 0 or os.path.exists(path):
+            return
+
+        poll_interval = max(0.05, min(0.5, timeout / 30))
+        deadline = asyncio.get_event_loop().time() + timeout
+        logger.info(
+            f"Waiting up to {timeout:.1f}s for config file to appear at {path}"
+        )
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(poll_interval)
+            if os.path.exists(path):
+                logger.info(f"Config file found at {path}")
+                return
+        logger.warning(
+            f"Config file at {path} did not appear within {timeout:.1f}s; "
+            f"continuing with defaults + env vars only."
+        )
+
+    def set_config_path(self, path: str | None) -> None:
+        """Update ``config_path`` and mark the manager dirty so the next
+        :meth:`initialize` call (or an explicit awaitable returned by the
+        caller) re-reads from the new file.
+
+        Used by the CLI to bridge ``--config`` into the global manager when
+        the file path is only known after the typer command parses its args.
+        """
+        if path == self.config_path:
+            return
+        self.config_path = path
+        self._initialized = False
 
     def get_component(self, path: str) -> ConfigComponent | None:
         """Get a configuration component by its path"""
@@ -217,7 +304,7 @@ class ConfigurationManager:
                     break
 
     def update_config(self, updates: dict[str, Any]) -> None:
-        """Update configuration with new values and notify subscribers."""
+        """Update L1 configuration with new values in-process and notify subscribers."""
         if not self._config:
             return
 
@@ -231,6 +318,55 @@ class ConfigurationManager:
         self._config = PolymatheraConfig(**config_dict)
 
         # Notify subscribers
+        self._notify_config_updated()
+
+    async def get_component_for(
+        self,
+        path: str,
+        *,
+        tenant_id: str | None = None,
+        session_id: str | None = None,
+    ) -> ConfigComponent | None:
+        """Return ``path`` composed across L1 + tenant + session + runtime overlays.
+
+        Equivalent to :meth:`get_component` when no ``overlay_store`` is wired
+        or when neither ``tenant_id`` nor ``session_id`` is supplied (and no
+        runtime overlays exist). Re-instantiates the component class from the
+        merged dict so its field validators run on the composed view.
+        """
+        base = self.get_component(path)
+        if base is None or self._overlay_store is None:
+            return base
+
+        state = await self._overlay_store.read()
+        merged = compose_overlays(
+            base.model_dump(),
+            state,
+            path=path,
+            tenant_id=tenant_id,
+            session_id=session_id,
+        )
+        return type(base)(**merged)
+
+    async def update_overlay(
+        self, path: str, updates: dict[str, Any], *, scope: OverlayScope,
+    ) -> None:
+        """Write ``updates`` to overlay ``scope`` for component ``path``.
+
+        Tier-checked against the field metadata declared on the component:
+        a write fails fast if any updated field's declared tier is below the
+        overlay's tier. Subscribers are notified after the write commits.
+        """
+        if self._overlay_store is None:
+            raise RuntimeError(
+                "ConfigurationManager: overlay_store not configured; "
+                "construct with overlay_store=OverlayStore(...) to enable overlays."
+            )
+        component = self.get_component(path)
+        if component is None:
+            raise KeyError(f"unknown config component path: {path}")
+        assert_writable_at_scope(type(component), updates, scope)
+        await self._overlay_store.write(scope, path, updates)
         self._notify_config_updated()
 
     def _notify_config_updated(self) -> None:
@@ -250,4 +386,23 @@ class ConfigurationManager:
                 handler(old_config, new_config)
             except Exception as e:
                 logger.error(f"Error in config update handler: {e}")
+
+
+def get_component_or_default(path: str, cls: type[T]) -> T:
+    """Return the registered component if the global manager has loaded it; else defaults.
+
+    Sync-safe shim for capability constructors that cannot await the manager's
+    initialize coroutine. Falls back to ``cls()`` when the global ``polymathera``
+    singleton has not been initialized yet (e.g. unit tests constructing
+    capabilities directly without booting the full app).
+    """
+    try:
+        from .. import get_polymathera as _get_polymathera
+        cm = _get_polymathera().config_manager
+    except Exception:  # noqa: BLE001 — distributed/system import side effects
+        return cls()
+    if not cm.is_initialized:
+        return cls()
+    component = cm.get_component(path)
+    return component if isinstance(component, cls) else cls()
 

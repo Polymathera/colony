@@ -1,0 +1,201 @@
+# Colony operator configuration — annotated example.
+# ===================================================
+# Pass to the CLI:
+#   colony-env up --workers 3 --config /path/to/this/file.yaml
+#
+# Sections marked LEGACY are read by the dataclass parser in
+# `cli/polymath.py` (the TestConfig path). Sections marked TYPED are read
+# by the new ConfigurationManager into registered ConfigComponents — every
+# field can also be overridden by `POLYMATHERA_<PATH>_<FIELD>` env vars.
+# Both layers parse the same YAML; sections they share (cluster,
+# agent_system) populate both.
+#
+# See colony/configs/README.md for the override chain and extension surface.
+
+# ---------------------------------------------------------------------------
+# Identity (LEGACY — TestConfig)
+# ---------------------------------------------------------------------------
+repo_id: "my-project"
+tenant_id: "test-tenant"
+colony_id: "test-colony"
+# session_id, run_id are auto-generated when omitted.
+
+# ---------------------------------------------------------------------------
+# LLM Cluster (LEGACY — TestConfig.cluster)
+# ---------------------------------------------------------------------------
+cluster:
+  app_name: "polymathera"
+  cleanup_on_init: true
+  remote_deployments:
+    - model_name: "claude-sonnet-4-6"
+      provider: "anthropic"          # registered via cluster/anthropic_deployment.py
+      api_key_env_var: "ANTHROPIC_API_KEY"
+      max_cached_pages: 50
+      max_cached_tokens: 2000000
+      ttl: "1h"
+      num_replicas: 1
+    # Add an OpenRouter deployment by uncommenting:
+    # - model_name: "deepseek/deepseek-v3.2"
+    #   provider: "openrouter"        # registered via cluster/openrouter_deployment.py
+    #   api_key_env_var: "OPENROUTER_API_KEY"
+    #   num_replicas: 1
+  # vllm_deployments: []              # Self-hosted vLLM (requires GPUs)
+  # embedding_config / remote_embedding_config / st_embedding_config: see
+  # cluster/config.py for the schema (mutually exclusive).
+
+# ---------------------------------------------------------------------------
+# VCM Paging (LEGACY — TestConfig.paging)
+# ---------------------------------------------------------------------------
+paging:
+  flush_threshold: 20
+  flush_token_budget: 4096
+  flush_interval_seconds: 60.0
+  pinned: false
+  locality_policy_type: "tag"
+  flush_policy_type: "threshold"
+
+# ---------------------------------------------------------------------------
+# Analyses (LEGACY — TestConfig.analyses)
+# ---------------------------------------------------------------------------
+analyses:
+  - type: impact
+    coordinator_version: v2
+    max_agents: 10
+    quality_threshold: 0.7
+    max_iterations: 50
+    batching_policy: hybrid
+    overlap_threshold: 0.3
+    batch_size: 5
+    prefetch_depth: 2
+    planning_params:
+      strategy: mpc
+      prompt_formatting: alias
+      planning_horizon: 5
+      replan_every_n_steps: 3
+      replan_on_failure: true
+    changes:
+      - file_path: "src/main.py"
+        change_type: modification
+        description: "Refactored authentication flow"
+
+# ---------------------------------------------------------------------------
+# Hierarchy (LEGACY — TestConfig.hierarchy)
+# ---------------------------------------------------------------------------
+hierarchy:
+  extra_capabilities:
+    - ReflectionCapability
+    - ConsciousnessCapability
+
+# ---------------------------------------------------------------------------
+# Job IO (LEGACY)
+# ---------------------------------------------------------------------------
+output_dir: "./polymath-results"
+timeout_seconds: 600
+verbose: false
+# budget_usd: 5.00
+# warn_budget_pct: 0.8
+
+# ===========================================================================
+# TYPED ConfigComponent overrides
+# ===========================================================================
+# Every section below maps to a registered ConfigComponent (see README.md
+# §Registered components). All fields are optional — Pydantic defaults apply
+# when omitted. Field-level env-var bindings are documented in each
+# component's source.
+
+# --- Agent system ---------------------------------------------------------
+# Source: agents/config.py:AgentSystemConfig
+# agent_system:
+#   max_retries: 3
+#   enable_sessions: true
+#   default_session_ttl: 86400.0
+#   blackboard_backend_type: "distributed"   # "distributed" | "redis" | "memory"
+
+# --- Plugin / skill discovery roots ---------------------------------------
+# Source: agents/configs.py:PluginsConfig
+# plugins:
+#   workspace_root: "/workspace/.colony"
+#   user_root: "~/.colony"
+#   system_root: "/etc/colony"
+#   extra_skill_roots: []
+#   extra_plugin_roots: []
+
+# --- Sandbox images registry ----------------------------------------------
+# Source: agents/configs.py:SandboxImagesConfig (replaces the old
+# sandbox-images.yaml mounted at /etc/colony/sandbox-images.yaml; both
+# sources work, the typed one wins when populated).
+# sandbox_images:
+#   images:
+#     - role: default
+#       image: python:3.11-slim
+#       description: "Minimal Python 3.11 environment."
+#       scripts:
+#         - name: python_version
+#           description: Report the Python version.
+#           cmd: ["python", "-V"]
+
+# --- Per-task Docker images -----------------------------------------------
+# Source: agents/configs.py:TaskImagesConfig
+# task_images:
+#   images:
+#     # task_kind → image_ref (CPS or other extension populates this)
+
+# --- Capability secrets ---------------------------------------------------
+# Source: agents/configs.py
+# capabilities:
+#   web_search:
+#     api_key: ""              # env: TAVILY_API_KEY
+#   github:
+#     app_id: ""               # env: GITHUB_APP_ID
+#     installation_id: ""      # env: GITHUB_INSTALLATION_ID
+#     private_key_pem: ""      # env: GITHUB_PRIVATE_KEY_PEM
+# memory:
+#   chroma:
+#     persist_dir: "/tmp/colony_chromadb"   # env: CHROMA_PERSIST_DIR
+
+# --- Observability / tracing ---------------------------------------------
+# Source: distributed/configs.py:ObservabilityConfig
+# distributed:
+#   observability:
+#     service_name: "polymathera-agent"
+#     environment: "development"
+#     tracing_enabled: false        # env: TRACING_ENABLED
+#     kafka_bootstrap: "kafka:9092" # env: KAFKA_BOOTSTRAP
+#     kafka_spans_topic: "colony.spans"  # env: KAFKA_SPANS_TOPIC
+
+# --- Deployment names ----------------------------------------------------
+# Source: deployment_names.py:DeploymentNames (each field has a
+# POLYMATHERA_DEPLOYMENT_<NAME> env var binding).
+# deployment_names:
+#   vcm: vcm
+#   llm_cluster: llm_cluster
+#   agent_system: agent_system
+#   tool_manager: tool_manager
+#   standalone_agents: standalone_agents
+#   session_manager: session_manager
+#   embedding: embedding
+
+# --- Web-UI backend ------------------------------------------------------
+# Source: web_ui/backend/configs.py:WebUIConfig (every field env-bound).
+# web_ui:
+#   host: "0.0.0.0"
+#   port: 8080
+#   ray_client_address: "ray://ray-head:10001"
+#   prometheus_url: "http://ray-head:9090"
+
+# --- Custom deployments (extension surface) -------------------------------
+# Source: deployments/configs.py:CustomDeploymentsConfig
+# Each instance maps to a handler registered via
+# `register_custom_deployment("<handler_name>")` in an extension package
+# (e.g. polymathera-cps). On `provision()`, the handler writes runtime
+# values into the L4 ``runtime_overlays`` slot — other components observe
+# them via cm.get_component_for(...).
+# custom_deployments:
+#   deployments:
+#     cps_hpc_aero:
+#       handler: aws_cdk_hpc           # registered in extension
+#       enabled: true
+#       auto_provision: true
+#       params:
+#         stack_name: polymath-hpc-prod
+#         region: us-west-2

@@ -26,9 +26,11 @@ GitHub Apps, not personal access tokens. The capability needs three pieces of co
 
 | What | Where it comes from |
 |------|---------------------|
-| App ID | Constructor `app_id=` or `GITHUB_APP_ID` env var |
-| Private key (PEM) | Constructor `private_key_pem=`, file at `private_key_path=`, or `GITHUB_PRIVATE_KEY_PEM` env var |
-| Installation ID | Constructor `installation_id=` or `GITHUB_INSTALLATION_ID` env var |
+| App ID | Constructor `app_id=` → typed `GitHubAuthConfig.app_id` → env `GITHUB_APP_ID` |
+| Private key (PEM) | Constructor `private_key_pem=` / `private_key_path=` → typed `GitHubAuthConfig.private_key_pem` → env `GITHUB_PRIVATE_KEY_PEM` |
+| Installation ID | Constructor `installation_id=` → typed `GitHubAuthConfig.installation_id` → env `GITHUB_INSTALLATION_ID` |
+
+Each value falls through the chain in that order. See [Configuration System](configuration.md) for how operator YAML, env vars, and tier overlays compose.
 
 The flow:
 

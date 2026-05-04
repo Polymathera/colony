@@ -28,7 +28,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...agents.blackboard.protocol import ConvergenceDispatchProtocol
 from .predicates import PageMetadataPredicate
 
 
@@ -82,6 +81,7 @@ class PageSubscription(BaseModel):
         ``ConvergenceDispatchProtocol.dispatch_key(subscription_id)``;
         the protocol owns the key shape so the runtime and subscribing
         capability never disagree."""
+        from ...agents.blackboard.protocol import ConvergenceDispatchProtocol
 
         return ConvergenceDispatchProtocol.dispatch_key(self.subscription_id)
 

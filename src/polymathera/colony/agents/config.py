@@ -3,34 +3,57 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from pydantic import ConfigDict, Field
 
-from ..distributed.ray_utils import serving
+from ..distributed.config import (
+    ConfigComponent,
+    Mutability,
+    Tier,
+    register_polymathera_config,
+    tier_metadata,
+)
 from ..distributed.observability.config import TracingConfig
+from ..distributed.ray_utils import serving
 
 
-@dataclass
-class AgentSystemConfig:
+@register_polymathera_config(path="agent_system")
+class AgentSystemConfig(ConfigComponent):
     """Configuration for Agent System deployment.
 
-    Attributes:
-        max_retries: Maximum number of retries for agent operations
-        enable_sessions: Whether to enable session management
-        default_session_ttl: Default session TTL in seconds (24 hours)
-        tracing: Configuration for observability/tracing system
+    Tier: ``L1_OPERATOR`` for the structural fields (e.g. backend type);
+    ``RELOADABLE`` so an operator can update them without re-deploying.
     """
 
-    max_retries: int = 3
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    max_retries: int = Field(
+        default=3,
+        json_schema_extra=tier_metadata(
+            tier=Tier.L1_OPERATOR, mutability=Mutability.RELOADABLE,
+        ),
+    )
 
     # Session management configuration
-    enable_sessions: bool = True
-    default_session_ttl: float = 86400.0  # 24 hours
+    enable_sessions: bool = Field(
+        default=True,
+        json_schema_extra=tier_metadata(tier=Tier.L1_OPERATOR),
+    )
+    default_session_ttl: float = Field(
+        default=86400.0,  # 24 hours
+        json_schema_extra=tier_metadata(
+            tier=Tier.L1_OPERATOR, mutability=Mutability.RELOADABLE,
+        ),
+    )
 
     # Blackboard configuration
-    blackboard_backend_type: str = "distributed"  # "distributed", "redis", or "memory"
+    blackboard_backend_type: str = Field(
+        default="distributed",
+        description='"distributed", "redis", or "memory"',
+        json_schema_extra=tier_metadata(tier=Tier.L1_OPERATOR),
+    )
 
     # Observability / tracing
-    tracing: TracingConfig = field(default_factory=TracingConfig)
+    tracing: TracingConfig = Field(default_factory=TracingConfig)
 
     def add_deployments_to_app(self, app: serving.Application, top_level: bool) -> None:
         if not top_level:

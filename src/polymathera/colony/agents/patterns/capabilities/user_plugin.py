@@ -49,7 +49,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Defaults mirroring design §5.2.
+# Defaults mirroring design §5.2. Kept as module constants because
+# ``UserPluginCapability.__init__`` uses ``_DEFAULT_WORKSPACE_ROOT`` as the
+# sentinel that triggers reading from ``PluginsConfig``; the others appear in
+# user-visible help strings and can be overridden via the typed config.
 _DEFAULT_SYSTEM_ROOT = "/etc/colony"
 _DEFAULT_USER_ROOT = os.path.expanduser("~/.colony")
 _DEFAULT_WORKSPACE_ROOT = "/workspace/.colony"
@@ -124,12 +127,24 @@ class UserPluginCapability(AgentCapability):
             capability_key=capability_key,
             app_name=app_name,
         )
-        self._workspace_root = workspace_root
+        # Pull defaults from the typed PluginsConfig (operator YAML / runtime
+        # overlays). Caller-supplied ``workspace_root`` overrides the typed
+        # default; ``extra_*`` from both sources are merged.
+        from ...configs import get_plugins_config
+        cfg = get_plugins_config()
+        self._workspace_root = (
+            cfg.workspace_root if workspace_root == _DEFAULT_WORKSPACE_ROOT
+            else workspace_root
+        )
+        self._user_root = cfg.user_root
+        self._system_root = cfg.system_root
+        merged_extra_skill = list(extra_skill_roots or []) + list(cfg.extra_skill_roots)
+        merged_extra_plugin = list(extra_plugin_roots or []) + list(cfg.extra_plugin_roots)
         self._skill_roots = self._resolve_roots(
-            skill_roots, kind="skills", extra=extra_skill_roots,
+            skill_roots, kind="skills", extra=merged_extra_skill,
         )
         self._plugin_roots = self._resolve_roots(
-            plugin_roots, kind="plugins", extra=extra_plugin_roots,
+            plugin_roots, kind="plugins", extra=merged_extra_plugin,
         )
         self._default_sandbox_image_role = default_sandbox_image_role
         self._sandbox_capability_key = sandbox_capability_key
@@ -205,9 +220,9 @@ class UserPluginCapability(AgentCapability):
             ]
         else:
             base = [
-                (Path(self._workspace_root) / kind, SkillSource.SESSION),
-                (Path(_DEFAULT_USER_ROOT) / kind, SkillSource.USER),
-                (Path(_DEFAULT_SYSTEM_ROOT) / kind, SkillSource.SYSTEM),
+                (Path(self._workspace_root).expanduser() / kind, SkillSource.SESSION),
+                (Path(self._user_root).expanduser() / kind, SkillSource.USER),
+                (Path(self._system_root).expanduser() / kind, SkillSource.SYSTEM),
             ]
         for p in (extra or []):
             base.append((Path(p).expanduser(), SkillSource.SYSTEM))

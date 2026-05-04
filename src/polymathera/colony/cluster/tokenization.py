@@ -16,8 +16,6 @@ import asyncio
 import logging
 from typing import Protocol
 
-import tiktoken
-from transformers import AutoTokenizer
 
 from .registry import LLMModelParameters, LLMBackend, ModelRegistry
 
@@ -53,6 +51,7 @@ class TiktokenTokenizer:
 
     def __init__(self):
         """Initialize tiktoken tokenizer."""
+        import tiktoken
         self._encoding = tiktoken.get_encoding("cl100k_base")
         logger.info("Initialized tiktoken tokenizer with cl100k_base encoding")
 
@@ -137,6 +136,9 @@ class HuggingFaceTokenizer:
             during potentially slow tokenizer loading from HuggingFace Hub or disk.
         """
         logger.info(f"Loading HuggingFace tokenizer from {model_name_or_path}")
+
+        # Lazy import — see the module docstring for the CPU-image rationale.
+        from transformers import AutoTokenizer
 
         # Load tokenizer in thread pool to avoid blocking
         tokenizer = await asyncio.to_thread(

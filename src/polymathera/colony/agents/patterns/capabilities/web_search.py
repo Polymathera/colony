@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
@@ -120,8 +119,10 @@ class TavilyBackend(SearchBackend):
         api_key: str | None = None,
         timeout_s: float = 15.0,
     ):
-        # Fall back to env var so keys stay out of config files.
-        self._api_key = api_key or os.environ.get("TAVILY_API_KEY", "")
+        # Explicit ``api_key`` overrides; otherwise read from typed
+        # ``WebSearchConfig`` (env-bound: ``TAVILY_API_KEY``).
+        from ...configs import get_web_search_config
+        self._api_key = api_key or get_web_search_config().api_key
         self._timeout_s = timeout_s
         self._client = None  # lazy-init
 
