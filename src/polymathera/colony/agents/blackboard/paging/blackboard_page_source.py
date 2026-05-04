@@ -791,15 +791,12 @@ class BlackboardContextPageSource(ContextPageSource):
     mutation.
     """
 
-    static = False
-    """Blackboard scopes mutate continuously; the convergence runtime
-    must treat this source as a live input."""
-
     def __init__(
         self,
         *,
         scope_id: str,
         mmap_config: MmapConfig,
+        static: bool = False,
     ):
         """Initialize page source for a storage scope.
 
@@ -808,8 +805,13 @@ class BlackboardContextPageSource(ContextPageSource):
         Args:
             scope_id: The scope being paged (e.g., "tenant:acme:discoveries")
             mmap_config: Configuration for the memory-mapped page source
+            static: ``False`` (default) — blackboard scopes mutate
+                continuously; the convergence runtime treats them as a
+                live input. Pass ``True`` for a frozen snapshot.
         """
-        super().__init__(scope_id=scope_id, mmap_config=mmap_config)
+        super().__init__(
+            scope_id=scope_id, mmap_config=mmap_config, static=static,
+        )
         #    ingestion_policy: How records are organized into pages.
         #        Default: GroupAndFlushIngestionPolicy (tag-based locality,
         #        threshold-based flushing, JSON serialization).

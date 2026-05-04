@@ -213,11 +213,11 @@ class _ProgrammableSource(ContextPageSource):
     ``get_all_mapped_pages`` is a settable dict — ``SourcePollWatcher``
     diffs successive snapshots into ``PageChangeEvent``s."""
 
-    static = False
-
     def __init__(self, scope_id: str = "smoke") -> None:
         from polymathera.colony.vcm.models import MmapConfig
-        super().__init__(scope_id=scope_id, mmap_config=MmapConfig())
+        super().__init__(
+            scope_id=scope_id, mmap_config=MmapConfig(), static=False,
+        )
         self._pages: dict[str, list[str]] = {}
 
     def set_pages(self, pages: dict[str, list[str]]) -> None:
@@ -281,10 +281,10 @@ async def test_watch_method_is_the_uniform_contract(
         are pushed onto an internal queue and yielded from
         ``watch()``."""
 
-        static = False
-
         def __init__(self) -> None:
-            super().__init__(scope_id="live", mmap_config=MmapConfig())
+            super().__init__(
+                scope_id="live", mmap_config=MmapConfig(), static=False,
+            )
             self._queue: asyncio.Queue[PageChangeEvent] = asyncio.Queue()
             self._pages: dict[str, list[str]] = {}
 

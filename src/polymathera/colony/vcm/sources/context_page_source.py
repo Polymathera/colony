@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from typing import Any, ClassVar
+from typing import Any
 from pydantic import BaseModel, Field
 from enum import Enum
 
@@ -49,34 +49,41 @@ class ContextPageSource(ABC):
     **Watcher contract** (master §5.6 item 1).
 
     Sources that can detect upstream changes and translate them into
-    page-graph mutations declare ``static = False`` and override
-    ``watch()``. Sources that cannot — a one-shot static dump, an
-    archived corpus snapshot — leave ``static = True`` (the default);
-    the convergence runtime refuses to subscribe to a static source as
-    a live page-graph input and instead relies on whatever bulk
-    re-ingestion path the source provides.
+    page-graph mutations are constructed with ``static=False`` and
+    override ``watch()``. Sources that cannot — a one-shot static
+    dump, an archived corpus snapshot, a git repo pinned at a frozen
+    commit — pass ``static=True``; the convergence runtime refuses to
+    subscribe to a static instance as a live page-graph input and
+    instead relies on whatever bulk re-ingestion path the source
+    provides. The same source class can produce both kinds of
+    instance — see ``FileGrouperContextPageSource`` for the canonical
+    mixed-mode use case.
     """
-
-    static: ClassVar[bool] = True
-    """Whether this source's backing store is static.
-
-    Override to ``False`` in subclasses that implement ``watch()``.
-    The convergence runtime keys off this attribute to decide whether
-    to attach the source as a live input."""
 
     def __init__(
         self,
         scope_id: str,
         mmap_config: MmapConfig,
+        *,
+        static: bool = True,
     ):
         """Initialize the context page source.
         Args:
             scope_id: Unique identifier for the scope of this source (e.g., file system ID, blackboard scope ID)
             mmap_config: Configuration for memory-mapped storage (if needed)
+            static: Whether this source's backing store is static. The same
+                source class can produce frozen-commit instances
+                (``static=True``) and live-update instances
+                (``static=False``) side by side; subclasses that implement
+                ``watch()`` typically default this to ``False`` in their own
+                ``__init__``. The VCM convergence runtime reads
+                ``self.static`` to decide whether to attach the source as a
+                live input.
         """
         self.scope_id = scope_id
         self.syscontext: serving.ExecutionContext = serving.require_execution_context()
         self.mmap_config = mmap_config
+        self.static = static
 
     @classmethod
     def get_source_metadata(cls, scope_id: str) -> str:
@@ -122,9 +129,9 @@ class ContextPageSource(ABC):
         """Yield ``PageChangeEvent``s as the backing store mutates.
 
         The default raises ``NotImplementedError``; sources that can
-        detect changes override and set ``static = False``. The
-        convergence runtime checks ``static`` before attaching a source
-        as a live input.
+        detect changes override and are constructed with
+        ``static=False``. The convergence runtime checks ``self.static``
+        before attaching a source as a live input.
 
         The implementation contract:
 
@@ -143,8 +150,8 @@ class ContextPageSource(ABC):
 
         raise NotImplementedError(
             f"{type(self).__name__} is a static source (static = "
-            f"{type(self).static}); override watch() and set "
-            "static = False to make it live."
+            f"{self.static}); override watch() and construct with "
+            "static=False to make it live."
         )
         # Make the function an async generator at the bytecode level
         # so subclasses' overrides match this signature without the

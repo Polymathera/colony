@@ -63,8 +63,6 @@ class FileGrouperContextPageSource(ContextPageSource):
       ``BlackboardContextPageSource``.
     """
 
-    static = False
-
     def __init__(
         self,
         *,
@@ -73,6 +71,7 @@ class FileGrouperContextPageSource(ContextPageSource):
         origin_url: str,   # Git repo URL (https:// or file://)
         branch: str = "main",
         commit: str = "HEAD",
+        static: bool = False,
     ):
         """Initialize file-grouper-based context page source.
 
@@ -82,8 +81,13 @@ class FileGrouperContextPageSource(ContextPageSource):
             origin_url: Git repository URL (https:// or file:// for local repos)
             branch: Git branch to check out
             commit: Git commit SHA (defaults to branch HEAD)
+            static: ``False`` (default) for live-watched repos; ``True``
+                for a frozen-commit context (no ``LocalFsWatcher``,
+                no live page-change events).
         """
-        super().__init__(scope_id=scope_id, mmap_config=mmap_config)
+        super().__init__(
+            scope_id=scope_id, mmap_config=mmap_config, static=static,
+        )
         self.origin_url = origin_url
         self.branch = branch
         self.commit = commit
