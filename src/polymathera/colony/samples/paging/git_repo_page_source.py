@@ -8,7 +8,7 @@ from overrides import override
 from typing import Any, AsyncIterator, Literal
 import networkx as nx
 
-from polymathera.colony.vcm.sources import ContextPageSource, ContextPageSourceFactory, BuilInContextPageSourceType
+from polymathera.colony.vcm.sources import ContextPageSource, ContextPageSourceFactory, BuiltInContextPageSourceType
 from polymathera.colony.vcm.models import MmapConfig, ContextPageId, VirtualContextPage
 from polymathera.colony.vcm.page_storage import PageStorage, PageStorageConfig
 from polymathera.colony.vcm.page_events import PageChangeEvent
@@ -30,7 +30,7 @@ from ._walk import BinaryPolicy, PathFilter
 
 logger = logging.getLogger(__name__)
 
-@ContextPageSourceFactory.register_new_source_type(BuilInContextPageSourceType.FILE_GROUPER.value)
+@ContextPageSourceFactory.register_new_source_type(BuiltInContextPageSourceType.CODEBASE.value)
 class GitRepoContextPageSource(ContextPageSource):
     """ContextPageSource backed by EFS/S3 storage using `FileGrouper`.
 

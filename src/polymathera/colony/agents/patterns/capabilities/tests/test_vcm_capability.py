@@ -275,7 +275,7 @@ def test_mmap_repo_delegates_origin_url_to_vcm():
     assert kwargs["origin_url"] == "https://github.com/org/repo"
     assert kwargs["branch"] == "main"
     assert kwargs["commit"] == "abc123"
-    assert kwargs["source_type"] == "file_grouper"
+    assert kwargs["source_type"] == "codebase"
     assert isinstance(kwargs["config"], MmapConfig)
 
 
@@ -433,7 +433,7 @@ def test_mmap_repo_emits_mapped_event_on_success():
     assert key.startswith("mapped:")
     parsed = VCMEventProtocol.parse_mapped_key(key)
     assert parsed == value["scope_id"]
-    assert value["source_type"] == "file_grouper"
+    assert value["source_type"] == "codebase"
     assert value["origin_url"] == "https://x"
     assert value["branch"] == "main"
     assert "ts" in value

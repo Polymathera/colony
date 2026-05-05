@@ -15,7 +15,7 @@ This module provides the complete agent infrastructure:
 
 Example:
     ```python
-    from polymathera.colony.vcm.sources import BuilInContextPageSourceType
+    from polymathera.colony.vcm.sources import BuiltInContextPageSourceType
     from polymathera.colony.system import get_vcm
     from polymathera.colony.distributed.ray_utils.serving.context import execution_context
 
@@ -31,7 +31,7 @@ Example:
         vcm_handle = await get_vcm()
         mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
             scope_id="repo-123",
-            source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
+            source_type=BuiltInContextPageSourceType.CODEBASE.value,
             config=MmapConfig(),
             repo_path="/path/to/repo",
         )

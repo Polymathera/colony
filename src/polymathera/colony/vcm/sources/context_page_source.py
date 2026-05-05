@@ -160,11 +160,11 @@ class ContextPageSource(ABC):
             yield  # type: ignore[unreachable]
 
 
-class BuilInContextPageSourceType(str, Enum):
+class BuiltInContextPageSourceType(str, Enum):
     """Built-in context page source types for easy reference.
     Users can also register custom types via ContextPageSourceFactory.
     """
-    FILE_GROUPER = "file_grouper"
+    CODEBASE = "codebase"
     BLACKBOARD = "blackboard"
     LITERATURE = "literature"
 
@@ -276,7 +276,7 @@ class ContextPageSourceFactory:
         """Create and initialize a ContextPageSource.
 
         Args:
-            source_type: Type of source to create ("file_grouper", etc.)
+            source_type: Type of source to create ("codebase", etc.)
             scope_id: Unique identifier for the scope (e.g., file system ID, blackboard scope ID)
             mmap_config: Configuration for memory-mapped storage (if needed)
             *args: Positional arguments for source constructor

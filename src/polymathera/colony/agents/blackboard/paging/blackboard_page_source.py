@@ -38,7 +38,7 @@ import networkx as nx
 from ....vcm.sources import (
     ContextPageSource,
     ContextPageSourceFactory,
-    BuilInContextPageSourceType
+    BuiltInContextPageSourceType
 )
 from ....vcm.models import VirtualContextPage, ContextPageId, MmapConfig
 from ....vcm.page_events import PageChangeEvent
@@ -750,7 +750,7 @@ class GroupAndFlushIngestionPolicy(IngestionPolicy):
 # =============================================================================
 
 
-@ContextPageSourceFactory.register_new_source_type(BuilInContextPageSourceType.BLACKBOARD.value)
+@ContextPageSourceFactory.register_new_source_type(BuiltInContextPageSourceType.BLACKBOARD.value)
 class BlackboardContextPageSource(ContextPageSource):
     """Pages any EnhancedBlackboard scope into VCM pages via IngestionPolicy.
 

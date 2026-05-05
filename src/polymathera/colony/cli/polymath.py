@@ -1172,7 +1172,7 @@ async def deploy_cluster(
     # Import built-in page source modules to trigger their @register decorators.
     # User-defined page sources from working_dir should also be imported here
     # (or in user startup code) before publish_to_env() is called.
-    import polymathera.colony.samples.paging  # noqa: F401 — registers file_grouper
+    import polymathera.colony.samples.paging  # noqa: F401 — registers codebase
     # blackboard is already registered via colony.agents.blackboard import chain
 
     # Publish registered page source module paths to an env var so Ray workers
@@ -1328,7 +1328,7 @@ async def run_integration_test(
     6. Returns a list of result dictionaries
     """
 
-    from polymathera.colony.vcm.sources import BuilInContextPageSourceType
+    from polymathera.colony.vcm.sources import BuiltInContextPageSourceType
     from polymathera.colony.vcm.models import MmapConfig, MmapResult
     from polymathera.colony.agents import AgentMetadata, AgentHandle, AgentRunEvent
     from polymathera.colony.agents import ScopeUtils

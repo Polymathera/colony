@@ -44,7 +44,7 @@ from polymathera.colony.vcm.models import (
 from polymathera.colony.vcm.page_events import PageChangeEvent
 from polymathera.colony.vcm.page_storage import PageStorage
 from polymathera.colony.vcm.sources import (
-    BuilInContextPageSourceType,
+    BuiltInContextPageSourceType,
     ContextPageSource,
     ContextPageSourceFactory,
 )
@@ -68,7 +68,7 @@ _DEFAULT_INCLUDE_GLOBS: tuple[str, ...] = (
 
 
 @ContextPageSourceFactory.register_new_source_type(
-    BuilInContextPageSourceType.LITERATURE.value,
+    BuiltInContextPageSourceType.LITERATURE.value,
 )
 class LiteratureContextPageSource(ContextPageSource):
     """Pages a literature subdirectory of a git repo into VCM.

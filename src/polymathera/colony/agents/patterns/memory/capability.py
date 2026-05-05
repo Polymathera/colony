@@ -114,7 +114,7 @@ from ...models import AgentSuspensionState
 from ...blackboard.protocol import MemoryRecordProtocol
 from ...blackboard.types import BlackboardEntry, BlackboardEvent
 from ....vcm.models import MmapConfig
-from ....vcm.sources import BuilInContextPageSourceType
+from ....vcm.sources import BuiltInContextPageSourceType
 from ..actions import action_executor
 from ....distributed.hooks import HookContext, HookType, ErrorMode
 from .types import (
@@ -462,7 +462,7 @@ class MemoryCapability(AgentCapability):
                 # TODO: This only works if the memory storage backend is BlackboardStorageBackend. Generalize?
                 result = await vcm_handle.mmap_application_scope(
                     scope_id=self.scope_id,
-                    source_type=BuilInContextPageSourceType.BLACKBOARD.value,
+                    source_type=BuiltInContextPageSourceType.BLACKBOARD.value,
                     config=self.vcm_config or MmapConfig(),
                 )
                 logger.info(

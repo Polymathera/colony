@@ -405,7 +405,7 @@ async def upload_and_map(
 
         # Map via file:// URL
         from polymathera.colony.vcm.models import MmapConfig
-        from polymathera.colony.vcm.sources import BuilInContextPageSourceType
+        from polymathera.colony.vcm.sources import BuiltInContextPageSourceType
         from polymathera.colony.agents import ScopeUtils
 
         vcm = await colony.get_vcm()
@@ -418,7 +418,7 @@ async def upload_and_map(
 
         result = await vcm.mmap_application_scope(
             scope_id=scope_id,
-            source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
+            source_type=BuiltInContextPageSourceType.CODEBASE.value,
             config=mmap_config,
             origin_url=f"file://{upload_dir}",
             branch="main",

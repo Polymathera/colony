@@ -78,7 +78,7 @@ Colony shards the repository into VCM pages (typically 20-40K tokens each) using
 # From the CLI — this happens automatically when you run colony-env run
 mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
     scope_id="my-project",
-    source_type=BuiltInContextPageSourceType.FILE_GROUPER.value,
+    source_type=BuiltInContextPageSourceType.CODEBASE.value,
     config=MmapConfig(),
     repo_path=repo_path,
 )

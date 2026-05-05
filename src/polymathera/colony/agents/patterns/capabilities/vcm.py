@@ -40,7 +40,7 @@ from ...scopes import BlackboardScope, get_scope_prefix
 from ..actions import action_executor
 
 from ....vcm.models import MmapConfig, MmapResult
-from ....vcm.sources import BuilInContextPageSourceType
+from ....vcm.sources import BuiltInContextPageSourceType
 
 if TYPE_CHECKING:
     from ...base import Agent
@@ -370,7 +370,7 @@ class VCMCapability(AgentCapability):
             vcm = await self._get_vcm()
             raw = await vcm.mmap_application_scope(
                 scope_id=target_scope_id,
-                source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
+                source_type=BuiltInContextPageSourceType.CODEBASE.value,
                 config=mmap_config,
                 origin_url=effective_url,
                 branch=branch,
@@ -407,7 +407,7 @@ class VCMCapability(AgentCapability):
                 VCMEventProtocol.mapped_key(normalized["scope_id"]),
                 {
                     "scope_id": normalized["scope_id"],
-                    "source_type": BuilInContextPageSourceType.FILE_GROUPER.value,
+                    "source_type": BuiltInContextPageSourceType.CODEBASE.value,
                     "origin_url": effective_url,
                     "branch": branch,
                     "commit": commit,
@@ -457,7 +457,7 @@ class VCMCapability(AgentCapability):
             vcm = await self._get_vcm()
             raw = await vcm.mmap_application_scope(
                 scope_id=target_scope_id,
-                source_type=BuilInContextPageSourceType.BLACKBOARD.value,
+                source_type=BuiltInContextPageSourceType.BLACKBOARD.value,
                 config=mmap_config,
             )
         except Exception as e:
@@ -483,7 +483,7 @@ class VCMCapability(AgentCapability):
                 VCMEventProtocol.mapped_key(normalized["scope_id"]),
                 {
                     "scope_id": normalized["scope_id"],
-                    "source_type": BuilInContextPageSourceType.BLACKBOARD.value,
+                    "source_type": BuiltInContextPageSourceType.BLACKBOARD.value,
                     "ts": time.time(),
                 },
             )

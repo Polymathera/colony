@@ -71,7 +71,7 @@ All set `static = False` and emit `PageChangeEvent`s. Watchers are **not** subcl
 
 ### Bridge: `GitRepoContextPageSource.watch`
 
-The page source itself is the bridge. When a working tree is mapped into the VCM as a `GitRepoContextPageSource` (via `mmap_application_scope` with `source_type="file_grouper"`), the VCM's `_start_watch_bridge` drains the source's `watch()` iterator and feeds each event into the runtime. `watch()` runs both watchers (LocalFs + GitRemote) inside the source itself — via `CompositeWatcher` — and merges them into one stream. There is no separate registration call from any capability.
+The page source itself is the bridge. When a working tree is mapped into the VCM as a `GitRepoContextPageSource` (via `mmap_application_scope` with `source_type="codebase"`), the VCM's `_start_watch_bridge` drains the source's `watch()` iterator and feeds each event into the runtime. `watch()` runs both watchers (LocalFs + GitRemote) inside the source itself — via `CompositeWatcher` — and merges them into one stream. There is no separate registration call from any capability.
 
 There used to be a parallel `DesignMonorepoWatcher` registered through `ConvergenceRuntimeDeployment.register_design_monorepo`; that produced duplicate watchers when the same working tree was both registered AND mapped. It was removed — the sole place a working tree's filesystem + remote are watched is `GitRepoContextPageSource.watch()`. See `colony_docs/markdown/convergence_flow_review.md` §P0 for the rationale.
 

@@ -15,7 +15,7 @@ Prerequisites:
 import asyncio
 import logging
 
-from polymathera.colony.vcm.sources import BuilInContextPageSourceType
+from polymathera.colony.vcm.sources import BuiltInContextPageSourceType
 from polymathera.colony.vcm.models import MmapConfig, MmapResult
 from polymathera.colony.agents.models import AgentMetadata
 from polymathera.colony.samples.code_analysis.basic.coordinator import CodeAnalysisCoordinator
@@ -59,7 +59,7 @@ async def analyze_repository(
         vcm_handle = await get_vcm()
         mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
             scope_id="repo-123",
-            source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
+            source_type=BuiltInContextPageSourceType.CODEBASE.value,
             config=MmapConfig(),
             repo_path=repo_path,
         )
