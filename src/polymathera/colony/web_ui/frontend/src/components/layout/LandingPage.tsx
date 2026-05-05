@@ -2,15 +2,24 @@ import { Plus } from "lucide-react";
 import { useHealthStatus } from "@/api/hooks/useInfrastructure";
 import { useSessions } from "@/api/hooks/useSessions";
 import { Badge } from "../shared/Badge";
+import { ColoniesSection } from "./ColoniesSection";
 import { formatTimestamp } from "@/lib/utils";
 
 interface LandingPageProps {
   onSelectSession: (sessionId: string) => void;
   onCreateSession: () => void;
   clusterReady: boolean;
+  activeColonyId: string | null;
+  onSelectColony: (colonyId: string) => void;
 }
 
-export function LandingPage({ onSelectSession, onCreateSession, clusterReady }: LandingPageProps) {
+export function LandingPage({
+  onSelectSession,
+  onCreateSession,
+  clusterReady,
+  activeColonyId,
+  onSelectColony,
+}: LandingPageProps) {
   const health = useHealthStatus();
   const sessions = useSessions();
 
@@ -58,6 +67,15 @@ export function LandingPage({ onSelectSession, onCreateSession, clusterReady }: 
           {health.data?.ray_cluster_status ?? "unknown"}
         </Badge>
       </div>
+
+      {/* Colonies — pick / create / configure before starting a session.
+          Lives outside the session-tabs gate because per-colony state
+          (the design-monorepo URL is the first such field) needs to be
+          editable before the SessionAgent boots and reads it. */}
+      <ColoniesSection
+        activeColonyId={activeColonyId}
+        onSelectColony={onSelectColony}
+      />
 
       {/* Actions */}
       <div className="flex gap-3">

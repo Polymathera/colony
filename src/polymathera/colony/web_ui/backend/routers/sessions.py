@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
+from ..auth import service as auth_service
 from ..auth.middleware import require_auth
 from ..dependencies import get_colony
 from ..models.api_models import RunSummary, SessionSummary
@@ -280,6 +281,22 @@ async def create_session(
             from polymathera.colony.agents.patterns.capabilities.github import (
                 GitHubCapability,
             )
+            from polymathera.colony.agents.patterns.capabilities.knowledge_retrieval import (
+                KnowledgeRetrievalCapability,
+            )
+            from polymathera.colony.agents.roles.knowledge_curator import (
+                KnowledgeCuratorCapability,
+            )
+            from polymathera.colony.knowledge.bulk_acquisition import (
+                BulkAcquisitionCapability,
+            )
+            from polymathera.colony.knowledge.deps import (
+                get_default_ingestor,
+                get_knowledge_deps,
+            )
+            from polymathera.colony.design_monorepo import (
+                design_monorepo_capability_blueprints,
+            )
             from polymathera.colony.agents.scopes import BlackboardScope
             from polymathera.colony.agents.patterns.planning.streams import (
                 ConsciousnessStream,
@@ -356,6 +373,19 @@ async def create_session(
                         "execute capability actions. Use `results[\"key\"] = value` to "
                         "store results. Use `log(msg)` for structured logging."
                     ),
+                    # Per-colony design-monorepo URL — populated from
+                    # the ``colonies`` table. The design-monorepo
+                    # capability trio reads this in ``_client_sync`` to
+                    # lazy-clone the repo into the per-agent working
+                    # directory on first access. ``None`` when the
+                    # colony has no design monorepo configured yet.
+                    "design_monorepo_url": (
+                        await auth_service.get_design_monorepo(
+                            colony._db_pool,
+                            colony_id=get_colony_id() or "",
+                            tenant_id=get_tenant_id() or "",
+                        ) or {}
+                    ).get("origin_url"),
                 },
                 action_policy_config={
                     "allow_self_termination": False,  # SessionAgent should not terminate itself — the session lives on until the user closes it
@@ -386,6 +416,34 @@ async def create_session(
                     # agent. Operators enable it via env vars or the
                     # Settings UI (planned).
                     GitHubCapability.bind(scope=BlackboardScope.SESSION),
+                    # Design-monorepo capability trio (state, checkpointing,
+                    # tool building) — per-agent clones under
+                    # /mnt/shared/agents/<agent_id>/clones/<scope_id>/.
+                    # SessionAgent runs in ``reactive_only`` mode so it
+                    # must NOT subscribe to the convergence-quiescence
+                    # stream — every episode boundary would otherwise
+                    # wake the LLM planner, producing the same welcome
+                    # message in a tight loop. Sub-agents that perform
+                    # actual design work get the default trio (with
+                    # auto-checkpoint enabled) when they are spawned.
+                    *design_monorepo_capability_blueprints(
+                        auto_checkpoint_on_quiescence=False,
+                    ),
+                    # Knowledge trio — chat-driven acquisition / curation
+                    # / retrieval. All three share a process-singleton
+                    # embedder + vector store; production users override
+                    # via knowledge.deps.set_knowledge_deps() during
+                    # cluster bring-up.
+                    BulkAcquisitionCapability.bind(
+                        ingestor=get_default_ingestor(),
+                    ),
+                    KnowledgeCuratorCapability.bind(
+                        ingestor=get_default_ingestor(),
+                    ),
+                    KnowledgeRetrievalCapability.bind(
+                        scope=BlackboardScope.SESSION,
+                        deps=get_knowledge_deps(),
+                    ),
                 ],
                 action_policy_blueprints={
                     "consciousness_streams": [

@@ -297,8 +297,10 @@ async def _run_mapping(
         # AuthMiddleware sets USER context; no explicit context needed
         try:
             from polymathera.colony.vcm.models import MmapConfig
-            from polymathera.colony.vcm.sources import BuilInContextPageSourceType
             from polymathera.colony.agents import ScopeUtils
+            from polymathera.colony.design_monorepo.materialize import (
+                materialize_repo_map,
+            )
 
             vcm = await colony.get_vcm()
 
@@ -310,23 +312,35 @@ async def _run_mapping(
 
             scope_id = request.repo_id or ScopeUtils.get_colony_level_scope()
 
-            result = await vcm.mmap_application_scope(
-                scope_id=scope_id,
-                source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
-                config=mmap_config,
+            # Honour ``.colony/repo_map.yaml`` if present in the repo;
+            # otherwise the materialiser falls back to a single
+            # default ``git_repo`` source and the call is equivalent to
+            # the previous one-shot ``mmap_application_scope``.
+            results = await materialize_repo_map(
+                vcm_handle=vcm,
                 origin_url=request.origin_url,
                 branch=request.branch,
                 commit=request.commit,
+                base_scope_id=scope_id,
+                mmap_config=mmap_config,
             )
-
-            if isinstance(result, dict):
-                op["status"] = result.get("status", "error")
-                op["message"] = result.get("message", "")
-                op["scope_id"] = result.get("scope_id", scope_id)
+            if not results:
+                op["status"] = "error"
+                op["message"] = "No sources materialised — check repo_map.yaml."
+                op["scope_id"] = scope_id
             else:
-                op["status"] = result.status
-                op["message"] = result.message
-                op["scope_id"] = result.scope_id
+                # Aggregate: report ``mapped`` only when every row succeeded.
+                statuses = []
+                for r in results:
+                    if isinstance(r, dict):
+                        statuses.append(r.get("status", "error"))
+                    else:
+                        statuses.append(r.status)
+                op["status"] = "mapped" if all(s == "mapped" for s in statuses) else "partial"
+                op["message"] = ", ".join(
+                    f"{i}:{s}" for i, s in enumerate(statuses)
+                )
+                op["scope_id"] = scope_id
 
         except Exception as e:
             logger.error("Mapping operation %s failed: %s", op_id, e)

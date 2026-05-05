@@ -242,14 +242,24 @@ class AgentCapability(ABC):
         """Initialize capability.
 
         ``input_patterns`` is used by the default ``stream_events_to_queue()`` to subscribe only to
-        relevant events instead of ``"*"``. If empty, falls back to ``"*"``
-        (legacy behavior, logs a warning).
+        relevant events instead of ``"*"``. The three accepted forms:
 
-        If ``input_patterns`` is not explicitly passed, it is inferred from methods
-        decorated with ``@event_handler`` on this class (including inherited methods).
-        Deduplicates across the MRO. Capabilities that subscribe to a different
-        blackboard than ``self.get_blackboard()`` (e.g., control plane lifecycle scope)
-        must explicitly pass ``input_patterns=[]`` to opt out of inference.
+        - **Not passed** (default ``None``) → auto-infer from
+          ``@event_handler``-decorated methods on this class
+          (including inherited methods). Deduplicated across the MRO.
+          If no decorated methods are found, falls back to ``"*"`` for
+          legacy compatibility (and logs a warning so callers notice).
+        - ``input_patterns=[]`` → explicit opt-out. The capability
+          manages its own subscriptions (e.g., ``MemoryCapability``)
+          or has none at all (e.g., a pure action surface). The
+          wildcard fallback does NOT apply.
+        - ``input_patterns=[pattern1, ...]`` → use these explicit
+          patterns instead of inference.
+
+        Capabilities that subscribe to a different blackboard than
+        ``self.get_blackboard()`` (e.g., control plane lifecycle
+        scope) must pass ``input_patterns=[]`` to suppress the default
+        subscription on this scope.
 
         Args:
             agent: Agent using this capability (None for detached mode)
@@ -497,19 +507,35 @@ class AgentCapability(ABC):
                 ``None``, high-priority handler patterns route into
                 ``event_queue`` instead.
         """
-        blackboard = await self.get_blackboard()
-
         normal_patterns = self.normal_priority_patterns
         high_patterns = self.high_priority_patterns
 
+        # Convention (see ``__init__`` docstring):
+        #   - ``input_patterns=None`` (default, not passed) → auto-infer
+        #     from ``@event_handler`` decorators. If nothing is found,
+        #     fall back to ``"*"`` for legacy compatibility (warns).
+        #   - ``input_patterns=[]`` → explicit opt-out: the capability
+        #     manages its own subscriptions or has none. Do NOT fall
+        #     through to the wildcard.
+        #   - ``input_patterns=[...]`` → use the listed patterns.
         if not normal_patterns and not high_patterns:
-            logger.warning(
-                f"{self.__class__.__name__} has no input_patterns declared — "
-                f"streaming all events (\"*\"). Declare input_patterns to "
-                f"filter events and reduce noise."
-            )
-            normal_patterns = ["*"]
+            if self._input_patterns is None:
+                logger.warning(
+                    f"{self.__class__.__name__} has no input_patterns declared — "
+                    f"streaming all events (\"*\"). Declare input_patterns to "
+                    f"filter events and reduce noise."
+                )
+                normal_patterns = ["*"]
+            else:
+                # Explicit ``input_patterns=[]`` opt-out — don't subscribe.
+                logger.debug(
+                    "%s.stream_events_to_queue: explicit input_patterns=[] "
+                    "opt-out; no subscriptions registered.",
+                    self.__class__.__name__,
+                )
+                return
 
+        blackboard = await self.get_blackboard()
         logger.info(
             "%s.stream_events_to_queue: scope_id=%s backend=%s "
             "normal=%s high=%s",

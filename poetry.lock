@@ -2468,6 +2468,7 @@ optional = false
 python-versions = ">=3.10"
 files = [
     {file = "griffelib-2.0.0-py3-none-any.whl", hash = "sha256:01284878c966508b6d6f1dbff9b6fa607bc062d8261c5c7253cb285b06422a7f"},
+    {file = "griffelib-2.0.0.tar.gz", hash = "sha256:e504d637a089f5cab9b5daf18f7645970509bf4f53eda8d79ed71cce8bd97934"},
 ]
 
 [package.extras]
@@ -4955,20 +4956,14 @@ playground = ["rich"]
 
 [[package]]
 name = "pathspec"
-version = "1.0.4"
+version = "0.12.1"
 description = "Utility library for gitignore style pattern matching of file paths."
 optional = false
-python-versions = ">=3.9"
+python-versions = ">=3.8"
 files = [
-    {file = "pathspec-1.0.4-py3-none-any.whl", hash = "sha256:fb6ae2fd4e7c921a165808a552060e722767cfa526f99ca5156ed2ce45a5c723"},
-    {file = "pathspec-1.0.4.tar.gz", hash = "sha256:0210e2ae8a21a9137c0d470578cb0e595af87edaa6ebf12ff176f14a02e0e645"},
+    {file = "pathspec-0.12.1-py3-none-any.whl", hash = "sha256:a0d503e138a4c123b27490a4f7beda6a01c6f288df0e4a8b79c7eb0dc7b4cc08"},
+    {file = "pathspec-0.12.1.tar.gz", hash = "sha256:a482d51503a1ab33b1c67a6c3813a26953dbdc71c31dacaef9a838c4e29f5712"},
 ]
-
-[package.extras]
-hyperscan = ["hyperscan (>=0.7)"]
-optional = ["typing-extensions (>=4)"]
-re2 = ["google-re2 (>=1.1)"]
-tests = ["pytest (>=9)", "typing-extensions (>=4.15)"]
 
 [[package]]
 name = "pexpect"
@@ -9649,7 +9644,7 @@ cffi = ["cffi (>=1.17,<2.0)", "cffi (>=2.0.0b)"]
 [extras]
 aws = ["aiobotocore", "boto3", "botocore"]
 cache-compression = ["zstandard"]
-code-analysis = ["astor", "chardet", "gitpython", "html2text", "markdown", "nbformat", "pillow", "psutil", "pygithub", "python-louvain", "python-magic", "sqlparse", "toml", "tree-sitter", "xxhash"]
+code-analysis = ["astor", "chardet", "gitpython", "html2text", "markdown", "nbformat", "pathspec", "pillow", "psutil", "pygithub", "python-louvain", "python-magic", "sqlparse", "toml", "tree-sitter", "xxhash"]
 cpu = ["anthropic", "chromadb", "openai", "sentence-transformers"]
 dashboard = ["fastapi", "httpx", "python-multipart", "uvicorn"]
 design-monorepo = ["gitpython", "watchdog"]
@@ -9660,4 +9655,4 @@ observability = ["aiokafka"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.13"
-content-hash = "dd4165bab0b38898e315cf32028bac2ad60b049b777252a9bf9dcddd8b6088a2"
+content-hash = "a9fe72038cf78652807d4283fe10f4f4005956942b8763020ba23e16818c4ca2"

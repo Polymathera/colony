@@ -39,6 +39,17 @@ CREATE TABLE IF NOT EXISTS colonies (
 
 COLONIES_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_colonies_tenant ON colonies(tenant_id);"
 
+# Per-colony design-monorepo configuration. ``ALTER TABLE ... ADD
+# COLUMN IF NOT EXISTS`` migrates pre-existing colony rows in place
+# without dropping data. Branch / commit have defaults; url is
+# nullable because a colony can exist before the user has wired up
+# its design monorepo.
+COLONIES_DESIGN_MONOREPO_MIGRATIONS = (
+    "ALTER TABLE colonies ADD COLUMN IF NOT EXISTS design_monorepo_url TEXT;",
+    "ALTER TABLE colonies ADD COLUMN IF NOT EXISTS design_monorepo_branch TEXT NOT NULL DEFAULT 'main';",
+    "ALTER TABLE colonies ADD COLUMN IF NOT EXISTS design_monorepo_commit TEXT NOT NULL DEFAULT 'HEAD';",
+)
+
 
 async def ensure_auth_schema(db_pool) -> None:
     """Create auth tables if they don't exist.
@@ -50,7 +61,9 @@ async def ensure_auth_schema(db_pool) -> None:
             await conn.execute(USERS_TABLE_SQL)
             await conn.execute(COLONIES_TABLE_SQL)
             await conn.execute(COLONIES_INDEX_SQL)
-        logger.info("Auth schema ensured (users + colonies)")
+            for stmt in COLONIES_DESIGN_MONOREPO_MIGRATIONS:
+                await conn.execute(stmt)
+        logger.info("Auth schema ensured (users + colonies + design-monorepo columns)")
     except Exception:
         logger.error("Failed to create auth schema", exc_info=True)
         raise

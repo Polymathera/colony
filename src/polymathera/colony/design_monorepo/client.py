@@ -186,6 +186,7 @@ class DesignMonorepoClient:
         """
 
         from git import GitCommandError, Repo
+        from ..utils.git.utils import inject_github_token
 
         working_dir = Path(working_dir)
         if (working_dir / ".git").exists():
@@ -200,7 +201,7 @@ class DesignMonorepoClient:
             kwargs["branch"] = manifest.default_branch
         try:
             repo = Repo.clone_from(
-                manifest.design_repo_url,
+                inject_github_token(manifest.design_repo_url),
                 str(working_dir),
                 **kwargs,
             )

@@ -27,8 +27,10 @@ git-backed durable design state benefits, not just CPS.
 
 from __future__ import annotations
 
+from .blueprints import design_monorepo_capability_blueprints
 from .bootstrap import SCAFFOLD_DIRS, bootstrap_design_monorepo
 from .capabilities import DesignCheckpointer, RepoStateProvider, ToolBuilder
+from .clones import resolve_clone_path
 from .client import (
     AGENT_BRANCH_PREFIX,
     BranchExistsError,
@@ -134,4 +136,6 @@ __all__ = (
     "RepoStateProvider",
     "DesignCheckpointer",
     "ToolBuilder",
+    "design_monorepo_capability_blueprints",
+    "resolve_clone_path",
 )

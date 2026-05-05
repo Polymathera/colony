@@ -1619,6 +1619,65 @@ class ConvergenceQuiescenceProtocol(BlackboardProtocol):
         return key[len(prefix):]
 
 
+class DesignMonorepoEventProtocol(BlackboardProtocol):
+    """Protocol for design-monorepo lifecycle events.
+
+    Emitted by :class:`DesignCheckpointer` when it translates a raw
+    ``VCMEventProtocol.page_changed`` event from the global VCM
+    mapping into a coarser branch-update / merge / checkpoint event
+    that the agent's action policy can react to. Subscribers
+    typically watch ``branch_changed:*`` to detect upstream movement
+    on the branch they are working from and trigger a checkout /
+    merge / rebase against their per-agent local clone.
+
+    Key formats:
+
+    - ``branch_changed:{scope_id}``      — upstream commits landed on
+      the tracked branch of this VCM scope.
+    - ``branch_merged:{scope_id}``       — a fork branch was merged
+      into the tracked branch.
+    - ``checkpoint_emitted:{scope_id}``  — a checkpoint tag was
+      created on this branch.
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.SESSION
+
+    _BRANCH_CHANGED_PREFIX: ClassVar[str] = "branch_changed:"
+    _BRANCH_MERGED_PREFIX: ClassVar[str] = "branch_merged:"
+    _CHECKPOINT_EMITTED_PREFIX: ClassVar[str] = "checkpoint_emitted:"
+
+    @staticmethod
+    def branch_changed_key(scope_id: str) -> str:
+        return f"{DesignMonorepoEventProtocol._BRANCH_CHANGED_PREFIX}{scope_id}"
+
+    @staticmethod
+    def branch_merged_key(scope_id: str) -> str:
+        return f"{DesignMonorepoEventProtocol._BRANCH_MERGED_PREFIX}{scope_id}"
+
+    @staticmethod
+    def checkpoint_emitted_key(scope_id: str) -> str:
+        return f"{DesignMonorepoEventProtocol._CHECKPOINT_EMITTED_PREFIX}{scope_id}"
+
+    @staticmethod
+    def branch_changed_pattern() -> str:
+        return f"{DesignMonorepoEventProtocol._BRANCH_CHANGED_PREFIX}*"
+
+    @staticmethod
+    def branch_merged_pattern() -> str:
+        return f"{DesignMonorepoEventProtocol._BRANCH_MERGED_PREFIX}*"
+
+    @staticmethod
+    def checkpoint_emitted_pattern() -> str:
+        return f"{DesignMonorepoEventProtocol._CHECKPOINT_EMITTED_PREFIX}*"
+
+    @staticmethod
+    def parse_branch_changed_key(key: str) -> str:
+        prefix = DesignMonorepoEventProtocol._BRANCH_CHANGED_PREFIX
+        if not key.startswith(prefix):
+            raise ValueError(f"Not a DesignMonorepoEventProtocol branch_changed key: {key!r}")
+        return key[len(prefix):]
+
+
 class GitHubEventProtocol(BlackboardProtocol):
     """Protocol for GitHub webhook events surfaced on the blackboard.
 

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { BookOpen, LogOut, LayoutDashboard, Bot, Database, GitFork, ClipboardList, ScrollText, Activity, Gauge, Settings } from "lucide-react";
+import { BookOpen, LogOut, LayoutDashboard, Bot, Database, GitFork, GitBranch, ClipboardList, ScrollText, Activity, Gauge, Settings } from "lucide-react";
 import { TabBar, type Tab } from "./TabBar";
 import { StatusBar } from "./StatusBar";
 import { Sidebar } from "./Sidebar";
@@ -8,6 +8,7 @@ import { AuthPage } from "../auth/AuthPage";
 import { ErrorBoundary } from "../shared/ErrorBoundary";
 import { ChatPanel } from "../chat/ChatPanel";
 import { OverviewTab } from "../dashboard/OverviewTab";
+import { RepoMapTab } from "../repo/RepoMapTab";
 import { AgentsTab } from "../agents/AgentsTab";
 import { VCMTab } from "../vcm/VCMTab";
 import { PageGraphTab } from "../graph/PageGraphTab";
@@ -22,6 +23,7 @@ import { useHealthStatus } from "@/api/hooks/useInfrastructure";
 
 const TABS: Tab[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={14} /> },
+  { id: "repo-map", label: "Design Monorepo", icon: <GitBranch size={14} /> },
   { id: "agents", label: "Agents", icon: <Bot size={14} /> },
   { id: "vcm", label: "VCM", icon: <Database size={14} /> },
   { id: "graph", label: "Page Graph", icon: <GitFork size={14} /> },
@@ -37,6 +39,7 @@ const TABS: Tab[] = [
 // so that component state (e.g. expand/collapse in Traces) survives tab switches.
 const TAB_COMPONENTS: Record<string, React.FC> = {
   overview: OverviewTab,
+  "repo-map": RepoMapTab,
   agents: AgentsTab,
   vcm: VCMTab,
   graph: PageGraphTab,
@@ -289,6 +292,8 @@ export function AppShell() {
                 onSelectSession={setActiveSessionId}
                 onCreateSession={handleCreateSession}
                 clusterReady={clusterReady}
+                activeColonyId={activeColonyId}
+                onSelectColony={setActiveColonyId}
               />
             </main>
           )}

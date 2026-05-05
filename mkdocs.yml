@@ -84,6 +84,10 @@ nav:
     - Configuration System: architecture/configuration.md
     - Execution Context: architecture/execution-context.md
     - Virtual Context Memory: architecture/virtual-context-memory.md
+    - Context Page Sources: architecture/context-page-sources.md
+    - 'Source — Git Repo': architecture/git-repo-context-page-source.md
+    - 'Source — Literature': architecture/literature-context-page-source.md
+    - 'Repo Map (.colony/repo_map.yaml)': architecture/repo-map.md
     - Live Context (Watchers + Convergence): architecture/live-context.md
     - Agent System: architecture/agent-system.md
     - Agent Memory System: architecture/agent-memory-system.md
@@ -95,6 +99,8 @@ nav:
     - 'Capability — Sandboxed Shell': architecture/sandboxed-shell-capability.md
     - 'Capability — User Plugins': architecture/user-plugin-capability.md
     - 'Capability — GitHub': architecture/github-capability.md
+    - 'Capability — Design Monorepo': architecture/design-monorepo-capabilities.md
+    - 'Capability — Knowledge': architecture/knowledge-capabilities.md
     - Blackboard Pattern: architecture/blackboard.md
     - Hook System: architecture/hook-system.md
     - Game Patterns: architecture/game-engine.md

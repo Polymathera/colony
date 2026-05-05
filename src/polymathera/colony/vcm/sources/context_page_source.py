@@ -166,6 +166,7 @@ class BuilInContextPageSourceType(str, Enum):
     """
     FILE_GROUPER = "file_grouper"
     BLACKBOARD = "blackboard"
+    LITERATURE = "literature"
 
 
 class ContextPageSourceFactory:

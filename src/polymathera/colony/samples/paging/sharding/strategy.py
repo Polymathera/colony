@@ -31,6 +31,7 @@ from .file_grouping import FileGrouperConfig
 from .file_grouping_wrapper import FileGrouperWithGraph
 from .tokenization import TokenizationConfig, TokenizationStrategy, TokenManager
 from .analyzers.base import FileContentCache
+from .._walk import PathFilter, walk_repo
 
 logger = logging.getLogger(__name__)
 
@@ -452,9 +453,14 @@ class GitRepoShardingStrategy:
         self,
         prompt_strategy: ShardedInferencePromptStrategy,
         config: ShardingConfig | None = None,
+        path_filter: PathFilter | None = None,
     ):
         self.prompt_strategy = prompt_strategy
         self.config: ShardingConfig | None = config
+        # Restricts which blobs become shards. ``None`` keeps the
+        # historical behaviour: traverse the whole repo, no glob
+        # filtering, binaries included as ``unknown``-language blobs.
+        self.path_filter = path_filter
         self._token_manager = None
         # Code splitter for language-aware splitting
         self._code_splitter = None
@@ -543,12 +549,19 @@ class GitRepoShardingStrategy:
         )
 
     @staticmethod
-    def _get_repo_files_sync(repo_path: str) -> list[str]:
+    def _get_repo_files_sync(
+        repo_path: str, path_filter: PathFilter | None = None,
+    ) -> list[str]:
         """Get all tracked files in the repository.
 
         Creates its own git.Repo instance so this can safely run in a
         background thread without sharing the parent repo's git subprocess.
+        Delegates to :func:`walk_repo` when ``path_filter`` is supplied
+        so subdir/include/exclude/binary-skip behaviour stays in one
+        place.
         """
+        if path_filter is not None:
+            return walk_repo(repo_path, path_filter)
         repo = git.Repo(repo_path)
         base = Path(repo_path)
         return [
@@ -688,7 +701,7 @@ class GitRepoShardingStrategy:
             repo_path = Path(repo.working_dir)
             logger.info(f"________ create_shards: 2.1 {repo_path}")
             files = await asyncio.to_thread(
-                self._get_repo_files_sync, str(repo_path)
+                self._get_repo_files_sync, str(repo_path), self.path_filter,
             )
             logger.info(f"________ create_shards: 2.2 {len(files)} files")
 

@@ -29,6 +29,10 @@ from overrides import override
 
 from ..agents.base import Agent, AgentCapability
 from ..agents.blackboard import BlackboardEvent, ConvergenceQuiescenceProtocol
+from ..agents.blackboard.protocol import (
+    DesignMonorepoEventProtocol,
+    VCMEventProtocol,
+)
 from ..agents.models import AgentSuspensionState
 from ..agents.patterns.actions import action_executor
 from ..agents.patterns.events import EventProcessingResult, event_handler
@@ -98,7 +102,9 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
         agent: Agent | None = None,
         scope_id: str | None = None,
         *,
-        working_dir: Path | str,
+        working_dir: Path | str | None = None,
+        clone_scope_id: str | None = None,
+        read_only: bool = False,
         input_patterns: list[str] | None = None,
         capability_key: str | None = None,
         app_name: str | None = None,
@@ -116,17 +122,63 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
             capability_key=capability_key,
             app_name=app_name,
         )
-        self._working_dir = Path(working_dir)
+        if working_dir is None:
+            # Resolve a per-agent (or shared read-only) clone path under
+            # ``/mnt/shared`` so the layout survives Ray actor restarts.
+            from .clones import resolve_clone_path
+            resolved = resolve_clone_path(
+                agent=agent,
+                scope_id=clone_scope_id or self.scope_id,
+                read_only=read_only,
+            )
+            self._working_dir = resolved
+        else:
+            self._working_dir = Path(working_dir)
+        self._read_only = read_only
         self._client: DesignMonorepoClient | None = None
 
     @property
     def working_dir(self) -> Path:
         return self._working_dir
 
+    _DESIGN_MONOREPO_URL_KEY = "design_monorepo_url"
+
     def _client_sync(self) -> DesignMonorepoClient:
         if self._client is None:
+            # Lazy-clone: if the per-agent ``working_dir`` does not yet
+            # contain a git repo, clone the colony's configured design
+            # monorepo into it. The URL is read from
+            # ``agent.metadata.parameters[design_monorepo_url]``,
+            # which the dashboard populates at session-creation time
+            # (or which ``DesignMonorepoBootstrap.set_design_monorepo``
+            # mutates in-place for chat-driven configuration). Auth is
+            # the operator's responsibility — git's standard machinery
+            # (credential helper, token-in-URL, ssh-agent) handles it
+            # transparently and any failure surfaces verbatim.
+            if not (self._working_dir / ".git").exists() and not self._read_only:
+                self._lazy_clone_from_agent_metadata()
             self._client = DesignMonorepoClient.open(self._working_dir)
         return self._client
+
+    def _lazy_clone_from_agent_metadata(self) -> None:
+        """Issue a raw ``git clone`` into ``self._working_dir`` when an
+        ``agent.metadata.parameters[design_monorepo_url]`` is present.
+        No-op when the parameter is missing — :meth:`_client_sync`
+        then falls back to ``open()`` and the caller sees the
+        unmodified ``DesignMonorepoError``.
+        """
+
+        if self._agent is None:
+            return
+        params = getattr(self._agent.metadata, "parameters", None) or {}
+        url = params.get(self._DESIGN_MONOREPO_URL_KEY)
+        if not url:
+            return
+        from git import Repo  # local import — gitpython is in the design_monorepo extra
+        from ..utils.git.utils import inject_github_token
+
+        self._working_dir.mkdir(parents=True, exist_ok=True)
+        Repo.clone_from(inject_github_token(url), str(self._working_dir))
 
     async def _client_async(self) -> DesignMonorepoClient:
         return await asyncio.to_thread(self._client_sync)
@@ -200,7 +252,35 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
     methods at the start of a session, at hypothesis-game boundaries,
     or whenever the convergence runtime signals quiescence, to decide
     what to do next without raising any concern about side effects.
+
+    Pure action surface — declares no ``@event_handler`` methods, so
+    ``input_patterns=[]`` is passed explicitly to opt out of the base
+    ``AgentCapability``'s wildcard fallback. Otherwise the agent's
+    own ``policy:action_started:*`` lifecycle writes would be fed
+    back into the action policy's event queue.
     """
+
+    def __init__(
+        self,
+        agent: Agent | None = None,
+        scope_id: str | None = None,
+        *,
+        working_dir: Path | str | None = None,
+        clone_scope_id: str | None = None,
+        read_only: bool = False,
+        capability_key: str | None = None,
+        app_name: str | None = None,
+    ) -> None:
+        super().__init__(
+            agent=agent,
+            scope_id=scope_id,
+            working_dir=working_dir,
+            clone_scope_id=clone_scope_id,
+            read_only=read_only,
+            input_patterns=[],
+            capability_key=capability_key,
+            app_name=app_name,
+        )
 
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"design_state", "git", "read"})
@@ -310,15 +390,33 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         agent: Agent | None = None,
         scope_id: str | None = None,
         *,
-        working_dir: Path | str,
+        working_dir: Path | str | None = None,
+        clone_scope_id: str | None = None,
         auto_checkpoint_on_quiescence: bool = True,
         capability_key: str | None = None,
         app_name: str | None = None,
     ) -> None:
+        # ``DesignCheckpointer`` writes checkpoint commits / tags / new
+        # branches, so ``read_only`` is hard-wired to ``False``.
+        #
+        # When auto-checkpoint is disabled, also opt out of the
+        # quiescence subscription. Otherwise the action policy's event
+        # queue receives a wake-up on every episode boundary, which —
+        # in ``reactive_only`` agents like SessionAgent — would trigger
+        # a full LLM plan_step → action → settles → new quiescence
+        # loop. The remote-change handler stays subscribed; it only
+        # fires on actual upstream changes.
+        if auto_checkpoint_on_quiescence:
+            input_patterns: list[str] | None = None  # auto-infer
+        else:
+            input_patterns = [VCMEventProtocol.reindexed_pattern()]
         super().__init__(
             agent=agent,
             scope_id=scope_id,
             working_dir=working_dir,
+            clone_scope_id=clone_scope_id,
+            read_only=False,
+            input_patterns=input_patterns,
             capability_key=capability_key,
             app_name=app_name,
         )
@@ -586,6 +684,37 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
             },
         )
 
+    # ---- Translate VCM page-graph rebuilds into a coarser branch event
+
+    @event_handler(pattern=VCMEventProtocol.reindexed_pattern())
+    async def _on_remote_change(
+        self,
+        event: BlackboardEvent,
+        repl: Any,
+    ) -> EventProcessingResult | None:
+        """Bridge a VCM ``reindexed:<scope_id>`` event to a
+        ``DesignMonorepoEventProtocol.branch_changed:<scope_id>``
+        event the agent's planner can react to (checkout / merge /
+        rebase the per-agent local clone against the new upstream).
+
+        VCM rebuilds the page graph after a ``GitRemoteWatcher``
+        observes upstream commits, so this is the right point to fan
+        out a higher-level branch-update signal without re-deriving
+        the underlying watcher event from raw blackboard state.
+        """
+
+        try:
+            scope_id = VCMEventProtocol.parse_reindexed_key(event.key)
+        except ValueError:
+            return None
+        return EventProcessingResult(
+            context_key=DesignMonorepoEventProtocol.branch_changed_key(scope_id),
+            context={
+                "scope_id": scope_id,
+                "source_event_key": event.key,
+            },
+        )
+
 
 # ---------------------------------------------------------------------------
 # ToolBuilder — bootstrap a new tool into tools/<purpose>/<name>/
@@ -600,7 +729,32 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
     writable match*. The capability does only the scaffold + register
     step; the implementation, validation, benchmarking, and merge steps
     are the pool's own action policy.
+
+    Pure action surface — passes ``input_patterns=[]`` for the same
+    reason as :class:`RepoStateProvider` (no ``@event_handler``
+    methods, must opt out of the wildcard fallback).
     """
+
+    def __init__(
+        self,
+        agent: Agent | None = None,
+        scope_id: str | None = None,
+        *,
+        working_dir: Path | str | None = None,
+        clone_scope_id: str | None = None,
+        capability_key: str | None = None,
+        app_name: str | None = None,
+    ) -> None:
+        super().__init__(
+            agent=agent,
+            scope_id=scope_id,
+            working_dir=working_dir,
+            clone_scope_id=clone_scope_id,
+            read_only=False,
+            input_patterns=[],
+            capability_key=capability_key,
+            app_name=app_name,
+        )
 
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"design_state", "git", "tool_building", "write"})

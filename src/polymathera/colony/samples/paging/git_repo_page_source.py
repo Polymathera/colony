@@ -25,6 +25,7 @@ from .sharding.file_grouping_wrapper import FileGrouperWithGraph
 from .sharding.strategy_wrapper import GitRepoShardingWithMapping
 from .sharding.prompting import IdentityPromptStrategy
 from .sharding.strategy import GitRepoShardingStrategy
+from ._walk import BinaryPolicy, PathFilter
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,13 @@ class GitRepoContextPageSource(ContextPageSource):
         origin_url: str,   # Git repo URL (https:// or file://)
         branch: str = "main",
         commit: str = "HEAD",
+        start_dir: str | None = None,
+        include_globs: list[str] | None = None,
+        exclude_globs: list[str] | None = None,
+        ignore_files: tuple[str, ...] = (".gitignore", ".colonyignore"),
+        binary_policy: BinaryPolicy = "skip",
+        watch_remote: bool = True,
+        watch_local: bool = False,
         static: bool = False,
     ):
         """Initialize file-grouper-based context page source.
@@ -81,9 +89,27 @@ class GitRepoContextPageSource(ContextPageSource):
             origin_url: Git repository URL (https:// or file:// for local repos)
             branch: Git branch to check out
             commit: Git commit SHA (defaults to branch HEAD)
+            start_dir: Repo-relative subdirectory to map. ``None`` = repo
+                root (historical behaviour).
+            include_globs: Gitignore-style include patterns; ``None`` =
+                include everything not excluded.
+            exclude_globs: Gitignore-style exclude patterns.
+            ignore_files: Filenames inside the repo whose patterns are
+                merged into the exclude set. Defaults read both
+                ``.gitignore`` and ``.colonyignore``; pass ``()`` to
+                disable.
+            binary_policy: ``"skip"`` (default) drops binary blobs from
+                the mapping; ``"include"`` keeps them (used by
+                literature/PDF sources that handle binaries explicitly).
+            watch_remote: Subscribe to upstream commits via
+                :class:`GitRemoteWatcher`. The VCM mapping is the
+                global read-only view of ``branch``, so this is the
+                event source you usually want.
+            watch_local: Subscribe to working-tree edits via
+                :class:`LocalFsWatcher`. Off by default — the working
+                tree on the VCM-mapping replica is read-only.
             static: ``False`` (default) for live-watched repos; ``True``
-                for a frozen-commit context (no ``LocalFsWatcher``,
-                no live page-change events).
+                for a frozen-commit context (no watchers attached).
         """
         super().__init__(
             scope_id=scope_id, mmap_config=mmap_config, static=static,
@@ -91,6 +117,15 @@ class GitRepoContextPageSource(ContextPageSource):
         self.origin_url = origin_url
         self.branch = branch
         self.commit = commit
+        self._path_filter = PathFilter(
+            start_dir=start_dir,
+            include_globs=tuple(include_globs) if include_globs is not None else None,
+            exclude_globs=tuple(exclude_globs or ()),
+            ignore_files=ignore_files,
+            binary_policy=binary_policy,
+        )
+        self._watch_remote = watch_remote
+        self._watch_local = watch_local
 
         # File grouping and sharding wrappers (expose graph and file-to-page mapping)
         self.file_grouper: FileGrouperWithGraph | None = None
@@ -225,6 +260,7 @@ class GitRepoContextPageSource(ContextPageSource):
         strategy = GitRepoShardingStrategy(
             prompt_strategy=prompt_strategy,
             config=None,  # Auto-loaded from Polymathera config system
+            path_filter=self._path_filter,
         )
         await strategy.initialize()
 
@@ -410,8 +446,9 @@ class GitRepoContextPageSource(ContextPageSource):
             return
 
         source_uri = f"git:{self.origin_url}:{self.branch}:{self.commit}"
-        composite = CompositeWatcher(
-            (
+        watchers: list = []
+        if self._watch_local:
+            watchers.append(
                 LocalFsWatcher(
                     root=self._repo_path,
                     scope_id=self.scope_id,
@@ -419,7 +456,10 @@ class GitRepoContextPageSource(ContextPageSource):
                     page_id_for=lambda rel: rel_to_page.get(rel.as_posix(), ""),
                     path_filter=lambda rel: rel.as_posix() in rel_to_page,
                     config=LocalFsWatcherConfig(data_type="design_monorepo_file"),
-                ),
+                )
+            )
+        if self._watch_remote:
+            watchers.append(
                 GitRemoteWatcher(
                     repo_path=self._repo_path,
                     scope_id=self.scope_id,
@@ -428,10 +468,11 @@ class GitRepoContextPageSource(ContextPageSource):
                         branch=self.branch,
                         data_type="design_monorepo_file",
                     ),
-                ),
-            ),
-            scope_id=self.scope_id,
-        )
+                )
+            )
+        if not watchers:
+            return
+        composite = CompositeWatcher(tuple(watchers), scope_id=self.scope_id)
         self._composite_watcher = composite
         try:
             async for event in composite.watch():

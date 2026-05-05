@@ -76,6 +76,7 @@ toml = { version = "^0.10.2", optional = true }
 zstandard = { version = "^0.25.0", optional = true }
 gitpython = { version = "^3.1.46", optional = true }
 pygithub = { version = "^2.8.1", optional = true }
+pathspec = { version = "^0.12.1", optional = true }
 watchdog = { version = "^6.0.0", optional = true }
 pypdf = { version = "^5.1.0", optional = true }
 qdrant-client = { version = "^1.12.0", optional = true }
@@ -127,6 +128,7 @@ code_analysis = [
     "toml",
     "gitpython",
     "pygithub",
+    "pathspec",
 ]
 
 cache_compression = [

@@ -1395,25 +1395,41 @@ async def run_integration_test(
     )
 
     with console.status("[cyan]Mapping codebase into VCM pages..."):
-        mmap_result: MmapResult = await vcm_handle.mmap_application_scope(
-            scope_id=ScopeUtils.get_colony_level_scope(),
-            source_type=BuilInContextPageSourceType.FILE_GROUPER.value,
-            config=mmap_config,
+        # Honor ``.colony/repo_map.yaml`` when present — see
+        # ``polymathera.colony.design_monorepo.materialize``. When the
+        # repo has no map, the fallback is a single ``git_repo`` source
+        # over the whole tree, so legacy single-source repos behave
+        # exactly as before.
+        from polymathera.colony.design_monorepo.materialize import (
+            materialize_repo_map,
+        )
+        mmap_results: list[MmapResult] = await materialize_repo_map(
+            vcm_handle=vcm_handle,
             origin_url=config.origin_url,
             branch=config.branch,
             commit=config.commit,
+            base_scope_id=ScopeUtils.get_colony_level_scope(),
+            mmap_config=mmap_config,
         )
 
-    if mmap_result.status in ("mapped", "already_mapped"):
-        console.print(
-            f"  [green]OK[/green] — {mmap_result.status}: "
-            f"{mmap_result.message or 'codebase mapped successfully'}"
-        )
+    if mmap_results and all(
+        r.status in ("mapped", "already_mapped") for r in mmap_results
+    ):
+        for r in mmap_results:
+            console.print(
+                f"  [green]OK[/green] — {r.status} ({r.scope_id}): "
+                f"{r.message or 'codebase mapped successfully'}"
+            )
     else:
-        console.print(
-            f"  [red]FAILED[/red] — {mmap_result.status}: {mmap_result.message}"
+        for r in mmap_results:
+            console.print(
+                f"  [red]FAILED[/red] — {r.status} ({r.scope_id}): {r.message}"
+            )
+        summary = (
+            "; ".join(f"{r.scope_id}:{r.message}" for r in mmap_results)
+            if mmap_results else "no sources materialised"
         )
-        return [{"analysis_type": "paging", "status": "failed", "summary": mmap_result.message}]
+        return [{"analysis_type": "paging", "status": "failed", "summary": summary}]
 
     # -----------------------------------------------------------------------
     # Step 2: Spawn coordinator agents via AgentHandle

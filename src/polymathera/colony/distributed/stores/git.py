@@ -830,8 +830,9 @@ class GitFileStorage:
 
                         def _clone_repo():
                             # Full clone required to ensure all commits exist locally.
+                            from polymathera.colony.utils.git.utils import inject_github_token
                             Repo.clone_from(
-                                origin_url,
+                                inject_github_token(origin_url),
                                 str(source_path),
                                 branch=None,  # Use remote's default branch instead of assuming 'master'
                                 # depth=1, # shallow clone. TODO: When should we use this?

@@ -193,6 +193,56 @@ async def list_colonies(db_pool, tenant_id: str) -> list[dict[str, Any]]:
     ]
 
 
+async def get_design_monorepo(
+    db_pool, *, colony_id: str, tenant_id: str,
+) -> dict[str, Any] | None:
+    """Return the per-colony design-monorepo configuration row.
+
+    Returns ``None`` for an unconfigured colony (``design_monorepo_url``
+    NULL). The ``branch`` / ``commit`` columns always have defaults so
+    callers do not need to coalesce.
+    """
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT design_monorepo_url, design_monorepo_branch, "
+            "design_monorepo_commit FROM colonies "
+            "WHERE id = $1 AND tenant_id = $2",
+            colony_id, tenant_id,
+        )
+    if row is None or row["design_monorepo_url"] is None:
+        return None
+    return {
+        "origin_url": row["design_monorepo_url"],
+        "branch": row["design_monorepo_branch"],
+        "commit": row["design_monorepo_commit"],
+    }
+
+
+async def set_design_monorepo(
+    db_pool, *,
+    colony_id: str,
+    tenant_id: str,
+    origin_url: str,
+    branch: str = "main",
+    commit: str = "HEAD",
+) -> dict[str, Any]:
+    """Persist the colony's design-monorepo URL/branch/commit. Returns
+    the newly-stored row. Raises :class:`KeyError` when the colony does
+    not exist or belongs to a different tenant."""
+
+    async with db_pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE colonies SET design_monorepo_url = $1, "
+            "design_monorepo_branch = $2, design_monorepo_commit = $3 "
+            "WHERE id = $4 AND tenant_id = $5",
+            origin_url, branch, commit, colony_id, tenant_id,
+        )
+    if result == "UPDATE 0":
+        raise KeyError(f"colony {colony_id!r} not found for tenant {tenant_id!r}")
+    return {"origin_url": origin_url, "branch": branch, "commit": commit}
+
+
 async def get_default_colony(db_pool, tenant_id: str) -> dict[str, Any] | None:
     """Get the default colony for a tenant."""
     async with db_pool.acquire() as conn:
