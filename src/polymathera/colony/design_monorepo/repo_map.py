@@ -71,6 +71,47 @@ class SourceSpec(BaseModel):
     chunk_target_tokens: int | None = None
     chunk_overlap_tokens: int | None = None
 
+    # Per-source paging knobs — feed into ``MmapConfig`` at materialise
+    # time. ``None`` means "use the materialiser's defaults". These are
+    # only meaningful for ``git_repo`` sources today; literature rows
+    # control chunk size via ``chunk_target_tokens`` instead.
+    flush_threshold: int | None = Field(
+        default=None,
+        description=(
+            "Number of records grouped per VCM page before flushing. "
+            "Lower = more, smaller pages; higher = fewer, larger pages."
+        ),
+    )
+    flush_token_budget: int | None = Field(
+        default=None,
+        description=(
+            "Maximum tokens per VCM page. When exceeded, a new page "
+            "starts. Controls how much code each agent sees at once."
+        ),
+    )
+    pinned: bool | None = Field(
+        default=None,
+        description="Pin pages produced by this source in cache.",
+    )
+
+    def to_mmap_config_overrides(self) -> dict[str, Any]:
+        """Return the subset of :class:`MmapConfig` fields this row
+        overrides. Empty dict when the row uses defaults — callers
+        layer this onto a base ``MmapConfig`` via ``model_copy``.
+
+        Kept on the spec rather than in the materialiser so the rules
+        (which knobs are per-source vs deployment-wide) are visible
+        next to the field declarations.
+        """
+        overrides: dict[str, Any] = {}
+        if self.flush_threshold is not None:
+            overrides["flush_threshold"] = self.flush_threshold
+        if self.flush_token_budget is not None:
+            overrides["flush_token_budget"] = self.flush_token_budget
+        if self.pinned is not None:
+            overrides["pinned"] = self.pinned
+        return overrides
+
     def to_mmap_kwargs(
         self,
         *,

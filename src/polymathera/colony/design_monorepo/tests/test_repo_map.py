@@ -215,6 +215,53 @@ def test_invalid_ingest_to_value_is_rejected(tmp_path: Path) -> None:
         RepoMap.load(repo_root)
 
 
+def test_per_source_paging_overrides_round_trip(tmp_path: Path) -> None:
+    """``flush_threshold`` / ``flush_token_budget`` / ``pinned`` are
+    optional per-source overrides. ``to_mmap_config_overrides`` returns
+    only the fields the user actually set so the materialiser can
+    layer them onto a base ``MmapConfig`` without clobbering defaults
+    on rows that don't override.
+    """
+
+    none_set = SourceSpec(name="bare", type="git_repo")
+    assert none_set.to_mmap_config_overrides() == {}
+
+    partial = SourceSpec(
+        name="code", type="git_repo", flush_threshold=8,
+    )
+    assert partial.to_mmap_config_overrides() == {"flush_threshold": 8}
+
+    full = SourceSpec(
+        name="lit", type="literature",
+        flush_threshold=2, flush_token_budget=512, pinned=True,
+    )
+    assert full.to_mmap_config_overrides() == {
+        "flush_threshold": 2,
+        "flush_token_budget": 512,
+        "pinned": True,
+    }
+
+
+def test_load_parses_per_source_paging_block(tmp_path: Path) -> None:
+    repo_root = tmp_path / "r"
+    (repo_root / REPO_MAP_DIR).mkdir(parents=True)
+    (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
+        "schema_version: 1\n"
+        "sources:\n"
+        "  - name: code\n"
+        "    type: git_repo\n"
+        "    flush_threshold: 50\n"
+        "    flush_token_budget: 8192\n"
+        "    pinned: true\n",
+        encoding="utf-8",
+    )
+    rm = RepoMap.load(repo_root)
+    spec = rm.sources[0]
+    assert spec.flush_threshold == 50
+    assert spec.flush_token_budget == 8192
+    assert spec.pinned is True
+
+
 def test_knowledge_route_matches_glob_relative_to_repo_root() -> None:
     route = KnowledgeRoute(paths=["literature/curated/**/*.pdf"])
     assert route.matches("literature/curated/2024/seminal.pdf")

@@ -247,16 +247,15 @@ export interface MapRepoRequest {
   branch?: string;
   commit?: string;
   repo_id?: string | null;
-  flush_threshold?: number;
-  flush_token_budget?: number;
-  pinned?: boolean;
+  /**
+   * Subset of source names from ``repo_map.yaml`` to map. ``undefined``
+   * (the default) maps every row. The Design Monorepo tab populates
+   * this from per-row checkboxes.
+   *
+   */
+  enabled_sources?: string[];
 }
 
-export interface MapRepoResponse {
-  status: string;
-  scope_id: string;
-  message: string;
-}
 
 /* Job submission */
 

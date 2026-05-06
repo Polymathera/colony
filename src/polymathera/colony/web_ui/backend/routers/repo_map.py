@@ -127,20 +127,31 @@ async def _clone_or_retrieve(
 ) -> Path:
     """Idempotent clone via ``GitFileStorage``. Same call the
     page-source ``initialize`` issues, so this is a no-op when the
-    repo is already on the shared volume."""
+    repo is already on the shared volume.
+
+    Auth failures are surfaced as ``HTTPException(401, ...)`` so the
+    dashboard renders an actionable message (which env var to fix,
+    which scopes / SSO settings to check) instead of a generic
+    ``"Clone failed: RetryError[...]"``. Other failures propagate as
+    502 (handled by the route).
+    """
 
     from polymathera.colony.distributed import get_polymathera
     from polymathera.colony.distributed.ray_utils import serving
+    from polymathera.colony.distributed.stores.git import GitAuthError
 
     polymathera = get_polymathera()
     storage = await polymathera.get_storage()
     colony_id = serving.get_colony_id()
-    repo_path = await storage.git_storage.clone_or_retrieve_repository(
-        origin_url=origin_url,
-        branch=branch,
-        commit=commit,
-        vmr_id=colony_id,
-    )
+    try:
+        repo_path = await storage.git_storage.clone_or_retrieve_repository(
+            origin_url=origin_url,
+            branch=branch,
+            commit=commit,
+            vmr_id=colony_id,
+        )
+    except GitAuthError as e:
+        raise HTTPException(status_code=401, detail=str(e)) from e
     return Path(str(repo_path))
 
 
@@ -209,6 +220,10 @@ async def get_repo_map(
         repo_path = await _clone_or_retrieve(
             origin_url=origin_url, branch=branch, commit=commit,
         )
+    except HTTPException:
+        # ``_clone_or_retrieve`` already converts auth failures
+        # into 401s; re-raise those untouched.
+        raise
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Clone failed: {e}") from e
 
@@ -253,6 +268,10 @@ async def get_repo_tree(
         repo_path = await _clone_or_retrieve(
             origin_url=origin_url, branch=branch, commit=commit,
         )
+    except HTTPException:
+        # ``_clone_or_retrieve`` already converts auth failures
+        # into 401s; re-raise those untouched.
+        raise
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Clone failed: {e}") from e
 

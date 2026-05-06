@@ -8,9 +8,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { FolderUp } from "lucide-react";
 import { useVCMStats, useVCMPages, useLoadedPageEntries, useMappingOperations } from "@/api/hooks/useVCM";
-import { MapContentDialog } from "../dialogs/MapContentDialog";
 import { MetricCard } from "../shared/MetricCard";
 import { DataTable } from "../shared/DataTable";
 import { Badge } from "../shared/Badge";
@@ -89,7 +87,6 @@ export function VCMTab() {
   const loadedEntries = useLoadedPageEntries();
   const mappingOps = useMappingOperations();
   const [viewMode, setViewMode] = useState<"table" | "grid">("grid");
-  const [showMapDialog, setShowMapDialog] = useState(false);
   const [colorMode, setColorMode] = useState<ColorMode>("loaded");
   const [hoveredPage, setHoveredPage] = useState<PageSummary | null>(null);
 
@@ -127,17 +124,14 @@ export function VCMTab() {
 
   return (
     <div className="space-y-6">
-      {/* Map Content action */}
-      <div className="flex items-center justify-between">
-        <div />
-        <button
-          onClick={() => setShowMapDialog(true)}
-          className="rounded bg-cyan-500/10 px-4 py-1.5 text-xs font-medium text-cyan-400 hover:bg-cyan-500/20 transition-colors"
-        >
-          <FolderUp size={14} className="inline -mt-0.5" /> Map Content
-        </button>
-      </div>
-      <MapContentDialog open={showMapDialog} onClose={() => setShowMapDialog(false)} />
+      {/*
+        Mapping is initiated from the Design Monorepo tab now (per-source
+        checkboxes + Map to VCM button on the parsed ``repo_map.yaml``);
+        this tab only displays mapping progress and the resulting page
+        catalog. Keeping the trigger and the catalog on the same screen
+        was confusing — the trigger asked for free-form URLs that bore
+        no relation to the colony's persisted design-monorepo URL.
+      */}
 
       {/* Active mapping operations */}
       {activeOps.length > 0 && (

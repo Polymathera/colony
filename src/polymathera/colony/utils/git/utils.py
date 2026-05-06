@@ -1,42 +1,10 @@
-import os
 import shutil
 import subprocess
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
 import logging
 import git
 
 logger = logging.getLogger(__name__)
-
-
-def inject_github_token(url: str) -> str:
-    """Embed ``$GITHUB_TOKEN`` into a ``https://github.com/...`` URL so
-    ``git clone`` can authenticate non-interactively.
-
-    Operator-managed: the token is read from the environment, not from
-    user input. Returns the URL unchanged when:
-
-    - the env var is unset / empty,
-    - the URL already carries credentials, or
-    - the URL is not a ``github.com`` https URL (ssh remotes, GitLab,
-      file://, etc. — git's standard machinery handles those itself).
-
-    The rewritten URL is never logged: it carries the secret. Callers
-    that log the original URL still log the un-rewritten form, which
-    is what we want.
-    """
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        return url
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname != "github.com":
-        return url
-    if parsed.username or parsed.password:
-        return url
-    netloc = f"x-access-token:{token}@{parsed.hostname}"
-    if parsed.port:
-        netloc += f":{parsed.port}"
-    return urlunparse(parsed._replace(netloc=netloc))
 
 
 def is_git_installed():

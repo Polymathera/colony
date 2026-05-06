@@ -15,6 +15,9 @@ export interface RepoMapSource {
   static?: boolean | null;
   chunk_target_tokens?: number | null;
   chunk_overlap_tokens?: number | null;
+  flush_threshold?: number | null;
+  flush_token_budget?: number | null;
+  pinned?: boolean | null;
 }
 
 export interface RepoMapResponse {

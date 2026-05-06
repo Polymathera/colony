@@ -5,7 +5,6 @@ import type {
   PageSummary,
   VCMStats,
   MapRepoRequest,
-  MapRepoResponse,
 } from "../types";
 
 export function useVCMStats(options?: { enabled?: boolean }) {
@@ -73,8 +72,12 @@ export function useMappingOperations() {
 export function useMapRepo() {
   const qc = useQueryClient();
   return useMutation({
+    // ``/vcm/map`` returns ``MappingOpStatus`` (the same shape
+    // surfaced by ``/vcm/map/operations``) — the mapping itself runs
+    // in a background task; the HTTP response just acknowledges the
+    // submission and carries the ``op_id`` the UI uses to track it.
     mutationFn: (req: MapRepoRequest) =>
-      apiFetch<MapRepoResponse>("/vcm/map", {
+      apiFetch<MappingOpStatus>("/vcm/map", {
         method: "POST",
         body: JSON.stringify(req),
       }),

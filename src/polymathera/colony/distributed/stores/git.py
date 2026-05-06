@@ -22,6 +22,7 @@ except ImportError:
 from git import Repo  # Using GitPython
 from git.exc import GitError, GitCommandError
 from multipledispatch import dispatch
+from tenacity import retry_if_not_exception_type
 
 from ...utils import create_dynamic_asyncio_task, call_async
 from ...utils.retry import standard_retry
@@ -35,6 +36,52 @@ logger = logging.getLogger(__name__)
 
 
 _HASH_PREFIX_LENGTH: int = 8  # Length of the hash prefix for repo IDs and cache keys
+
+
+# ---------------------------------------------------------------------------
+# Auth-failure classification
+# ---------------------------------------------------------------------------
+
+
+class GitAuthError(GitError):
+    """Permanent git authentication failure — do NOT retry.
+
+    Raised when ``git clone`` returns exit code 128 with stderr
+    matching a known auth-failure marker (e.g., GitHub's
+    ``Invalid username or token``). Repeating the call cannot recover
+    — the operator needs to fix the credentials in
+    ``GITHUB_TOKEN`` / ``GITLAB_TOKEN``. The retry decorator on
+    :meth:`GitFileStorage.clone_or_retrieve_repository` is configured
+    to skip retries for this exception so we don't burn three
+    rate-limited auth attempts on a permanent failure.
+    """
+
+
+def _classify_git_clone_error(exc: GitCommandError) -> Exception:
+    """Return a :class:`GitAuthError` when ``exc`` is a permanent
+    auth failure, otherwise return ``exc`` unchanged. The caller
+    raises whatever this returns; the typed exception is what the
+    retry predicate keys off of.
+    """
+
+    stderr = (getattr(exc, "stderr", "") or "").lower()
+    auth_markers = (
+        "authentication failed",
+        "invalid username or token",
+        "could not read username",
+        "permission denied",
+        "incorrect username or password",
+    )
+    if any(m in stderr for m in auth_markers):
+        return GitAuthError(
+            "git authentication failed. Verify GITHUB_TOKEN / "
+            "GITLAB_TOKEN: (1) is set and not expired, (2) has the "
+            "right scopes (classic PAT: 'repo' for private repos; "
+            "fine-grained PAT: repository-level read access), and "
+            "(3) the org has authorised the token if SSO is enforced. "
+            f"Underlying git error: {(getattr(exc, 'stderr', '') or str(exc)).strip()}"
+        )
+    return exc
 
 def build_repo_cache_key(
     origin_url: str, operation: str | None = None, *args, **kwargs
@@ -773,7 +820,14 @@ class GitFileStorage:
             yield
 
     #@dispatch(str, str, str)
-    @standard_retry(logger)
+    @standard_retry(
+        logger,
+        # Auth errors are permanent — retrying just burns more
+        # rate-limited auth attempts and delays the user-visible
+        # error. Transient failures (network blips, lock contention)
+        # still hit the default 3-attempt exponential backoff.
+        retry=retry_if_not_exception_type(GitAuthError),
+    )
     async def clone_or_retrieve_repository(
         self, *, origin_url: str, branch: str, commit: str, vmr_id: str | UUID4 = "system"
     ) -> Path:
@@ -830,14 +884,19 @@ class GitFileStorage:
 
                         def _clone_repo():
                             # Full clone required to ensure all commits exist locally.
-                            from polymathera.colony.utils.git.utils import inject_github_token
-                            Repo.clone_from(
-                                inject_github_token(origin_url),
-                                str(source_path),
-                                branch=None,  # Use remote's default branch instead of assuming 'master'
-                                # depth=1, # shallow clone. TODO: When should we use this?
-                                # single_branch=True,
-                            )
+                            try:
+                                Repo.clone_from(
+                                    origin_url,
+                                    str(source_path),
+                                    branch=None,  # Use remote's default branch instead of assuming 'master'
+                                    # depth=1, # shallow clone. TODO: When should we use this?
+                                    # single_branch=True,
+                                )
+                            except GitCommandError as exc:
+                                # Reclassify permanent auth failures so the
+                                # outer retry decorator skips its 3-attempt
+                                # backoff for them.
+                                raise _classify_git_clone_error(exc) from exc
 
                         await call_async(_clone_repo)
                         tx.cloned_to_efs = True

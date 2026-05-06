@@ -52,9 +52,21 @@ async def materialize_repo_map(
     commit: str,
     base_scope_id: str,
     mmap_config: MmapConfig,
+    enabled_sources: set[str] | None = None,
 ) -> list[Any]:
     """Clone the design monorepo, load its repo map, and issue one
     ``mmap_application_scope`` call per source row.
+
+    ``mmap_config`` provides the deployment-wide defaults; each
+    source row may override individual fields (``flush_threshold``,
+    ``flush_token_budget``, ``pinned``) via
+    :meth:`SourceSpec.to_mmap_config_overrides`.
+
+    ``enabled_sources``, when not ``None``, restricts mapping to rows
+    whose ``name`` is in the set. The default (``None``) maps every
+    row — same behaviour as before. The dashboard "Design Monorepo"
+    tab uses this so the user can tick off rows before clicking
+    "Map to VCM".
 
     Returns the list of mmap results in source order. Failures on a
     single source row are logged and skipped — the rest still
@@ -76,6 +88,8 @@ async def materialize_repo_map(
 
     results: list[Any] = []
     for spec, scope_id in zip(repo_map.sources, scope_ids, strict=True):
+        if enabled_sources is not None and spec.name not in enabled_sources:
+            continue
         try:
             kwargs = spec.to_mmap_kwargs(
                 repo_root=repo_root,
@@ -84,8 +98,12 @@ async def materialize_repo_map(
                 fallback_branch=branch,
                 fallback_commit=commit,
             )
+            overrides = spec.to_mmap_config_overrides()
+            effective_config = (
+                mmap_config.model_copy(update=overrides) if overrides else mmap_config
+            )
             result = await vcm_handle.mmap_application_scope(
-                config=mmap_config, **kwargs,
+                config=effective_config, **kwargs,
             )
             results.append(result)
         except Exception:  # noqa: BLE001

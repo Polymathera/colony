@@ -27,15 +27,28 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 class MapRepoRequest(BaseModel):
-    """Map a codebase to VCM for exploration and analysis."""
+    """Map a codebase to VCM for exploration and analysis.
+
+    Paging knobs (``flush_threshold``, ``flush_token_budget``,
+    ``pinned``) live per-source in ``.colony/repo_map.yaml`` —
+    declared next to the source they apply to, version-controlled
+    with the rest of the design monorepo. They are no longer part of
+    this request body. Sources that do not override pick up the
+    materialiser's :class:`MmapConfig` defaults.
+    """
 
     origin_url: str = Field(description="Git repo URL (https:// or file://)")
     branch: str = Field(default="main", description="Git branch")
     commit: str = Field(default="HEAD", description="Git commit SHA")
     repo_id: str | None = Field(default=None, description="Scope ID (auto-generated if None)")
-    flush_threshold: int = Field(default=20, description="Page flush threshold")
-    flush_token_budget: int = Field(default=4096, description="Token budget per page flush")
-    pinned: bool = Field(default=False, description="Pin pages in cache")
+    enabled_sources: list[str] | None = Field(
+        default=None,
+        description=(
+            "Subset of source names from ``repo_map.yaml`` to map. "
+            "``None`` (default) maps every row. The Design Monorepo "
+            "tab populates this from per-row checkboxes."
+        ),
+    )
 
 
 class MapRepoResponse(BaseModel):
@@ -304,11 +317,9 @@ async def _run_mapping(
 
             vcm = await colony.get_vcm()
 
-            mmap_config = MmapConfig(
-                flush_threshold=request.flush_threshold,
-                flush_token_budget=request.flush_token_budget,
-                pinned=request.pinned,
-            )
+            # Deployment-wide defaults; per-source overrides come from
+            # ``repo_map.yaml`` and are applied inside the materialiser.
+            mmap_config = MmapConfig()
 
             scope_id = request.repo_id or ScopeUtils.get_colony_level_scope()
 
@@ -316,6 +327,10 @@ async def _run_mapping(
             # otherwise the materialiser falls back to a single
             # default ``git_repo`` source and the call is equivalent to
             # the previous one-shot ``mmap_application_scope``.
+            enabled = (
+                set(request.enabled_sources)
+                if request.enabled_sources is not None else None
+            )
             results = await materialize_repo_map(
                 vcm_handle=vcm,
                 origin_url=request.origin_url,
@@ -323,6 +338,7 @@ async def _run_mapping(
                 commit=request.commit,
                 base_scope_id=scope_id,
                 mmap_config=mmap_config,
+                enabled_sources=enabled,
             )
             if not results:
                 op["status"] = "error"

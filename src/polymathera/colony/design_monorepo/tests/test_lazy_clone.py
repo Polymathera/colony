@@ -109,42 +109,49 @@ def test_no_url_means_no_clone_and_open_raises(tmp_path: Path) -> None:
     assert not (working_dir / ".git").exists()
 
 
-def test_inject_github_token_only_rewrites_github_https_urls(
-    monkeypatch,
-) -> None:
-    """The helper rewrites bare ``https://github.com/...`` URLs when
-    ``GITHUB_TOKEN`` is set, and leaves everything else alone."""
+def test_classify_git_clone_error_recognises_auth_failures() -> None:
+    """``_classify_git_clone_error`` returns a :class:`GitAuthError`
+    for any stderr that matches a known auth-failure marker, and
+    leaves other ``GitCommandError`` instances untouched. The retry
+    decorator on ``clone_or_retrieve_repository`` keys off this
+    type to skip retries — pinning the markers here prevents a
+    silent regression that would resurrect the 3-attempt retry storm
+    on permanent auth failures.
+    """
 
-    from polymathera.colony.utils.git.utils import inject_github_token
+    from git.exc import GitCommandError
 
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
-
-    rewritten = inject_github_token("https://github.com/o/r.git")
-    assert rewritten == "https://x-access-token:ghp_secret@github.com/o/r.git"
-
-    # ssh, file://, gitlab, and URLs that already carry credentials
-    # must pass through untouched — git's standard auth machinery
-    # handles those.
-    assert (
-        inject_github_token("git@github.com:o/r.git")
-        == "git@github.com:o/r.git"
-    )
-    assert inject_github_token("file:///tmp/r") == "file:///tmp/r"
-    assert (
-        inject_github_token("https://gitlab.com/o/r.git")
-        == "https://gitlab.com/o/r.git"
-    )
-    assert (
-        inject_github_token("https://u:p@github.com/o/r.git")
-        == "https://u:p@github.com/o/r.git"
+    from polymathera.colony.distributed.stores.git import (
+        GitAuthError,
+        _classify_git_clone_error,
     )
 
-    # Without a token, every input is a no-op.
-    monkeypatch.delenv("GITHUB_TOKEN")
-    assert (
-        inject_github_token("https://github.com/o/r.git")
-        == "https://github.com/o/r.git"
+    def _err(stderr: str) -> GitCommandError:
+        e = GitCommandError(["git", "clone"], 128)
+        e.stderr = stderr
+        return e
+
+    auth_messages = (
+        "remote: Invalid username or token. Password authentication is "
+        "not supported for Git operations.\nfatal: Authentication failed",
+        "fatal: could not read Username for 'https://github.com'",
+        "remote: Permission denied to user@github.com",
+        "fatal: Authentication failed for 'https://gitlab.com/x.git'",
     )
+    for msg in auth_messages:
+        result = _classify_git_clone_error(_err(msg))
+        assert isinstance(result, GitAuthError), msg
+        # The actionable hint is in the message body — the user needs
+        # to know which env var to fix and what scopes to check.
+        text = str(result)
+        assert "GITHUB_TOKEN" in text
+        assert "scope" in text.lower()
+
+    # Non-auth failures (network, missing repo, etc.) must NOT be
+    # reclassified — those are still worth retrying.
+    transient = _err("fatal: unable to access 'https://github.com/x/y.git/': "
+                     "Could not resolve host: github.com")
+    assert _classify_git_clone_error(transient) is transient
 
 
 def test_pre_existing_clone_is_opened_not_recloned(tmp_path: Path) -> None:

@@ -14,7 +14,7 @@
  *   4. Click "New Session" — the SessionAgent reads the URL from
  *      ``AgentMetadata.parameters[design_monorepo_url]``.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Pencil, Plus } from "lucide-react";
 import {
   useColonies,
@@ -53,7 +53,17 @@ export function ColoniesSection({
         </button>
       </div>
       {creating && (
-        <NewColonyForm onClose={() => setCreating(false)} />
+        <NewColonyForm
+          onClose={() => setCreating(false)}
+          onCreated={(colonyId) => {
+            // A new colony only matters if it becomes the active one —
+            // otherwise the next session will still boot under whatever
+            // colony was active before, and the Design Monorepo tab
+            // ends up reading a different colony's row than the one
+            // just edited.
+            onSelectColony(colonyId);
+          }}
+        />
       )}
       <div className="rounded-lg border border-border bg-card divide-y divide-border">
         {(colonies.data ?? []).map((c) => (
@@ -62,6 +72,7 @@ export function ColoniesSection({
             colony={c}
             isActive={c.colony_id === activeColonyId}
             onSelect={() => onSelectColony(c.colony_id)}
+            onSelectColony={onSelectColony}
           />
         ))}
         {colonies.data && colonies.data.length === 0 && (
@@ -75,7 +86,12 @@ export function ColoniesSection({
 }
 
 
-function NewColonyForm({ onClose }: { onClose: () => void }) {
+function NewColonyForm({
+  onClose, onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (colonyId: string) => void;
+}) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const create = useCreateColony();
@@ -84,10 +100,11 @@ function NewColonyForm({ onClose }: { onClose: () => void }) {
     e.preventDefault();
     if (!name.trim()) return;
     try {
-      await create.mutateAsync({
+      const created = await create.mutateAsync({
         name: name.trim(),
         description: description.trim(),
       });
+      onCreated(created.colony_id);
       onClose();
     } catch {
       // useCreateColony exposes the error; rendering below.
@@ -139,11 +156,12 @@ function NewColonyForm({ onClose }: { onClose: () => void }) {
 
 
 function ColonyRow({
-  colony, isActive, onSelect,
+  colony, isActive, onSelect, onSelectColony,
 }: {
   colony: ColonyInfo;
   isActive: boolean;
   onSelect: () => void;
+  onSelectColony: (colonyId: string) => void;
 }) {
   return (
     <div
@@ -183,7 +201,10 @@ function ColonyRow({
           keep the order stable so users see the same layout per
           colony. */}
       <div className="mt-2 flex flex-col gap-1">
-        <DesignMonorepoField colonyId={colony.colony_id} />
+        <DesignMonorepoField
+          colonyId={colony.colony_id}
+          onSelectColony={onSelectColony}
+        />
         {/* TODO(per-colony-field-2): future slot. */}
         {/* TODO(per-colony-field-3): future slot. */}
       </div>
@@ -192,14 +213,30 @@ function ColonyRow({
 }
 
 
-function DesignMonorepoField({ colonyId }: { colonyId: string }) {
+function DesignMonorepoField({
+  colonyId, onSelectColony,
+}: {
+  colonyId: string;
+  onSelectColony: (colonyId: string) => void;
+}) {
   const cfg = useColonyDesignMonorepo(colonyId);
   const set = useSetColonyDesignMonorepo(colonyId);
   const [editing, setEditing] = useState(false);
   const [draftUrl, setDraftUrl] = useState("");
   const [draftBranch, setDraftBranch] = useState("main");
+  // Transient confirmation flag — the save lands in Postgres
+  // immediately (independent of cluster-ready state), but the form
+  // collapses back to the read view on success which makes the save
+  // easy to miss. A short-lived "Saved" indicator answers "did this
+  // actually persist?" without needing a refresh.
+  const [savedAt, setSavedAt] = useState<number | null>(null);
 
   const startEdit = () => {
+    // Make this colony the active one before editing — otherwise the
+    // user can save a URL onto colony A while colony B is active, and
+    // the next session (which boots under the active colony) reads B's
+    // empty row in the Design Monorepo tab.
+    onSelectColony(colonyId);
     setDraftUrl(cfg.data?.origin_url ?? "");
     setDraftBranch(cfg.data?.branch ?? "main");
     setEditing(true);
@@ -215,10 +252,17 @@ function DesignMonorepoField({ colonyId }: { colonyId: string }) {
       });
       cfg.refetch();
       setEditing(false);
+      setSavedAt(Date.now());
     } catch {
       // useSetColonyDesignMonorepo exposes the error; rendered below.
     }
   };
+
+  useEffect(() => {
+    if (savedAt === null) return;
+    const t = setTimeout(() => setSavedAt(null), 2500);
+    return () => clearTimeout(t);
+  }, [savedAt]);
 
   if (editing) {
     return (
@@ -283,6 +327,9 @@ function DesignMonorepoField({ colonyId }: { colonyId: string }) {
       >
         <Pencil size={11} />
       </button>
+      {savedAt !== null && (
+        <span className="text-[10px] text-emerald-400">Saved.</span>
+      )}
     </div>
   );
 }

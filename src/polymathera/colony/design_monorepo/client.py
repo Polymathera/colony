@@ -199,6 +199,7 @@ class DesignMonorepoClient:
         if single_branch:
             kwargs["single_branch"] = True
             kwargs["branch"] = manifest.default_branch
+        from ..distributed.stores.git import _classify_git_clone_error, GitAuthError
         try:
             repo = Repo.clone_from(
                 inject_github_token(manifest.design_repo_url),
@@ -206,6 +207,12 @@ class DesignMonorepoClient:
                 **kwargs,
             )
         except GitCommandError as exc:
+            classified = _classify_git_clone_error(exc)
+            # Auth failures propagate untouched so callers higher up
+            # the stack (e.g. the dashboard router) can map them to
+            # an actionable HTTP response instead of a generic 5xx.
+            if isinstance(classified, GitAuthError):
+                raise classified from exc
             raise DesignMonorepoError(
                 f"Failed to clone {manifest.design_repo_url} into "
                 f"{working_dir}: {exc}",
