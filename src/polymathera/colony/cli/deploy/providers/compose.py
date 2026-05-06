@@ -35,9 +35,14 @@ class DockerComposeProvider(DeploymentProvider):
     def _compose_cmd(self, *args: str) -> list[str]:
         """Build a docker compose command with the correct file path.
 
-        If a .env file exists (next to .env.template), passes it via
-        --env-file so Docker Compose can substitute API keys into the
-        compose YAML — regardless of whether the user exported them.
+        Always passes ``--env-file`` when ``deploy/.env`` is present so
+        Docker Compose reads the file regardless of the user's CWD.
+        Note: ``--env-file`` only affects compose's variable substitution
+        and does NOT override shell-exported variables of the same name
+        (compose's documented precedence puts shell env above
+        ``--env-file``). The subprocess env built by
+        :meth:`_compose_subprocess_env` is what makes ``.env``
+        authoritative — see that method's docstring.
         """
         cmd = ["docker", "compose", "-f", str(_COMPOSE_FILE)]
         if _ENV_FILE.is_file():
@@ -45,18 +50,54 @@ class DockerComposeProvider(DeploymentProvider):
         cmd.extend(args)
         return cmd
 
-    async def _exec(self, *args: str, capture: bool = True) -> tuple[int, str, str]:
-        """Run a subprocess and return (returncode, stdout, stderr)."""
+    def _compose_subprocess_env(self) -> dict[str, str]:
+        """Build the subprocess environment for ``docker compose`` calls.
+
+        Compose substitutes ``${VAR}`` in the YAML from the env of the
+        process that runs it. Its documented precedence is:
+
+            shell env  >  --env-file  >  compose ``environment:`` defaults
+
+        That means a stale ``GITHUB_TOKEN`` exported in the user's shell
+        silently shadows the value in ``deploy/.env`` — the trap that
+        produced "Invalid username or token" failures from valid token
+        material on disk.
+
+        We make ``.env`` authoritative by overlaying its values on top
+        of ``os.environ`` *before* spawning compose. Compose still
+        substitutes from "shell env", but the shell env it sees is the
+        one we hand it, with ``.env`` already applied. Only keys
+        explicitly listed in :attr:`DeployConfig.api_key_env_vars`
+        are overridden — host-level overrides for unrelated variables
+        (``HOME``, ``PATH``, ``DOCKER_HOST``, …) flow through
+        unchanged.
+        """
+        env = os.environ.copy()
+        env.update(load_dotenv(self._config))
+        return env
+
+    async def _exec(
+        self, *args: str, capture: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> tuple[int, str, str]:
+        """Run a subprocess and return (returncode, stdout, stderr).
+
+        ``env`` overrides the inherited environment for the spawned
+        process. Compose-invoking callers pass
+        :meth:`_compose_subprocess_env`'s result so the ``.env`` file
+        wins over shell-exported variables.
+        """
         if capture:
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
             stdout, stderr = await proc.communicate()
             return proc.returncode, stdout.decode(), stderr.decode()
         else:
-            proc = await asyncio.create_subprocess_exec(*args)
+            proc = await asyncio.create_subprocess_exec(*args, env=env)
             await proc.wait()
             return proc.returncode, "", ""
 
@@ -78,6 +119,7 @@ class DockerComposeProvider(DeploymentProvider):
             # Stream build output to terminal so user sees download/compile progress
             rc, _, stderr = await self._exec(
                 *self._compose_cmd("build"), capture=False,
+                env=self._compose_subprocess_env(),
             )
             if rc != 0:
                 raise RuntimeError(f"Docker Compose build failed:\n{stderr}")
@@ -89,6 +131,7 @@ class DockerComposeProvider(DeploymentProvider):
                 "--scale", f"ray-worker={workers}",
             ),
             capture=True,
+            env=self._compose_subprocess_env(),
         )
         if rc != 0:
             raise RuntimeError(f"Docker Compose up failed:\n{stderr}")
@@ -159,6 +202,7 @@ class DockerComposeProvider(DeploymentProvider):
         """Stop and remove all containers and volumes."""
         rc, _, stderr = await self._exec(
             *self._compose_cmd("down", "--volumes", "--remove-orphans"),
+            env=self._compose_subprocess_env(),
         )
         if rc != 0:
             raise RuntimeError(f"Docker Compose down failed:\n{stderr}")
@@ -168,6 +212,7 @@ class DockerComposeProvider(DeploymentProvider):
         """Get status of all services."""
         rc, stdout, _ = await self._exec(
             *self._compose_cmd("ps", "--format", "json"),
+            env=self._compose_subprocess_env(),
         )
         if rc != 0:
             return []

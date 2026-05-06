@@ -64,6 +64,23 @@ RUN apt-get update -yq && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Credential helpers for HTTPS Git operations against github.com /
+# gitlab.com. git invokes the helper when it needs auth and reads
+# ``username=oauth2`` plus the token from its stdout — the same scheme
+# ``gh auth setup-git`` configures on a developer's laptop, and the only
+# scheme that works for every PAT type GitHub issues today (classic,
+# fine-grained, App installation). ``$GITHUB_TOKEN`` / ``$GITLAB_TOKEN``
+# expand from the container environment at git-invocation time, so the
+# image ships only the helper's literal text — never the secret. Written
+# to ``/etc/gitconfig`` (``--system``) so it covers every user in the
+# container (root, ``RAY_CONTAINER_USER``, etc.). An unset env var
+# yields git's standard "Invalid username or token" failure, which the
+# auth-error classifier surfaces as a 401 in the dashboard.
+RUN git config --system credential.https://github.com.helper \
+        '!f() { echo "username=oauth2"; echo "password=$GITHUB_TOKEN"; }; f' \
+ && git config --system credential.https://gitlab.com.helper \
+        '!f() { echo "username=oauth2"; echo "password=$GITLAB_TOKEN"; }; f'
+
 # Node.js (for building the dashboard frontend)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \

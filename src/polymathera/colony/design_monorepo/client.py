@@ -186,7 +186,6 @@ class DesignMonorepoClient:
         """
 
         from git import GitCommandError, Repo
-        from ..utils.git.utils import inject_github_token
 
         working_dir = Path(working_dir)
         if (working_dir / ".git").exists():
@@ -201,8 +200,11 @@ class DesignMonorepoClient:
             kwargs["branch"] = manifest.default_branch
         from ..distributed.stores.git import _classify_git_clone_error, GitAuthError
         try:
+            # Authentication flows through the system-level git
+            # credential helper baked into the container image (see
+            # ``Dockerfile.local``); the URL stays bare.
             repo = Repo.clone_from(
-                inject_github_token(manifest.design_repo_url),
+                manifest.design_repo_url,
                 str(working_dir),
                 **kwargs,
             )

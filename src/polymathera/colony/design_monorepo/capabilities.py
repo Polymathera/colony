@@ -175,10 +175,21 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
         if not url:
             return
         from git import Repo  # local import — gitpython is in the design_monorepo extra
-        from ..utils.git.utils import inject_github_token
+        from git.exc import GitCommandError
 
+        from ..distributed.stores.git import _classify_git_clone_error
+
+        # Authentication for github.com / gitlab.com flows through the
+        # system-level credential helper baked into the container image
+        # (see ``Dockerfile.local``). The helper reads
+        # ``$GITHUB_TOKEN`` / ``$GITLAB_TOKEN`` from the process
+        # environment and feeds them to git on demand. Pass the URL
+        # bare; do NOT embed credentials.
         self._working_dir.mkdir(parents=True, exist_ok=True)
-        Repo.clone_from(inject_github_token(url), str(self._working_dir))
+        try:
+            Repo.clone_from(url, str(self._working_dir))
+        except GitCommandError as exc:
+            raise _classify_git_clone_error(exc) from exc
 
     async def _client_async(self) -> DesignMonorepoClient:
         return await asyncio.to_thread(self._client_sync)

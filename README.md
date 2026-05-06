@@ -139,6 +139,8 @@ Colony runs as an **always-on system**. After `colony-env up`, the cluster deplo
 
 All Colony dependencies run inside Docker -- no local GPU drivers, Ray, or Redis installation required.
 
+**Credentials.** Put `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN` (PAT with `repo` scope, used by the in-container git credential helper for private-repo clones), `GITLAB_TOKEN`, etc. in `polymathera/colony/cli/deploy/.env`. `colony-env up` reads that file *and* overlays its values onto the subprocess environment before spawning Docker Compose, so a stale token exported in the launching shell can no longer shadow a fresh one in `.env`. See [colony-env — Environment Variables](docs/guides/colony-env.md#environment-variables).
+
 **Services started by `colony-env up`:**
 
 | Service | Port | Description |

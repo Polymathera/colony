@@ -87,13 +87,25 @@ colony-env dashboard
 
 ## Environment Variables
 
-Pass environment variables to the cluster via a `.env` file or shell exports. Common variables:
+Pass environment variables to the cluster via the `.env` file (preferred) or shell exports. Common variables:
 
 | Variable | Description |
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | API key for Anthropic Claude |
 | `OPENAI_API_KEY` | API key for OpenAI |
+| `GITHUB_TOKEN` | PAT used by the in-container git credential helper to clone private GitHub repos (Design Monorepo tab, the materialiser, agent-side per-agent clones). Needs `repo` scope for private repos. |
+| `GITLAB_TOKEN` | Same role as `GITHUB_TOKEN`, for `gitlab.com`. |
 | `COLONY_DASHBOARD_UI_PORT` | Dashboard port (default: 8080) |
+
+The `.env` file lives at `polymathera/colony/cli/deploy/.env` (next to `.env.template`). `colony-env up` always reads this file via `docker compose --env-file=…` and additionally **overlays its values onto the subprocess environment before spawning compose** — so a stale `GITHUB_TOKEN` exported in the launching shell can no longer shadow a fresh one in `.env`. Only keys listed in `DeployConfig.api_key_env_vars` are overlaid; unrelated host vars (`PATH`, `HOME`, `DOCKER_HOST`, …) flow through unchanged.
+
+Concretely, the precedence inside compose's `${VAR}` substitution becomes:
+
+```
+.env file  >  shell env  >  compose ``environment:`` defaults
+```
+
+This inverts compose's documented default (`shell > .env`) for the API-key variables, on the explicit-is-better-than-implicit principle: the file checked into the project directory is what determines what the cluster authenticates with.
 
 ## Architecture
 
