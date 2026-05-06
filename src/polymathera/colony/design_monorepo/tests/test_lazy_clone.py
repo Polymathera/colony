@@ -154,6 +154,167 @@ def test_classify_git_clone_error_recognises_auth_failures() -> None:
     assert _classify_git_clone_error(transient) is transient
 
 
+def _bootstrap_empty_remote(remote_root: Path) -> Path:
+    """Empty git remote — no manifest, no repo_map. The exact shape an
+    operator hits on a fresh empty GitHub repo before
+    ``initialize_repo_map`` runs."""
+
+    repo = git.Repo.init(remote_root, initial_branch="main")
+    repo.config_writer().set_value("user", "email", "t@t").release()
+    repo.config_writer().set_value("user", "name", "t").release()
+    # An initial empty commit so the remote has a HEAD to clone.
+    repo.index.commit("initial")
+    return remote_root
+
+
+def _bootstrap_empty_bare_remote(remote_root: Path) -> Path:
+    """Bare empty git remote that accepts pushes. Used for the push
+    path of ``initialize_repo_map``: a non-bare remote rejects pushes
+    to its currently-checked-out branch, so we use a bare repo to
+    simulate the GitHub side of the conversation faithfully."""
+
+    git.Repo.init(remote_root, initial_branch="main", bare=True)
+    return remote_root
+
+
+@pytest.mark.asyncio
+async def test_initialize_repo_map_triggers_lazy_clone_on_empty_workdir(
+    tmp_path: Path,
+) -> None:
+    """The user-facing reproducer: a fresh agent's working_dir exists
+    (``resolve_clone_path`` made it) but is empty — no ``.git``,
+    because ``_client_sync`` (which would have lazy-cloned) is
+    bypassed by ``initialize_repo_map``. The action MUST trigger the
+    lazy clone itself before checking for ``.git``; otherwise it
+    fails with "not a git repository — clone the design monorepo
+    first" exactly the way the user reported.
+
+    End state: ``.git`` exists, ``.colony/manifest.json`` exists,
+    ``.colony/repo_map.yaml`` exists, all committed.
+    """
+
+    from polymathera.colony.design_monorepo.manifest import (
+        MANIFEST_RELATIVE_PATH,
+    )
+    from polymathera.colony.design_monorepo.repo_map import (
+        REPO_MAP_DIR, REPO_MAP_FILENAME,
+    )
+
+    remote_root = _bootstrap_empty_remote(tmp_path / "remote")
+    working_dir = tmp_path / "agent_clone"
+    # Agent-init resolves the path so the directory exists but is
+    # empty when the action fires.
+    working_dir.mkdir(parents=True, exist_ok=True)
+    assert not (working_dir / ".git").exists()
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        cap = _make_writer_capability(
+            agent_id="agent-A",
+            working_dir=working_dir,
+            design_monorepo_url=f"file://{remote_root}",
+        )
+        # ``push=False`` because the helper above creates a non-bare
+        # remote — fine for clone-from but not for push-to. Push
+        # behaviour is exercised in
+        # ``test_initialize_repo_map_pushes_to_origin``.
+        result = await cap.initialize_repo_map(push=False)
+
+    assert (working_dir / ".git").is_dir()
+    assert (working_dir / MANIFEST_RELATIVE_PATH).is_file()
+    assert (working_dir / REPO_MAP_DIR / REPO_MAP_FILENAME).is_file()
+    assert result["status"] == "initialized"
+    assert set(result["files_created"]) == {
+        MANIFEST_RELATIVE_PATH,
+        f"{REPO_MAP_DIR}/{REPO_MAP_FILENAME}",
+    }
+
+
+@pytest.mark.asyncio
+async def test_initialize_repo_map_pushes_to_origin(
+    tmp_path: Path,
+) -> None:
+    """The user-reported regression: ``initialize_repo_map`` succeeded
+    locally but no changes appeared on GitHub because the action
+    never pushed.
+
+    With ``push=True`` (the default), the action must push the
+    bootstrap commit so the upstream remote — and any other clone of
+    it (the dashboard's read-only inspection cache, sibling agents)
+    — sees the new files. We simulate the GitHub side with a bare
+    file:// remote because non-bare remotes reject pushes to their
+    currently-checked-out branch.
+    """
+
+    from polymathera.colony.design_monorepo.manifest import (
+        MANIFEST_RELATIVE_PATH,
+    )
+    from polymathera.colony.design_monorepo.repo_map import (
+        REPO_MAP_DIR, REPO_MAP_FILENAME,
+    )
+
+    remote_root = _bootstrap_empty_bare_remote(tmp_path / "remote.git")
+    working_dir = tmp_path / "agent_clone"
+    working_dir.mkdir(parents=True, exist_ok=True)
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        cap = _make_writer_capability(
+            agent_id="agent-A",
+            working_dir=working_dir,
+            design_monorepo_url=f"file://{remote_root}",
+        )
+        result = await cap.initialize_repo_map()
+
+    assert result["status"] == "initialized"
+    assert result["pushed"] is True
+    assert result["push_error"] is None
+
+    # The remote now actually has the commit. Cloning it fresh into a
+    # third location must yield the manifest and repo_map files —
+    # this is what the dashboard's cache would see on its next
+    # fetch from origin.
+    inspector_dir = tmp_path / "inspector"
+    git.Repo.clone_from(f"file://{remote_root}", str(inspector_dir))
+    assert (inspector_dir / MANIFEST_RELATIVE_PATH).is_file()
+    assert (inspector_dir / REPO_MAP_DIR / REPO_MAP_FILENAME).is_file()
+
+
+@pytest.mark.asyncio
+async def test_initialize_repo_map_errors_clearly_when_no_url_and_no_repo(
+    tmp_path: Path,
+) -> None:
+    """Empty working_dir + no URL on agent metadata: the action can't
+    do anything without manual ``git init``. It must raise an
+    actionable :class:`DesignMonorepoError`, not the generic gitpython
+    "not a git repository" — the message names the two ways forward
+    so the planner can surface them to the user.
+    """
+
+    from polymathera.colony.design_monorepo.client import DesignMonorepoError
+
+    working_dir = tmp_path / "agent_clone"
+    working_dir.mkdir(parents=True, exist_ok=True)
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        cap = _make_writer_capability(
+            agent_id="agent-A",
+            working_dir=working_dir,
+            design_monorepo_url=None,
+        )
+        with pytest.raises(DesignMonorepoError) as ei:
+            await cap.initialize_repo_map()
+
+    msg = str(ei.value)
+    assert "not a git repository" in msg
+    assert "design_monorepo_url" in msg
+    assert "git init" in msg
+
+
 def test_pre_existing_clone_is_opened_not_recloned(tmp_path: Path) -> None:
     """When ``working_dir`` already contains a git repo, the capability
     must open it directly — the lazy-clone branch must not run."""

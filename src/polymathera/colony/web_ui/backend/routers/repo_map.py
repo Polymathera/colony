@@ -26,6 +26,7 @@ decisions that belong with the operator, not the framework.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -123,11 +124,22 @@ _TREE_MAX_DEPTH = 8
 
 
 async def _clone_or_retrieve(
-    *, origin_url: str, branch: str, commit: str,
+    *, origin_url: str, branch: str, commit: str, refresh: bool = True,
 ) -> Path:
-    """Idempotent clone via ``GitFileStorage``. Same call the
-    page-source ``initialize`` issues, so this is a no-op when the
-    repo is already on the shared volume.
+    """Idempotent clone via ``GitFileStorage``, with an optional
+    fetch-and-reset against ``origin`` so the dashboard's read-only
+    inspection always reflects upstream state.
+
+    The underlying :meth:`GitFileStorage.clone_or_retrieve_repository`
+    is intentionally idempotent — once cloned, it returns the cached
+    path on subsequent calls without fetching. That's correct for VCM
+    mapping (which wants a stable snapshot for a specific commit) but
+    *wrong* for the Design Monorepo tab's "Load" button: an agent
+    that just pushed ``initialize_repo_map`` to origin would otherwise
+    not appear in the dashboard until something else evicted the
+    cache. We do the fetch in this dashboard-specific helper rather
+    than in the shared storage layer so VCM mapping behaviour stays
+    untouched.
 
     Auth failures are surfaced as ``HTTPException(401, ...)`` so the
     dashboard renders an actionable message (which env var to fix,
@@ -152,7 +164,58 @@ async def _clone_or_retrieve(
         )
     except GitAuthError as e:
         raise HTTPException(status_code=401, detail=str(e)) from e
-    return Path(str(repo_path))
+    repo_path = Path(str(repo_path))
+
+    if refresh:
+        await asyncio.to_thread(
+            _refresh_cache_clone, repo_path, branch=branch, commit=commit,
+        )
+    return repo_path
+
+
+def _refresh_cache_clone(
+    repo_path: Path, *, branch: str, commit: str,
+) -> None:
+    """Pull ``origin``'s state into ``repo_path`` so a re-Load reflects
+    upstream changes (e.g. an agent's just-pushed
+    ``initialize_repo_map`` commit).
+
+    Best-effort: a network blip or auth hiccup must not turn a Load
+    that would otherwise return cached state into a hard failure.
+    The fetch errors are logged at WARNING and the existing cached
+    state is returned. The cache is read-only from the dashboard's
+    perspective (only ``clone_or_retrieve_repository`` ever writes to
+    it on initial clone), so a hard ``reset --hard`` against
+    ``origin/<branch>`` is safe — there are no local edits to
+    preserve.
+
+    Pinned commit takes precedence over branch: if the caller asked
+    for a specific SHA we don't ``reset`` past it.
+    """
+
+    from git import Repo
+
+    try:
+        repo = Repo(str(repo_path))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("refresh: %s is not a git repo (%s); skipping fetch", repo_path, e)
+        return
+    try:
+        repo.remote("origin").fetch(prune=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("refresh: fetch from origin failed for %s (%s); using cached state", repo_path, e)
+        return
+    if commit and commit != "HEAD":
+        return  # caller pinned a specific revision; don't move HEAD
+    target_branch = branch or "HEAD"
+    try:
+        repo.git.reset("--hard", f"origin/{target_branch}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "refresh: reset --hard origin/%s failed for %s (%s); "
+            "using cached state",
+            target_branch, repo_path, e,
+        )
 
 
 def _walk_tree(root: Path, *, max_nodes: int, max_depth: int) -> RepoTreeNode:

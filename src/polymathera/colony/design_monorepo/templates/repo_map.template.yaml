@@ -1,0 +1,91 @@
+# `.colony/repo_map.yaml` — VCM/KB ingestion declaration for this design monorepo.
+#
+# This file declares ONE row per VCM source the framework should map. The
+# materialiser reads it on every ``Map to VCM`` (Design Monorepo tab) /
+# ``materialize_repo_map`` (CLI) call and issues one
+# ``mmap_application_scope`` per source row.
+#
+# The default below maps the whole working tree as a single ``git_repo``
+# source — same behaviour you get when this file is absent. As your
+# project grows, un-comment the relevant blocks below to split the repo
+# into typed sources (code subtrees, literature, frozen submodules) and
+# declare which paths the SessionAgent should ingest into the knowledge
+# base.
+#
+# Full schema reference: docs/architecture/repo-map.md.
+
+schema_version: 1
+
+sources:
+  # ------- Default: one git_repo source over the whole tree ----------
+  # Maps every file under the repo root into a single VCM scope. This
+  # is what the framework falls back to when no repo_map.yaml is
+  # present, reproduced here so you can edit it explicitly.
+  - name: default
+    type: git_repo
+
+  # ------- Code subtree, with build artifacts excluded ---------------
+  # Useful once your repo has a clear ``code/`` (or ``tools/``,
+  # ``src/``, …) directory and you want it mapped as its own scope so
+  # an agent can target it without dragging in literature/build noise.
+  # ``flush_threshold`` / ``flush_token_budget`` are per-source page-
+  # size knobs — see docs/architecture/repo-map.md#page-size-knobs.
+  #
+  # - name: design-code
+  #   type: git_repo
+  #   start_dir: code/
+  #   exclude_globs: ["**/build/**", "**/__pycache__/**", "**/node_modules/**"]
+  #   binary_policy: skip
+  #   flush_threshold: 8        # smaller groups → smaller pages
+  #   flush_token_budget: 2048
+
+  # ------- Literature directory --------------------------------------
+  # PDFs / .md / .txt under ``literature/`` flow through the prose
+  # chunker before paging. ``chunk_target_tokens`` is the soft target
+  # per chunk; ``chunk_overlap_tokens`` adds optional overlap between
+  # consecutive chunks for retrieval continuity.
+  #
+  # - name: literature
+  #   type: literature
+  #   start_dir: literature/
+  #   chunk_target_tokens: 800
+  #   chunk_overlap_tokens: 64
+
+  # ------- Frozen external dependency declared as a git submodule ----
+  # The materialiser resolves the URL from .gitmodules and pins to the
+  # commit recorded in this repo's gitlink — so the dependency stays
+  # at a known version even when upstream advances. ``static: true``
+  # tells VCM not to live-watch this source.
+  #
+  # - name: external-foo
+  #   type: git_repo
+  #   submodule: third_party/foo
+  #   start_dir: src/
+  #   static: true
+  #   pinned: true              # keep this scope's pages in cache
+
+# ``knowledge_routing`` is the user's seed for the knowledge base. The
+# materialiser walks every matching file and feeds it to the process-
+# singleton ``Ingestor``, so the SessionAgent can retrieve from these
+# documents on day one (no chat-driven acquisition needed).
+#
+# Each row carries an explicit ``ingest_to`` field. ``knowledge_base``
+# (default for new literature) ingests the file into the KB.
+# ``ingest_to: vcm`` is documentation-only — it records that a path
+# has been promoted to VCM by a ``sources:`` row above and must NOT be
+# KB-ingested. The two lists answer different questions: ``sources:``
+# = what does VCM map?  ``knowledge_routing:`` = what does the KB
+# ingest?
+
+knowledge_routing: []
+  # Examples (un-comment and adapt to your literature layout):
+  #
+  # - paths: ["literature/curated/**/*.pdf"]
+  #   ingest_to: knowledge_base    # default; explicit for clarity
+  #   profile: scientific_paper    # surfaces as ``data_type`` on KB chunks
+  #
+  # - paths: ["standards/**/*.pdf"]
+  #   # ingest_to omitted ⇒ knowledge_base
+  #
+  # - paths: ["literature/promoted/**/*.pdf"]
+  #   ingest_to: vcm               # promoted — KB materialiser skips it

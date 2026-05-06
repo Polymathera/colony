@@ -77,3 +77,133 @@ def test_walker_respects_max_nodes(tmp_path: Path) -> None:
     # at max_nodes. We expect strictly fewer than 50 file children.
     d = node.children[0]
     assert len(d.children) < 50
+
+
+# ---------------------------------------------------------------------------
+# _refresh_cache_clone
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_cache_clone_picks_up_new_origin_commits(tmp_path: Path) -> None:
+    """The user-reported bug: an agent pushed ``initialize_repo_map``
+    to origin, but the dashboard's "Load" still showed the old empty
+    state because ``GitFileStorage.clone_or_retrieve_repository`` is
+    idempotent and returns the cached path without fetching.
+
+    ``_refresh_cache_clone`` is the dashboard-side fix: after the
+    cache lookup, fetch from origin and reset the cached working tree
+    to ``origin/<branch>`` so subsequent reads see what the agent
+    just published.
+    """
+
+    import git
+
+    from polymathera.colony.web_ui.backend.routers.repo_map import (
+        _refresh_cache_clone,
+    )
+
+    upstream = tmp_path / "upstream.git"
+    git.Repo.init(upstream, initial_branch="main", bare=True)
+
+    # Seed upstream with commit X, so the dashboard cache has
+    # SOMETHING to clone before the agent's push lands.
+    seed = tmp_path / "seed"
+    seed_repo = git.Repo.clone_from(f"file://{upstream}", str(seed))
+    seed_repo.config_writer().set_value("user", "email", "s@s").release()
+    seed_repo.config_writer().set_value("user", "name", "seed").release()
+    (seed / "x").write_text("X\n", encoding="utf-8")
+    seed_repo.index.add(["x"])
+    seed_repo.index.commit("X")
+    seed_repo.remote("origin").push(refspec="HEAD:refs/heads/main")
+
+    # Dashboard cache cloned at X — pre-agent state.
+    cache = tmp_path / "cache"
+    git.Repo.clone_from(f"file://{upstream}", str(cache))
+    assert (cache / "x").is_file()
+    assert not (cache / "y").exists()
+
+    # Agent's clone makes commit Y and pushes it.
+    agent = tmp_path / "agent"
+    agent_repo = git.Repo.clone_from(f"file://{upstream}", str(agent))
+    agent_repo.config_writer().set_value("user", "email", "a@a").release()
+    agent_repo.config_writer().set_value("user", "name", "agent").release()
+    (agent / "y").write_text("from agent\n", encoding="utf-8")
+    agent_repo.index.add(["y"])
+    agent_repo.index.commit("Y — agent's bootstrap commit")
+    agent_repo.remote("origin").push(refspec="HEAD:refs/heads/main")
+
+    # Refresh the cache. After this, the cache's working tree should
+    # reflect Y — both ``x`` and ``y`` present.
+    _refresh_cache_clone(cache, branch="main", commit="HEAD")
+
+    assert (cache / "x").is_file()
+    assert (cache / "y").is_file()
+    assert (cache / "y").read_text() == "from agent\n"
+
+
+def test_refresh_cache_clone_respects_pinned_commit(tmp_path: Path) -> None:
+    """When the caller asked for a specific revision (``commit !=
+    "HEAD"``), refresh fetches but does NOT move HEAD — pinned
+    commits are exactly the use case that wants stable snapshots.
+    """
+
+    import git
+
+    from polymathera.colony.web_ui.backend.routers.repo_map import (
+        _refresh_cache_clone,
+    )
+
+    upstream = tmp_path / "upstream.git"
+    git.Repo.init(upstream, initial_branch="main", bare=True)
+
+    seed = tmp_path / "seed"
+    seed_repo = git.Repo.clone_from(f"file://{upstream}", str(seed))
+    seed_repo.config_writer().set_value("user", "email", "s@s").release()
+    seed_repo.config_writer().set_value("user", "name", "seed").release()
+    (seed / "v1").write_text("v1", encoding="utf-8")
+    seed_repo.index.add(["v1"])
+    pinned = seed_repo.index.commit("v1")
+    seed_repo.remote("origin").push(refspec="HEAD:refs/heads/main")
+
+    cache = tmp_path / "cache"
+    git.Repo.clone_from(f"file://{upstream}", str(cache))
+    pinned_sha = pinned.hexsha
+
+    # Upstream advances after the cache was populated.
+    (seed / "v2").write_text("v2", encoding="utf-8")
+    seed_repo.index.add(["v2"])
+    seed_repo.index.commit("v2")
+    seed_repo.remote("origin").push(refspec="HEAD:refs/heads/main")
+
+    _refresh_cache_clone(cache, branch="main", commit=pinned_sha)
+
+    cache_repo = git.Repo(str(cache))
+    # HEAD didn't budge: pinned snapshot honoured.
+    assert cache_repo.head.commit.hexsha == pinned_sha
+    assert not (cache / "v2").exists()
+
+
+def test_refresh_cache_clone_tolerates_missing_origin(tmp_path: Path) -> None:
+    """A best-effort refresh: a local-only cache (no ``origin``) must
+    not turn a successful Load into a 5xx. The dashboard logs a
+    warning and serves the existing cached state."""
+
+    import git
+
+    from polymathera.colony.web_ui.backend.routers.repo_map import (
+        _refresh_cache_clone,
+    )
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    repo = git.Repo.init(cache, initial_branch="main")
+    repo.config_writer().set_value("user", "email", "c@c").release()
+    repo.config_writer().set_value("user", "name", "c").release()
+    (cache / "f").write_text("hi", encoding="utf-8")
+    repo.index.add(["f"])
+    repo.index.commit("only commit")
+
+    # Should not raise.
+    _refresh_cache_clone(cache, branch="main", commit="HEAD")
+
+    assert (cache / "f").is_file()

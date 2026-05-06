@@ -27,6 +27,11 @@ include = [
     # the wildcards in `exclude` below would otherwise drop. This entry
     # *overrides* the exclude rules for the scaffolds subtree.
     { path = "src/polymathera/colony/design_monorepo/scaffolds/**/*", format = ["sdist", "wheel"] },
+    # ``DesignCheckpointer.initialize_repo_map`` reads this template at
+    # runtime via ``Path(__file__).parent / "templates" / ...``; non-.py
+    # files in package directories are stripped from the wheel by
+    # default, so name it explicitly.
+    { path = "src/polymathera/colony/design_monorepo/templates/*.yaml", format = ["sdist", "wheel"] },
 ]
 exclude = [
     "src/**/tests/",

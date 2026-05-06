@@ -174,12 +174,20 @@ class AgentPoolCapability(AgentCapability):
             - created: Whether creation succeeded
         """
         try:
-            # Inherit syscontext from parent when not explicitly set
+            # Inherit syscontext from parent when not explicitly set.
+            # LLM-driven callers naturally pass ``metadata`` as a JSON
+            # dict (the REPL serialises kwargs); coerce here so the
+            # downstream spawn pipeline always sees the typed model.
+            # Without this, ``blueprint.metadata.tenant_id`` blows up
+            # in ``AgentSystem.spawn_from_blueprint`` because attribute
+            # access on a plain dict raises ``AttributeError``.
             if metadata is None:
                 metadata = AgentMetadata(
                     syscontext=self.agent.syscontext,
                     parent_agent_id=self.agent.agent_id,
                 )
+            elif isinstance(metadata, dict):
+                metadata = AgentMetadata(**metadata)
             # Resolve agent class from fully qualified path
             agent_cls = self._resolve_class(agent_type)
 

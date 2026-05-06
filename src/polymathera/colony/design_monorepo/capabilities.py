@@ -42,7 +42,8 @@ from .client import (
     DesignMonorepoError,
 )
 from .identity import AgentIdentity
-from .manifest import DesignMonorepoManifest
+from .manifest import MANIFEST_RELATIVE_PATH, DesignMonorepoManifest
+from .repo_map import REPO_MAP_DIR, REPO_MAP_FILENAME
 from .models import (
     BootstrapResult,
     BranchTopology,
@@ -623,6 +624,261 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
     async def diff_design(self, ref_a: str, ref_b: str) -> DesignDiff:
         client = await self._client_async()
         return await asyncio.to_thread(client.diff, ref_a, ref_b)
+
+    @action_executor(
+        planning_summary=(
+            "Initialise the design monorepo: write a default "
+            "``.colony/manifest.json`` and a commented "
+            "``.colony/repo_map.yaml`` template, then commit them."
+        ),
+    )
+    async def initialize_repo_map(
+        self, *, push: bool = True,
+    ) -> dict[str, Any]:
+        """Bring an empty / freshly-cloned repo into a state where the
+        rest of the design-monorepo capabilities work.
+
+        Writes whichever of ``.colony/manifest.json`` and
+        ``.colony/repo_map.yaml`` is missing, commits the new files
+        under the agent's identity, and (when ``push=True``) pushes
+        the commit to ``origin`` so the changes are visible on the
+        upstream remote and to other clones of the repo (the
+        dashboard's read-only inspection cache, other agents).
+        **Idempotent**: existing files are never overwritten —
+        operator edits stay intact.
+
+        Why both files: ``manifest.json`` is the framework's required
+        marker that "this is a Colony design monorepo"
+        (:class:`DesignMonorepoClient.open` raises without it).
+        ``repo_map.yaml`` declares VCM ingestion. A fresh clone has
+        neither; the action creates whatever's needed in one shot so
+        the operator doesn't trip a "Manifest not found" error from a
+        sibling action.
+
+        The manifest is built with sensible defaults: ``tenant`` /
+        ``colony`` from the current execution context, ``program``
+        defaulting to the colony id, ``target_system`` left as
+        ``"unspecified"``, ``design_repo_url`` from the agent's
+        ``design_monorepo_url`` parameter (or empty for a local-only
+        bootstrap). Operator can edit any of these later — the file
+        is plain JSON.
+
+        The repo_map template is intentionally minimal: the only
+        active row is the default ``git_repo`` source over the whole
+        tree. Below that, every supported source type and
+        ``knowledge_routing`` flavour ships as commented examples for
+        the operator to un-comment and adapt. We do NOT auto-detect
+        repo structure or scaffold ``tools/``, ``literature/``, etc.
+        — prescribing a layout this early in the lifecycle costs
+        more than the 30 lines of YAML the operator reads once.
+
+        Bypasses :meth:`_client_async` deliberately: the client's
+        ``open()`` requires a valid manifest, which is exactly what
+        we may be about to create. Uses gitpython directly on the
+        working tree instead.
+
+        Args:
+            push: When ``True`` (default), runs ``git push origin
+                HEAD:<branch>`` after the commit. The local commit is
+                already on disk by then, so a push failure (network,
+                auth, branch protection) leaves the per-agent clone
+                in a committed-but-unpushed state — the operator can
+                re-push manually. The error string is returned in
+                ``push_error`` so the planner can surface it. Set to
+                ``False`` to commit locally only (e.g., for a
+                file://-only test bootstrap or when the operator
+                wants to review before publishing).
+        """
+
+        return await asyncio.to_thread(self._initialize_repo_map_sync, push=push)
+
+    def _initialize_repo_map_sync(self, *, push: bool) -> dict[str, Any]:
+        """Synchronous body of :meth:`initialize_repo_map`. Lives on a
+        thread (see the action wrapper) because gitpython operations
+        are blocking."""
+
+        from git import Repo
+
+        repo_root = self._working_dir
+        # Trigger the lazy-clone path that ``_client_sync`` would
+        # normally run. We bypass ``_client_sync`` here because it
+        # ends in ``DesignMonorepoClient.open`` which insists on a
+        # manifest — the very file this action may be about to
+        # create. But the clone still has to happen, so call the
+        # cloner directly. ``_lazy_clone_from_agent_metadata`` is a
+        # no-op when ``.git`` is already present or when no URL is
+        # configured on agent metadata.
+        if not (repo_root / ".git").is_dir():
+            self._lazy_clone_from_agent_metadata()
+        if not (repo_root / ".git").is_dir():
+            raise DesignMonorepoError(
+                f"{repo_root} is not a git repository and no "
+                "``design_monorepo_url`` is configured on the agent's "
+                "metadata — set the URL on the colony (Landing page → "
+                "Colonies → pencil) and start a fresh session, or "
+                "``git init`` the working tree manually if you mean "
+                "to bootstrap a local-only design monorepo.",
+            )
+
+        manifest_path = repo_root / MANIFEST_RELATIVE_PATH
+        repo_map_path = repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME
+        manifest_existed = manifest_path.is_file()
+        repo_map_existed = repo_map_path.is_file()
+
+        if manifest_existed and repo_map_existed:
+            return {
+                "status": "already_initialized",
+                "files_created": [],
+                "committed_sha": None,
+                "pushed": False,
+                "push_error": None,
+            }
+
+        files_created: list[str] = []
+        if not manifest_existed:
+            manifest = self._build_default_manifest()
+            manifest.write_path(repo_root)
+            files_created.append(MANIFEST_RELATIVE_PATH)
+            agent_email_domain = manifest.agent_email_domain
+        else:
+            agent_email_domain = (
+                DesignMonorepoManifest.load_path(repo_root).agent_email_domain
+            )
+
+        if not repo_map_existed:
+            template = (
+                Path(__file__).parent / "templates" / "repo_map.template.yaml"
+            ).read_text(encoding="utf-8")
+            repo_map_path.parent.mkdir(parents=True, exist_ok=True)
+            repo_map_path.write_text(template, encoding="utf-8")
+            files_created.append(f"{REPO_MAP_DIR}/{REPO_MAP_FILENAME}")
+
+        identity = self._identity_for_bootstrap(agent_email_domain)
+        repo = Repo(str(repo_root))
+        repo.index.add(files_created)
+        actor = identity.actor()
+        commit = repo.index.commit(
+            "init: scaffold .colony/ (manifest + repo_map.yaml)",
+            author=actor,
+            committer=actor,
+        )
+
+        # Push so the changes are visible on the upstream and so
+        # other clones (dashboard cache, other agents) can pick them
+        # up on their next fetch. We push HEAD:<active-branch> rather
+        # than a bare ``push()`` because the per-agent clone may have
+        # been cloned from a default branch the user later renamed —
+        # being explicit avoids "src refspec doesn't match" surprises.
+        # Failures (no ``origin``, no permission, branch protection,
+        # offline) leave the local commit on disk and are surfaced in
+        # the result so the planner / operator can act on them.
+        pushed = False
+        push_error: str | None = None
+        if push:
+            try:
+                branch_name = repo.active_branch.name
+            except TypeError:
+                # Detached HEAD — no branch to push to. Rare in this
+                # bootstrap path but possible if a prior action
+                # checked out a tag.
+                push_error = (
+                    "HEAD is detached; cannot push. Switch to a branch "
+                    "and re-run with ``push=True``."
+                )
+            else:
+                try:
+                    origin = repo.remote("origin")
+                except ValueError as exc:
+                    # No ``origin`` remote — typical of a local-only
+                    # ``git init`` bootstrap. That's a legitimate
+                    # workflow; just record it and move on.
+                    push_error = f"no ``origin`` remote configured: {exc}"
+                else:
+                    try:
+                        push_info = origin.push(
+                            refspec=f"HEAD:refs/heads/{branch_name}",
+                        )
+                        # gitpython returns a list of PushInfo; any
+                        # ERROR flag means the push didn't reach the
+                        # remote even if the call returned normally.
+                        from git import PushInfo
+                        bad = [pi for pi in push_info if pi.flags & PushInfo.ERROR]
+                        if bad:
+                            push_error = "; ".join(
+                                pi.summary.strip() or repr(pi.flags) for pi in bad
+                            )
+                        else:
+                            pushed = True
+                    except Exception as exc:  # noqa: BLE001
+                        push_error = str(exc)
+        return {
+            "status": "initialized",
+            "files_created": files_created,
+            "committed_sha": commit.hexsha,
+            "pushed": pushed,
+            "push_error": push_error,
+        }
+
+    def _build_default_manifest(self) -> DesignMonorepoManifest:
+        """Construct a manifest with defaults pulled from execution
+        context + agent metadata. Operator-tunable fields
+        (``program``, ``target_system``, ``design_repo_url``) get
+        sensible placeholders; the file is plain JSON for later
+        editing."""
+
+        from ..distributed.ray_utils import serving
+
+        try:
+            tenant = serving.get_tenant_id() or "unspecified"
+        except Exception:  # noqa: BLE001 — no execution context (detached / test)
+            tenant = "unspecified"
+        try:
+            colony = serving.get_colony_id() or "unspecified"
+        except Exception:  # noqa: BLE001
+            colony = "unspecified"
+
+        url = ""
+        if self._agent is not None:
+            params = getattr(self._agent.metadata, "parameters", None) or {}
+            url = params.get(self._DESIGN_MONOREPO_URL_KEY, "") or ""
+
+        return DesignMonorepoManifest(
+            tenant=tenant,
+            colony=colony,
+            program=colony,
+            target_system="unspecified",
+            design_repo_url=url,
+        )
+
+    def _identity_for_bootstrap(self, agent_email_domain: str) -> AgentIdentity:
+        """Build an :class:`AgentIdentity` without going through
+        :meth:`_manifest` (which requires a working
+        :class:`DesignMonorepoClient`). Mirrors :meth:`_identity` but
+        takes ``agent_email_domain`` as an explicit input so the
+        bootstrap path can use a freshly-built manifest's value."""
+
+        if self.is_detached:
+            return AgentIdentity(
+                agent_id=self.scope_id,
+                role="external",
+                colony_id="external",
+                agent_email_domain=agent_email_domain,
+            )
+        agent = self.agent
+        role = "agent"
+        try:
+            md = getattr(agent, "metadata", None)
+            if md is not None and getattr(md, "role", None):
+                role = str(md.role)
+        except Exception:  # noqa: BLE001
+            pass
+        colony_id = getattr(agent, "colony_id", "default") or "default"
+        return AgentIdentity(
+            agent_id=agent.agent_id,
+            role=role,
+            colony_id=colony_id,
+            agent_email_domain=agent_email_domain,
+        )
 
     # ---- Auto-checkpoint on convergence quiescence -------------------
 

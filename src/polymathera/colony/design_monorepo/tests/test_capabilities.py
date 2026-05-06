@@ -107,6 +107,137 @@ async def test_fork_design_creates_branch(
     assert st.current_branch == "fork/explore-A"
 
 
+async def test_initialize_repo_map_writes_repo_map_when_manifest_exists(
+    bootstrapped_repo: DesignMonorepoClient,
+    checkpointer: DesignCheckpointer,
+) -> None:
+    """When the manifest is already present (the
+    ``bootstrapped_repo`` fixture writes one) but the repo_map is
+    missing, ``initialize_repo_map`` writes only the repo_map and
+    commits it. Pins that the action *does not* clobber the existing
+    manifest and the resulting YAML parses cleanly.
+    """
+
+    from polymathera.colony.design_monorepo.manifest import (
+        MANIFEST_RELATIVE_PATH,
+    )
+    from polymathera.colony.design_monorepo.repo_map import (
+        REPO_MAP_DIR, REPO_MAP_FILENAME, RepoMap,
+    )
+
+    repo_root = bootstrapped_repo.working_dir
+    target = repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME
+    assert not target.exists()
+    manifest_before = (repo_root / MANIFEST_RELATIVE_PATH).read_text()
+
+    result = await checkpointer.initialize_repo_map(push=False)
+    assert result["status"] == "initialized"
+    assert result["files_created"] == [f"{REPO_MAP_DIR}/{REPO_MAP_FILENAME}"]
+    assert result["committed_sha"] is not None
+    assert target.is_file()
+    # Existing manifest was NOT touched.
+    assert (repo_root / MANIFEST_RELATIVE_PATH).read_text() == manifest_before
+
+    # Template parses through the repo-map schema with the default
+    # ``git_repo`` source as the only active row.
+    rm = RepoMap.load(repo_root)
+    assert [s.name for s in rm.sources] == ["default"]
+    assert rm.knowledge_routing == []
+
+    # Working tree is clean — the action committed everything it wrote.
+    assert not bootstrapped_repo.has_uncommitted_changes()
+
+
+async def test_initialize_repo_map_bootstraps_empty_repo(
+    tmp_path: Path,
+) -> None:
+    """The user-facing failure mode: a fresh-cloned repo with neither
+    ``.colony/manifest.json`` nor ``.colony/repo_map.yaml``. Going
+    through :class:`DesignMonorepoClient.open` would raise
+    ``ManifestSchemaError`` because there's no manifest yet — the
+    chicken-and-egg the action exists to break.
+
+    The action MUST work on this case end-to-end: write both files
+    with sensible defaults, commit them, and leave the working tree
+    clean. Subsequent capability calls (which do go through
+    ``Client.open``) then succeed.
+    """
+
+    import git
+
+    from polymathera.colony.design_monorepo.manifest import (
+        MANIFEST_RELATIVE_PATH, DesignMonorepoManifest,
+    )
+    from polymathera.colony.design_monorepo.repo_map import (
+        REPO_MAP_DIR, REPO_MAP_FILENAME, RepoMap,
+    )
+
+    repo_root = tmp_path / "fresh"
+    repo_root.mkdir()
+    git.Repo.init(str(repo_root), initial_branch="main")
+
+    cap = DesignCheckpointer(
+        agent=None, scope_id="dm", working_dir=repo_root,
+    )
+    # The repo has no ``origin`` remote (just a local ``git init``)
+    # so ``push=True`` records a clean push_error rather than failing.
+    # We assert that path here too — the operator must be able to
+    # bootstrap a local-only design monorepo without a remote.
+    result = await cap.initialize_repo_map()
+
+    assert result["status"] == "initialized"
+    assert set(result["files_created"]) == {
+        MANIFEST_RELATIVE_PATH,
+        f"{REPO_MAP_DIR}/{REPO_MAP_FILENAME}",
+    }
+    assert result["committed_sha"] is not None
+    assert result["pushed"] is False
+    assert result["push_error"] is not None
+    assert "origin" in result["push_error"].lower()
+
+    # Both files are committed: working tree clean.
+    repo = git.Repo(str(repo_root))
+    assert not repo.is_dirty(untracked_files=True)
+
+    # The manifest parses through its schema (defaults applied).
+    manifest = DesignMonorepoManifest.load_path(repo_root)
+    assert manifest.target_system == "unspecified"
+    # The repo_map parses through its schema.
+    rm = RepoMap.load(repo_root)
+    assert [s.name for s in rm.sources] == ["default"]
+
+
+async def test_initialize_repo_map_is_idempotent(
+    bootstrapped_repo: DesignMonorepoClient,
+    checkpointer: DesignCheckpointer,
+) -> None:
+    """Second call when both files already exist must NOT overwrite
+    operator edits — ``initialize`` is a one-shot scaffold, not a
+    re-render. Returns ``status="already_initialized"`` so the
+    planner can branch on it cleanly.
+    """
+
+    from polymathera.colony.design_monorepo.repo_map import (
+        REPO_MAP_DIR, REPO_MAP_FILENAME,
+    )
+
+    await checkpointer.initialize_repo_map()
+    target = bootstrapped_repo.working_dir / REPO_MAP_DIR / REPO_MAP_FILENAME
+    target.write_text(
+        "schema_version: 1\n"
+        "sources:\n"
+        "  - name: operator-edited\n"
+        "    type: git_repo\n",
+        encoding="utf-8",
+    )
+
+    result = await checkpointer.initialize_repo_map(push=False)
+    assert result["status"] == "already_initialized"
+    assert result["files_created"] == []
+    assert result["committed_sha"] is None
+    assert "operator-edited" in target.read_text(encoding="utf-8")
+
+
 async def test_diff_design_against_checkpoint(
     bootstrapped_repo: DesignMonorepoClient,
     checkpointer: DesignCheckpointer,

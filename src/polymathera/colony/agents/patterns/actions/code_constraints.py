@@ -433,6 +433,67 @@ class IterationShapeValidator(CodeValidator):
         self._max_browse = max_browse
         self._max_lines = max_lines
 
+    @staticmethod
+    def _is_call(node: ast.AST, name: str) -> bool:
+        """Match ``name(...)`` and ``self.name(...)`` shapes."""
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id == name
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            return func.attr == name
+        return False
+
+    @classmethod
+    def _count_runs_per_path(cls, node: ast.AST) -> int:
+        """Recursively count ``run()`` calls along any single execution
+        path through ``node``. ``If`` and ``Try`` nodes contribute the
+        max across mutually-exclusive branches; everything else sums.
+
+        This matters because the LLM's natural shape for a one-step
+        action with a branched response —
+
+            await run("ack")
+            r = await run("the_action")
+            if r.success:
+                await run("respond_ok")
+            else:
+                await run("respond_err")
+
+        — runs at most three actions in any single execution. A naive
+        textual walk would count four and reject the iteration. Path-
+        aware counting matches the validator's intent (focused step,
+        not monolithic program).
+        """
+        if cls._is_call(node, "run"):
+            # Count this call, but also walk its arguments — a
+            # nested ``run(other=run(...))`` would otherwise be missed.
+            return 1 + sum(cls._count_runs_per_path(c) for c in ast.iter_child_nodes(node))
+        if isinstance(node, ast.If):
+            test = cls._count_runs_per_path(node.test)
+            body = sum(cls._count_runs_per_path(s) for s in node.body)
+            orelse = sum(cls._count_runs_per_path(s) for s in node.orelse)
+            return test + max(body, orelse)
+        if isinstance(node, ast.Try):
+            body = sum(cls._count_runs_per_path(s) for s in node.body)
+            else_ = sum(cls._count_runs_per_path(s) for s in node.orelse)
+            finalbody = sum(cls._count_runs_per_path(s) for s in node.finalbody)
+            handlers = max(
+                (sum(cls._count_runs_per_path(s) for s in h.body) for h in node.handlers),
+                default=0,
+            )
+            # Either the body completes (body + else_) or an exception
+            # routes through one handler. ``finalbody`` always runs.
+            return max(body + else_, body + handlers) + finalbody
+        return sum(cls._count_runs_per_path(c) for c in ast.iter_child_nodes(node))
+
+    @classmethod
+    def _count_browses_textual(cls, tree: ast.AST) -> int:
+        """browse() is a discovery anti-pattern; multiple browses are
+        excessive regardless of which branch they sit in. Text-walk."""
+        return sum(1 for node in ast.walk(tree) if cls._is_call(node, "browse"))
+
     async def validate(self, code: str, agent: Agent) -> ValidationResult:
         errors: list[str] = []
 
@@ -441,27 +502,19 @@ class IterationShapeValidator(CodeValidator):
         except SyntaxError as e:
             return ValidationResult(valid=False, errors=[f"Syntax error: {e}"])
 
-        run_count = 0
-        browse_count = 0
-
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-
-            # Detect run() and browse() regardless of whether they are
-            # awaited — the Await node wraps the Call, so walk visits both.
-            func = node.func
-            if isinstance(func, ast.Name):
-                if func.id == "run":
-                    run_count += 1
-                elif func.id == "browse":
-                    browse_count += 1
-            elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-                # Covers patterns like `self.run(...)` if someone tries that
-                if func.attr == "run":
-                    run_count += 1
-                elif func.attr == "browse":
-                    browse_count += 1
+        # Run() count is per execution path, not textual. An ``if/else``
+        # block with one ``run()`` in each branch executes ONE of them,
+        # so it counts as 1 — not 2. Otherwise the natural
+        # ack-then-action-then-branched-response pattern (an
+        # acknowledgement, the action, plus a success/failure
+        # ``respond_to_user`` in each ``if/else`` arm) would tip a
+        # focused 3-action iteration into looking like 4 to a textual
+        # walker. Browse() counting stays textual since browse()
+        # mid-iteration is a discovery anti-pattern regardless of
+        # branch — multiple browses in different branches are still
+        # excessive overall.
+        run_count = self._count_runs_per_path(tree)
+        browse_count = self._count_browses_textual(tree)
 
         if run_count > self._max_actions:
             errors.append(
