@@ -407,6 +407,19 @@ async def create_session(
                             tenant_id=get_tenant_id() or "",
                         ) or {}
                     ).get("origin_url"),
+                    # Per-commit attribution config — read once at
+                    # session-creation, agents look it up on metadata
+                    # for every commit they produce. Defaults baked
+                    # into the schema return ``commit_principal=colony``
+                    # / ``commit_co_author=user`` for fresh colonies;
+                    # operator overrides via the landing page.
+                    "git_attribution": (
+                        await auth_service.get_git_attribution(
+                            colony._db_pool,
+                            colony_id=get_colony_id() or "",
+                            tenant_id=get_tenant_id() or "",
+                        ) or {}
+                    ),
                 },
                 action_policy_config={
                     "allow_self_termination": False,  # SessionAgent should not terminate itself — the session lives on until the user closes it

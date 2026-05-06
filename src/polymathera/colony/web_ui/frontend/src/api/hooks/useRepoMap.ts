@@ -158,3 +158,41 @@ export function useSetColonyDesignMonorepo(colonyId: string | null) {
       ),
   });
 }
+
+// ----------------------------------------------------------------------
+// Per-colony git-commit attribution (principal + optional co-author).
+//
+// ``commit_principal`` is a free-form string — well-known values
+// ``"user"`` / ``"colony"`` / ``"agent"``, anything else treated as
+// an agent-type label. ``commit_co_author`` is the same value space,
+// or ``null`` to disable the ``Co-Authored-By:`` trailer. The
+// ``git_user_*`` fields are required when either field is ``"user"``.
+// ----------------------------------------------------------------------
+
+export interface ColonyGitAttributionConfig {
+  git_user_name: string | null;
+  git_user_email: string | null;
+  commit_principal: string;
+  commit_co_author: string | null;
+}
+
+export function useColonyGitAttribution(colonyId: string | null) {
+  return useQuery({
+    queryKey: ["colonies", colonyId, "git-attribution"],
+    queryFn: () =>
+      apiFetch<ColonyGitAttributionConfig>(
+        `/colonies/${colonyId}/git-attribution`,
+      ),
+    enabled: !!colonyId,
+  });
+}
+
+export function useSetColonyGitAttribution(colonyId: string | null) {
+  return useMutation({
+    mutationFn: (request: ColonyGitAttributionConfig) =>
+      apiFetch<ColonyGitAttributionConfig>(
+        `/colonies/${colonyId}/git-attribution`,
+        { method: "PUT", body: JSON.stringify(request) },
+      ),
+  });
+}

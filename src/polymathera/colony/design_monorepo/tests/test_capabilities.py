@@ -207,6 +207,172 @@ async def test_initialize_repo_map_bootstraps_empty_repo(
     assert [s.name for s in rm.sources] == ["default"]
 
 
+async def test_initialize_repo_map_attribution_default_colony_co_author_user(
+    tmp_path: Path,
+) -> None:
+    """The framework default: ``commit_principal=colony``,
+    ``commit_co_author=user``. The commit's author/committer is
+    ``colony:<id>`` and the message ends with a ``Co-Authored-By:``
+    trailer naming the configured user.
+
+    This is the user-visible change being shipped — the previous
+    behaviour stamped the ephemeral agent identity on every commit;
+    new default keeps the persistent collective identity as
+    principal and surfaces the human via the trailer (so GitHub UI
+    attribution and ``git log --grep`` both work).
+    """
+
+    from unittest.mock import MagicMock
+
+    import git
+
+    from polymathera.colony.design_monorepo.capabilities import (
+        DesignCheckpointer,
+    )
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        Ring, execution_context,
+    )
+
+    repo_root = tmp_path / "fresh"
+    repo_root.mkdir()
+    git.Repo.init(str(repo_root), initial_branch="main")
+
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    agent.colony_id = "c1"
+    agent.metadata.parameters = {
+        "git_attribution": {
+            "commit_principal": "colony",
+            "commit_co_author": "user",
+            "git_user_name": "Ada Lovelace",
+            "git_user_email": "ada@example.com",
+        },
+    }
+    agent.metadata.role = "session_orchestrator"
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c1", session_id="s",
+    ):
+        cap = DesignCheckpointer(
+            agent=agent, scope_id="dm", working_dir=repo_root,
+        )
+        await cap.initialize_repo_map(push=False)
+
+    repo = git.Repo(str(repo_root))
+    head = repo.head.commit
+    assert head.author.name == "colony:c1"
+    assert head.author.email == "c1@agent.colony.local"
+    assert head.committer.name == "colony:c1"
+    assert (
+        "Co-Authored-By: Ada Lovelace <ada@example.com>"
+        in head.message
+    )
+
+
+async def test_initialize_repo_map_attribution_user_principal_no_co_author(
+    tmp_path: Path,
+) -> None:
+    """When the operator picks ``commit_principal=user`` with no
+    co-author, the commit looks like a plain human commit — no
+    trailer, real name/email as author/committer.
+    """
+
+    from unittest.mock import MagicMock
+
+    import git
+
+    from polymathera.colony.design_monorepo.capabilities import (
+        DesignCheckpointer,
+    )
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        Ring, execution_context,
+    )
+
+    repo_root = tmp_path / "fresh"
+    repo_root.mkdir()
+    git.Repo.init(str(repo_root), initial_branch="main")
+
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    agent.colony_id = "c1"
+    agent.metadata.parameters = {
+        "git_attribution": {
+            "commit_principal": "user",
+            "commit_co_author": None,
+            "git_user_name": "Ada Lovelace",
+            "git_user_email": "ada@example.com",
+        },
+    }
+    agent.metadata.role = "session_orchestrator"
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c1", session_id="s",
+    ):
+        cap = DesignCheckpointer(
+            agent=agent, scope_id="dm", working_dir=repo_root,
+        )
+        await cap.initialize_repo_map(push=False)
+
+    repo = git.Repo(str(repo_root))
+    head = repo.head.commit
+    assert head.author.name == "Ada Lovelace"
+    assert head.author.email == "ada@example.com"
+    assert "Co-Authored-By:" not in head.message
+
+
+async def test_initialize_repo_map_attribution_falls_back_when_user_unset(
+    tmp_path: Path,
+) -> None:
+    """If ``commit_co_author=user`` is configured but no name/email
+    is set on the colony, the action must still succeed — the
+    trailer is dropped (with a warning) rather than blocking the
+    commit. Operator can fix the config and re-run; partial
+    attribution beats no commit.
+    """
+
+    from unittest.mock import MagicMock
+
+    import git
+
+    from polymathera.colony.design_monorepo.capabilities import (
+        DesignCheckpointer,
+    )
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        Ring, execution_context,
+    )
+
+    repo_root = tmp_path / "fresh"
+    repo_root.mkdir()
+    git.Repo.init(str(repo_root), initial_branch="main")
+
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    agent.colony_id = "c1"
+    agent.metadata.parameters = {
+        "git_attribution": {
+            "commit_principal": "colony",
+            "commit_co_author": "user",
+            "git_user_name": None,
+            "git_user_email": None,
+        },
+    }
+    agent.metadata.role = "session_orchestrator"
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c1", session_id="s",
+    ):
+        cap = DesignCheckpointer(
+            agent=agent, scope_id="dm", working_dir=repo_root,
+        )
+        await cap.initialize_repo_map(push=False)
+
+    repo = git.Repo(str(repo_root))
+    head = repo.head.commit
+    # Principal still applied; trailer skipped silently.
+    assert head.author.name == "colony:c1"
+    assert "Co-Authored-By:" not in head.message
+
+
 async def test_initialize_repo_map_is_idempotent(
     bootstrapped_repo: DesignMonorepoClient,
     checkpointer: DesignCheckpointer,

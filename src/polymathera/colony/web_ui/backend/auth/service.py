@@ -243,6 +243,84 @@ async def set_design_monorepo(
     return {"origin_url": origin_url, "branch": branch, "commit": commit}
 
 
+async def get_git_attribution(
+    db_pool, *, colony_id: str, tenant_id: str,
+) -> dict[str, Any] | None:
+    """Return the per-colony git-commit attribution row.
+
+    Shape: ``{"git_user_name", "git_user_email", "commit_principal",
+    "commit_co_author"}``. ``None`` when the colony doesn't exist for
+    this tenant. Defaults baked into the schema mean the principal
+    and co-author fields are always populated; the user
+    name/email fields are optional and stay ``None`` until set.
+    """
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT git_user_name, git_user_email, commit_principal, "
+            "commit_co_author FROM colonies "
+            "WHERE id = $1 AND tenant_id = $2",
+            colony_id, tenant_id,
+        )
+    if row is None:
+        return None
+    return {
+        "git_user_name": row["git_user_name"],
+        "git_user_email": row["git_user_email"],
+        "commit_principal": row["commit_principal"],
+        "commit_co_author": row["commit_co_author"],
+    }
+
+
+async def set_git_attribution(
+    db_pool, *,
+    colony_id: str,
+    tenant_id: str,
+    git_user_name: str | None,
+    git_user_email: str | None,
+    commit_principal: str,
+    commit_co_author: str | None,
+) -> dict[str, Any]:
+    """Persist the colony's git-commit attribution. Returns the
+    newly-stored row. Raises :class:`KeyError` when the colony does
+    not exist or belongs to a different tenant.
+
+    Validation: when ``commit_principal`` or ``commit_co_author``
+    equals ``"user"``, both ``git_user_name`` and ``git_user_email``
+    must be non-empty — otherwise the resolver would fail at commit
+    time, far from the operator's edit. We reject early instead.
+    """
+
+    needs_user = commit_principal == "user" or commit_co_author == "user"
+    if needs_user and (not git_user_name or not git_user_email):
+        raise ValueError(
+            "git_user_name and git_user_email are required when "
+            "commit_principal or commit_co_author is 'user'.",
+        )
+
+    async with db_pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE colonies SET git_user_name = $1, "
+            "git_user_email = $2, commit_principal = $3, "
+            "commit_co_author = $4 "
+            "WHERE id = $5 AND tenant_id = $6",
+            git_user_name or None,
+            git_user_email or None,
+            commit_principal,
+            commit_co_author or None,
+            colony_id,
+            tenant_id,
+        )
+    if result == "UPDATE 0":
+        raise KeyError(f"colony {colony_id!r} not found for tenant {tenant_id!r}")
+    return {
+        "git_user_name": git_user_name or None,
+        "git_user_email": git_user_email or None,
+        "commit_principal": commit_principal,
+        "commit_co_author": commit_co_author or None,
+    }
+
+
 async def get_default_colony(db_pool, tenant_id: str) -> dict[str, Any] | None:
     """Get the default colony for a tenant."""
     async with db_pool.acquire() as conn:

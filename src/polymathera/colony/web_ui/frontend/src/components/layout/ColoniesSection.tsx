@@ -23,7 +23,10 @@ import {
 } from "@/api/hooks/useAuth";
 import {
   useColonyDesignMonorepo,
+  useColonyGitAttribution,
   useSetColonyDesignMonorepo,
+  useSetColonyGitAttribution,
+  type ColonyGitAttributionConfig,
 } from "@/api/hooks/useRepoMap";
 
 
@@ -196,16 +199,19 @@ function ColonyRow({
       {/* Per-colony field slots. Each slot is a single line:
           ``label: <value | "Not configured"> [Edit]``.
           Slot 1 — design-monorepo URL.
-          Slots 2 & 3 — reserved for future per-colony state. Add new
-          rows here following the ``DesignMonorepoField`` pattern;
-          keep the order stable so users see the same layout per
-          colony. */}
+          Slot 2 — git-commit attribution (principal + co-author + name/email).
+          Slot 3 — reserved for future per-colony state. Add new rows
+          here following the ``DesignMonorepoField`` pattern; keep the
+          order stable so users see the same layout per colony. */}
       <div className="mt-2 flex flex-col gap-1">
         <DesignMonorepoField
           colonyId={colony.colony_id}
           onSelectColony={onSelectColony}
         />
-        {/* TODO(per-colony-field-2): future slot. */}
+        <GitAttributionField
+          colonyId={colony.colony_id}
+          onSelectColony={onSelectColony}
+        />
         {/* TODO(per-colony-field-3): future slot. */}
       </div>
     </div>
@@ -318,6 +324,172 @@ function DesignMonorepoField({
         </code>
       ) : (
         <span className="text-muted-foreground italic">Not configured</span>
+      )}
+      <button
+        type="button"
+        onClick={startEdit}
+        className="text-muted-foreground hover:text-foreground"
+        title="Edit"
+      >
+        <Pencil size={11} />
+      </button>
+      {savedAt !== null && (
+        <span className="text-[10px] text-emerald-400">Saved.</span>
+      )}
+    </div>
+  );
+}
+
+
+function GitAttributionField({
+  colonyId, onSelectColony,
+}: {
+  colonyId: string;
+  onSelectColony: (colonyId: string) => void;
+}) {
+  // Per-commit attribution shown as a single read-only line, with an
+  // inline edit form that toggles open. Mirrors ``DesignMonorepoField``
+  // shape so the Colonies panel feels consistent.
+  //
+  // Defaults from the schema (``commit_principal=colony``,
+  // ``commit_co_author=user``) mean the read view normally shows
+  // ``colony · user`` as a hint to the operator that they need to
+  // configure name/email before the user co-author trailer actually
+  // resolves; the backend ``set_git_attribution`` rejects ``user``
+  // selection without name/email so the failure mode is local.
+  const cfg = useColonyGitAttribution(colonyId);
+  const set = useSetColonyGitAttribution(colonyId);
+  const [editing, setEditing] = useState(false);
+  const [draftPrincipal, setDraftPrincipal] = useState("colony");
+  const [draftCoAuthor, setDraftCoAuthor] = useState<string>("user");
+  const [draftName, setDraftName] = useState("");
+  const [draftEmail, setDraftEmail] = useState("");
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  const startEdit = () => {
+    onSelectColony(colonyId);
+    setDraftPrincipal(cfg.data?.commit_principal ?? "colony");
+    setDraftCoAuthor(cfg.data?.commit_co_author ?? "");
+    setDraftName(cfg.data?.git_user_name ?? "");
+    setDraftEmail(cfg.data?.git_user_email ?? "");
+    setEditing(true);
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const payload: ColonyGitAttributionConfig = {
+      commit_principal: draftPrincipal.trim() || "colony",
+      // Empty input → no co-author trailer.
+      commit_co_author: draftCoAuthor.trim() || null,
+      git_user_name: draftName.trim() || null,
+      git_user_email: draftEmail.trim() || null,
+    };
+    try {
+      await set.mutateAsync(payload);
+      cfg.refetch();
+      setEditing(false);
+      setSavedAt(Date.now());
+    } catch {
+      // useSetColonyGitAttribution surfaces the error below.
+    }
+  };
+
+  useEffect(() => {
+    if (savedAt === null) return;
+    const t = setTimeout(() => setSavedAt(null), 2500);
+    return () => clearTimeout(t);
+  }, [savedAt]);
+
+  if (editing) {
+    return (
+      <form onSubmit={submit} className="flex flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-[10px] text-muted-foreground self-center">
+            Commit attribution:
+          </span>
+          <input
+            autoFocus
+            value={draftPrincipal}
+            onChange={(e) => setDraftPrincipal(e.target.value)}
+            placeholder="principal (colony / user / agent / …)"
+            title="Free-form. Well-known: user, colony, agent. Anything else is treated as an agent-type label."
+            className="px-1.5 py-0.5 rounded border bg-background text-xs w-44"
+          />
+          <span className="text-[10px] text-muted-foreground">+</span>
+          <input
+            value={draftCoAuthor}
+            onChange={(e) => setDraftCoAuthor(e.target.value)}
+            placeholder="co-author (blank = none)"
+            title="Same value space as principal. Blank disables the Co-Authored-By: trailer."
+            className="px-1.5 py-0.5 rounded border bg-background text-xs w-40"
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-[10px] text-muted-foreground self-center">
+            User name / email (required when ``user`` is selected):
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-1">
+          <input
+            value={draftName}
+            onChange={(e) => setDraftName(e.target.value)}
+            placeholder="Your Name"
+            className="px-1.5 py-0.5 rounded border bg-background text-xs flex-1 min-w-[10rem]"
+          />
+          <input
+            value={draftEmail}
+            onChange={(e) => setDraftEmail(e.target.value)}
+            placeholder="you@example.com"
+            className="px-1.5 py-0.5 rounded border bg-background text-xs flex-1 min-w-[12rem]"
+          />
+          <button
+            type="submit"
+            disabled={set.isPending}
+            className="px-2 py-0.5 rounded bg-primary text-primary-foreground text-xs disabled:opacity-50"
+          >
+            {set.isPending ? "…" : "Save"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setEditing(false)}
+            className="px-2 py-0.5 rounded border text-xs"
+          >
+            Cancel
+          </button>
+        </div>
+        {set.error && (
+          <span className="text-[10px] text-red-500">
+            {(set.error as Error).message}
+          </span>
+        )}
+      </form>
+    );
+  }
+
+  const principal = cfg.data?.commit_principal ?? "colony";
+  const coAuthor = cfg.data?.commit_co_author;
+  const userName = cfg.data?.git_user_name;
+  const userEmail = cfg.data?.git_user_email;
+  const userIdent = userName && userEmail
+    ? `${userName} <${userEmail}>`
+    : null;
+  return (
+    <div className="flex items-center gap-2 text-[11px]">
+      <span className="text-muted-foreground">Commit attribution:</span>
+      <code className="text-foreground">
+        {principal}
+        {coAuthor ? ` + ${coAuthor}` : ""}
+      </code>
+      {(principal === "user" || coAuthor === "user") && (
+        userIdent ? (
+          <span className="text-[10px] text-muted-foreground">
+            ({userIdent})
+          </span>
+        ) : (
+          <span className="text-[10px] text-amber-400" title="Set name/email to use 'user'">
+            (name/email not set)
+          </span>
+        )
       )}
       <button
         type="button"

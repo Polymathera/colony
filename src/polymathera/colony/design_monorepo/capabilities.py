@@ -41,7 +41,12 @@ from .client import (
     DesignMonorepoClient,
     DesignMonorepoError,
 )
-from .identity import AgentIdentity
+from .identity import (
+    AgentIdentity,
+    CommitIdentity,
+    append_co_author_trailer,
+    resolve_commit_identity,
+)
 from .manifest import MANIFEST_RELATIVE_PATH, DesignMonorepoManifest
 from .repo_map import REPO_MAP_DIR, REPO_MAP_FILENAME
 from .models import (
@@ -753,12 +758,23 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
             repo_map_path.write_text(template, encoding="utf-8")
             files_created.append(f"{REPO_MAP_DIR}/{REPO_MAP_FILENAME}")
 
-        identity = self._identity_for_bootstrap(agent_email_domain)
         repo = Repo(str(repo_root))
         repo.index.add(files_created)
-        actor = identity.actor()
-        commit = repo.index.commit(
+        # Per-commit attribution. Principal becomes author/committer;
+        # co-author (when set) is rendered as a ``Co-Authored-By:``
+        # trailer. Configured per-colony via the landing-page UI and
+        # plumbed onto agent metadata at session creation; defaults
+        # are ``principal=colony, co_author=user``.
+        principal_id, co_author_id = self._resolve_attribution(
+            agent_email_domain=agent_email_domain,
+        )
+        message = append_co_author_trailer(
             "init: scaffold .colony/ (manifest + repo_map.yaml)",
+            co_author_id,
+        )
+        actor = principal_id.actor()
+        commit = repo.index.commit(
+            message,
             author=actor,
             committer=actor,
         )
@@ -879,6 +895,82 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
             colony_id=colony_id,
             agent_email_domain=agent_email_domain,
         )
+
+    _GIT_ATTRIBUTION_KEY = "git_attribution"
+
+    def _resolve_attribution(
+        self, *, agent_email_domain: str,
+    ) -> tuple[CommitIdentity, CommitIdentity | None]:
+        """Read the colony's commit-attribution config from agent
+        metadata and resolve principal + co-author into concrete
+        :class:`CommitIdentity` pairs.
+
+        Returns ``(principal, co_author_or_None)``. Falls back to the
+        framework defaults — ``principal=colony, co_author=user`` —
+        when metadata is absent (detached / test contexts) and to
+        ``principal=colony`` (no co-author) when ``user`` was selected
+        but no name/email is configured (rather than failing the
+        commit; we'd rather lose the trailer than block the operation).
+        """
+
+        params: dict[str, Any] = {}
+        if self._agent is not None:
+            params = getattr(self._agent.metadata, "parameters", None) or {}
+        cfg = params.get(self._GIT_ATTRIBUTION_KEY) or {}
+        principal_label = cfg.get("commit_principal") or "colony"
+        co_author_label = cfg.get("commit_co_author")
+        user_name = cfg.get("git_user_name")
+        user_email = cfg.get("git_user_email")
+
+        agent_id: str | None = None
+        role: str | None = None
+        colony_id: str = "default"
+        if self._agent is not None:
+            agent_id = getattr(self._agent, "agent_id", None)
+            colony_id = getattr(self._agent, "colony_id", "default") or "default"
+            try:
+                md = getattr(self._agent, "metadata", None)
+                if md is not None and getattr(md, "role", None):
+                    role = str(md.role)
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _safe_resolve(label: str | None) -> CommitIdentity | None:
+            if not label:
+                return None
+            try:
+                return resolve_commit_identity(
+                    label,
+                    colony_id=colony_id,
+                    agent_id=agent_id,
+                    role=role,
+                    user_name=user_name,
+                    user_email=user_email,
+                    agent_email_domain=agent_email_domain,
+                )
+            except ValueError:
+                # 'user' picked but name/email missing, or 'agent'
+                # picked in detached mode. Skip the trailer rather
+                # than blocking the commit — operator can fix the
+                # config and re-run.
+                logger.warning(
+                    "Skipping attribution for label %r: "
+                    "name/email or agent context missing.", label,
+                )
+                return None
+
+        principal = _safe_resolve(principal_label)
+        if principal is None:
+            # Last-resort fallback: synthesise a colony identity so
+            # the commit always succeeds. Without a principal we
+            # can't author at all.
+            principal = resolve_commit_identity(
+                "colony",
+                colony_id=colony_id,
+                agent_email_domain=agent_email_domain,
+            )
+        co_author = _safe_resolve(co_author_label)
+        return principal, co_author
 
     # ---- Auto-checkpoint on convergence quiescence -------------------
 

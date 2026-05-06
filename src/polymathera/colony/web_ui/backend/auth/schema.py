@@ -50,6 +50,27 @@ COLONIES_DESIGN_MONOREPO_MIGRATIONS = (
     "ALTER TABLE colonies ADD COLUMN IF NOT EXISTS design_monorepo_commit TEXT NOT NULL DEFAULT 'HEAD';",
 )
 
+# Per-colony git-commit attribution. ``commit_principal`` is the
+# free-form identity string (well-known: ``user`` / ``colony`` /
+# ``agent``; anything else is treated as an agent-type label).
+# ``commit_co_author`` is the optional second identity rendered in
+# the ``Co-Authored-By:`` trailer; NULL disables the trailer.
+# ``git_user_name`` / ``git_user_email`` are required when either
+# field equals ``user``. Defaults match the framework's recommended
+# shape: colony as principal, user as co-author — i.e., the colony
+# (the persistent collective) did the work on behalf of the user
+# (the human who started the session).
+COLONIES_GIT_ATTRIBUTION_MIGRATIONS = (
+    "ALTER TABLE colonies ADD COLUMN IF NOT EXISTS git_user_name TEXT;",
+    "ALTER TABLE colonies ADD COLUMN IF NOT EXISTS git_user_email TEXT;",
+    "ALTER TABLE colonies ADD COLUMN IF NOT EXISTS commit_principal TEXT NOT NULL DEFAULT 'colony';",
+    # ``DEFAULT 'user'`` backfills existing rows to ``'user'`` on the
+    # first run of this migration AND applies to new rows thereafter.
+    # Operators who want no co-author trailer set this to NULL via
+    # the landing-page UI (``UPDATE`` in :func:`set_git_attribution`).
+    "ALTER TABLE colonies ADD COLUMN IF NOT EXISTS commit_co_author TEXT DEFAULT 'user';",
+)
+
 
 async def ensure_auth_schema(db_pool) -> None:
     """Create auth tables if they don't exist.
@@ -63,7 +84,12 @@ async def ensure_auth_schema(db_pool) -> None:
             await conn.execute(COLONIES_INDEX_SQL)
             for stmt in COLONIES_DESIGN_MONOREPO_MIGRATIONS:
                 await conn.execute(stmt)
-        logger.info("Auth schema ensured (users + colonies + design-monorepo columns)")
+            for stmt in COLONIES_GIT_ATTRIBUTION_MIGRATIONS:
+                await conn.execute(stmt)
+        logger.info(
+            "Auth schema ensured (users + colonies + design-monorepo "
+            "+ git-attribution columns)"
+        )
     except Exception:
         logger.error("Failed to create auth schema", exc_info=True)
         raise

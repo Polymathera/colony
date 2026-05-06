@@ -136,3 +136,102 @@ async def set_colony_design_monorepo(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return DesignMonorepoConfig(**row)
+
+
+# ---------------------------------------------------------------------------
+# Per-colony git-commit attribution (principal + optional co-author).
+# Default: principal=colony, co_author=user — the persistent
+# collective identity does the work on behalf of the human who
+# started the session. Operator can swap to per-agent or any
+# free-form agent-type label via the landing-page UI.
+# ---------------------------------------------------------------------------
+
+
+class GitAttributionConfig(BaseModel):
+    git_user_name: str | None = Field(
+        default=None,
+        description=(
+            "Display name used when ``commit_principal`` or "
+            "``commit_co_author`` is ``\"user\"``. Required in those "
+            "cases; ignored otherwise."
+        ),
+    )
+    git_user_email: str | None = Field(
+        default=None,
+        description="Email paired with ``git_user_name``.",
+    )
+    commit_principal: str = Field(
+        default="colony",
+        description=(
+            "Free-form identity string. Well-known: ``user`` / "
+            "``colony`` / ``agent``. Anything else is treated as an "
+            "agent-type label (e.g. ``session_agent``)."
+        ),
+    )
+    commit_co_author: str | None = Field(
+        default="user",
+        description=(
+            "Optional second identity, rendered as a "
+            "``Co-Authored-By:`` trailer. Same value space as "
+            "``commit_principal``. ``null`` disables the trailer."
+        ),
+    )
+
+
+class SetGitAttributionRequest(BaseModel):
+    git_user_name: str | None = None
+    git_user_email: str | None = None
+    commit_principal: str = "colony"
+    commit_co_author: str | None = "user"
+
+
+@router.get(
+    "/colonies/{colony_id}/git-attribution",
+    response_model=GitAttributionConfig,
+)
+async def get_colony_git_attribution(
+    colony_id: str,
+    user: dict[str, Any] = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> GitAttributionConfig:
+    """Return the colony's per-commit attribution settings."""
+    db = _get_db_pool(colony)
+    row = await auth_service.get_git_attribution(
+        db, colony_id=colony_id, tenant_id=user["tenant_id"],
+    )
+    if row is None:
+        return GitAttributionConfig()
+    return GitAttributionConfig(**row)
+
+
+@router.put(
+    "/colonies/{colony_id}/git-attribution",
+    response_model=GitAttributionConfig,
+)
+async def set_colony_git_attribution(
+    colony_id: str,
+    request: SetGitAttributionRequest,
+    user: dict[str, Any] = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> GitAttributionConfig:
+    """Persist the colony's per-commit attribution settings."""
+
+    db = _get_db_pool(colony)
+    try:
+        row = await auth_service.set_git_attribution(
+            db,
+            colony_id=colony_id,
+            tenant_id=user["tenant_id"],
+            git_user_name=request.git_user_name,
+            git_user_email=request.git_user_email,
+            commit_principal=request.commit_principal,
+            commit_co_author=request.commit_co_author,
+        )
+    except ValueError as exc:
+        # Operator picked a 'user' principal/co_author without
+        # configuring name/email — surface as 400 so the UI can show
+        # an inline validation message instead of a generic 5xx.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return GitAttributionConfig(**row)
