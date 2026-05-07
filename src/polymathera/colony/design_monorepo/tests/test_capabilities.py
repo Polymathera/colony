@@ -87,6 +87,63 @@ async def test_find_existing_tool_partial_match(
     assert any(m.entry.name == "widget_engine" for m in matches)
 
 
+async def test_ingest_repo_map_literature_walks_knowledge_routing(
+    bootstrapped_repo: DesignMonorepoClient,
+    state_provider: RepoStateProvider,
+) -> None:
+    """The chat-callable ingestion action: write a ``repo_map.yaml``
+    with two ``knowledge_routing`` rows (one ``knowledge_base``, one
+    ``vcm``), seed matching files, run the action with
+    ``refresh=False`` (no remote to fetch from in this fixture), and
+    assert: the kb-routed file is ingested, the vcm-routed file is
+    silently skipped per the materialiser's contract.
+    """
+
+    from polymathera.colony.knowledge.deps import (
+        get_default_ingestor, reset_knowledge_deps,
+    )
+
+    reset_knowledge_deps()
+    try:
+        repo_root = bootstrapped_repo.working_dir
+
+        # Seed two literature files; only the ``curated`` one is
+        # routed to the KB.
+        (repo_root / "literature" / "curated").mkdir(parents=True)
+        (repo_root / "literature" / "promoted").mkdir(parents=True)
+        (repo_root / "literature" / "curated" / "a.txt").write_text(
+            "Curated paper A — should be ingested.\n", encoding="utf-8",
+        )
+        (repo_root / "literature" / "promoted" / "b.txt").write_text(
+            "Promoted paper B — vcm-routed, must NOT be ingested.\n",
+            encoding="utf-8",
+        )
+
+        # Write the repo map. ``refresh=False`` in the call below
+        # skips ``git fetch`` so this works in the bootstrapped-repo
+        # fixture which has no remote.
+        (repo_root / ".colony" / "repo_map.yaml").write_text(
+            "schema_version: 1\n"
+            "sources:\n"
+            "  - { name: default, type: git_repo }\n"
+            "knowledge_routing:\n"
+            "  - paths: ['literature/curated/**/*.txt']\n"
+            "    ingest_to: knowledge_base\n"
+            "    profile: scientific_paper\n"
+            "  - paths: ['literature/promoted/**/*.txt']\n"
+            "    ingest_to: vcm\n",
+            encoding="utf-8",
+        )
+
+        result = await state_provider.ingest_repo_map_literature(refresh=False)
+
+        assert result["count"] == 1
+        assert any("a.txt" in uri for uri in result["ingested"])
+        assert not any("b.txt" in uri for uri in result["ingested"])
+    finally:
+        reset_knowledge_deps()
+
+
 async def test_checkpoint_state_round_trip(
     checkpointer: DesignCheckpointer, state_provider: RepoStateProvider,
 ) -> None:

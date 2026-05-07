@@ -420,6 +420,106 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
         client = await self._client_async()
         return await asyncio.to_thread(client.get_branch_topology)
 
+    @action_executor(
+        planning_summary=(
+            "Ingest every file matched by the design monorepo's "
+            "``knowledge_routing:`` block into the knowledge base."
+        ),
+    )
+    async def ingest_repo_map_literature(
+        self, *, refresh: bool = True,
+    ) -> dict[str, Any]:
+        """Walk the design monorepo's ``.colony/repo_map.yaml``
+        ``knowledge_routing:`` block and ingest every matching file
+        into the process-singleton knowledge base.
+
+        ``refresh=True`` (default) runs ``git fetch origin`` +
+        ``git reset --hard origin/<branch>`` on the per-agent clone
+        before reading ``repo_map.yaml`` — so an operator's edit-on-
+        host → push → tell-agent flow picks up the latest patterns.
+        Set to ``False`` to ingest from the current clone state
+        (e.g. when the operator is offline or wants reproducibility
+        on a pinned commit).
+
+        Wraps :func:`materialize_knowledge_routing` — the same
+        function the dashboard's "Map to VCM" flow uses for the
+        knowledge-base side. Rows whose ``ingest_to`` is ``vcm`` are
+        silently skipped (those are documentation-only markers that
+        a path was promoted to VCM mapping; the materialiser handles
+        the contract).
+
+        Returns ``{"ingested": [<source_uri>, …], "count": N}`` so
+        the planner can summarise back to chat. Per-file ingestion
+        errors are logged at WARNING and don't fail the whole call —
+        partial progress beats no progress.
+        """
+        from .repo_map import RepoMap
+        from .materialize import materialize_knowledge_routing
+
+        repo_root = self._working_dir
+        if not (repo_root / ".git").is_dir():
+            self._lazy_clone_from_agent_metadata()
+        if not (repo_root / ".git").is_dir():
+            raise DesignMonorepoError(
+                f"{repo_root} is not a git repository — set the colony's "
+                "design-monorepo URL on the landing page and start a "
+                "fresh session, or run ``initialize_repo_map`` first.",
+            )
+        if refresh:
+            await asyncio.to_thread(self._refresh_against_origin)
+
+        repo_map = await asyncio.to_thread(RepoMap.load, repo_root)
+        records = await materialize_knowledge_routing(
+            repo_map=repo_map, repo_root=repo_root,
+        )
+        return {
+            "ingested": [str(r.source_uri) for r in records],
+            "count": len(records),
+        }
+
+    def _refresh_against_origin(self) -> None:
+        """Best-effort ``git fetch origin && git reset --hard
+        origin/<branch>`` so the agent's clone reflects the
+        operator's latest pushed state. Used by
+        :meth:`ingest_repo_map_literature` (and any future read-side
+        action that wants to honour upstream edits) — same intent as
+        the dashboard's ``_refresh_cache_clone``, scoped to the
+        per-agent clone.
+
+        Failures (no ``origin``, network blip, detached HEAD) log a
+        warning and return — the caller proceeds with whatever state
+        the clone is currently in. Pushing a hard-reset failure to
+        the LLM is worse UX than ingesting from a slightly-stale
+        clone.
+        """
+        from git import Repo
+
+        try:
+            repo = Repo(str(self._working_dir))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("refresh: not a git repo (%s)", e)
+            return
+        try:
+            origin = repo.remote("origin")
+        except ValueError:
+            return  # local-only bootstrap — nothing to fetch
+        try:
+            origin.fetch(prune=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("refresh: fetch failed (%s); using cached state", e)
+            return
+        try:
+            branch = repo.active_branch.name
+        except TypeError:
+            return  # detached HEAD
+        try:
+            repo.git.reset("--hard", f"origin/{branch}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "refresh: reset --hard origin/%s failed (%s); "
+                "using cached state", branch, e,
+            )
+
 
 # ---------------------------------------------------------------------------
 # DesignCheckpointer — write-side wrappers (master §8.1)

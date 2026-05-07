@@ -4,13 +4,25 @@
  * calls the materialiser would issue, AND the entry point for actually
  * mapping the repo into VCM (per-source checkboxes + Map to VCM button +
  * confirmation modal). PUT-and-commit on the YAML is intentionally
- * deferred; the YAML viewer is a `<pre>` block, not Monaco.
+ * deferred; the YAML viewer is read-only with syntax highlighting via
+ * ``prism-react-renderer``.
  *
  * The colony's design-monorepo URL is configured on the LandingPage
  * (Colonies panel → pencil → Save). The tab reads the persisted URL
  * to pre-populate the inspector but does not write back here.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Tree, type NodeRendererProps } from "react-arborist";
+import { Highlight, themes } from "prism-react-renderer";
+import {
+  ChevronDown,
+  ChevronRight,
+  File as FileIcon,
+  FileCode,
+  FileText,
+  Folder,
+  FolderOpen,
+} from "lucide-react";
 import {
   useColonyDesignMonorepo,
   useRepoMap,
@@ -65,8 +77,6 @@ export function RepoMapTab() {
   const [enabledNames, setEnabledNames] = useState<Set<string>>(new Set());
   useEffect(() => {
     setEnabledNames(new Set(sources.map((s) => s.name)));
-    // sourcesKey collapses the array identity into a stable string so
-    // we re-init only when the actual list of names changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourcesKey]);
 
@@ -75,7 +85,10 @@ export function RepoMapTab() {
   const onLoad = (e: React.FormEvent) => {
     e.preventDefault();
     if (!originInput.trim()) return;
-    setSubmitted({ originUrl: originInput.trim(), branch: branchInput.trim() || DEFAULT_BRANCH });
+    setSubmitted({
+      originUrl: originInput.trim(),
+      branch: branchInput.trim() || DEFAULT_BRANCH,
+    });
   };
 
   const onPreview = () => {
@@ -88,9 +101,6 @@ export function RepoMapTab() {
 
   const onConfirmMap = () => {
     if (!submitted) return;
-    // ``enabled_sources`` is omitted when every source is ticked —
-    // matches the backend's "None ⇒ map every row" contract and keeps
-    // the request body small for the common case.
     const allEnabled = enabledNames.size === sources.length;
     mapRepo.mutate({
       origin_url: submitted.originUrl,
@@ -113,101 +123,90 @@ export function RepoMapTab() {
 
   return (
     <div className="p-4 flex flex-col gap-4 h-full">
-      <header className="flex flex-col gap-2">
-        <h2 className="text-lg font-semibold">Design Monorepo</h2>
-        <p className="text-xs text-muted-foreground max-w-3xl">
-          Inspect the <code>.colony/repo_map.yaml</code> of a design
-          monorepo, browse its directory tree, dry-run the materialiser
-          to see exactly which VCM mappings the cluster would create,
-          and trigger the actual mapping with the per-source checkboxes
-          below. The colony's design-monorepo URL is configured on the
-          landing page (Colonies panel → pencil → Save).
-        </p>
-        <form onSubmit={onLoad} className="flex flex-wrap items-center gap-2">
-          <input
-            value={originInput}
-            onChange={(e) => setOriginInput(e.target.value)}
-            placeholder="https://github.com/example/design-monorepo.git"
-            className="px-2 py-1 rounded border bg-background text-sm w-[28rem]"
-          />
-          <input
-            value={branchInput}
-            onChange={(e) => setBranchInput(e.target.value)}
-            placeholder="branch"
-            className="px-2 py-1 rounded border bg-background text-sm w-32"
-          />
-          <button
-            type="submit"
-            className="px-3 py-1 rounded bg-primary text-primary-foreground text-sm"
-          >
-            Load
-          </button>
-          <button
-            type="button"
-            onClick={onPreview}
-            disabled={!submitted}
-            className="px-3 py-1 rounded border text-sm disabled:opacity-50"
-          >
-            Preview mmap calls
-          </button>
-          <button
-            type="button"
-            onClick={() => setConfirmOpen(true)}
-            disabled={!canMap || mapRepo.isPending}
-            className="px-3 py-1 rounded bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 text-sm disabled:opacity-50"
-          >
-            {mapRepo.isPending ? "Mapping…" : "Map to VCM"}
-          </button>
+      <header className="flex flex-col gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Design Monorepo</h2>
+          <p className="text-xs text-muted-foreground max-w-3xl mt-1">
+            Inspect <code>.colony/repo_map.yaml</code>, browse the
+            directory tree, dry-run the materialiser, and trigger the
+            actual mapping into VCM. The colony's design-monorepo URL is
+            configured on the landing page (Colonies → pencil → Save).
+          </p>
+        </div>
+
+        {/* Row 1: source inputs. Row 2: action cluster, right-aligned.
+            Two rows beats one wrapping row — keeps the inputs readable
+            at any width and keeps actions visually grouped. */}
+        <form onSubmit={onLoad} className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={originInput}
+              onChange={(e) => setOriginInput(e.target.value)}
+              placeholder="https://github.com/example/design-monorepo.git"
+              className="px-3 py-1.5 rounded-md border border-border bg-background text-sm flex-1 min-w-[20rem] focus:outline-none focus:ring-2 focus:ring-primary/30"
+            />
+            <input
+              value={branchInput}
+              onChange={(e) => setBranchInput(e.target.value)}
+              placeholder="branch"
+              className="px-3 py-1.5 rounded-md border border-border bg-background text-sm w-32 focus:outline-none focus:ring-2 focus:ring-primary/30"
+            />
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <SecondaryButton type="submit">Load</SecondaryButton>
+            <SecondaryButton
+              type="button"
+              onClick={onPreview}
+              disabled={!submitted}
+            >
+              Preview mmap calls
+            </SecondaryButton>
+            <PrimaryButton
+              type="button"
+              onClick={() => setConfirmOpen(true)}
+              disabled={!canMap || mapRepo.isPending}
+            >
+              {mapRepo.isPending ? "Mapping…" : "Map to VCM"}
+            </PrimaryButton>
+          </div>
         </form>
-        {!colonyId ? (
-          <div className="text-xs text-muted-foreground">
-            No active colony. Pick one in the header dropdown or on the
-            landing page.
-          </div>
-        ) : persisted.data?.origin_url ? (
-          <div className="text-xs text-muted-foreground">
-            Saved on this colony:{" "}
-            <code>{persisted.data.origin_url}</code>{" "}
-            (branch <code>{persisted.data.branch}</code>) — edit on the
-            landing page.
-          </div>
-        ) : (
-          <div className="text-xs text-muted-foreground">
-            No design monorepo configured for the active colony{" "}
-            (<code>{colonyId.slice(0, 16)}…</code>). Set one on the
-            landing page (Colonies panel → pencil → Save), then refresh
-            this tab. Until then, you can paste any URL above to
-            inspect it ad-hoc.
-          </div>
-        )}
-        {repoMapQuery.isError && (
-          <div className="text-xs text-red-500">
-            {(repoMapQuery.error as Error)?.message ?? "Failed to load repo map."}
-          </div>
-        )}
-        {mapRepo.isSuccess && (
-          <div className="text-xs text-emerald-400">
-            Mapping started (op {mapRepo.data?.op_id ?? "?"}). Watch
-            progress on the VCM tab.
-          </div>
-        )}
-        {mapRepo.isError && (
-          <div className="text-xs text-red-500">
-            {(mapRepo.error as Error)?.message ?? "Map to VCM failed."}
-          </div>
-        )}
+
+        <Banner
+          colony={colonyId}
+          persistedUrl={persisted.data?.origin_url ?? null}
+          persistedBranch={persisted.data?.branch ?? null}
+          loadError={
+            repoMapQuery.isError
+              ? (repoMapQuery.error as Error)?.message ?? "Failed to load repo map."
+              : null
+          }
+          mapSuccess={
+            mapRepo.isSuccess
+              ? `Mapping started (op ${mapRepo.data?.op_id ?? "?"}). Watch progress on the VCM tab.`
+              : null
+          }
+          mapError={
+            mapRepo.isError
+              ? (mapRepo.error as Error)?.message ?? "Map to VCM failed."
+              : null
+          }
+        />
       </header>
 
-      <div className="flex flex-1 gap-4 overflow-hidden">
-        <section className="w-1/3 border rounded p-2 overflow-auto">
-          <h3 className="text-sm font-medium mb-2">Tree</h3>
-          {treeQuery.isLoading && <div className="text-xs">Loading…</div>}
-          {treeQuery.data ? (
-            <RepoTree node={treeQuery.data.root} depth={0} />
-          ) : null}
+      <div className="flex flex-1 gap-4 overflow-hidden min-h-0">
+        <section className="w-72 shrink-0 rounded-lg border border-border bg-card flex flex-col overflow-hidden">
+          <div className="px-3 py-2 border-b border-border">
+            <h3 className="text-sm font-medium">Tree</h3>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            {treeQuery.isLoading && (
+              <div className="text-xs text-muted-foreground p-3">Loading…</div>
+            )}
+            {treeQuery.data && <RepoTreeView root={treeQuery.data.root} />}
+          </div>
         </section>
 
-        <section className="flex-1 flex flex-col gap-3 overflow-hidden">
+        <section className="flex-1 flex flex-col gap-3 overflow-hidden min-w-0">
           <SourcesPanel
             hasFile={repoMapQuery.data?.has_repo_map_file ?? false}
             yaml={repoMapQuery.data?.raw_yaml ?? null}
@@ -240,42 +239,220 @@ export function RepoMapTab() {
 }
 
 /* -------------------------------------------------------------------- */
+/* Buttons — two styles only: PrimaryButton (the CTA), SecondaryButton  */
+/* (everything else). Local to this tab to avoid premature shared-      */
+/* primitive churn across the dashboard.                                */
+/* -------------------------------------------------------------------- */
 
-function RepoTree({ node, depth }: { node: RepoTreeNode; depth: number }) {
-  const [open, setOpen] = useState(depth < 1);
-  const indent = { paddingLeft: `${depth * 12}px` };
-  const label = node.path === "." ? "/" : node.path.split("/").pop();
-  if (!node.is_dir) {
-    return (
-      <div style={indent} className="text-xs">
-        {label}
-      </div>
-    );
-  }
+type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement>;
+
+function PrimaryButton(props: ButtonProps) {
+  const { className = "", ...rest } = props;
   return (
-    <div>
-      <div
-        style={indent}
-        className="text-xs cursor-pointer select-none"
-        onClick={() => setOpen((o) => !o)}
-      >
-        {open ? "▾" : "▸"} {label}/
-      </div>
-      {open &&
-        node.children.map((c) => (
-          <RepoTree key={c.path} node={c} depth={depth + 1} />
-        ))}
+    <button
+      {...rest}
+      className={
+        "rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground " +
+        "hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed " +
+        "focus:outline-none focus:ring-2 focus:ring-primary/40 transition-colors " +
+        className
+      }
+    />
+  );
+}
+
+function SecondaryButton(props: ButtonProps) {
+  const { className = "", ...rest } = props;
+  return (
+    <button
+      {...rest}
+      className={
+        "rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium text-foreground " +
+        "hover:bg-accent/40 disabled:opacity-50 disabled:cursor-not-allowed " +
+        "focus:outline-none focus:ring-2 focus:ring-primary/30 transition-colors " +
+        className
+      }
+    />
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* Status banner — colony-context + load/map states, all in one strip.  */
+/* Replaces the old vertical pile of mismatched status divs.            */
+/* -------------------------------------------------------------------- */
+
+function Banner({
+  colony, persistedUrl, persistedBranch, loadError, mapSuccess, mapError,
+}: {
+  colony: string | null;
+  persistedUrl: string | null;
+  persistedBranch: string | null;
+  loadError: string | null;
+  mapSuccess: string | null;
+  mapError: string | null;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      {!colony ? (
+        <div className="text-xs text-muted-foreground">
+          No active colony. Pick one in the header dropdown or on the
+          landing page.
+        </div>
+      ) : persistedUrl ? (
+        <div className="text-xs text-muted-foreground">
+          Saved on this colony: <code>{persistedUrl}</code> (branch{" "}
+          <code>{persistedBranch}</code>) — edit on the landing page.
+        </div>
+      ) : (
+        <div className="text-xs text-muted-foreground">
+          No design monorepo configured for the active colony{" "}
+          (<code>{colony.slice(0, 16)}…</code>). Set one on the landing
+          page (Colonies → pencil → Save), then refresh this tab.
+        </div>
+      )}
+      {loadError && (
+        <div className="text-xs rounded border border-red-500/40 bg-red-500/10 px-2.5 py-1.5 text-red-400">
+          {loadError}
+        </div>
+      )}
+      {mapSuccess && (
+        <div className="text-xs rounded border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-emerald-400">
+          {mapSuccess}
+        </div>
+      )}
+      {mapError && (
+        <div className="text-xs rounded border border-red-500/40 bg-red-500/10 px-2.5 py-1.5 text-red-400">
+          {mapError}
+        </div>
+      )}
     </div>
   );
 }
 
+/* -------------------------------------------------------------------- */
+/* Tree — react-arborist + lucide icons.                                */
+/* -------------------------------------------------------------------- */
+
+interface ArboristNode {
+  id: string;
+  name: string;
+  isDir: boolean;
+  children?: ArboristNode[];
+}
+
+function toArborist(node: RepoTreeNode): ArboristNode {
+  return {
+    id: node.path,
+    name: node.path === "." ? "/" : node.path.split("/").pop() ?? node.path,
+    isDir: node.is_dir,
+    children: node.is_dir ? node.children.map(toArborist) : undefined,
+  };
+}
+
+function RepoTreeView({ root }: { root: RepoTreeNode }) {
+  // arborist requires an array at the top level; expose root's
+  // children directly when root is the synthetic ".", otherwise wrap.
+  const data = useMemo<ArboristNode[]>(() => {
+    const rootNode = toArborist(root);
+    return root.path === "." ? rootNode.children ?? [] : [rootNode];
+  }, [root]);
+  const { ref, height } = useElementSize<HTMLDivElement>();
+
+  return (
+    <div ref={ref} className="h-full overflow-hidden">
+      <Tree<ArboristNode>
+        data={data}
+        openByDefault={false}
+        width="100%"
+        height={height || 1}
+        indent={16}
+        rowHeight={24}
+        paddingTop={4}
+        paddingBottom={4}
+        disableDrag
+        disableDrop
+        disableEdit
+        disableMultiSelection
+        className="text-xs"
+      >
+        {TreeNode}
+      </Tree>
+    </div>
+  );
+}
+
+/**
+ * Track the rendered height of an element so virtualised children
+ * (react-arborist's ``<Tree>``) get a real number rather than the
+ * fill-parent CSS the rest of the layout relies on. ResizeObserver
+ * is on every browser the dashboard targets.
+ */
+function useElementSize<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+  const [height, setHeight] = useState(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const h = entries[0]?.contentRect.height ?? 0;
+      setHeight(Math.floor(h));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return { ref, height };
+}
+
+function iconForFile(name: string) {
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
+  const code = new Set([
+    "py", "ts", "tsx", "js", "jsx", "go", "rs", "java", "c", "cpp", "h",
+    "hpp", "rb", "sh", "yaml", "yml", "toml", "json", "ipynb",
+  ]);
+  const text = new Set(["md", "txt", "rst", "csv", "tsv", "log"]);
+  if (code.has(ext)) return FileCode;
+  if (text.has(ext)) return FileText;
+  return FileIcon;
+}
+
+function TreeNode({ node, style, dragHandle }: NodeRendererProps<ArboristNode>) {
+  const isDir = node.data.isDir;
+  const Chevron = node.isOpen ? ChevronDown : ChevronRight;
+  const FolderGlyph = node.isOpen ? FolderOpen : Folder;
+  const FileGlyph = iconForFile(node.data.name);
+
+  return (
+    <div
+      ref={dragHandle}
+      style={style}
+      className={
+        "flex items-center gap-1.5 px-2 cursor-pointer select-none rounded-sm " +
+        "hover:bg-accent/30 " +
+        (node.isSelected ? "bg-accent/40 " : "")
+      }
+      onClick={() => isDir && node.toggle()}
+    >
+      {isDir ? (
+        <Chevron size={12} className="shrink-0 text-muted-foreground" />
+      ) : (
+        <span className="w-3 shrink-0" />
+      )}
+      {isDir ? (
+        <FolderGlyph size={14} className="shrink-0 text-sky-500/80" />
+      ) : (
+        <FileGlyph size={14} className="shrink-0 text-muted-foreground" />
+      )}
+      <span className="truncate">{node.data.name}</span>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* Sources / YAML panel.                                                */
+/* -------------------------------------------------------------------- */
+
 function SourcesPanel({
-  hasFile,
-  yaml,
-  sources,
-  enabledNames,
-  toggleSource,
-  loading,
+  hasFile, yaml, sources, enabledNames, toggleSource, loading,
 }: {
   hasFile: boolean;
   yaml: string | null;
@@ -285,10 +462,10 @@ function SourcesPanel({
   loading: boolean;
 }) {
   return (
-    <div className="border rounded flex flex-col overflow-hidden">
-      <div className="px-3 py-2 border-b flex items-center justify-between">
+    <div className="rounded-lg border border-border bg-card flex flex-col overflow-hidden min-h-0">
+      <div className="px-3 py-2 border-b border-border flex items-center justify-between">
         <h3 className="text-sm font-medium">repo_map.yaml</h3>
-        <span className="text-xs text-muted-foreground">
+        <span className="text-[11px] text-muted-foreground">
           {loading
             ? "loading…"
             : hasFile
@@ -296,34 +473,75 @@ function SourcesPanel({
             : "default fallback (no file present)"}
         </span>
       </div>
-      <div className="grid grid-cols-2 gap-0 overflow-hidden">
-        {/* Left: per-source toggles. The user ticks rows they want
-            mapped; the Map to VCM button passes the resulting set as
-            ``enabled_sources``. */}
-        <div className="border-r overflow-auto p-2">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">
+      {/* Sources column fixed-width, YAML takes the remainder. The old
+          50/50 grid cramped the YAML at typical widths. */}
+      <div
+        className="grid overflow-hidden min-h-0"
+        style={{ gridTemplateColumns: "18rem 1fr" }}
+      >
+        <div className="border-r border-border overflow-auto p-3">
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">
             Sources to map
           </div>
-          {sources.length === 0 && (
+          {sources.length === 0 ? (
             <div className="text-xs text-muted-foreground italic">
               no sources
             </div>
+          ) : (
+            <div className="flex flex-col gap-0.5">
+              {sources.map((s) => (
+                <SourceCheckbox
+                  key={s.name}
+                  source={s}
+                  enabled={enabledNames.has(s.name)}
+                  onToggle={() => toggleSource(s.name)}
+                />
+              ))}
+            </div>
           )}
-          {sources.map((s) => (
-            <SourceCheckbox
-              key={s.name}
-              source={s}
-              enabled={enabledNames.has(s.name)}
-              onToggle={() => toggleSource(s.name)}
-            />
-          ))}
         </div>
-        {/* Right: raw YAML for reference. */}
-        <pre className="text-xs p-3 overflow-auto bg-muted/40 whitespace-pre-wrap font-mono">
-          {yaml ?? renderDefaultSummary(sources)}
-        </pre>
+        <YamlView text={yaml ?? renderDefaultSummary(sources)} />
       </div>
     </div>
+  );
+}
+
+function YamlView({ text }: { text: string }) {
+  return (
+    <Highlight code={text} language="yaml" theme={themes.vsDark}>
+      {({ className, style, tokens, getLineProps, getTokenProps }) => (
+        <pre
+          className={
+            (className ?? "") +
+            " text-[11px] leading-5 font-mono p-3 overflow-auto m-0 bg-muted/40"
+          }
+          style={{ ...style, background: undefined }}
+        >
+          {tokens.map((line, i) => {
+            const lineProps = getLineProps({ line, key: i });
+            return (
+              <div
+                key={i}
+                className={lineProps.className}
+                style={lineProps.style}
+              >
+                <span className="inline-block w-7 pr-2 text-right text-muted-foreground/60 select-none">
+                  {i + 1}
+                </span>
+                {line.map((token, j) => {
+                  const tp = getTokenProps({ token, key: j });
+                  return (
+                    <span key={j} className={tp.className} style={tp.style}>
+                      {tp.children}
+                    </span>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </pre>
+      )}
+    </Highlight>
   );
 }
 
@@ -334,9 +552,6 @@ function SourceCheckbox({
   enabled: boolean;
   onToggle: () => void;
 }) {
-  // Surface the per-source paging knobs (and chunk knobs for
-  // literature) so the operator sees what config each row uses
-  // without having to read the YAML.
   const meta = useMemo(() => {
     const bits: string[] = [source.type];
     if (source.start_dir) bits.push(`@ ${source.start_dir}`);
@@ -348,16 +563,16 @@ function SourceCheckbox({
   }, [source]);
 
   return (
-    <label className="flex items-start gap-2 py-1 cursor-pointer hover:bg-accent/30 px-1 rounded">
+    <label className="flex items-start gap-2 py-1 px-1 cursor-pointer hover:bg-accent/30 rounded">
       <input
         type="checkbox"
         checked={enabled}
         onChange={onToggle}
-        className="mt-0.5"
+        className="mt-0.5 accent-primary"
       />
-      <div className="flex flex-col">
-        <span className="text-xs font-medium">{source.name}</span>
-        <span className="text-[10px] text-muted-foreground">{meta}</span>
+      <div className="flex flex-col min-w-0">
+        <span className="text-xs font-medium truncate">{source.name}</span>
+        <span className="text-[10px] text-muted-foreground truncate">{meta}</span>
       </div>
     </label>
   );
@@ -373,29 +588,40 @@ function renderDefaultSummary(sources: RepoMapSource[]): string {
   ].join("\n");
 }
 
+/* -------------------------------------------------------------------- */
+/* Preview panel + Confirm dialog — same shape as before, restyled to   */
+/* match the unified card / button language.                            */
+/* -------------------------------------------------------------------- */
+
 function PreviewPanel({
-  baseScopeId,
-  sources,
+  baseScopeId, sources,
 }: {
   baseScopeId: string;
   sources: { name: string; scope_id: string; mmap_kwargs: Record<string, unknown> }[];
 }) {
   return (
-    <div className="border rounded flex flex-col overflow-hidden">
-      <div className="px-3 py-2 border-b">
+    <div className="rounded-lg border border-border bg-card flex flex-col overflow-hidden">
+      <div className="px-3 py-2 border-b border-border">
         <h3 className="text-sm font-medium">
-          Preview — mmap calls (base scope:{" "}
-          <code className="text-xs">{baseScopeId}</code>)
+          Preview — mmap calls
+          <span className="ml-2 text-xs text-muted-foreground font-normal">
+            base scope <code>{baseScopeId}</code>
+          </span>
         </h3>
       </div>
-      <div className="overflow-auto p-2 flex flex-col gap-2">
+      <div className="overflow-auto p-3 flex flex-col gap-2">
         {sources.map((s) => (
-          <div key={s.scope_id} className="border rounded p-2 text-xs">
+          <div
+            key={s.scope_id}
+            className="rounded-md border border-border bg-background/60 p-2 text-xs"
+          >
             <div className="font-medium">
               {s.name}{" "}
-              <span className="text-muted-foreground">→ {s.scope_id}</span>
+              <span className="text-muted-foreground font-normal">
+                → {s.scope_id}
+              </span>
             </div>
-            <pre className="mt-1 text-[11px] whitespace-pre-wrap font-mono">
+            <pre className="mt-1 text-[11px] whitespace-pre-wrap font-mono text-muted-foreground">
               {JSON.stringify(s.mmap_kwargs, null, 2)}
             </pre>
           </div>
@@ -436,25 +662,16 @@ function ConfirmMapDialog({
                 : `${enabledNames.length} of ${totalSources}: ${enabledNames.join(", ") || "(none)"}`}
             </div>
           </div>
-          <div className="rounded border border-border bg-muted/30 px-3 py-2 text-muted-foreground">
+          <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-muted-foreground">
             Mapping runs in the background on the cluster. Progress and
             results appear on the <strong>VCM</strong> tab.
           </div>
         </div>
         <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
-          <button
-            onClick={onCancel}
-            className="rounded px-4 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onConfirm}
-            disabled={enabledNames.length === 0}
-            className="rounded bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-          >
+          <SecondaryButton onClick={onCancel}>Cancel</SecondaryButton>
+          <PrimaryButton onClick={onConfirm} disabled={enabledNames.length === 0}>
             Map to VCM
-          </button>
+          </PrimaryButton>
         </div>
       </div>
     </div>

@@ -150,6 +150,27 @@ it ingests files already committed to the monorepo. It does not
 overlap with chat-driven acquisition (`BulkAcquisitionCapability`),
 which adds *new external* sources at the agent's request.
 
+### Triggering ingestion from chat
+
+`RepoStateProvider.ingest_repo_map_literature` is the chat-callable
+wrapper. The `SessionAgent` picks it when the user says "ingest
+literature from `repo_map.yaml`" / "process the design monorepo". The
+action `git fetch origin && git reset --hard origin/<branch>` on
+the per-agent clone (so operator edits pushed from the host land
+before ingestion runs), then walks `knowledge_routing:` rows whose
+`ingest_to` is `knowledge_base`. `vcm`-routed rows are silently
+skipped per the materialiser's contract. Returns `{"ingested":
+[<source_uri>, …], "count": N}`.
+
+Bulk acquisition of *external* sources (URLs / arXiv / DOI) is a
+separate flow via `BulkAcquisitionCapability.acquire_manifest(path)`
+which takes an operator-authored `CorpusManifest` YAML at any path.
+A reasonable convention for operators who want manifests inside the
+design monorepo is `.colony/corpora/<name>.manifest.yaml` (multiple
+manifests per repo allowed; each carries its own `domain` label).
+The framework does not enforce this layout — the action takes the
+path explicitly.
+
 ### How `ingest_to` works
 
 `ingest_to` is the single declarative field that names where a glob
@@ -158,7 +179,7 @@ of literature paths should land. There are two values:
 - **`knowledge_base`** (default for new literature). The materialiser
   walks every matching file and feeds it through the process-singleton
   `Ingestor` — the same backend curation and retrieval share, so the
-  ingested chunks are immediately available to the SessionAgent's
+  ingested chunks are immediately available to the `SessionAgent`'s
   retrieval surface in the next chat turn.
 
 - **`vcm`**. The materialiser **skips** these rows on the KB side. The
@@ -235,8 +256,8 @@ can adopt the materialiser by importing
 
 | Path | Trigger | Source |
 |---|---|---|
-| `knowledge_routing` rules in `repo_map.yaml` | Materialiser runs (CLI / dashboard `Map Repo`) | Files **already committed** to the design monorepo. Used to seed the KB with literature the user wants the SessionAgent to be able to retrieve from day one. |
-| `BulkAcquisitionCapability.acquire_manifest` / `KnowledgeCuratorCapability.ingest_raw` | Agent action triggered from chat | **New external** sources — papers the SessionAgent decides to acquire while answering a question. |
+| `knowledge_routing` rules in `repo_map.yaml` | Materialiser runs (CLI / dashboard `Map Repo`) | Files **already committed** to the design monorepo. Used to seed the KB with literature the user wants the `SessionAgent` to be able to retrieve from day one. |
+| `BulkAcquisitionCapability.acquire_manifest` / `KnowledgeCuratorCapability.ingest_raw` | Agent action triggered from chat | **New external** sources — papers the `SessionAgent` decides to acquire while answering a question. |
 
 Both write through the same process-singleton `Ingestor`, so chunks
 from the two paths coexist in one KB.

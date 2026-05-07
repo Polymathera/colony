@@ -1,24 +1,30 @@
 """``BulkAcquisitionCapability`` — master §6.6 corpus bulk acquisition.
 
-Master §6.6 names a capability that a domain (Quantum Sensing, Racer,
-Fusion, etc.) uses to load its expected literature into the corpus
-**without trampling user-seeded content**. This module implements the
-durable spine of that capability:
+Master §6.6 names a capability that downstream applications use to
+load expected literature into the corpus **without trampling user-
+seeded content**. This module implements the durable spine of that
+capability:
 
-- A typed :class:`CorpusManifest` schema — what a domain ships under
-  ``cps/domains/<domain>/corpora/manifest.yaml``.
+- A typed :class:`CorpusManifest` schema — operator-authored YAML
+  listing every external source to acquire. Path is operator-chosen;
+  the action takes it as an explicit argument. The suggested
+  convention for operators who keep manifests inside a Colony design
+  monorepo is ``.colony/corpora/<name>.manifest.yaml`` (alongside
+  ``.colony/repo_map.yaml`` and ``.colony/manifest.json``); the
+  framework does not enforce this.
 - An :class:`AcquirerStrategy` ABC — the integration point for the
   per-method acquirers (HTTP, arXiv, DOI, IEEE Xplore, SAE Mobilus,
   Semantic Scholar). The only real implementation today is
   :class:`LocalPathAcquirer` (the file is already on disk because the
-  user pre-seeded it). The rest are
-  ``_TODO_<source>Acquirer`` stubs that raise ``NotImplementedError``
-  with the dossier reference and the build-effort estimate, so the
-  framework's missing integrations are *visible* rather than silent.
+  operator pre-seeded it). The rest are ``_TODO_<source>Acquirer``
+  stubs that raise ``NotImplementedError`` with the build-effort
+  estimate, so the framework's missing integrations are *visible*
+  rather than silent.
 - :class:`BulkAcquisitionCapability` — the agent-callable
   ``@action_executor`` surface. Defaults to
   :data:`IngestionPolicy.SKIP_IF_PRESENT`, the safe-by-default
-  contract per ``cps/phase_q_opm_meg_demo_plan.md`` Q-S0a.
+  contract: re-running on the same manifest never overwrites or
+  re-ingests already-acquired sources unless the operator opts in.
 
 Acronyms expanded for non-specialist readers:
 
@@ -120,11 +126,19 @@ class ManifestEntry(BaseModel):
 
 
 class CorpusManifest(BaseModel):
-    """A domain-shipped list of expected sources.
+    """A list of external sources to acquire and ingest.
 
-    Lives under ``cps/domains/<domain>/corpora/manifest.yaml`` by
-    convention. The schema is intentionally minimal so it can absorb
-    future fields without breaking older consumers — the
+    Operator-authored YAML; path is supplied explicitly to
+    :meth:`BulkAcquisitionCapability.acquire_manifest`. The framework
+    does not prescribe a location, but operators who keep manifests
+    inside a Colony design monorepo will find it natural to put them
+    alongside ``.colony/repo_map.yaml`` and ``.colony/manifest.json``
+    — e.g. ``.colony/corpora/<name>.manifest.yaml``. Multiple
+    manifests can coexist (``papers``, ``standards``, …); each one
+    has its own ``domain`` label.
+
+    The schema is intentionally minimal so it can absorb future
+    fields without breaking older consumers — the
     ``schema_version`` field gates migrations.
     """
 
@@ -217,10 +231,9 @@ class AcquiredSource(BaseModel):
 
 
 class LocalPathAcquirer(AcquirerStrategy):
-    """The user has already placed the file on disk — typical for the
-    user-seeded corpus. ``acquirer_args["path"]`` carries the absolute
-    path. No network access. Used for every paper the user manually
-    pre-downloaded into ``cps/domains/<domain>/corpora/papers/``.
+    """The operator has already placed the file on disk — typical for
+    a pre-seeded corpus. ``acquirer_args["path"]`` carries the
+    absolute path. No network access.
     """
 
     @property
