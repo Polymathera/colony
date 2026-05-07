@@ -27,11 +27,13 @@ include = [
     # the wildcards in `exclude` below would otherwise drop. This entry
     # *overrides* the exclude rules for the scaffolds subtree.
     { path = "src/polymathera/colony/design_monorepo/scaffolds/**/*", format = ["sdist", "wheel"] },
-    # ``DesignCheckpointer.initialize_repo_map`` reads this template at
+    # ``DesignCheckpointer.initialize_repo_map`` reads these templates at
     # runtime via ``Path(__file__).parent / "templates" / ...``; non-.py
     # files in package directories are stripped from the wheel by
-    # default, so name it explicitly.
+    # default, so name them explicitly. Both the repo-map YAML and the
+    # ``.gitattributes`` LFS pattern list ship as data files.
     { path = "src/polymathera/colony/design_monorepo/templates/*.yaml", format = ["sdist", "wheel"] },
+    { path = "src/polymathera/colony/design_monorepo/templates/*.template", format = ["sdist", "wheel"] },
 ]
 exclude = [
     "src/**/tests/",

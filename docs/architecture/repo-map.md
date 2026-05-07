@@ -253,6 +253,75 @@ are re-ingested or deleted; the dashboard surfaces a per-row
 (PUT-and-commit is deferred — see the "Design Monorepo" tab
 section below.)
 
+## Git LFS
+
+Design monorepos accumulate large binary blobs — literature PDFs,
+CAD outputs, simulation runs, ML weights, scientific datasets — at
+a pace that breaks plain git (GitHub rejects pushes of any file >
+100 MB; cumulative repo size grows as N × revisions; the framework
+clones each repo three times, so worst-case disk usage compounds).
+The framework treats LFS as the default for design monorepos and
+sets it up automatically.
+
+### What `initialize_repo_map(enable_lfs=True)` does
+
+1. Runs `git lfs install --local` on the working tree to wire the
+   clean/smudge filters and the pre-push hook into the per-agent
+   clone. Idempotent — re-running is a no-op. Best-effort: if
+   `git-lfs` isn't installed (rare; the framework's container
+   images ship it), the action logs a warning and continues so the
+   bootstrap commit still happens.
+2. Writes a default
+   [`.gitattributes`](../../src/polymathera/colony/design_monorepo/templates/gitattributes.template)
+   declaring LFS patterns for documents, archives, scientific data,
+   images, CAD/3D, ML weights, and audio/video — **only when no
+   `.gitattributes` exists** (operator edits are never overwritten).
+3. Sets `manifest.lfs.mode = "same_remote"` for new manifests, or
+   flips the mode from `"disabled"` to `"same_remote"` on
+   pre-existing manifests so other clones of this repo activate LFS
+   too. The mode is the single source of truth other consumers
+   (dashboard cache, sibling agents) read.
+
+Patterns are **format-based, not path-based**. The framework does
+not prescribe a directory layout, so `*.pdf` matches PDFs anywhere
+in the tree rather than `literature/**/*.pdf`. Edit `.gitattributes`
+freely to add domain-specific formats or to scope a pattern to a
+subtree.
+
+Per-agent clones go through `_lazy_clone_from_agent_metadata`,
+which also runs `git lfs install --local` after each clone so
+later commits from those agents route through LFS instead of plain
+git.
+
+### Forward-only by default; `migrate_existing_to_lfs=True` rewrites history
+
+LFS is forward-only. Adding a pattern to `.gitattributes` only
+affects commits made *after* the pattern is in place. PDFs that
+were committed earlier sit as plain git objects in history — the
+repo size doesn't shrink retroactively.
+
+To convert already-committed blobs into LFS pointers, run
+`initialize_repo_map(migrate_existing_to_lfs=True)`. The action
+calls `git lfs migrate import --include=<patterns>
+--everything` after the bootstrap commit, where `<patterns>` is
+parsed from the current `.gitattributes`. **This rewrites every
+commit SHA on the migrated refs.** Anyone else who already cloned
+the repo will need to re-clone (or run `git pull --rebase` and
+resolve), and the next push needs `--force`. Default is `False`;
+opt in only on a fresh repo or when you're sure no one else has a
+working clone.
+
+### GitHub LFS quota
+
+LFS storage and bandwidth live on the upstream remote, not in the
+framework. For self-hosted Gitea / GitLab there's no quota. For
+github.com the free tier is 1 GB storage + 1 GB bandwidth per
+month, then $5 per 50 GB data pack. A single literature monorepo
+will fit comfortably in the free tier; a CAD-heavy design repo
+that pushes 50 GB/month of revision data won't. The operator pays
+for LFS storage on github.com — flagged here so it's not a
+surprise on the first invoice.
+
 ## Dashboard tab — "Design Monorepo"
 
 The **Design Monorepo** tab is now both the inspector AND the entry

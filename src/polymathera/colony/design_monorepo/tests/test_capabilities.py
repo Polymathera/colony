@@ -186,9 +186,12 @@ async def test_initialize_repo_map_bootstraps_empty_repo(
     result = await cap.initialize_repo_map()
 
     assert result["status"] == "initialized"
+    # ``.gitattributes`` joins manifest + repo_map.yaml in the
+    # bootstrap commit because ``enable_lfs=True`` is the default.
     assert set(result["files_created"]) == {
         MANIFEST_RELATIVE_PATH,
         f"{REPO_MAP_DIR}/{REPO_MAP_FILENAME}",
+        ".gitattributes",
     }
     assert result["committed_sha"] is not None
     assert result["pushed"] is False
@@ -371,6 +374,207 @@ async def test_initialize_repo_map_attribution_falls_back_when_user_unset(
     # Principal still applied; trailer skipped silently.
     assert head.author.name == "colony:c1"
     assert "Co-Authored-By:" not in head.message
+
+
+def test_lfs_patterns_from_gitattributes_extracts_filter_lfs_lines(
+    tmp_path: Path,
+) -> None:
+    """``_lfs_patterns_from_gitattributes`` returns exactly the
+    patterns that route through LFS. Skips comments, blank lines,
+    and lines without ``filter=lfs``. Used by ``initialize_repo_map``
+    when the operator opts into ``migrate_existing_to_lfs=True``."""
+
+    from polymathera.colony.design_monorepo.capabilities import (
+        _lfs_patterns_from_gitattributes,
+    )
+
+    p = tmp_path / ".gitattributes"
+    p.write_text(
+        "# header comment\n"
+        "\n"
+        "*.pdf       filter=lfs diff=lfs merge=lfs -text\n"
+        "*.docx      filter=lfs diff=lfs merge=lfs -text\n"
+        "*.md        text\n"  # NOT an LFS line
+        "*.zip       filter=lfs diff=lfs merge=lfs -text\n",
+        encoding="utf-8",
+    )
+    assert _lfs_patterns_from_gitattributes(p) == ["*.pdf", "*.docx", "*.zip"]
+
+
+def test_lfs_patterns_from_gitattributes_returns_empty_when_missing(
+    tmp_path: Path,
+) -> None:
+    from polymathera.colony.design_monorepo.capabilities import (
+        _lfs_patterns_from_gitattributes,
+    )
+    assert _lfs_patterns_from_gitattributes(tmp_path / "absent") == []
+
+
+async def test_initialize_repo_map_enables_lfs_by_default(
+    tmp_path: Path,
+) -> None:
+    """``enable_lfs=True`` (the default): writes the bundled
+    ``.gitattributes`` LFS template, flips the manifest's
+    ``lfs.mode`` to ``"same_remote"``, and includes the file in the
+    bootstrap commit. ``git lfs install --local`` is best-effort —
+    if ``git-lfs`` isn't on the dev box the action logs a warning
+    and continues, which is the contract this test pins.
+    """
+
+    import git
+
+    from polymathera.colony.design_monorepo.capabilities import (
+        DesignCheckpointer,
+    )
+    from polymathera.colony.design_monorepo.manifest import (
+        DesignMonorepoManifest,
+    )
+
+    repo_root = tmp_path / "fresh"
+    repo_root.mkdir()
+    git.Repo.init(str(repo_root), initial_branch="main")
+
+    cap = DesignCheckpointer(
+        agent=None, scope_id="dm", working_dir=repo_root,
+    )
+    result = await cap.initialize_repo_map(push=False)
+
+    assert result["status"] == "initialized"
+    assert ".gitattributes" in result["files_created"]
+    assert result["lfs_enabled"] is True
+    assert result["migrated_to_lfs"] is False  # not opted in
+
+    gitattrs = (repo_root / ".gitattributes").read_text(encoding="utf-8")
+    # Spot-check a few representative LFS patterns from the template.
+    assert "*.pdf" in gitattrs
+    assert "filter=lfs" in gitattrs
+    assert "*.zip" in gitattrs
+
+    manifest = DesignMonorepoManifest.load_path(repo_root)
+    assert manifest.lfs.mode == "same_remote"
+
+
+async def test_initialize_repo_map_skip_lfs_when_disabled(
+    tmp_path: Path,
+) -> None:
+    """``enable_lfs=False``: no ``.gitattributes`` written; manifest
+    records ``lfs.mode="disabled"``. The opt-out exists for operators
+    who don't want LFS at all (e.g. small monorepos with no large
+    binaries, or air-gapped deployments without an LFS endpoint)."""
+
+    import git
+
+    from polymathera.colony.design_monorepo.capabilities import (
+        DesignCheckpointer,
+    )
+    from polymathera.colony.design_monorepo.manifest import (
+        DesignMonorepoManifest,
+    )
+
+    repo_root = tmp_path / "fresh"
+    repo_root.mkdir()
+    git.Repo.init(str(repo_root), initial_branch="main")
+
+    cap = DesignCheckpointer(
+        agent=None, scope_id="dm", working_dir=repo_root,
+    )
+    result = await cap.initialize_repo_map(push=False, enable_lfs=False)
+
+    assert result["status"] == "initialized"
+    assert ".gitattributes" not in result["files_created"]
+    assert not (repo_root / ".gitattributes").exists()
+    assert result["lfs_enabled"] is False
+
+    manifest = DesignMonorepoManifest.load_path(repo_root)
+    assert manifest.lfs.mode == "disabled"
+
+
+async def test_initialize_repo_map_preserves_operator_edited_gitattributes(
+    tmp_path: Path,
+) -> None:
+    """When ``.gitattributes`` already exists, ``initialize_repo_map``
+    must NOT overwrite it — operator edits stay intact. Same
+    no-clobber discipline as the manifest and repo_map.yaml.
+    """
+
+    import git
+
+    from polymathera.colony.design_monorepo.capabilities import (
+        DesignCheckpointer,
+    )
+
+    repo_root = tmp_path / "fresh"
+    repo_root.mkdir()
+    git.Repo.init(str(repo_root), initial_branch="main")
+
+    operator_content = "# my custom rules\n*.weird filter=lfs diff=lfs merge=lfs -text\n"
+    (repo_root / ".gitattributes").write_text(operator_content, encoding="utf-8")
+    repo = git.Repo(str(repo_root))
+    repo.config_writer().set_value("user", "email", "t@t").release()
+    repo.config_writer().set_value("user", "name", "t").release()
+    repo.index.add([".gitattributes"])
+    repo.index.commit("operator: custom .gitattributes")
+
+    cap = DesignCheckpointer(
+        agent=None, scope_id="dm", working_dir=repo_root,
+    )
+    result = await cap.initialize_repo_map(push=False)
+
+    assert result["status"] == "initialized"
+    assert ".gitattributes" not in result["files_created"]
+    assert (repo_root / ".gitattributes").read_text(encoding="utf-8") == operator_content
+
+
+async def test_initialize_repo_map_flips_existing_manifest_lfs_mode(
+    tmp_path: Path,
+) -> None:
+    """If a previously-initialised repo has ``lfs.mode="disabled"``
+    in its manifest, calling ``initialize_repo_map(enable_lfs=True)``
+    must flip the mode to ``"same_remote"`` and re-commit the
+    manifest — that's how the operator opts an existing repo into
+    LFS without re-creating it.
+    """
+
+    import json
+
+    import git
+
+    from polymathera.colony.design_monorepo.capabilities import (
+        DesignCheckpointer,
+    )
+    from polymathera.colony.design_monorepo.manifest import (
+        DesignMonorepoManifest, MANIFEST_RELATIVE_PATH,
+    )
+
+    repo_root = tmp_path / "fresh"
+    repo_root.mkdir()
+    repo = git.Repo.init(str(repo_root), initial_branch="main")
+    repo.config_writer().set_value("user", "email", "t@t").release()
+    repo.config_writer().set_value("user", "name", "t").release()
+
+    # Pre-existing manifest with LFS disabled.
+    manifest_path = repo_root / MANIFEST_RELATIVE_PATH
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps({
+        "schema_version": 1,
+        "tenant": "t", "colony": "c", "program": "p",
+        "target_system": "ts", "topology": "external",
+        "design_repo_url": "file://placeholder",
+        "lfs": {"mode": "disabled", "separate_url": None, "credentials_ref": None},
+    }) + "\n")
+    repo.index.add([MANIFEST_RELATIVE_PATH])
+    repo.index.commit("seed manifest with lfs disabled")
+
+    cap = DesignCheckpointer(
+        agent=None, scope_id="dm", working_dir=repo_root,
+    )
+    result = await cap.initialize_repo_map(push=False)
+
+    assert result["status"] == "initialized"
+    assert MANIFEST_RELATIVE_PATH in result["files_created"]
+
+    manifest = DesignMonorepoManifest.load_path(repo_root)
+    assert manifest.lfs.mode == "same_remote"
 
 
 async def test_initialize_repo_map_is_idempotent(

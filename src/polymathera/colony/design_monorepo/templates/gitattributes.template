@@ -1,0 +1,94 @@
+# `.gitattributes` — written by ``DesignCheckpointer.initialize_repo_map``
+# when ``enable_lfs=True``. Each pattern below is tracked through
+# Git LFS so the actual blobs live in a side-store; only ~150-byte
+# pointer files land in git history.
+#
+# Patterns are FORMAT-BASED, not PATH-BASED — the framework does not
+# prescribe a directory layout for design monorepos. Edit this file
+# freely to add patterns for formats specific to your domain (e.g.
+# proprietary CAD/sim outputs) or to scope a pattern to a subtree
+# (e.g. ``literature/**/*.pdf`` instead of ``*.pdf``).
+#
+# To convert files you've ALREADY committed (before this file
+# existed) to LFS, you need ``git lfs migrate import`` — that
+# rewrites history and requires a ``--force`` push. The framework
+# offers this as the opt-in ``migrate_existing_to_lfs=True`` flag on
+# ``initialize_repo_map``; do NOT run it on a repo that other people
+# already cloned, because their clones break.
+
+# ---- Documents / literature -----------------------------------------------
+*.pdf       filter=lfs diff=lfs merge=lfs -text
+*.docx      filter=lfs diff=lfs merge=lfs -text
+*.xlsx      filter=lfs diff=lfs merge=lfs -text
+*.pptx      filter=lfs diff=lfs merge=lfs -text
+*.odt       filter=lfs diff=lfs merge=lfs -text
+*.ods       filter=lfs diff=lfs merge=lfs -text
+*.odp       filter=lfs diff=lfs merge=lfs -text
+*.epub      filter=lfs diff=lfs merge=lfs -text
+
+# ---- Archives -------------------------------------------------------------
+*.zip       filter=lfs diff=lfs merge=lfs -text
+*.tar       filter=lfs diff=lfs merge=lfs -text
+*.tar.gz    filter=lfs diff=lfs merge=lfs -text
+*.tgz       filter=lfs diff=lfs merge=lfs -text
+*.tar.bz2   filter=lfs diff=lfs merge=lfs -text
+*.tar.xz    filter=lfs diff=lfs merge=lfs -text
+*.7z        filter=lfs diff=lfs merge=lfs -text
+*.gz        filter=lfs diff=lfs merge=lfs -text
+*.bz2       filter=lfs diff=lfs merge=lfs -text
+*.xz        filter=lfs diff=lfs merge=lfs -text
+
+# ---- Scientific data formats ---------------------------------------------
+*.h5        filter=lfs diff=lfs merge=lfs -text
+*.hdf5      filter=lfs diff=lfs merge=lfs -text
+*.nc        filter=lfs diff=lfs merge=lfs -text
+*.npy       filter=lfs diff=lfs merge=lfs -text
+*.npz       filter=lfs diff=lfs merge=lfs -text
+*.parquet   filter=lfs diff=lfs merge=lfs -text
+*.feather   filter=lfs diff=lfs merge=lfs -text
+*.arrow     filter=lfs diff=lfs merge=lfs -text
+*.zarr      filter=lfs diff=lfs merge=lfs -text
+*.mat       filter=lfs diff=lfs merge=lfs -text
+
+# ---- Images (raster) -----------------------------------------------------
+*.png       filter=lfs diff=lfs merge=lfs -text
+*.jpg       filter=lfs diff=lfs merge=lfs -text
+*.jpeg      filter=lfs diff=lfs merge=lfs -text
+*.tiff      filter=lfs diff=lfs merge=lfs -text
+*.tif       filter=lfs diff=lfs merge=lfs -text
+*.gif       filter=lfs diff=lfs merge=lfs -text
+*.bmp       filter=lfs diff=lfs merge=lfs -text
+*.psd       filter=lfs diff=lfs merge=lfs -text
+*.webp      filter=lfs diff=lfs merge=lfs -text
+*.heic      filter=lfs diff=lfs merge=lfs -text
+
+# ---- CAD / 3D ------------------------------------------------------------
+*.step      filter=lfs diff=lfs merge=lfs -text
+*.stp       filter=lfs diff=lfs merge=lfs -text
+*.iges      filter=lfs diff=lfs merge=lfs -text
+*.igs       filter=lfs diff=lfs merge=lfs -text
+*.stl       filter=lfs diff=lfs merge=lfs -text
+*.dwg       filter=lfs diff=lfs merge=lfs -text
+*.dxf       filter=lfs diff=lfs merge=lfs -text
+*.3mf       filter=lfs diff=lfs merge=lfs -text
+*.obj       filter=lfs diff=lfs merge=lfs -text
+*.fbx       filter=lfs diff=lfs merge=lfs -text
+*.glb       filter=lfs diff=lfs merge=lfs -text
+*.gltf      filter=lfs diff=lfs merge=lfs -text
+
+# ---- ML / model weights --------------------------------------------------
+*.onnx          filter=lfs diff=lfs merge=lfs -text
+*.safetensors   filter=lfs diff=lfs merge=lfs -text
+*.ckpt          filter=lfs diff=lfs merge=lfs -text
+*.pt            filter=lfs diff=lfs merge=lfs -text
+*.pth           filter=lfs diff=lfs merge=lfs -text
+*.bin           filter=lfs diff=lfs merge=lfs -text
+
+# ---- Audio / video --------------------------------------------------------
+*.mp3       filter=lfs diff=lfs merge=lfs -text
+*.wav       filter=lfs diff=lfs merge=lfs -text
+*.flac      filter=lfs diff=lfs merge=lfs -text
+*.mp4       filter=lfs diff=lfs merge=lfs -text
+*.mov       filter=lfs diff=lfs merge=lfs -text
+*.mkv       filter=lfs diff=lfs merge=lfs -text
+*.webm      filter=lfs diff=lfs merge=lfs -text

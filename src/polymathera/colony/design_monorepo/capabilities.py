@@ -90,6 +90,34 @@ def _commit_paths(
     )
 
 
+def _lfs_patterns_from_gitattributes(path: Path) -> list[str]:
+    """Parse ``.gitattributes`` and return the patterns that route
+    through LFS — i.e. lines whose attribute set contains
+    ``filter=lfs``.
+
+    Used by :meth:`DesignCheckpointer.initialize_repo_map` when the
+    operator opts into ``migrate_existing_to_lfs=True``: ``git lfs
+    migrate import`` needs an explicit ``--include=<csv>`` and we
+    want to migrate exactly what ``.gitattributes`` declares
+    (including any patterns the operator added beyond the default
+    template).
+    """
+    if not path.is_file():
+        return []
+    patterns: list[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Format: ``<pattern> attr1=val1 attr2=val2 ...``
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        if any(p == "filter=lfs" for p in parts[1:]):
+            patterns.append(parts[0])
+    return patterns
+
+
 # ---------------------------------------------------------------------------
 # Shared base
 # ---------------------------------------------------------------------------
@@ -193,9 +221,25 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
         # bare; do NOT embed credentials.
         self._working_dir.mkdir(parents=True, exist_ok=True)
         try:
-            Repo.clone_from(url, str(self._working_dir))
+            cloned = Repo.clone_from(url, str(self._working_dir))
         except GitCommandError as exc:
             raise _classify_git_clone_error(exc) from exc
+        # Activate Git LFS clean/smudge filters on this fresh clone.
+        # Pointer files in the upstream are de-referenced into real
+        # blobs by the smudge filter on checkout, and any large file
+        # the agent later commits routes through clean. Without this
+        # the agent could push plain-git blobs that bypass LFS and
+        # bloat the repo (or trip GitHub's 100 MB hard limit). Best-
+        # effort: ``git-lfs`` may not be installed on a bare-metal
+        # dev box; degrade gracefully there.
+        try:
+            cloned.git.lfs("install", "--local")
+        except Exception as exc:  # noqa: BLE001 - LFS may not be installed
+            logger.warning(
+                "git lfs install failed at %s (%s); LFS hooks are "
+                "not active. Install git-lfs and re-run.",
+                self._working_dir, exc,
+            )
 
     async def _client_async(self) -> DesignMonorepoClient:
         return await asyncio.to_thread(self._client_sync)
@@ -638,7 +682,10 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         ),
     )
     async def initialize_repo_map(
-        self, *, push: bool = True,
+        self, *,
+        push: bool = True,
+        enable_lfs: bool = True,
+        migrate_existing_to_lfs: bool = False,
     ) -> dict[str, Any]:
         """Bring an empty / freshly-cloned repo into a state where the
         rest of the design-monorepo capabilities work.
@@ -693,11 +740,47 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
                 ``False`` to commit locally only (e.g., for a
                 file://-only test bootstrap or when the operator
                 wants to review before publishing).
+            enable_lfs: When ``True`` (default), activates Git LFS for
+                the design monorepo:
+                  - runs ``git lfs install --local`` on the working
+                    tree (idempotent — installs the clean/smudge hooks);
+                  - writes a default ``.gitattributes`` declaring LFS
+                    patterns for documents, archives, scientific data,
+                    images, CAD/3D, ML weights, and audio/video, **only
+                    when no .gitattributes exists** (operator edits are
+                    never overwritten);
+                  - flips ``manifest.lfs.mode`` from ``"disabled"`` to
+                    ``"same_remote"`` if needed, so other clones of
+                    this repo also activate LFS.
+                **Forward-only**: blobs that were already committed
+                before ``.gitattributes`` was added stay as plain git
+                objects in history. Use ``migrate_existing_to_lfs`` to
+                convert them.
+            migrate_existing_to_lfs: When ``True`` (default ``False``),
+                runs ``git lfs migrate import --include=<patterns>``
+                after the initial commit to convert already-committed
+                files matching the LFS patterns into LFS pointers.
+                **Rewrites history**: every commit SHA on the current
+                branch changes, the next push needs ``--force``, and
+                anyone else who already cloned the repo will need to
+                re-clone. Off by default; only opt in on a fresh repo
+                or when you're sure no one else has a working clone.
+                Has no effect when ``enable_lfs`` is ``False``.
         """
 
-        return await asyncio.to_thread(self._initialize_repo_map_sync, push=push)
+        return await asyncio.to_thread(
+            self._initialize_repo_map_sync,
+            push=push,
+            enable_lfs=enable_lfs,
+            migrate_existing_to_lfs=migrate_existing_to_lfs,
+        )
 
-    def _initialize_repo_map_sync(self, *, push: bool) -> dict[str, Any]:
+    def _initialize_repo_map_sync(
+        self, *,
+        push: bool,
+        enable_lfs: bool,
+        migrate_existing_to_lfs: bool,
+    ) -> dict[str, Any]:
         """Synchronous body of :meth:`initialize_repo_map`. Lives on a
         thread (see the action wrapper) because gitpython operations
         are blocking."""
@@ -727,39 +810,84 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
 
         manifest_path = repo_root / MANIFEST_RELATIVE_PATH
         repo_map_path = repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME
+        gitattributes_path = repo_root / ".gitattributes"
         manifest_existed = manifest_path.is_file()
         repo_map_existed = repo_map_path.is_file()
+        gitattributes_existed = gitattributes_path.is_file()
 
-        if manifest_existed and repo_map_existed:
-            return {
-                "status": "already_initialized",
-                "files_created": [],
-                "committed_sha": None,
-                "pushed": False,
-                "push_error": None,
-            }
+        files_changed: list[str] = []
 
-        files_created: list[str] = []
+        # ---- Manifest ---------------------------------------------------
         if not manifest_existed:
-            manifest = self._build_default_manifest()
+            manifest = self._build_default_manifest(enable_lfs=enable_lfs)
             manifest.write_path(repo_root)
-            files_created.append(MANIFEST_RELATIVE_PATH)
+            files_changed.append(MANIFEST_RELATIVE_PATH)
             agent_email_domain = manifest.agent_email_domain
         else:
-            agent_email_domain = (
-                DesignMonorepoManifest.load_path(repo_root).agent_email_domain
-            )
+            existing_manifest = DesignMonorepoManifest.load_path(repo_root)
+            agent_email_domain = existing_manifest.agent_email_domain
+            # If the operator is opting into LFS on a previously-
+            # initialised repo whose manifest has ``lfs.mode="disabled"``,
+            # flip it to ``"same_remote"`` so other clones of this repo
+            # also activate LFS. Leave any non-disabled mode alone — the
+            # operator may have configured ``"separate"`` deliberately.
+            if enable_lfs and existing_manifest.lfs.mode == "disabled":
+                from .manifest import LFSConfig
+                updated = existing_manifest.model_copy(
+                    update={"lfs": LFSConfig(mode="same_remote")},
+                )
+                updated.write_path(repo_root)
+                files_changed.append(MANIFEST_RELATIVE_PATH)
 
+        # ---- repo_map.yaml ---------------------------------------------
         if not repo_map_existed:
             template = (
                 Path(__file__).parent / "templates" / "repo_map.template.yaml"
             ).read_text(encoding="utf-8")
             repo_map_path.parent.mkdir(parents=True, exist_ok=True)
             repo_map_path.write_text(template, encoding="utf-8")
-            files_created.append(f"{REPO_MAP_DIR}/{REPO_MAP_FILENAME}")
+            files_changed.append(f"{REPO_MAP_DIR}/{REPO_MAP_FILENAME}")
+
+        # ---- LFS: hooks + .gitattributes -------------------------------
+        # ``git lfs install --local`` writes the clean/smudge filter
+        # config into ``.git/config`` and the ``pre-push`` hook into
+        # ``.git/hooks/``. Idempotent — running twice is a no-op.
+        # Without this, ``git add`` of a tracked path goes to plain git,
+        # not LFS, and a subsequent push to GitHub will be rejected for
+        # files > 100 MB. Tolerate ``git lfs`` not being installed (the
+        # framework's container images ship it; bare-metal dev boxes
+        # without it degrade gracefully — same pattern the bootstrap
+        # path uses).
+        if enable_lfs:
+            try:
+                Repo(str(repo_root)).git.lfs("install", "--local")
+            except Exception as exc:  # noqa: BLE001 - LFS may not be installed
+                logger.warning(
+                    "git lfs install failed at %s (%s); "
+                    "LFS hooks are NOT active. Install git-lfs and re-run.",
+                    repo_root, exc,
+                )
+            if not gitattributes_existed:
+                template = (
+                    Path(__file__).parent / "templates" / "gitattributes.template"
+                ).read_text(encoding="utf-8")
+                gitattributes_path.write_text(template, encoding="utf-8")
+                files_changed.append(".gitattributes")
+
+        if not files_changed:
+            return {
+                "status": "already_initialized",
+                "files_created": [],
+                "committed_sha": None,
+                "pushed": False,
+                "push_error": None,
+                "lfs_enabled": enable_lfs,
+                "migrated_to_lfs": False,
+                "migrate_error": None,
+            }
 
         repo = Repo(str(repo_root))
-        repo.index.add(files_created)
+        repo.index.add(files_changed)
         # Per-commit attribution. Principal becomes author/committer;
         # co-author (when set) is rendered as a ``Co-Authored-By:``
         # trailer. Configured per-colony via the landing-page UI and
@@ -827,21 +955,64 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
                             pushed = True
                     except Exception as exc:  # noqa: BLE001
                         push_error = str(exc)
+
+        # Optional history rewrite: convert already-committed blobs
+        # matching the LFS patterns into LFS pointers. Off by default
+        # because ``git lfs migrate import`` rewrites every commit
+        # SHA on the migrated refs — anyone else's clones break and
+        # the next push needs ``--force``. When the operator opts in,
+        # we run the migration AFTER the bootstrap commit so the
+        # newly-written ``.gitattributes`` is part of the migrated
+        # history (otherwise the patterns wouldn't match anything).
+        migrated = False
+        migrate_error: str | None = None
+        if enable_lfs and migrate_existing_to_lfs:
+            patterns = _lfs_patterns_from_gitattributes(gitattributes_path)
+            if not patterns:
+                migrate_error = (
+                    "No LFS patterns found in .gitattributes; "
+                    "skipping migrate."
+                )
+            else:
+                try:
+                    repo.git.lfs(
+                        "migrate", "import",
+                        f"--include={','.join(patterns)}",
+                        "--everything",
+                    )
+                    migrated = True
+                except Exception as exc:  # noqa: BLE001
+                    migrate_error = str(exc)
+
         return {
             "status": "initialized",
-            "files_created": files_created,
+            "files_created": files_changed,
             "committed_sha": commit.hexsha,
             "pushed": pushed,
             "push_error": push_error,
+            "lfs_enabled": enable_lfs,
+            "migrated_to_lfs": migrated,
+            "migrate_error": migrate_error,
         }
 
-    def _build_default_manifest(self) -> DesignMonorepoManifest:
+    def _build_default_manifest(
+        self, *, enable_lfs: bool = True,
+    ) -> DesignMonorepoManifest:
         """Construct a manifest with defaults pulled from execution
         context + agent metadata. Operator-tunable fields
         (``program``, ``target_system``, ``design_repo_url``) get
         sensible placeholders; the file is plain JSON for later
-        editing."""
+        editing.
 
+        ``lfs.mode`` defaults to ``"same_remote"`` when ``enable_lfs``
+        is True (the framework's default), or ``"disabled"`` when the
+        operator explicitly opts out at init time. The mode is what
+        other clones of this repo read to decide whether to activate
+        LFS — a single-source-of-truth signal that survives the
+        ephemeral per-agent clones.
+        """
+
+        from .manifest import LFSConfig
         from ..distributed.ray_utils import serving
 
         try:
@@ -864,6 +1035,7 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
             program=colony,
             target_system="unspecified",
             design_repo_url=url,
+            lfs=LFSConfig(mode="same_remote" if enable_lfs else "disabled"),
         )
 
     def _identity_for_bootstrap(self, agent_email_domain: str) -> AgentIdentity:

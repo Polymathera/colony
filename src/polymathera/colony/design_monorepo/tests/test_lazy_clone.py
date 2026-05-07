@@ -225,9 +225,11 @@ async def test_initialize_repo_map_triggers_lazy_clone_on_empty_workdir(
     assert (working_dir / MANIFEST_RELATIVE_PATH).is_file()
     assert (working_dir / REPO_MAP_DIR / REPO_MAP_FILENAME).is_file()
     assert result["status"] == "initialized"
+    # ``.gitattributes`` is included by default (``enable_lfs=True``).
     assert set(result["files_created"]) == {
         MANIFEST_RELATIVE_PATH,
         f"{REPO_MAP_DIR}/{REPO_MAP_FILENAME}",
+        ".gitattributes",
     }
 
 
