@@ -907,12 +907,64 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
             committer=actor,
         )
 
+        # Optional history rewrite: convert already-committed blobs
+        # matching the LFS patterns into LFS pointers. Off by default
+        # because ``git lfs migrate import`` rewrites every commit
+        # SHA on the migrated refs — anyone else's clones break.
+        # Migration runs BEFORE the push so we never publish the
+        # original history that the migration is about to invalidate;
+        # otherwise the upstream would have a no-common-ancestor
+        # divergence with the local rewritten history and need a
+        # second, force-flavoured push to reconcile (this is exactly
+        # the failure operators hit when running the migration
+        # manually after a regular push).
+        migrated = False
+        migrate_error: str | None = None
+        if enable_lfs and migrate_existing_to_lfs:
+            patterns = _lfs_patterns_from_gitattributes(gitattributes_path)
+            if not patterns:
+                migrate_error = (
+                    "No LFS patterns found in .gitattributes; "
+                    "skipping migrate."
+                )
+            else:
+                try:
+                    # ``--yes`` auto-accepts migrate's "override
+                    # changes in your working copy?" prompt. The
+                    # bootstrap commit just landed, so the working
+                    # tree is logically clean — but adding LFS
+                    # patterns to ``.gitattributes`` makes git treat
+                    # already-committed files matching the patterns
+                    # as phantom-dirty (the new clean filter would
+                    # produce a different blob than what's in HEAD).
+                    # The "changes" migrate would override are exactly
+                    # that filter-renormalization artifact, not real
+                    # operator work — auto-accepting is safe and
+                    # avoids requiring an interactive shell.
+                    repo.git.lfs(
+                        "migrate", "import",
+                        f"--include={','.join(patterns)}",
+                        "--everything",
+                        "--yes",
+                    )
+                    migrated = True
+                except Exception as exc:  # noqa: BLE001
+                    migrate_error = str(exc)
+
         # Push so the changes are visible on the upstream and so
         # other clones (dashboard cache, other agents) can pick them
         # up on their next fetch. We push HEAD:<active-branch> rather
         # than a bare ``push()`` because the per-agent clone may have
         # been cloned from a default branch the user later renamed —
         # being explicit avoids "src refspec doesn't match" surprises.
+        # When the migration ran, every commit SHA on the active
+        # branch is new, so a regular push is rejected as
+        # non-fast-forward; switch to ``--force-with-lease`` to
+        # publish the rewritten history. The "with-lease" guard
+        # checks the remote is in the state we expect (the original
+        # SHAs we just diverged from) and refuses if someone else
+        # pushed concurrently — safer than ``--force`` while still
+        # capable of publishing a rewritten history.
         # Failures (no ``origin``, no permission, branch protection,
         # offline) leave the local commit on disk and are surfaced in
         # the result so the planner / operator can act on them.
@@ -939,9 +991,14 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
                     push_error = f"no ``origin`` remote configured: {exc}"
                 else:
                     try:
-                        push_info = origin.push(
-                            refspec=f"HEAD:refs/heads/{branch_name}",
-                        )
+                        push_kwargs: dict[str, Any] = {
+                            "refspec": f"HEAD:refs/heads/{branch_name}",
+                        }
+                        if migrated:
+                            # gitpython forwards unknown kwargs to the
+                            # underlying ``git push`` command line.
+                            push_kwargs["force_with_lease"] = True
+                        push_info = origin.push(**push_kwargs)
                         # gitpython returns a list of PushInfo; any
                         # ERROR flag means the push didn't reach the
                         # remote even if the call returned normally.
@@ -955,34 +1012,6 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
                             pushed = True
                     except Exception as exc:  # noqa: BLE001
                         push_error = str(exc)
-
-        # Optional history rewrite: convert already-committed blobs
-        # matching the LFS patterns into LFS pointers. Off by default
-        # because ``git lfs migrate import`` rewrites every commit
-        # SHA on the migrated refs — anyone else's clones break and
-        # the next push needs ``--force``. When the operator opts in,
-        # we run the migration AFTER the bootstrap commit so the
-        # newly-written ``.gitattributes`` is part of the migrated
-        # history (otherwise the patterns wouldn't match anything).
-        migrated = False
-        migrate_error: str | None = None
-        if enable_lfs and migrate_existing_to_lfs:
-            patterns = _lfs_patterns_from_gitattributes(gitattributes_path)
-            if not patterns:
-                migrate_error = (
-                    "No LFS patterns found in .gitattributes; "
-                    "skipping migrate."
-                )
-            else:
-                try:
-                    repo.git.lfs(
-                        "migrate", "import",
-                        f"--include={','.join(patterns)}",
-                        "--everything",
-                    )
-                    migrated = True
-                except Exception as exc:  # noqa: BLE001
-                    migrate_error = str(exc)
 
         return {
             "status": "initialized",

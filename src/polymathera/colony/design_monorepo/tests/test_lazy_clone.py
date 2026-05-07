@@ -284,6 +284,96 @@ async def test_initialize_repo_map_pushes_to_origin(
     assert (inspector_dir / REPO_MAP_DIR / REPO_MAP_FILENAME).is_file()
 
 
+def _git_lfs_available() -> bool:
+    import subprocess
+    try:
+        rc = subprocess.run(
+            ["git", "lfs", "version"], capture_output=True,
+        ).returncode
+        return rc == 0
+    except FileNotFoundError:
+        return False
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _git_lfs_available(), reason="git-lfs not installed")
+async def test_initialize_repo_map_force_pushes_after_migration(
+    tmp_path: Path,
+) -> None:
+    """When ``migrate_existing_to_lfs=True`` rewrites history, the
+    subsequent push MUST be ``--force-with-lease`` — otherwise the
+    upstream's old SHAs trigger a non-fast-forward rejection and the
+    operator is left with the exact "rejected (non-fast-forward)" /
+    "refusing to merge unrelated histories" pair the original bug
+    report described.
+
+    Setup mirrors the real failure: the upstream already has commits
+    (a pre-existing PDF in this case) so the agent's bootstrap +
+    migration produces a divergent history that needs a force push.
+    """
+
+    from polymathera.colony.design_monorepo.manifest import (
+        MANIFEST_RELATIVE_PATH,
+    )
+
+    upstream = tmp_path / "remote.git"
+    git.Repo.init(upstream, initial_branch="main", bare=True)
+
+    # Seed upstream with an initial PDF — this is the file we'll
+    # migrate into LFS, so it must exist as a plain blob first.
+    seed = tmp_path / "seed"
+    seed_repo = git.Repo.clone_from(f"file://{upstream}", str(seed))
+    seed_repo.config_writer().set_value("user", "email", "s@s").release()
+    seed_repo.config_writer().set_value("user", "name", "seed").release()
+    (seed / "doc.pdf").write_bytes(b"%PDF-1.4\n%fake\n")
+    seed_repo.index.add(["doc.pdf"])
+    seed_repo.index.commit("seed PDF")
+    seed_repo.remote("origin").push(refspec="HEAD:refs/heads/main")
+
+    working_dir = tmp_path / "agent_clone"
+    working_dir.mkdir(parents=True, exist_ok=True)
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        cap = _make_writer_capability(
+            agent_id="agent-A",
+            working_dir=working_dir,
+            design_monorepo_url=f"file://{upstream}",
+        )
+        result = await cap.initialize_repo_map(
+            migrate_existing_to_lfs=True,
+        )
+
+    assert result["status"] == "initialized"
+    assert result["migrated_to_lfs"] is True, result
+    assert result["migrate_error"] is None
+    assert result["pushed"] is True, result["push_error"]
+    assert result["push_error"] is None
+
+    # Verify the upstream's *tree* contains an LFS pointer for the
+    # PDF, not the original binary blob. Cloning with
+    # ``GIT_LFS_SKIP_SMUDGE=1`` leaves the pointer un-resolved in the
+    # working tree so we can inspect it directly — without that, the
+    # inspector clone's smudge filter would dereference the pointer
+    # back to the original content (since LFS objects are co-located
+    # with the bare ``file://`` upstream), masking the migration.
+    inspector = tmp_path / "inspector"
+    import os
+    git.Repo.clone_from(
+        f"file://{upstream}", str(inspector),
+        env={**os.environ, "GIT_LFS_SKIP_SMUDGE": "1"},
+    )
+    pdf_text = (inspector / "doc.pdf").read_text(encoding="utf-8", errors="replace")
+    assert pdf_text.startswith("version https://git-lfs.github.com/spec/"), (
+        "Migrated PDF should be an LFS pointer on upstream, not a real blob. "
+        f"Got: {pdf_text[:80]!r}"
+    )
+    # And the bootstrap files are there.
+    assert (inspector / MANIFEST_RELATIVE_PATH).is_file()
+    assert (inspector / ".gitattributes").is_file()
+
+
 @pytest.mark.asyncio
 async def test_initialize_repo_map_errors_clearly_when_no_url_and_no_repo(
     tmp_path: Path,

@@ -302,14 +302,34 @@ repo size doesn't shrink retroactively.
 
 To convert already-committed blobs into LFS pointers, run
 `initialize_repo_map(migrate_existing_to_lfs=True)`. The action
-calls `git lfs migrate import --include=<patterns>
---everything` after the bootstrap commit, where `<patterns>` is
-parsed from the current `.gitattributes`. **This rewrites every
-commit SHA on the migrated refs.** Anyone else who already cloned
-the repo will need to re-clone (or run `git pull --rebase` and
-resolve), and the next push needs `--force`. Default is `False`;
+sequences three steps:
+
+1. Make the bootstrap commit (manifest + repo_map.yaml +
+   `.gitattributes`).
+2. Run `git lfs migrate import --include=<patterns> --everything`
+   where `<patterns>` is parsed from the current `.gitattributes`.
+   **This rewrites every commit SHA on the migrated refs.**
+3. Push with `--force-with-lease` so the rewritten history reaches
+   the upstream. Force is necessary because the rewritten SHAs
+   share no commits with the remote's existing branch — a regular
+   push fails as non-fast-forward, and `git pull` reports "refusing
+   to merge unrelated histories" (there's no common ancestor to
+   merge against). `--force-with-lease` is safer than `--force`
+   because it checks the remote is in the state we expect and
+   refuses if someone else pushed concurrently.
+
+Anyone else who already cloned the repo will need to **re-clone**
+afterwards — `git pull --rebase` won't help because pre- and
+post-migration histories share no commits. Default is `False`;
 opt in only on a fresh repo or when you're sure no one else has a
 working clone.
+
+If you've run the migration manually outside this action and hit
+the `non-fast-forward` rejection, the fix is `git push
+--force-with-lease origin <branch>`. Running this action with
+`migrate_existing_to_lfs=True` again would also work — it's
+idempotent on the file content and re-publishes the rewritten
+history.
 
 ### GitHub LFS quota
 
