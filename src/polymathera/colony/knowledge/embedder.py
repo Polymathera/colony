@@ -21,6 +21,8 @@ import struct
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
+from ..agents.blueprint import blueprint
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +45,7 @@ class Embedder(Protocol):
 # ---------------------------------------------------------------------------
 
 
+@blueprint
 class InMemoryEmbedder:
     """Hash-based deterministic embedder. 64-d float vectors, L2-normalised.
 
@@ -50,7 +53,8 @@ class InMemoryEmbedder:
     (SHA-256 of UTF-8 bytes), and distinct inputs produce vectors with
     different content but the same dimensionality. Vector quality is
     *not* semantic — this exists for unit tests, not retrieval quality
-    benchmarks.
+    benchmarks. ``@blueprint`` adds a pickleable ``.bind()`` so the
+    dashboard can ship this embedder across the Ray boundary.
     """
 
     embedder_id = "polymathera.knowledge:inmem_sha256_64d"

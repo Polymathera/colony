@@ -45,6 +45,7 @@ from ...knowledge import (
 )
 from ...vcm.page_events import PageChangeEvent
 from ..base import Agent, AgentCapability
+from ..blueprint import Blueprint
 from ..models import AgentSuspensionState
 from ..patterns.actions import action_executor
 
@@ -132,13 +133,17 @@ class KnowledgeCuratorCapability(AgentCapability):
         agent: Agent | None = None,
         scope_id: str | None = None,
         *,
-        ingestor: Ingestor,
+        ingestor: Ingestor | Blueprint,
         page_event_emitter: PageEventEmitter | None = None,
         design_monorepo: _DesignMonorepoMirror | None = None,
         design_monorepo_identity: Any | None = None,
         capability_key: str | None = None,
         app_name: str | None = None,
     ) -> None:
+        # ``ingestor`` accepts either a real :class:`Ingestor` (tests
+        # / in-process) or a :class:`Blueprint` for it (cross-Ray
+        # construction via ``default_ingestor_blueprint()``); same
+        # pattern as ``BulkAcquisitionCapability``.
         super().__init__(
             agent=agent,
             scope_id=scope_id,
@@ -146,7 +151,9 @@ class KnowledgeCuratorCapability(AgentCapability):
             capability_key=capability_key,
             app_name=app_name,
         )
-        self._ingestor = ingestor
+        self._ingestor = (
+            ingestor.local_instance() if isinstance(ingestor, Blueprint) else ingestor
+        )
         self._page_event_emitter = page_event_emitter
         self._design_monorepo = design_monorepo
         self._design_monorepo_identity = design_monorepo_identity

@@ -133,6 +133,7 @@ def create_app(config: DashboardConfig) -> FastAPI:
         traces,
         trace_analysis,
         repo_map,
+        kb,
         jobs,
         chat,
         auth,
@@ -160,6 +161,7 @@ def create_app(config: DashboardConfig) -> FastAPI:
     app.include_router(traces.router, prefix="/api/v1", tags=["traces"])
     app.include_router(trace_analysis.router, prefix="/api/v1", tags=["trace-analysis"])
     app.include_router(repo_map.router, prefix="/api/v1", tags=["repo-map"])
+    app.include_router(kb.router, prefix="/api/v1", tags=["kb"])
     app.include_router(sse.router, prefix="/api/v1", tags=["streaming"])
 
     # Serve built frontend as static files (production mode)

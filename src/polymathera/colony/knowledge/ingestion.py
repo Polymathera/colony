@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from ..agents.blueprint import Blueprint, blueprint
 from .chunking import ChunkerConfig, CodeChunker, ProseChunker
 from .embedder import Embedder
 from .extractors import ClaimExtractor
@@ -59,8 +60,18 @@ flags a record for human review. The callback typically writes to a
 blackboard scope; for tests, a list-appending coroutine works."""
 
 
+@blueprint
 class Ingestor:
-    """Per-source ingestion orchestrator."""
+    """Per-source ingestion orchestrator.
+
+    ``@blueprint`` adds a pickleable ``.bind()``. The heavy
+    dependencies (``embedder``, ``vector_store``, ``graph_store``)
+    accept either a real instance or a :class:`Blueprint` — the
+    constructor resolves the latter via ``local_instance()`` so the
+    same shape works in tests (real instances) and across the Ray
+    boundary (blueprint chain). Same pattern as
+    :class:`ConsciousnessStream`.
+    """
 
     DEFAULT_REVIEW_SAMPLE_RATE = 0.05
 
@@ -71,9 +82,9 @@ class Ingestor:
         prose_chunker: ProseChunker | None = None,
         code_chunker: CodeChunker | None = None,
         extractors: Sequence[ClaimExtractor] = (),
-        embedder: Embedder,
-        vector_store: VectorStore,
-        graph_store: GraphStore | None = None,
+        embedder: Embedder | Blueprint,
+        vector_store: VectorStore | Blueprint,
+        graph_store: GraphStore | Blueprint | None = None,
         review_queue: HumanReviewQueueCallback | None = None,
         review_sample_rate: float = DEFAULT_REVIEW_SAMPLE_RATE,
         rng: random.Random | None = None,
@@ -82,9 +93,19 @@ class Ingestor:
         self._prose = prose_chunker or ProseChunker()
         self._code = code_chunker or CodeChunker()
         self._extractors: tuple[ClaimExtractor, ...] = tuple(extractors)
-        self._embedder = embedder
-        self._vector_store = vector_store
-        self._graph_store = graph_store
+        self._embedder = (
+            embedder.local_instance() if isinstance(embedder, Blueprint) else embedder
+        )
+        self._vector_store = (
+            vector_store.local_instance()
+            if isinstance(vector_store, Blueprint)
+            else vector_store
+        )
+        self._graph_store = (
+            graph_store.local_instance()
+            if isinstance(graph_store, Blueprint)
+            else graph_store
+        )
         self._review = review_queue
         self._review_rate = max(0.0, min(1.0, review_sample_rate))
         self._rng = rng or random.Random()

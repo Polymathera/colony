@@ -55,6 +55,13 @@ services:
       # Observability (tracing)
       - TRACING_ENABLED=true
       - KAFKA_BOOTSTRAP=kafka:9092
+      # Knowledge stack — Qdrant vector store + GROBID PDF extractor.
+      # When QDRANT_URL is set, knowledge.deps switches the default
+      # VectorStore from InMemoryVectorStore to QdrantVectorStore so
+      # ingested chunks survive restarts. When GROBID_URL is set,
+      # GrobidPdfReader becomes the default for *.pdf.
+      - QDRANT_URL=http://qdrant:6333
+      - GROBID_URL=http://grobid:8070
       # API keys — forwarded from host environment
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -141,6 +148,9 @@ services:
       # Observability (tracing)
       - TRACING_ENABLED=true
       - KAFKA_BOOTSTRAP=kafka:9092
+      # Knowledge stack — see ray-head for the contract.
+      - QDRANT_URL=http://qdrant:6333
+      - GROBID_URL=http://grobid:8070
       # API keys — forwarded from host environment
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -213,8 +223,13 @@ services:
       - qdrant-data:/qdrant/storage
     networks:
       - colony-net
+    # The qdrant image ships without ``wget`` / ``curl``, so probe the
+    # listening socket via bash's ``/dev/tcp`` redirection. ``readyz``
+    # would be richer, but a working TCP listener is the property that
+    # actually gates dependents (we don't need shard-level readiness
+    # before letting agents connect — the client retries internally).
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/readyz || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333' || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -231,8 +246,11 @@ services:
       - "${COLONY_GROBID_PORT:-8070}:8070"
     networks:
       - colony-net
+    # Same TCP-listener probe as qdrant — the grobid image is a JRE
+    # base without curl/wget. ``/api/isalive`` would tell us more,
+    # but a listening 8070 is sufficient for ``depends_on``.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8070/api/isalive || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8070' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -284,6 +302,13 @@ services:
       - TRACING_ENABLED=true
       # Kafka — log streaming + span consumer
       - KAFKA_BOOTSTRAP=kafka:9092
+      # Knowledge stack — must point at the SAME Qdrant the agents
+      # ingest into; otherwise the KB tab reads from the dashboard's
+      # private InMemoryVectorStore and shows 0 chunks while the
+      # corpus actually lives in Qdrant. See ray-head for the full
+      # contract.
+      - QDRANT_URL=http://qdrant:6333
+      - GROBID_URL=http://grobid:8070
       # PostgreSQL — auth, chat persistence, observability
       - RDS_HOST=postgres
       - RDS_PORT=5432

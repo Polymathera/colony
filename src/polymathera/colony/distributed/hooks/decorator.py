@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 P = ParamSpec("P")
 R = TypeVar("R")
+T = TypeVar("T")
 
 
 # Attribute name for storing hook registration metadata
@@ -127,12 +128,12 @@ def _discover_hook_handlers(obj: Any) -> list[tuple[Callable, dict]]:
 
 
 def tracing(
-    publish_key: Callable[[Any], str] = None,
-    subscribe_key: Callable[[Any], str] = None,
-) -> Callable[[type], type]:
+    publish_key: Callable[[type[T]], str] = None,
+    subscribe_key: Callable[[type[T]], str] = None,
+) -> Callable[[type[T]], type[T]]:
     """Class decorator to inject get_hookable_*_domain_key methods for hookable publishers and listeners."""
     
-    def decorator(cls: type) -> type:
+    def decorator(cls: type[T]) -> type[T]:
         if publish_key is not None:
             setattr(
                 cls,

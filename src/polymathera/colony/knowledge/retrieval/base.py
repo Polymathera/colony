@@ -14,9 +14,9 @@ from __future__ import annotations
 import logging
 from abc import abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any
 
+from ...agents.blueprint import Blueprint, blueprint
 from ...tools import ToolAdapter, ToolCall, ToolResult
 from ..embedder import Embedder
 from ..models import RetrievalQuery, RetrievalResult
@@ -26,13 +26,36 @@ from ..stores import GraphStore, VectorStore
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@blueprint
 class RetrievalDeps:
-    """Dependencies shared across retrieval-mode adapters."""
+    """Dependencies shared across retrieval-mode adapters.
 
-    embedder: Embedder
-    vector_store: VectorStore
-    graph_store: GraphStore | None = None
+    ``@blueprint`` adds a pickleable ``.bind()``. ``embedder`` /
+    ``vector_store`` / ``graph_store`` accept either a real instance
+    or a :class:`Blueprint` — resolved via ``local_instance()`` here
+    so the same shape works in tests and across the Ray boundary.
+    """
+
+    def __init__(
+        self,
+        *,
+        embedder: Embedder | Blueprint,
+        vector_store: VectorStore | Blueprint,
+        graph_store: GraphStore | Blueprint | None = None,
+    ) -> None:
+        self.embedder = (
+            embedder.local_instance() if isinstance(embedder, Blueprint) else embedder
+        )
+        self.vector_store = (
+            vector_store.local_instance()
+            if isinstance(vector_store, Blueprint)
+            else vector_store
+        )
+        self.graph_store = (
+            graph_store.local_instance()
+            if isinstance(graph_store, Blueprint)
+            else graph_store
+        )
 
 
 class RetrievalAdapter(ToolAdapter):

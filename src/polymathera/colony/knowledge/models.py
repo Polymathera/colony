@@ -385,6 +385,24 @@ class RetrievalResult(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+class SourceSummary(BaseModel):
+    """Aggregated stats for one source URI in the vector store.
+
+    Powers the dashboard's KB tab — one row per distinct source URI
+    held in the index, with the cardinalities operators want at a
+    glance (chunk count, token count, the data_type and tier mix
+    spanned by the source's chunks).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source: str
+    chunk_count: int
+    total_tokens: int = 0
+    data_types: tuple[str, ...] = Field(default_factory=tuple)
+    tiers: tuple[CorpusTier, ...] = Field(default_factory=tuple)
+
+
 # ---------------------------------------------------------------------------
 # Ingestion record (one per source ingested)
 # ---------------------------------------------------------------------------
@@ -485,6 +503,7 @@ __all__ = (
     "RetrievalQuery",
     "RetrievalHit",
     "RetrievalResult",
+    "SourceSummary",
     "IngestionStatus",
     "IngestionRecord",
     "deterministic_source_uri",

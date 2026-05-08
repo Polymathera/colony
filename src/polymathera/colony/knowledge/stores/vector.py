@@ -27,12 +27,14 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from ...agents.blueprint import blueprint
 from ..models import (
     Chunk,
     CorpusTier,
     EmbeddedChunk,
     RetrievalQuery,
     RetrievalHit,
+    SourceSummary,
 )
 
 
@@ -98,18 +100,28 @@ class VectorStore(ABC):
     async def count(self) -> int:
         ...
 
+    @abstractmethod
+    async def list_source_summaries(self) -> Sequence[SourceSummary]:
+        """Return one :class:`SourceSummary` per distinct ``source`` URI
+        in the index. Powers the dashboard's KB tab; not on the agent
+        retrieval hot path. Implementations may cap or stream when the
+        corpus exceeds memory; the in-memory store enumerates fully."""
+
 
 # ---------------------------------------------------------------------------
 # In-memory store (production-ready for small corpora; canonical for tests)
 # ---------------------------------------------------------------------------
 
 
+@blueprint
 class InMemoryVectorStore(VectorStore):
     """Pure-Python vector store with cosine similarity ranking.
 
     Indexes by ``data_type`` + ``source`` so prefix filters short-
     circuit the scan. For corpora above a few tens of thousands of
-    chunks, switch to ``QdrantVectorStore``.
+    chunks, switch to ``QdrantVectorStore``. ``@blueprint`` adds a
+    pickleable ``.bind()`` so the dashboard can ship this store
+    across the Ray boundary in capability blueprints.
     """
 
     def __init__(self) -> None:
@@ -194,6 +206,29 @@ class InMemoryVectorStore(VectorStore):
                 update={"chunk": updated_chunk},
             )
         return len(ids)
+
+    async def list_source_summaries(self) -> Sequence[SourceSummary]:
+        summaries: list[SourceSummary] = []
+        for source, ids in self._by_source.items():
+            data_types: set[str] = set()
+            tiers: set[CorpusTier] = set()
+            total_tokens = 0
+            for cid in ids:
+                chunk = self._items[cid].chunk
+                data_types.add(chunk.data_type)
+                tiers.add(chunk.tier)
+                total_tokens += chunk.token_count
+            summaries.append(
+                SourceSummary(
+                    source=source,
+                    chunk_count=len(ids),
+                    total_tokens=total_tokens,
+                    data_types=tuple(sorted(data_types)),
+                    tiers=tuple(sorted(tiers, key=lambda t: t.value)),
+                ),
+            )
+        summaries.sort(key=lambda s: s.source)
+        return tuple(summaries)
 
     # ---- internals --------------------------------------------------
 
@@ -293,6 +328,7 @@ async def _query_points_compat(
 # ---------------------------------------------------------------------------
 
 
+@blueprint
 class QdrantVectorStore(VectorStore):
     """Qdrant-backed vector store.
 
@@ -376,12 +412,46 @@ class QdrantVectorStore(VectorStore):
     def __init__(
         self,
         *,
-        client: Any,
+        client: Any | None = None,
+        url: str | None = None,
+        host: str | None = None,
+        port: int = 6333,
+        grpc_port: int = 6334,
+        prefer_grpc: bool = False,
+        api_key: str | None = None,
+        timeout_s: float = 10.0,
         collection: str,
         embedder_id: str,
         dimensions: int,
         distance: str = "Cosine",
     ) -> None:
+        # Two construction paths so the blueprint kwargs can stay
+        # picklable while tests and the async ``connect()`` factory keep
+        # passing pre-built clients:
+        #
+        # - ``client=...`` — explicit injection (tests, ``connect()``).
+        # - ``url=...`` / ``host=...`` — connection params; the
+        #   ``AsyncQdrantClient`` is constructed here. The construction
+        #   is sync (no I/O until first method call), so it is safe
+        #   inside ``Blueprint.local_instance()`` on the worker.
+        if client is None:
+            from qdrant_client import AsyncQdrantClient  # type: ignore[import-not-found]
+            if url is not None:
+                client = AsyncQdrantClient(
+                    url=url, api_key=api_key, prefer_grpc=prefer_grpc,
+                    timeout=int(timeout_s),
+                )
+            elif host is not None:
+                client = AsyncQdrantClient(
+                    host=host, port=port, grpc_port=grpc_port,
+                    api_key=api_key, prefer_grpc=prefer_grpc,
+                    timeout=int(timeout_s),
+                )
+            else:
+                raise VectorStoreError(
+                    "QdrantVectorStore: pass either ``client=`` or "
+                    "``url=`` / ``host=``.",
+                )
         self._client = client
         self._collection = collection
         self._embedder_id = embedder_id
@@ -733,6 +803,62 @@ class QdrantVectorStore(VectorStore):
         )
         await self.upsert(updated)
         return len(updated)
+
+    async def list_source_summaries(self) -> Sequence[SourceSummary]:
+        await self._ensure_collection()
+        # Scroll-aggregate: one pass, group by ``source``. Fine for the
+        # KB tab (operator-driven, infrequent) but quadratic-ish in
+        # corpus size — switch to a persisted source index if this
+        # becomes a hot path.
+        agg: dict[str, dict[str, Any]] = {}
+        offset: Any = None
+        while True:
+            points, offset = await self._client.scroll(
+                collection_name=self._collection,
+                limit=512,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points or ():
+                payload = dict(getattr(point, "payload", {}) or {})
+                source = str(payload.get("source", ""))
+                if not source:
+                    continue
+                row = agg.setdefault(
+                    source,
+                    {
+                        "chunk_count": 0,
+                        "total_tokens": 0,
+                        "data_types": set(),
+                        "tiers": set(),
+                    },
+                )
+                row["chunk_count"] += 1
+                row["total_tokens"] += int(payload.get("token_count", 0) or 0)
+                dt = payload.get("data_type")
+                if dt:
+                    row["data_types"].add(str(dt))
+                tier = payload.get("tier")
+                if tier:
+                    try:
+                        row["tiers"].add(CorpusTier(str(tier)))
+                    except ValueError:
+                        pass
+            if offset is None:
+                break
+        summaries = [
+            SourceSummary(
+                source=src,
+                chunk_count=row["chunk_count"],
+                total_tokens=row["total_tokens"],
+                data_types=tuple(sorted(row["data_types"])),
+                tiers=tuple(sorted(row["tiers"], key=lambda t: t.value)),
+            )
+            for src, row in agg.items()
+        ]
+        summaries.sort(key=lambda s: s.source)
+        return tuple(summaries)
 
 
 __all__ = (

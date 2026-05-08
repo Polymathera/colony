@@ -20,6 +20,7 @@ from typing import Any, Literal, TYPE_CHECKING
 from overrides import override
 
 from ...base import AgentCapability
+from ...blueprint import Blueprint
 from ...models import AgentSuspensionState
 from ...scopes import BlackboardScope, get_scope_prefix
 from ..actions import action_executor
@@ -63,18 +64,22 @@ class KnowledgeRetrievalCapability(AgentCapability):
         scope: BlackboardScope = BlackboardScope.SESSION,
         namespace: str = "knowledge_retrieval",
         *,
-        deps: "RetrievalDeps",
+        deps: "RetrievalDeps | Blueprint",
         default_adapter_name: _AdapterName = "scoped",
         capability_key: str = "knowledge_retrieval",
         app_name: str | None = None,
     ):
+        # ``deps`` accepts either a real :class:`RetrievalDeps` (tests
+        # / in-process) or a :class:`Blueprint` for it (cross-Ray
+        # construction via ``default_retrieval_deps_blueprint()``);
+        # same shape as ``BulkAcquisitionCapability(ingestor=…)``.
         super().__init__(
             agent=agent,
             scope_id=get_scope_prefix(scope, agent, namespace=namespace),
             capability_key=capability_key,
             app_name=app_name,
         )
-        self._deps = deps
+        self._deps = deps.local_instance() if isinstance(deps, Blueprint) else deps
         self._default_adapter_name: _AdapterName = default_adapter_name
         # Lazy adapter cache — instantiated only for modes the agent
         # actually calls. Keeps the import surface small for agents

@@ -448,11 +448,25 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
         a path was promoted to VCM mapping; the materialiser handles
         the contract).
 
-        Returns ``{"ingested": [<source_uri>, …], "count": N}`` so
-        the planner can summarise back to chat. Per-file ingestion
-        errors are logged at WARNING and don't fail the whole call —
-        partial progress beats no progress.
+        Returns a dict the planner can branch on without log access:
+
+        - ``ingested`` — source URIs that produced new chunks.
+        - ``skipped`` — source URIs already present in the corpus.
+        - ``failed``  — list of ``{source_uri, error}`` rows.
+        - ``count``   — number of records (any status).
+        - ``by_status`` — count per ``IngestionStatus``.
+        - ``backend`` — vector-store class name + Qdrant URL when set.
+          Lets the agent surface "the corpus didn't reach Qdrant" vs
+          "Qdrant is wired but the routing matched 0 files".
+
+        Per-file ingestion errors are logged at WARNING and don't fail
+        the whole call — partial progress beats no progress.
         """
+        import os as _os
+
+        from polymathera.colony.knowledge.deps import get_knowledge_deps
+        from polymathera.colony.knowledge.models import IngestionStatus
+
         from .repo_map import RepoMap
         from .materialize import materialize_knowledge_routing
 
@@ -472,9 +486,37 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
         records = await materialize_knowledge_routing(
             repo_map=repo_map, repo_root=repo_root,
         )
+
+        ingested: list[str] = []
+        skipped: list[str] = []
+        failed: list[dict[str, str]] = []
+        by_status: dict[str, int] = {}
+        for rec in records:
+            status_value = rec.status.value
+            by_status[status_value] = by_status.get(status_value, 0) + 1
+            if rec.status == IngestionStatus.COMPLETED:
+                ingested.append(str(rec.source_uri))
+            elif rec.status in (
+                IngestionStatus.SKIPPED_ALREADY_PRESENT,
+                IngestionStatus.TIER_UPGRADED,
+            ):
+                skipped.append(str(rec.source_uri))
+            elif rec.status == IngestionStatus.FAILED:
+                failed.append(
+                    {"source_uri": str(rec.source_uri), "error": rec.error or ""},
+                )
+
+        deps = get_knowledge_deps()
         return {
-            "ingested": [str(r.source_uri) for r in records],
+            "ingested": ingested,
+            "skipped": skipped,
+            "failed": failed,
             "count": len(records),
+            "by_status": by_status,
+            "backend": {
+                "vector_store": type(deps.vector_store).__name__,
+                "qdrant_url": _os.environ.get("QDRANT_URL"),
+            },
         }
 
     def _refresh_against_origin(self) -> None:

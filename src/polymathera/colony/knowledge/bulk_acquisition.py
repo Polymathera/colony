@@ -47,6 +47,7 @@ from overrides import override
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..agents.base import Agent, AgentCapability
+from ..agents.blueprint import Blueprint
 from ..agents.models import AgentSuspensionState
 from ..agents.patterns.actions import action_executor
 from .ingestion import Ingestor
@@ -451,12 +452,17 @@ class BulkAcquisitionCapability(AgentCapability):
         agent: Agent | None = None,
         scope_id: str | None = None,
         *,
-        ingestor: Ingestor,
+        ingestor: Ingestor | Blueprint,
         acquirers: Sequence[AcquirerStrategy] = (),
         cache_dir: Path | str = "/tmp/polymathera_corpus_cache",
         capability_key: str | None = None,
         app_name: str | None = None,
     ) -> None:
+        # ``ingestor`` accepts either a real :class:`Ingestor` (tests,
+        # in-process callers) or a :class:`Blueprint` for it (the
+        # cross-Ray path: the dashboard ships
+        # ``default_ingestor_blueprint()`` and the worker resolves it
+        # here). Same shape as ``ConsciousnessStream(formatter=…)``.
         super().__init__(
             agent=agent,
             scope_id=scope_id,
@@ -464,7 +470,9 @@ class BulkAcquisitionCapability(AgentCapability):
             capability_key=capability_key,
             app_name=app_name,
         )
-        self._ingestor = ingestor
+        self._ingestor = (
+            ingestor.local_instance() if isinstance(ingestor, Blueprint) else ingestor
+        )
         self._cache_dir = Path(cache_dir).expanduser()
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         # Strategies registered by ``method`` — last write wins so a

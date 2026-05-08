@@ -104,6 +104,7 @@ from .models import (
     RetrievalHit,
     RetrievalQuery,
     RetrievalResult,
+    SourceSummary,
     deterministic_source_uri,
     tier_priority,
 )
@@ -162,6 +163,7 @@ __all__ = (
     "RetrievalQuery",
     "RetrievalHit",
     "RetrievalResult",
+    "SourceSummary",
     "IngestionStatus",
     "IngestionRecord",
     "deterministic_source_uri",

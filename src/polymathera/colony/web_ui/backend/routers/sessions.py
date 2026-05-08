@@ -291,8 +291,8 @@ async def create_session(
                 BulkAcquisitionCapability,
             )
             from polymathera.colony.knowledge.deps import (
-                get_default_ingestor,
-                get_knowledge_deps,
+                default_ingestor_blueprint,
+                default_retrieval_deps_blueprint,
             )
             from polymathera.colony.design_monorepo import (
                 design_monorepo_capability_blueprints,
@@ -388,6 +388,41 @@ async def create_session(
                         "  ever runs (≤3 actions per path); a straight-line program "
                         "  with 4+ actions is not. When in doubt, defer the response "
                         "  to the next iteration.\n\n"
+                        "RESULT INSPECTION — branch on the action result:\n"
+                        "  ``run(...)`` returns an ``ActionResult`` Pydantic "
+                        "  model — NOT a dict. Use attribute access, not "
+                        "  ``.get(...)``:\n"
+                        "    r.success      → bool (True iff the action ran "
+                        "                     to completion without error)\n"
+                        "    r.output       → the action's actual return "
+                        "                     value (a dict for most actions; "
+                        "                     None on failure)\n"
+                        "    r.error        → str | None (set on failure)\n"
+                        "    r.cancelled    → bool (set when /abort fired)\n"
+                        "  Never forward a result blindly. After every "
+                        "  action, branch on ``r.success`` and on the shape "
+                        "  of ``r.output``, surfacing zero-count / empty / "
+                        "  error cases explicitly. Doing this in the SAME "
+                        "  iteration that ran the action is allowed under "
+                        "  ITERATION DISCIPLINE because only one branch "
+                        "  executes:\n"
+                        "    r = await run(\"some.action\", ...)\n"
+                        "    results[\"r\"] = r\n"
+                        "    if not r.success:\n"
+                        "        await run(\"respond_to_user\", text=f\"…X failed: {r.error}\")\n"
+                        "    else:\n"
+                        "        out = r.output or {}\n"
+                        "        if not out or out.get(\"count\", 0) == 0:\n"
+                        "            await run(\"respond_to_user\", text=\"…ran X but it returned 0 items; likely cause: …\")\n"
+                        "        else:\n"
+                        "            await run(\"respond_to_user\", text=f\"…X succeeded: {out}\")\n"
+                        "  Apply this to ANY action whose ``output`` is a "
+                        "  dict with count / list / status / error fields — "
+                        "  not just literature ingestion. When the empty "
+                        "  case has a likely cause you can name (empty "
+                        "  knowledge_routing, unreachable origin, missing "
+                        "  file), include it in the message so the user can "
+                        "  act on it.\n\n"
                         "OUTPUT FORMAT — code generation:\n"
                         "  Emit ONLY raw Python code. No markdown fences. No mocked "
                         "  result blocks. No prose between statements. Each iteration "
@@ -473,19 +508,27 @@ async def create_session(
                         auto_checkpoint_on_quiescence=False,
                     ),
                     # Knowledge trio — chat-driven acquisition / curation
-                    # / retrieval. All three share a process-singleton
-                    # embedder + vector store; production users override
-                    # via knowledge.deps.set_knowledge_deps() during
-                    # cluster bring-up.
+                    # / retrieval. The dashboard ships *blueprints*, not
+                    # live instances: the Ingestor + RetrievalDeps wrap
+                    # an ``AsyncQdrantClient`` (RLock) and an
+                    # ``InMemoryEmbedder`` (local closure), neither of
+                    # which survives cloudpickle. The blueprint chain
+                    # (Ingestor.bind → InMemoryEmbedder.bind +
+                    # QdrantVectorStore.bind) carries only picklable
+                    # kwargs (URLs, collection names, dimensions) and
+                    # is resolved on the worker via ``local_instance()``
+                    # — same pattern as ``ConsciousnessStream(formatter=…)``.
+                    # Same QDRANT_URL, same collection, separate Python
+                    # objects per process.
                     BulkAcquisitionCapability.bind(
-                        ingestor=get_default_ingestor(),
+                        ingestor=default_ingestor_blueprint(),
                     ),
                     KnowledgeCuratorCapability.bind(
-                        ingestor=get_default_ingestor(),
+                        ingestor=default_ingestor_blueprint(),
                     ),
                     KnowledgeRetrievalCapability.bind(
                         scope=BlackboardScope.SESSION,
-                        deps=get_knowledge_deps(),
+                        deps=default_retrieval_deps_blueprint(),
                     ),
                 ],
                 action_policy_blueprints={

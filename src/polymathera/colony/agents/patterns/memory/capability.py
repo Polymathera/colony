@@ -533,27 +533,17 @@ class MemoryCapability(AgentCapability):
         logger.warning("deserialize_suspension_state not implemented for MemoryCapability")
         pass
 
-    @override
-    async def stream_events_to_queue(
-        self,
-        event_queue: asyncio.Queue[BlackboardEvent],
-        *,
-        high_priority_queue: asyncio.Queue[BlackboardEvent] | None = None,
-    ) -> None:
-        """Stream memory events from this scope to the given queue.
-
-        Streams all write events from this memory capability's scope.
-
-        ``high_priority_queue`` is accepted for interface compatibility
-        with the base ``stream_events_to_queue`` (added by the
-        event-priority work) but ignored here — memory events are not
-        high-priority traffic.
-
-        Args:
-            event_queue: Queue to stream events to.
-            high_priority_queue: Ignored.
-        """
-        await self.storage.stream_events_to_queue(event_queue, "*")
+    # NOTE: ``stream_events_to_queue`` is intentionally NOT overridden
+    # here. MemoryCapability passes ``input_patterns=[]`` in
+    # ``__init__`` (explicit opt-out), so the inherited base method
+    # registers no subscriptions on the agent's main event queue. A
+    # prior override forced a wildcard ``"*"`` subscription — that
+    # contradicted the opt-out and produced a feedback loop where
+    # every ``MemoryCapability.store(...)`` write fed
+    # ``memory_record:*`` events back into the same agent's planning
+    # queue, waking the policy on its own writes. The cross-memory
+    # transfer loop (``_run_transfer_loop``) uses its own private
+    # event_queue and is unaffected.
 
     @override
     async def get_result_future(self) -> CapabilityResultFuture:

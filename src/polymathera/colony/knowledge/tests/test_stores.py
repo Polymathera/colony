@@ -123,6 +123,46 @@ async def test_vector_store_delete_by_source() -> None:
     assert await store.count() == 1
 
 
+async def test_vector_store_list_source_summaries() -> None:
+    """Powers the dashboard KB tab: one row per distinct source."""
+
+    store = InMemoryVectorStore()
+    await store.upsert(
+        [
+            _embedded(
+                "a", text="x", vector=(1.0, 0.0),
+                source="file:///lit/paper1.pdf",
+                data_type="paper_section",
+                tier=CorpusTier.TIER_3_RESEARCH,
+            ),
+            _embedded(
+                "b", text="y y", vector=(1.0, 0.0),
+                source="file:///lit/paper1.pdf",
+                data_type="paper_section",
+                tier=CorpusTier.TIER_3_RESEARCH,
+            ),
+            _embedded(
+                "c", text="z", vector=(1.0, 0.0),
+                source="file:///lit/paper2.pdf",
+                data_type="paper_abstract",
+                tier=CorpusTier.UNTIERED,
+            ),
+        ]
+    )
+    summaries = await store.list_source_summaries()
+    assert [s.source for s in summaries] == [
+        "file:///lit/paper1.pdf",
+        "file:///lit/paper2.pdf",
+    ]
+    p1, p2 = summaries
+    assert p1.chunk_count == 2
+    assert p1.total_tokens == 1 + 2  # "x" → 1 token, "y y" → 2 tokens
+    assert p1.tiers == (CorpusTier.TIER_3_RESEARCH,)
+    assert p1.data_types == ("paper_section",)
+    assert p2.chunk_count == 1
+    assert p2.tiers == (CorpusTier.UNTIERED,)
+
+
 async def test_qdrant_constructible_without_client_calls() -> None:
     """Phase C1b: QdrantVectorStore is now a real implementation; the
     in-process unit + integration tests exercise it. Here we only

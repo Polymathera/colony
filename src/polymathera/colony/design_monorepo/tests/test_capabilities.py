@@ -140,6 +140,11 @@ async def test_ingest_repo_map_literature_walks_knowledge_routing(
         assert result["count"] == 1
         assert any("a.txt" in uri for uri in result["ingested"])
         assert not any("b.txt" in uri for uri in result["ingested"])
+        # Diagnostics fields the SessionAgent surfaces back to chat.
+        assert result["skipped"] == []
+        assert result["failed"] == []
+        assert result["by_status"] == {"completed": 1}
+        assert result["backend"]["vector_store"] == "InMemoryVectorStore"
     finally:
         reset_knowledge_deps()
 
