@@ -122,6 +122,7 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             awaiting_reply: msg.awaiting_reply,
             kind: msg.kind,
             run_status: msg.run_status,
+            attachments: msg.attachments,
           });
         } else if (data.type === "agent_question") {
           const msg = data.message;
@@ -137,6 +138,7 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             response_options: msg.response_options,
             awaiting_reply: true,
             kind: msg.kind,
+            attachments: msg.attachments,
           });
         } else if (data.type === "history") {
           // History messages from server (on connect or pagination request)
@@ -155,6 +157,7 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             awaiting_reply: m.awaiting_reply,
             kind: m.kind,
             run_status: m.run_status,
+            attachments: m.attachments,
           }));
           if (historyMsgs.length > 0) {
             setMessages((prev) => [...historyMsgs, ...prev]);

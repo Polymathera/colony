@@ -560,6 +560,12 @@ async def _listen_for_agent_messages(
                 # ``agent_question`` (replies routed via the chat
                 # WebSocket). Absent for legacy messages.
                 "kind": payload.get("kind"),
+                # Structured attachments emitted by ``respond_to_user``
+                # / ``respond_to_user_with_table`` / ``respond_to_user_with_diff``. The
+                # chat UI dispatches each attachment to a typed
+                # renderer (code block, table, diff). Absent for
+                # plain-text messages.
+                "attachments": payload.get("attachments"),
             }
 
             # Persist agent message

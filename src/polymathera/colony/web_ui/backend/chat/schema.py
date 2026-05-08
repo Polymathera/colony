@@ -31,13 +31,26 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     -- Run lifecycle
     run_status      TEXT,                    -- 'submitted', 'running', 'completed', 'failed'
     -- Controls sent with the message (JSON blob)
-    controls        JSONB
+    controls        JSONB,
+    -- Structured attachments emitted by ``respond_to_user`` /
+    -- ``respond_to_user_with_table`` / ``respond_to_user_with_diff``. Each element is
+    -- a typed dict (kind=code/table/diff/...) the chat UI renders
+    -- alongside the markdown content. JSONB so future kinds plug in
+    -- without a schema migration.
+    attachments     JSONB
 );
 """
 
 CHAT_MESSAGES_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, timestamp);
 """
+
+# Idempotent ALTERs for existing deployments that pre-date a column.
+# ``ADD COLUMN IF NOT EXISTS`` is a no-op when the column already
+# exists; safe to run on every startup.
+CHAT_MESSAGES_MIGRATIONS_SQL = (
+    "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS attachments JSONB;",
+)
 
 
 async def ensure_chat_schema(db_pool) -> None:
@@ -46,6 +59,8 @@ async def ensure_chat_schema(db_pool) -> None:
         async with db_pool.acquire() as conn:
             await conn.execute(CHAT_MESSAGES_TABLE_SQL)
             await conn.execute(CHAT_MESSAGES_INDEX_SQL)
+            for stmt in CHAT_MESSAGES_MIGRATIONS_SQL:
+                await conn.execute(stmt)
         logger.info("Chat schema ensured")
     except Exception as e:
         logger.error("Failed to ensure chat schema: %s", e)

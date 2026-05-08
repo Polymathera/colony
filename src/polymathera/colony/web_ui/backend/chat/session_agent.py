@@ -9,7 +9,9 @@ specific agents), and relays agent progress back to the user.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import pprint
 import time
 import uuid
 import re
@@ -454,8 +456,74 @@ class SessionOrchestratorCapability(AgentCapability):
             "or to acknowledge a request before spawning agents."
         )
 
+    @staticmethod
+    def _format_code_value(value: Any, lang: str | None) -> str:
+        """Pretty-print a structured value into a string suitable for a
+        ``kind: "code"`` attachment.
+
+        Lives here because three turns of prompt iteration showed that
+        agents reliably reach for ``str(out)`` instead of
+        ``pprint.pformat(out)`` even when explicitly told. Doing the
+        formatting framework-side is the durable fix: the agent can
+        pass ``content=out`` (raw dict, list, ActionResult.output) and
+        get readable multi-line output regardless of which serializer
+        habit the LLM falls into.
+
+        Dispatches on ``lang`` so the same attachment shape works for
+        Python, JSON, and YAML payloads. Any other lang value falls
+        back to ``pprint.pformat`` — a safe default that produces
+        well-indented Python repr.
+        """
+
+        normalised_lang = (lang or "python").lower()
+        if normalised_lang == "json":
+            try:
+                return json.dumps(value, indent=2, default=str, sort_keys=True)
+            except Exception:  # noqa: BLE001
+                return pprint.pformat(value, width=88)
+        if normalised_lang in ("yaml", "yml"):
+            try:
+                import yaml  # type: ignore[import-not-found]
+                return yaml.safe_dump(value, default_flow_style=False, sort_keys=False)
+            except Exception:  # noqa: BLE001
+                return pprint.pformat(value, width=88)
+        return pprint.pformat(value, width=88)
+
+    @classmethod
+    def _normalize_attachments(
+        cls, attachments: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]] | None:
+        """Apply server-side formatting to attachment payloads.
+
+        Today this only touches ``kind: "code"`` attachments whose
+        ``content`` is not already a string — those get pretty-printed
+        via :meth:`_format_code_value`. Other kinds are passed through
+        unchanged. Returns a *new* list so the caller's input is not
+        mutated.
+        """
+
+        if not attachments:
+            return attachments
+        out: list[dict[str, Any]] = []
+        for att in attachments:
+            kind = att.get("kind")
+            if kind == "code" and not isinstance(att.get("content"), str):
+                copy = dict(att)
+                copy["content"] = cls._format_code_value(
+                    att.get("content"), att.get("lang"),
+                )
+                out.append(copy)
+            else:
+                out.append(att)
+        return out
+
     @action_executor()
-    async def respond_to_user(self, content: str, **extra: Any) -> dict[str, Any]:
+    async def respond_to_user(
+        self,
+        content: str,
+        attachments: list[dict[str, Any]] | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
         """Send a text response to the user in the chat.
 
         Use this action to respond to user questions, provide status updates,
@@ -464,6 +532,30 @@ class SessionOrchestratorCapability(AgentCapability):
 
         Args:
             content: The message text to send to the user (supports markdown).
+            attachments: Optional list of structured attachments rendered
+                below ``content``. Each attachment is a dict with a
+                ``kind`` discriminator the chat UI dispatches on. Three
+                kinds are supported today:
+
+                - ``{"kind": "code", "lang": "python", "content": <value>,
+                   "label": "..."?}`` — fenced code block, collapsible
+                  past 12 lines / 800 chars. ``content`` accepts EITHER
+                  a pre-formatted string OR a raw Python value (dict,
+                  list, ``ActionResult.output``). When non-string, the
+                  framework pretty-prints it via ``pprint.pformat`` /
+                  ``json.dumps`` / ``yaml.safe_dump`` based on
+                  ``lang``. Pass the raw value — DO NOT call
+                  ``str(value)`` yourself; that produces a single-line
+                  blob that the chat cannot lay out cleanly.
+                - ``{"kind": "table", "rows": [...], "columns": [...]?,
+                   "label": "..."?}`` — see :meth:`respond_to_user_with_table`.
+                - ``{"kind": "diff", "before": "...", "after": "...",
+                   "lang": "..."?, "label": "..."?}`` — see
+                  :meth:`respond_to_user_with_diff`.
+
+                Future kinds (image, plot, error_trace, …) plug in
+                without changing the action surface — only the
+                renderer registry on the frontend grows.
             **extra: Additional fields to include in the message payload
                 (e.g., request_id, response_options, awaiting_reply).
 
@@ -473,15 +565,96 @@ class SessionOrchestratorCapability(AgentCapability):
         bb = await self.get_blackboard()
         message_id = f"msg_{uuid.uuid4().hex[:12]}"
         key = SessionChatProtocol.agent_message_key(self.agent.agent_id, message_id)
-        await bb.write(key, {
+        payload: dict[str, Any] = {
             "content": content,
             "agent_id": self.agent.agent_id,
             "agent_type": self.agent.agent_type,
             "message_id": message_id,
             "timestamp": time.time(),
             **extra,
-        })
+        }
+        normalised = self._normalize_attachments(attachments)
+        if normalised:
+            payload["attachments"] = normalised
+        await bb.write(key, payload)
         return {"message_id": message_id}
+
+    @action_executor()
+    async def respond_to_user_with_table(
+        self,
+        *,
+        summary: str,
+        rows: list[dict[str, Any]],
+        columns: list[str] | None = None,
+        label: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a chat response that pairs a one-line summary with a
+        rendered table — for action results that are naturally
+        tabular (per-file outcomes, per-source counts, side-by-side
+        comparisons).
+
+        Args:
+            summary: Short headline rendered as plain markdown above
+                the table. The user reads this first.
+            rows: Each dict is one row. Keys whose values are missing
+                in a given row render as empty cells.
+            columns: Column order. Defaults to the union of keys
+                across all rows, sorted alphabetically.
+            label: Optional caption shown above the table.
+
+        Returns:
+            Dict with message_id of the posted message.
+        """
+        if columns is None:
+            seen: dict[str, None] = {}
+            for row in rows:
+                for k in row:
+                    seen.setdefault(k, None)
+            columns = sorted(seen)
+        attachment: dict[str, Any] = {
+            "kind": "table",
+            "rows": list(rows),
+            "columns": list(columns),
+        }
+        if label:
+            attachment["label"] = label
+        return await self.respond_to_user(content=summary, attachments=[attachment])
+
+    @action_executor()
+    async def respond_to_user_with_diff(
+        self,
+        *,
+        summary: str,
+        before: str,
+        after: str,
+        lang: str = "text",
+        label: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a chat response that pairs a one-line summary with a
+        before/after diff — for action results that describe a state
+        change (config edit, file rewrite, schema migration).
+
+        Args:
+            summary: Short headline rendered as plain markdown above
+                the diff. The user reads this first.
+            before: Pre-change content (multi-line strings preferred).
+            after: Post-change content.
+            lang: Language hint for syntax highlighting on each side
+                (``"yaml"``, ``"python"``, ``"text"``).
+            label: Optional caption (e.g., file path the diff is over).
+
+        Returns:
+            Dict with message_id of the posted message.
+        """
+        attachment: dict[str, Any] = {
+            "kind": "diff",
+            "before": before,
+            "after": after,
+            "lang": lang,
+        }
+        if label:
+            attachment["label"] = label
+        return await self.respond_to_user(content=summary, attachments=[attachment])
 
     async def _post_response(self, content: str, **extra: Any) -> None:
         """Internal helper — posts a response without going through action dispatch.
