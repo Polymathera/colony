@@ -256,8 +256,8 @@ class Ingestor:
             if chunk_ids:
                 await self._vector_store.delete_by_chunk_ids(chunk_ids)
 
-        reader = self._readers.reader_for(document.detected_format)
-        if reader is None:
+        readers = self._readers.readers_for(document.detected_format)
+        if not readers:
             return _finish_record(
                 record,
                 status=IngestionStatus.FAILED,
@@ -267,20 +267,38 @@ class Ingestor:
                 ),
             )
 
-        try:
-            sections = await reader.read_async(document)
-        except FormatReaderError as exc:
-            return _finish_record(
-                record, status=IngestionStatus.FAILED, error=str(exc),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "Ingestor: reader %s failed on %s",
-                type(reader).__name__, document.source_uri,
-            )
+        # Multi-reader path: each registered reader contributes its
+        # sections; failures on one reader log and skip rather than
+        # fail the whole ingest, so a transient GROBID outage doesn't
+        # poison the body-extractor result. We fail the record only if
+        # NO reader produced sections.
+        sections: list[Any] = []
+        last_error: str | None = None
+        for reader in readers:
+            try:
+                reader_sections = await reader.read_async(document)
+            except FormatReaderError as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Ingestor: reader %s rejected %s (%s); continuing.",
+                    type(reader).__name__, document.source_uri, exc,
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001
+                last_error = f"reader failed: {exc}"
+                logger.exception(
+                    "Ingestor: reader %s failed on %s",
+                    type(reader).__name__, document.source_uri,
+                )
+                continue
+            sections.extend(reader_sections)
+        if not sections:
             return _finish_record(
                 record, status=IngestionStatus.FAILED,
-                error=f"reader failed: {exc}",
+                error=last_error or (
+                    f"All readers for {document.detected_format.value} "
+                    f"returned no sections."
+                ),
             )
 
         record = record.model_copy(update={"status": IngestionStatus.CHUNKING})

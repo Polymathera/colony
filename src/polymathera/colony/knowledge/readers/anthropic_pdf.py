@@ -107,8 +107,6 @@ class AnthropicPdfReader(FormatReader):
             prefix-cache discount.
     """
 
-    handles = (KnowledgeFormat.PDF,)
-
     def __init__(
         self,
         *,
@@ -120,6 +118,7 @@ class AnthropicPdfReader(FormatReader):
         prompt: str | None = None,
         prompt_cache: bool = True,
     ) -> None:
+        super().__init__(handles=(KnowledgeFormat.PDF,))
         # image_store is accepted but stored only for diagnostics —
         # Anthropic's response carries no image bytes so the reader
         # has nothing to put. We still record it so the operator can

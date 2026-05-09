@@ -113,7 +113,8 @@ class _SectionedExtractor(HTMLParser):
 
 
 class HtmlReader(FormatReader):
-    handles = (KnowledgeFormat.HTML,)
+    def __init__(self) -> None:
+        super().__init__(handles=(KnowledgeFormat.HTML,))
 
     def read(self, document: RawDocument) -> Sequence[ParsedSection]:
         text = document.text

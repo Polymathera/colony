@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 class JupyterReader(FormatReader):
-    handles = (KnowledgeFormat.JUPYTER,)
+    def __init__(self) -> None:
+        super().__init__(handles=(KnowledgeFormat.JUPYTER,))
 
     def read(self, document: RawDocument) -> Sequence[ParsedSection]:
         try:

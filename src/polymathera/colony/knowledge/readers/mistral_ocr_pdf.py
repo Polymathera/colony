@@ -51,7 +51,7 @@ from ..models import (
     RawDocument,
 )
 from ..stores.image import ImageStore
-from .base import FormatReader, FormatReaderError
+from .base import FormatReader, FormatReaderError, PdfTooManyPagesError
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,34 @@ _DEFAULT_TIMEOUT_S = 120.0
 is generous even for 600-page books. Bumped from the GROBID-style
 60 s default since the OCR endpoint orchestrates upload + signed
 URL + extract — three round trips serialised."""
+
+
+def _parse_mistral_page_limits(body: str) -> tuple[int | None, int | None]:
+    """Pull ``(page_count, max_pages)`` out of a Mistral OCR
+    ``document_parser_too_many_pages`` 400 body.
+
+    Best-effort: the structured ``code`` / ``type`` fields are stable,
+    but the page numbers live in a free-form ``message`` (e.g. ``"This
+    document has 2096 pages, which is more than the maximum allowed
+    of 1000."``). Returns ``(None, None)`` if either number is absent —
+    the typed exception still fires; the operator just loses the
+    diagnostic detail.
+    """
+    import json as _json
+    import re as _re
+
+    try:
+        payload = _json.loads(body)
+        message = payload.get("message", "")
+    except Exception:  # noqa: BLE001
+        message = body
+    m = _re.search(
+        r"has\s+(\d+)\s+pages?,\s+which\s+is\s+more\s+than\s+the\s+maximum\s+allowed\s+of\s+(\d+)",
+        message,
+    )
+    if m is None:
+        return (None, None)
+    return (int(m.group(1)), int(m.group(2)))
 
 _DATA_URI_RE = re.compile(r"^data:(?P<mime>[^;]+);base64,(?P<data>.+)$", re.DOTALL)
 """Mistral wraps image bytes in ``data:image/jpeg;base64,...`` per
@@ -104,8 +132,6 @@ class MistralOcrPdfReader(FormatReader):
             to the OCR call.
     """
 
-    handles = (KnowledgeFormat.PDF,)
-
     def __init__(
         self,
         *,
@@ -116,6 +142,7 @@ class MistralOcrPdfReader(FormatReader):
         timeout_s: float = _DEFAULT_TIMEOUT_S,
         table_format: str = "markdown",
     ) -> None:
+        super().__init__(handles=(KnowledgeFormat.PDF,))
         if image_store is None:
             raise ValueError(
                 "MistralOcrPdfReader requires an image_store — figure "
@@ -274,9 +301,22 @@ class MistralOcrPdfReader(FormatReader):
             json=payload,
         )
         if response.status_code != 200:
+            # Mistral OCR caps documents at 1000 pages and surfaces it
+            # as HTTP 400 ``document_parser_too_many_pages``. Promote
+            # to the typed error so a wrapping ``FallbackPdfReader``
+            # can route to a backend without that limit (Gemini /
+            # LlamaParse / self-hosted) instead of failing the ingest.
+            body_text = response.text
+            if response.status_code == 400 and "document_parser_too_many_pages" in body_text:
+                page_count, max_pages = _parse_mistral_page_limits(body_text)
+                raise PdfTooManyPagesError(
+                    f"Mistral /v1/ocr rejected {response.status_code}: "
+                    f"{body_text[:512]!r}",
+                    page_count=page_count, max_pages=max_pages,
+                )
             raise FormatReaderError(
                 f"Mistral /v1/ocr returned HTTP {response.status_code}: "
-                f"{response.text[:512]!r}",
+                f"{body_text[:512]!r}",
             )
         return response.json()
 

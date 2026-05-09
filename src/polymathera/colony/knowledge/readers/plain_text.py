@@ -15,7 +15,8 @@ from .base import FormatReader
 
 
 class PlainTextReader(FormatReader):
-    handles = (KnowledgeFormat.PLAIN_TEXT,)
+    def __init__(self) -> None:
+        super().__init__(handles=(KnowledgeFormat.PLAIN_TEXT,))
 
     def read(self, document: RawDocument) -> Sequence[ParsedSection]:
         text = document.text

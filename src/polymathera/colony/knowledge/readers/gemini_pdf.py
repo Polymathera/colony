@@ -100,8 +100,6 @@ class GeminiPdfReader(FormatReader):
             call per ingest.
     """
 
-    handles = (KnowledgeFormat.PDF,)
-
     def __init__(
         self,
         *,
@@ -113,6 +111,7 @@ class GeminiPdfReader(FormatReader):
         prompt: str | None = None,
         cached_content_name: str | None = None,
     ) -> None:
+        super().__init__(handles=(KnowledgeFormat.PDF,))
         self._image_store = image_store
         self._api_key = api_key
         self._model = model

@@ -25,7 +25,8 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 
 
 class MarkdownReader(FormatReader):
-    handles = (KnowledgeFormat.MARKDOWN,)
+    def __init__(self) -> None:
+        super().__init__(handles=(KnowledgeFormat.MARKDOWN,))
 
     def read(self, document: RawDocument) -> Sequence[ParsedSection]:
         text = document.text

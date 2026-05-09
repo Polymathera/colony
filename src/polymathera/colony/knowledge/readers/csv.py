@@ -20,7 +20,8 @@ from .base import FormatReader
 
 
 class CsvReader(FormatReader):
-    handles = (KnowledgeFormat.CSV,)
+    def __init__(self) -> None:
+        super().__init__(handles=(KnowledgeFormat.CSV,))
 
     def read(self, document: RawDocument) -> Sequence[ParsedSection]:
         text = document.text

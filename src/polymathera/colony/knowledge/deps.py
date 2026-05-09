@@ -138,7 +138,8 @@ def _default_reader_registry(image_store: "ImageStore") -> Any:
     the reader's constructor verbatim.
     """
 
-    cfg = _knowledge_config().pdf_extractor
+    knowledge_cfg = _knowledge_config()
+    cfg = knowledge_cfg.pdf_extractor
     backend = cfg.backend
     from .readers import default_registry_with_pdf_extractor
 
@@ -147,6 +148,9 @@ def _default_reader_registry(image_store: "ImageStore") -> Any:
             backend=backend,
             image_store=image_store,
             backend_kwargs=cfg.options,
+            fallback_backend=cfg.max_pages_fallback_backend,
+            fallback_kwargs=cfg.max_pages_fallback_options,
+            grobid_url=knowledge_cfg.grobid.url or None,
         )
     except (NotImplementedError, ValueError) as exc:
         logger.warning(

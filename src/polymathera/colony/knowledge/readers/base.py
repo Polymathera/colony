@@ -19,7 +19,6 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
-from typing import ClassVar
 
 from ..models import KnowledgeFormat, ParsedSection, RawDocument
 
@@ -31,12 +30,38 @@ class FormatReaderError(RuntimeError):
     """Raised when a reader cannot parse its input."""
 
 
+class PdfTooManyPagesError(FormatReaderError):
+    """Raised when a PDF reader rejects a document because its page
+    count exceeds the backend's hard limit (Mistral OCR: 1000 pages).
+
+    Distinct from generic :class:`FormatReaderError` so a wrapping
+    :class:`FallbackPdfReader` can route to a backend without that
+    limit (Gemini, LlamaParse, self-hosted) instead of failing the
+    ingest. Carries ``page_count`` / ``max_pages`` when the backend
+    surfaces them, ``None`` when the reader inferred the limit from
+    a less-structured error response.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        page_count: int | None = None,
+        max_pages: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.page_count = page_count
+        self.max_pages = max_pages
+
+
 class FormatReader(ABC):
     """Read a ``RawDocument`` into a sequence of ``ParsedSection``s."""
 
-    handles: ClassVar[tuple[KnowledgeFormat, ...]] = ()
-    """Formats this reader handles. Subclasses set this; the registry
-    indexes on it."""
+    def __init__(self, *, handles: tuple[KnowledgeFormat, ...]) -> None:
+        """
+        ``handles`` declares the formats this reader handles. Subclasses set this; the registry
+        indexes on it."""
+        self.handles = handles
 
     @abstractmethod
     def read(self, document: RawDocument) -> Sequence[ParsedSection]:
@@ -54,10 +79,23 @@ class FormatReader(ABC):
 
 
 class ReaderRegistry:
-    """Registry that picks a reader for a detected format."""
+    """Registry that resolves readers for a detected format.
+
+    Supports **multi-reader-per-format**: different reader CLASSES
+    register additively (e.g. a layout-aware body extractor and a
+    metadata-only GROBID sibling for ``KnowledgeFormat.PDF``); a
+    re-registration of the SAME class replaces the previous instance
+    (idempotent against double-init). Section concatenation across
+    readers is the Ingestor's responsibility.
+
+    Backward-compat: :meth:`reader_for` returns the LAST reader
+    registered for a format (preserves the old "last write wins"
+    contract used by tests and by ``default_registry_with_grobid``).
+    Multi-reader callers use :meth:`readers_for`.
+    """
 
     def __init__(self) -> None:
-        self._by_format: dict[KnowledgeFormat, FormatReader] = {}
+        self._by_format: dict[KnowledgeFormat, list[FormatReader]] = {}
 
     def register(self, reader: FormatReader) -> None:
         if not reader.handles:
@@ -65,19 +103,38 @@ class ReaderRegistry:
                 f"Reader {type(reader).__name__} declares no handled formats.",
             )
         for fmt in reader.handles:
-            existing = self._by_format.get(fmt)
-            if existing is not None and type(existing) is not type(reader):
-                logger.info(
-                    "ReaderRegistry: replacing %s for %s with %s",
-                    type(existing).__name__, fmt.value, type(reader).__name__,
-                )
-            self._by_format[fmt] = reader
+            readers = self._by_format.setdefault(fmt, [])
+            for i, existing in enumerate(readers):
+                if type(existing) is type(reader):
+                    logger.info(
+                        "ReaderRegistry: replacing %s for %s",
+                        type(reader).__name__, fmt.value,
+                    )
+                    readers[i] = reader
+                    break
+            else:
+                readers.append(reader)
+
+    def readers_for(self, fmt: KnowledgeFormat) -> tuple[FormatReader, ...]:
+        """All readers registered for ``fmt`` in registration order."""
+        return tuple(self._by_format.get(fmt, ()))
 
     def reader_for(self, fmt: KnowledgeFormat) -> FormatReader | None:
-        return self._by_format.get(fmt)
+        """The most-recently-registered reader for ``fmt`` (legacy
+        single-reader contract). Returns ``None`` when no reader is
+        registered. New code should use :meth:`readers_for`."""
+        readers = self._by_format.get(fmt)
+        if not readers:
+            return None
+        return readers[-1]
 
     def formats(self) -> Iterable[KnowledgeFormat]:
         return tuple(self._by_format.keys())
 
 
-__all__ = ("FormatReader", "FormatReaderError", "ReaderRegistry")
+__all__ = (
+    "FormatReader",
+    "FormatReaderError",
+    "PdfTooManyPagesError",
+    "ReaderRegistry",
+)

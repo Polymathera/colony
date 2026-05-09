@@ -78,8 +78,6 @@ class RemotePdfExtractorReader(FormatReader):
             controls table format, image extraction, page filter.
     """
 
-    handles = (KnowledgeFormat.PDF,)
-
     _BACKEND_TO_DEPLOYMENT_NAME: dict[str, str] = {
         "marker": "MarkerExtractorDeployment",
         "docling": "DoclingExtractorDeployment",
@@ -95,6 +93,7 @@ class RemotePdfExtractorReader(FormatReader):
         deployment_name: str | None = None,
         extract_options: ExtractOptions | None = None,
     ) -> None:
+        super().__init__(handles=(KnowledgeFormat.PDF,))
         if image_store is None:
             raise ValueError(
                 "RemotePdfExtractorReader requires an image_store.",

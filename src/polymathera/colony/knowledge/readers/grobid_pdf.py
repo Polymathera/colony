@@ -49,8 +49,6 @@ class GrobidPdfReader(FormatReader):
     take seconds for non-trivial papers).
     """
 
-    handles = (KnowledgeFormat.PDF,)
-
     def __init__(
         self,
         *,
@@ -83,6 +81,7 @@ class GrobidPdfReader(FormatReader):
                 preserver, future citation-graph features) can hook
                 in.
         """
+        super().__init__(handles=(KnowledgeFormat.PDF,))
         if not base_url:
             raise ValueError("GrobidPdfReader requires a non-empty base_url.")
         if mode not in ("full", "metadata_only"):

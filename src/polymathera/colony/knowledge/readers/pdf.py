@@ -35,7 +35,8 @@ class PdfReader(FormatReader):
     are not text-shaped.
     """
 
-    handles = (KnowledgeFormat.PDF,)
+    def __init__(self) -> None:
+        super().__init__(handles=(KnowledgeFormat.PDF,))
 
     def read(self, document: RawDocument) -> Sequence[ParsedSection]:
         try:

@@ -102,8 +102,6 @@ class LlamaParsePdfReader(FormatReader):
             no images are extracted anyway.
     """
 
-    handles = (KnowledgeFormat.PDF,)
-
     def __init__(
         self,
         *,
@@ -115,6 +113,7 @@ class LlamaParsePdfReader(FormatReader):
         poll_interval_s: float = _DEFAULT_POLL_INTERVAL_S,
         download_images: bool = True,
     ) -> None:
+        super().__init__(handles=(KnowledgeFormat.PDF,))
         if image_store is None:
             raise ValueError(
                 "LlamaParsePdfReader requires an image_store — figure "

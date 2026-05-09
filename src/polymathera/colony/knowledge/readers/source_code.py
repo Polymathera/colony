@@ -48,7 +48,8 @@ _BLOCK_HEADER: dict[str, re.Pattern[str]] = {
 
 
 class SourceCodeReader(FormatReader):
-    handles = (KnowledgeFormat.SOURCE_CODE,)
+    def __init__(self) -> None:
+        super().__init__(handles=(KnowledgeFormat.SOURCE_CODE,))
 
     def read(self, document: RawDocument) -> Sequence[ParsedSection]:
         text = document.text

@@ -109,6 +109,35 @@ class PdfExtractorConfig(ConfigComponent):
         ),
     )
 
+    max_pages_fallback_backend: PdfExtractorBackend | None = Field(
+        default=None,
+        description=(
+            "Optional fallback backend for documents that exceed the "
+            "primary backend's page limit. Today's only enforcer is "
+            "Mistral OCR (1000-page cap, surfaced as a typed "
+            "``PdfTooManyPagesError``); when this field is set, the "
+            "reader is wrapped in ``FallbackPdfReader`` and oversized "
+            "documents are routed here instead of failing the ingest. "
+            "Pick a backend without a comparable cap — typically "
+            "``gemini`` (no documented limit on 2.5-flash) or "
+            "``llamaparse``."
+        ),
+        json_schema_extra=tier_metadata(
+            tier=Tier.L1_OPERATOR, mutability=Mutability.RELOADABLE,
+        ),
+    )
+
+    max_pages_fallback_options: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Backend-specific kwargs for the fallback reader. Same "
+            "shape as ``options``."
+        ),
+        json_schema_extra=tier_metadata(
+            tier=Tier.L1_OPERATOR, mutability=Mutability.RELOADABLE,
+        ),
+    )
+
     # Self-hosted-only knobs — ignored when ``backend`` is a hosted
     # vendor.
     replicas: int = Field(

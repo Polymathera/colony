@@ -16,7 +16,8 @@ from .base import FormatReader
 
 
 class JsonlReader(FormatReader):
-    handles = (KnowledgeFormat.JSONL,)
+    def __init__(self) -> None:
+        super().__init__(handles=(KnowledgeFormat.JSONL,))
 
     def read(self, document: RawDocument) -> Sequence[ParsedSection]:
         text = document.text
