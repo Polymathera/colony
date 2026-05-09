@@ -3,8 +3,9 @@
 The dashboard's KB tab calls these to surface the corpus the agents
 share via the process-singleton ``RetrievalDeps`` from
 ``polymathera.colony.knowledge.deps``. Same backend (Qdrant when
-``QDRANT_URL`` is set, in-memory otherwise) the agents see — the tab
-is a window onto live state, not a separate cache.
+``knowledge.qdrant.url`` is set in the operator YAML, in-memory
+otherwise) the agents see — the tab is a window onto live state, not
+a separate cache.
 
 All endpoints are ``Ring.USER`` and gated by ``require_auth``.
 """
@@ -15,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from ..auth.middleware import require_auth
@@ -73,8 +74,21 @@ class KBChunkRow(BaseModel):
     token_count: int
     page_number: int | None = None
     text_preview: str
-    """First ~400 chars of the chunk text. Full text is available via
-    the future ``GET /kb/chunks/{chunk_id}`` endpoint when needed."""
+    """Chunk text (capped at 16 KB). For multimodal chunks this is
+    Markdown — the dashboard's KB tab renders it with figure URI
+    rewriting so embedded ``colony-image://`` references resolve via
+    ``GET /kb/images/<sha>``."""
+
+    figure_ids: list[str] = Field(default_factory=list)
+    """IDs of figures the chunk references, copied from
+    ``Chunk.extra["figure_ids"]``. Lets the dashboard show a "N
+    figures" badge per chunk and the agent's planner pull image URIs
+    without re-parsing the chunk text."""
+
+    metadata_origin: str | None = None
+    """Provenance hint copied from ``Chunk.extra["metadata_origin"]``
+    so the KB tab can label which extractor produced a given chunk
+    (``mistral_ocr`` / ``anthropic`` / ``marker`` / …)."""
 
 
 class KBChunksResponse(BaseModel):
@@ -117,6 +131,13 @@ class KBIngestRequest(BaseModel):
     text: str | None = None
     source_uri: str | None = None
     tier: str = "untiered"
+    extractor_override: str | None = None
+    """Force a specific PDF extractor for this single ingest call —
+    one of ``mistral_ocr`` / ``anthropic`` / ``marker`` / ``docling``
+    / ``mineru``. Useful for A/B tests from the KB tab without
+    redeploying or editing ``polymathera_cluster.knowledge.pdf_extractor``
+    in the operator YAML. ``None`` (the default) uses the colony's
+    configured extractor. Ignored for non-PDF ingests."""
 
 
 class KBIngestResponse(BaseModel):
@@ -133,21 +154,18 @@ class KBIngestResponse(BaseModel):
 
 
 def _backend_info() -> KBBackendInfo:
-    import os
-
+    from polymathera.colony.distributed.config import get_component_or_default
+    from polymathera.colony.knowledge.cluster_config import KnowledgeConfig
     from polymathera.colony.knowledge.deps import get_knowledge_deps
 
     deps = get_knowledge_deps()
+    qdrant_cfg = get_component_or_default("knowledge", KnowledgeConfig).qdrant
     return KBBackendInfo(
         vector_store=type(deps.vector_store).__name__,
         embedder_id=deps.embedder.embedder_id,
         embedder_dimensions=deps.embedder.dimensions,
-        qdrant_url=os.environ.get("QDRANT_URL"),
-        qdrant_collection=(
-            os.environ.get("QDRANT_COLLECTION", "colony_knowledge")
-            if os.environ.get("QDRANT_URL")
-            else None
-        ),
+        qdrant_url=qdrant_cfg.url or None,
+        qdrant_collection=qdrant_cfg.collection if qdrant_cfg.url else None,
     )
 
 
@@ -227,9 +245,18 @@ async def kb_chunks_for_source(
 
     ``source_uri`` is taken as a query param so URL-encoded ``file:///``
     paths come through cleanly without path-segment surprises.
+
+    ``text_preview`` carries the full chunk text (capped at 16 KB)
+    rather than the previous 400-char preview so a markdown-format
+    chunk (Mistral / Anthropic / Marker / …) is rendered intact in
+    the KB tab — partial markdown breaks figure references and
+    table layouts. Operators can still navigate the chunk via the
+    chat UI's ``CollapsiblePre`` on the client side.
     """
 
     from polymathera.colony.knowledge.deps import get_knowledge_deps
+
+    _MAX_CHUNK_TEXT = 16_384
 
     deps = get_knowledge_deps()
     chunks = await deps.vector_store.list_chunks_for_source(source_uri)
@@ -241,12 +268,63 @@ async def kb_chunks_for_source(
             tier=c.chunk.tier.value,
             token_count=c.chunk.token_count,
             page_number=c.chunk.citation.page_number,
-            text_preview=c.chunk.text[:400],
+            text_preview=c.chunk.text[:_MAX_CHUNK_TEXT],
+            figure_ids=list(c.chunk.extra.get("figure_ids") or ()),
+            metadata_origin=c.chunk.extra.get("metadata_origin"),
         )
         for c in chunks[:limit]
     ]
     rows.sort(key=lambda r: (r.section_path, r.chunk_id))
     return KBChunksResponse(source=source_uri, chunks=rows)
+
+
+@router.get("/kb/images/{sha}")
+async def kb_image_resolve(
+    sha: str,
+    _user: dict = Depends(require_auth),
+) -> Response:
+    """Serve raw figure bytes from the active :class:`ImageStore`.
+
+    The chunk text emitted by the multimodal readers carries
+    ``colony-image://<sha>`` URIs; the KB tab's markdown renderer
+    rewrites those to ``/api/v1/kb/images/<sha>`` so a browser ``<img>``
+    tag resolves them via this endpoint. The mime is read from the
+    store's sidecar so the right ``Content-Type`` flows back without
+    sniffing magic bytes here.
+
+    Returns 404 when the URI is not present (operator-deleted figure,
+    fresh worker that never ran ingest, …) — the dashboard renders
+    a placeholder rather than crashing the chat panel.
+    """
+
+    # Sha sanity: the store's URI scheme uses hex; reject anything
+    # else so a bogus path can't traverse out of the shard tree.
+    if not sha or not all(ch in "0123456789abcdef" for ch in sha.lower()):
+        raise HTTPException(
+            status_code=400, detail="invalid image sha (expected hex)",
+        )
+
+    from polymathera.colony.knowledge.deps import get_knowledge_deps
+    from polymathera.colony.knowledge.stores.image import _build_uri
+
+    image_store = get_knowledge_deps().image_store
+    if image_store is None:
+        raise HTTPException(
+            status_code=503, detail="no image store configured on this colony",
+        )
+    uri = _build_uri(sha.lower())
+    payload = await image_store.get(uri)
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"image not found: {sha}")
+    info = await image_store.stat(uri)
+    media_type = (info or {}).get("mime") or "application/octet-stream"
+    # Cache aggressively — content-addressed bytes never change for
+    # a given sha. ``immutable`` tells the browser not to revalidate.
+    return Response(
+        content=payload,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @router.post("/kb/search", response_model=KBSearchResponse)
@@ -305,8 +383,13 @@ async def kb_ingest(
     ``materialize_knowledge_routing`` action driven by ``repo_map.yaml``.
     """
 
-    from polymathera.colony.knowledge.deps import get_default_ingestor
+    from polymathera.colony.knowledge.deps import (
+        get_default_ingestor, get_knowledge_deps,
+    )
     from polymathera.colony.knowledge.models import CorpusTier
+    from polymathera.colony.knowledge.readers import (
+        default_registry_with_pdf_extractor,
+    )
 
     if not payload.path and not payload.text:
         raise HTTPException(
@@ -327,6 +410,38 @@ async def kb_ingest(
         ) from exc
 
     ingestor = get_default_ingestor()
+
+    # If the operator overrode the extractor for this single call,
+    # build a one-shot Ingestor that shares the singleton's
+    # embedder + vector store + image store but swaps the reader
+    # registry. This avoids touching the process-wide ingestor
+    # (so the override doesn't leak into concurrent ingests) while
+    # still landing chunks in the same Qdrant collection. Ignored
+    # for ``text`` ingests since those don't go through a PDF
+    # reader.
+    if payload.extractor_override and payload.path:
+        from polymathera.colony.knowledge.ingestion import Ingestor
+
+        try:
+            override_registry = default_registry_with_pdf_extractor(
+                backend=payload.extractor_override,
+                image_store=get_knowledge_deps().image_store,
+            )
+        except (NotImplementedError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"extractor_override={payload.extractor_override!r} "
+                       f"not available: {exc}",
+            ) from exc
+        deps = get_knowledge_deps()
+        ingestor = Ingestor(
+            readers=override_registry,
+            embedder=deps.embedder,
+            vector_store=deps.vector_store,
+            graph_store=deps.graph_store,
+            image_store=deps.image_store,
+        )
+
     if payload.path:
         path_obj = Path(payload.path)
         if not path_obj.is_file():

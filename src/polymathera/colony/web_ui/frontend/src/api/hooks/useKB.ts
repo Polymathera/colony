@@ -38,6 +38,18 @@ export interface KBChunkRow {
   token_count: number;
   page_number: number | null;
   text_preview: string;
+  /**
+   * IDs of figures the chunk references. Populated by the chunker
+   * when the section's markdown contained ``colony-image://`` URIs;
+   * the chat tab renders a "📷 N" badge on chunks that have them.
+   */
+  figure_ids: string[];
+  /**
+   * Which extractor produced this chunk (``mistral_ocr`` /
+   * ``anthropic`` / ``marker`` / …). ``null`` for legacy chunks
+   * ingested before the multimodal pipeline landed.
+   */
+  metadata_origin: string | null;
 }
 
 export interface KBChunksResponse {

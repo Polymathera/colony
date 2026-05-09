@@ -88,6 +88,22 @@ watchdog = { version = "^6.0.0", optional = true }
 pypdf = { version = "^5.1.0", optional = true }
 qdrant-client = { version = "^1.12.0", optional = true }
 kuzu = { version = "^0.7.0", optional = true }
+# Multimodal PDF extractors.
+# - ``docling`` (MIT) and ``magic-pdf`` (MinerU / AGPL-3.0) ship by
+#   default in the ``knowledge`` extra.
+# - ``google-genai`` (Apache-2.0) is installed by default; the
+#   GeminiPdfReader needs it.
+# - ``marker-pdf`` (GPL-3.0) is intentionally NOT poetry-managed —
+#   it pins ``openai <2.0`` which conflicts with the colony's
+#   ``openai ^2.21.0`` pin. Operators who want Marker install it
+#   manually after building the image:
+#     ``pip install --no-deps marker-pdf``
+#   (``--no-deps`` so its older ``openai`` pin doesn't clobber
+#   ours). The Marker deployment lazy-imports the package so the
+#   absence is a clean error, not a startup crash.
+docling = { version = ">=2.70.0", optional = true }
+"magic-pdf" = { version = ">=1.0.0", optional = true }
+google-genai = { version = ">=1.0.0", optional = true }
 # PyTorch 2.8.0 with CUDA 12.8 (matching rayproject/ray:2.49.0-py311-cu128 base image)
 torch = {version = "2.8.0+cu128", source = "torch", optional = true}
 torchvision = {version = "0.23.0+cu128", source = "torch", optional = true}
@@ -189,7 +205,26 @@ knowledge = [
     "httpx",
     "qdrant-client",
     "kuzu",
+    # Self-hosted multimodal extractors with permissive (MIT) or
+    # network-modification-only (AGPL-3.0) licensing — bundled by
+    # default. The Marker extractor (GPL-3.0) lives in the
+    # ``knowledge_marker`` extra so the GPL viral terms only apply
+    # when the operator explicitly opts in.
+    "docling",
+    "magic-pdf",
+    # Hosted-API SDKs the readers use directly when their backend is
+    # selected. ``anthropic`` already lives under ``cpu``; the
+    # Mistral / LlamaParse readers go through plain ``httpx``.
+    "google-genai",
 ]
+
+# NOTE: The ``knowledge_marker`` extra is intentionally not declared.
+# Marker (GPL-3.0) pins ``openai <2.0`` which conflicts with the
+# colony's ``openai ^2.21.0``. Poetry can't satisfy both, so Marker
+# stays out of poetry resolution entirely. Operators who want it run
+# ``pip install --no-deps marker-pdf`` inside the running container
+# (or add the line to a downstream Dockerfile) — see decision #6 in
+# docs/architecture/multimodal-pdf-ingestion.md.
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.2"

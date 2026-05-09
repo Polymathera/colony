@@ -7,6 +7,22 @@ Usage:
 
 from __future__ import annotations
 
+# First-party ConfigComponent registry bootstrap. Each
+# ``@register_polymathera_config(path=…)`` decorator runs at module
+# import time and adds its class to the global registry that
+# :class:`PolymatheraConfig.__init__` snapshots when
+# ``ConfigurationManager.initialize()`` first loads the YAML. Any
+# component whose module is not imported BEFORE that snapshot is
+# silently absent from ``cm.get_component(path)``, and downstream
+# ``get_component_or_default(path, cls)`` calls fall through to bare
+# defaults.
+#
+# Other entry-points (``polymath.py`` CLI, agent workers) reach these
+# modules transitively via ``polymathera.colony.system``, but the
+# dashboard's import chain doesn't — so we import them here, before
+# anything else runs ``cli_main`` and constructs the manager.
+from polymathera.colony.knowledge import cluster_config as _knowledge_config_register  # noqa: F401
+
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path

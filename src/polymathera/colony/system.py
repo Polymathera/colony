@@ -22,6 +22,7 @@ from .distributed.ray_utils import serving
 from .cluster.config import ClusterConfig
 from .vcm.config import VCMConfig
 from .agents.config import AgentSystemConfig
+from .knowledge.cluster_config import KnowledgeConfig
 from .agents.blueprint import AgentBlueprint
 from . import get_deployment_names
 
@@ -51,6 +52,7 @@ class PolymatheraClusterConfig(ConfigComponent):
     llm_cluster_config: ClusterConfig | None = None
     vcm_config: VCMConfig = Field(default_factory=VCMConfig)
     agent_system_config: AgentSystemConfig = Field(default_factory=AgentSystemConfig)
+    knowledge_config: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
     cleanup_on_init: bool = Field(
         default=False,
         json_schema_extra=tier_metadata(tier=Tier.L1_OPERATOR),
@@ -96,6 +98,13 @@ class PolymatheraClusterConfig(ConfigComponent):
 
         # VCM with config
         self.vcm_config.add_deployments_to_app(app, top_level=False)
+
+        # Knowledge layer — for self-hosted PDF extractor backends
+        # this brings up the matching *ExtractorDeployment. Hosted
+        # backends are no-ops at deploy time; every worker resolves
+        # the active reader from KnowledgeConfig directly via the
+        # global ConfigurationManager.
+        self.knowledge_config.add_deployments_to_app(app, top_level=False)
 
         # Agent system deployments
         self.agent_system_config.add_deployments_to_app(app, top_level=False)

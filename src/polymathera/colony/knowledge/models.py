@@ -199,6 +199,52 @@ class RawDocument(BaseModel):
         return bytes(self.payload)
 
 
+class FigureRef(BaseModel):
+    """One figure / table-as-image / diagram extracted from a document.
+
+    Readers that produce multimodal output (Marker, Docling, MinerU,
+    Mistral OCR, Anthropic native PDF) emit these alongside the
+    section text. The chunker forwards the IDs into
+    ``Chunk.extra["figure_ids"]`` so retrievers and the agent's
+    planner can fetch image bytes by URI without a second
+    document-resolution round trip. See
+    :doc:`/architecture/multimodal-pdf-ingestion` for the design.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    figure_id: str = Field(
+        default_factory=lambda: f"fig_{uuid.uuid4().hex[:16]}",
+    )
+
+    image_uri: str
+    """Content-addressed URI returned by ``ImageStore.put`` —
+    typically ``colony-image://<sha256>``. Resolves via the active
+    :class:`~polymathera.colony.knowledge.stores.image.ImageStore`
+    bound to :class:`RetrievalDeps`."""
+
+    page: int | None = None
+    """1-indexed page number the figure appears on, when the reader
+    can supply it."""
+
+    bbox: tuple[float, float, float, float] | None = None
+    """``(x0, y0, x1, y1)`` in PDF user-space units, when the reader
+    can supply them. Pixel coords are also acceptable as long as the
+    reader is consistent within a single document."""
+
+    caption_hint: str = ""
+    """Caption text the reader extracted from below the figure (or
+    similar). Used as a hint for the captioner; not authoritative."""
+
+    kind: Literal["figure", "table", "diagram", "equation", "other"] = "figure"
+
+    label: str = ""
+    """In-text label, e.g. ``"Fig. 3"`` or ``"Table 2"``. Lets chunks
+    that mention the label resolve back to this figure."""
+
+    extra: dict[str, Any] = Field(default_factory=dict)
+
+
 class ParsedSection(BaseModel):
     """One section of a parsed document.
 
@@ -214,6 +260,21 @@ class ParsedSection(BaseModel):
     heading: str = ""
     text: str
     citation: CitationSpan
+    figures: tuple[FigureRef, ...] = Field(default_factory=tuple)
+    """Figures, tables-as-images, diagrams, and equations extracted
+    from this section. The reader emits them; the chunker links each
+    chunk back to the figures it mentions via ``Chunk.extra
+    ["figure_ids"]``. Empty for text-only readers (the existing
+    pypdf / plain-text / markdown / HTML paths)."""
+
+    format: Literal["text", "markdown"] = "text"
+    """Content shape of ``text``. ``"markdown"`` flags sections whose
+    text carries Markdown the chunker should preserve through
+    chunking — fenced code blocks, GFM tables, and ``$...$`` math
+    must not be split mid-block. Layout-aware readers (Marker,
+    Docling, MinerU, Mistral OCR) emit ``"markdown"``; the legacy
+    pypdf and plain-text paths default to ``"text"``."""
+
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -497,6 +558,7 @@ __all__ = (
     "CitationSpan",
     "RawDocument",
     "ParsedSection",
+    "FigureRef",
     "Chunk",
     "Claim",
     "EmbeddedChunk",

@@ -55,13 +55,11 @@ services:
       # Observability (tracing)
       - TRACING_ENABLED=true
       - KAFKA_BOOTSTRAP=kafka:9092
-      # Knowledge stack — Qdrant vector store + GROBID PDF extractor.
-      # When QDRANT_URL is set, knowledge.deps switches the default
-      # VectorStore from InMemoryVectorStore to QdrantVectorStore so
-      # ingested chunks survive restarts. When GROBID_URL is set,
-      # GrobidPdfReader becomes the default for *.pdf.
-      - QDRANT_URL=http://qdrant:6333
-      - GROBID_URL=http://grobid:8070
+      # Knowledge stack — Qdrant URL, GROBID URL, PDF extractor
+      # backend, and image directory live in the operator YAML
+      # (``polymathera_cluster.knowledge`` — see configs/example.yaml).
+      # Workers re-read the same YAML via POLYMATHERA_CONFIG, so no
+      # env-var passthrough is needed for these knobs.
       # API keys — forwarded from host environment
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -69,6 +67,10 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      # PDF-extractor API keys — only the one matching the active
+      # backend is actually used at runtime.
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
+      - LLAMA_CLOUD_API_KEY=${LLAMA_CLOUD_API_KEY:-}
       # WebSearchCapability / ColonyDocsCapability — Tavily backend.
       # The capability stays disabled until this is set; agents see a
       # clean error dict from search_web rather than a crash.
@@ -148,9 +150,8 @@ services:
       # Observability (tracing)
       - TRACING_ENABLED=true
       - KAFKA_BOOTSTRAP=kafka:9092
-      # Knowledge stack — see ray-head for the contract.
-      - QDRANT_URL=http://qdrant:6333
-      - GROBID_URL=http://grobid:8070
+      # Knowledge stack — see ray-head for the contract. Knobs live
+      # in the operator YAML; only secrets propagate as env vars.
       # API keys — forwarded from host environment
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -158,6 +159,10 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      # PDF-extractor API keys — only the one matching the active
+      # backend is used at runtime.
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
+      - LLAMA_CLOUD_API_KEY=${LLAMA_CLOUD_API_KEY:-}
       # WebSearchCapability / ColonyDocsCapability — Tavily backend.
       - TAVILY_API_KEY=${TAVILY_API_KEY:-}
       # GitHubCapability — App credentials. See
@@ -302,13 +307,6 @@ services:
       - TRACING_ENABLED=true
       # Kafka — log streaming + span consumer
       - KAFKA_BOOTSTRAP=kafka:9092
-      # Knowledge stack — must point at the SAME Qdrant the agents
-      # ingest into; otherwise the KB tab reads from the dashboard's
-      # private InMemoryVectorStore and shows 0 chunks while the
-      # corpus actually lives in Qdrant. See ray-head for the full
-      # contract.
-      - QDRANT_URL=http://qdrant:6333
-      - GROBID_URL=http://grobid:8070
       # PostgreSQL — auth, chat persistence, observability
       - RDS_HOST=postgres
       - RDS_PORT=5432
@@ -344,6 +342,15 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      # Knowledge stack — Qdrant URL, GROBID URL, PDF extractor
+      # backend, and image directory live in the operator YAML
+      # (``polymathera_cluster.knowledge`` — see configs/example.yaml).
+      # The dashboard reads the same YAML via POLYMATHERA_CONFIG, so
+      # it sees the SAME Qdrant the agents ingest into.
+      # PDF-extractor API keys — only the one matching the active
+      # backend is used at runtime.
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
+      - LLAMA_CLOUD_API_KEY=${LLAMA_CLOUD_API_KEY:-}
       # Slack chat service (optional)
       - SLACK_ENABLED=false
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}

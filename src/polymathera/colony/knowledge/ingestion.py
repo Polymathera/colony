@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ..agents.blueprint import Blueprint, blueprint
-from .chunking import ChunkerConfig, CodeChunker, ProseChunker
+from .chunking import ChunkerConfig, CodeChunker, MarkdownChunker, ProseChunker
 from .embedder import Embedder
 from .extractors import ClaimExtractor
 from .formats import detect_format
@@ -48,7 +48,7 @@ from .models import (
     tier_priority,
 )
 from .readers import FormatReader, FormatReaderError, ReaderRegistry, default_registry
-from .stores import GraphStore, VectorStore
+from .stores import GraphStore, ImageStore, VectorStore
 
 
 logger = logging.getLogger(__name__)
@@ -80,17 +80,28 @@ class Ingestor:
         *,
         readers: ReaderRegistry | None = None,
         prose_chunker: ProseChunker | None = None,
+        markdown_chunker: MarkdownChunker | None = None,
         code_chunker: CodeChunker | None = None,
         extractors: Sequence[ClaimExtractor] = (),
         embedder: Embedder | Blueprint,
         vector_store: VectorStore | Blueprint,
         graph_store: GraphStore | Blueprint | None = None,
+        image_store: ImageStore | Blueprint | None = None,
         review_queue: HumanReviewQueueCallback | None = None,
         review_sample_rate: float = DEFAULT_REVIEW_SAMPLE_RATE,
         rng: random.Random | None = None,
     ) -> None:
         self._readers = readers or default_registry()
         self._prose = prose_chunker or ProseChunker()
+        # Reuse the prose chunker's config + token counter so the
+        # markdown variant honours the same target / max budgets.
+        # Sharing config between sibling chunkers keeps a section
+        # whose ``format`` was misdetected from chunking very
+        # differently from one whose format was right.
+        self._markdown = markdown_chunker or MarkdownChunker(
+            config=self._prose._config,
+            token_counter=self._prose._count,
+        )
         self._code = code_chunker or CodeChunker()
         self._extractors: tuple[ClaimExtractor, ...] = tuple(extractors)
         self._embedder = (
@@ -106,9 +117,22 @@ class Ingestor:
             if isinstance(graph_store, Blueprint)
             else graph_store
         )
+        self._image_store = (
+            image_store.local_instance()
+            if isinstance(image_store, Blueprint)
+            else image_store
+        )
         self._review = review_queue
         self._review_rate = max(0.0, min(1.0, review_sample_rate))
         self._rng = rng or random.Random()
+
+    @property
+    def image_store(self) -> ImageStore | None:
+        """Read-only accessor for the active image store. Readers that
+        emit figure bytes pull this when constructed via the registry
+        factory; the property is also useful for tests that need to
+        round-trip a URI emitted during ingest."""
+        return self._image_store
 
     # ---- Public API ----------------------------------------------------
 
@@ -400,8 +424,18 @@ class Ingestor:
                     )
                 )
             else:
+                # Pick the chunker by section ``format`` — markdown
+                # output (Mistral / Marker / Anthropic / etc.) goes
+                # through the block-aware chunker so fenced code,
+                # GFM tables, and display math stay atomic; plain
+                # text falls through the legacy paragraph chunker.
+                chunker = (
+                    self._markdown
+                    if section.format == "markdown"
+                    else self._prose
+                )
                 out.extend(
-                    self._prose.chunk(
+                    chunker.chunk(
                         section,
                         data_type=data_type,
                         tier=tier,

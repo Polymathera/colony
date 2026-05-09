@@ -28,6 +28,77 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+
+# Allowlist of env-var prefixes the driver propagates from
+# ``os.environ`` into Ray actor ``runtime_env.env_vars``. Variables
+# whose names match one of these prefixes flow into spawned actors;
+# everything else (raw bash vars, shell tooling) is dropped so each
+# actor starts from a minimal, reproducible environment.
+#
+# Scope is intentionally narrow: bootstrap (``POLYMATHERA`` /
+# ``RAY_`` / ``REDIS_``) plus secrets (LLM provider API keys). Pure
+# operator config knobs (vector-store URL, PDF extractor backend,
+# image directory, etc.) live in :class:`KnowledgeConfig` and other
+# typed ``ConfigComponent``s — every Ray worker re-reads the same
+# YAML via its own ``ConfigurationManager`` (loaded from the path in
+# ``POLYMATHERA_CONFIG``), so config knobs do not need env-var
+# passthrough to reach actor processes.
+#
+# Lifted to module scope so the contract is testable without
+# spinning up Ray.
+RUNTIME_ENV_PREFIXES: tuple[str, ...] = (
+    # Bootstrap — needed before the ConfigurationManager itself can
+    # run on the worker.
+    "POLYMATH",
+    "RAY_",
+    "REDIS_",
+    # Secrets — LLM provider API keys read directly by reader /
+    # deployment client code at call time (not bound into typed
+    # config since YAML must not carry secrets).
+    "ANTHROPIC_",
+    "OPENROUTER_",
+    "OPENAI_",
+    "GOOGLE_",
+    "MISTRAL_",
+    "LLAMA_",
+    "HUGGING_FACE_",
+)
+
+# Node-specific Ray internals — never propagate. The local raylet
+# sets these per-node; replicating them to actors on a different
+# node makes workers monitor the wrong PIDs and crash.
+RAY_INTERNAL_ENV_VARS: frozenset[str] = frozenset({
+    "RAY_RAYLET_PID",
+    "RAY_JOB_ID",
+    "RAY_LD_PRELOAD_ON_WORKERS",
+    "RAY_NODE_MANAGER_PORT",
+    "RAY_OBJECT_STORE_MEMORY",
+    "RAY_RAYLET_SOCKET_NAME",
+})
+
+
+def runtime_env_vars_to_propagate(
+    source: "dict[str, str] | None" = None,
+) -> dict[str, str]:
+    """Return the subset of ``source`` (defaults to ``os.environ``)
+    that should flow into a spawned actor's ``runtime_env.env_vars``.
+
+    Pure / sync — exists so tests can lock the contract without
+    going near Ray. The serving proxy at runtime calls this exact
+    function with ``os.environ`` and merges the result with any
+    explicit ``env_vars`` the caller passed in ``ray_actor_options``.
+    """
+
+    items = source if source is not None else os.environ
+    return {
+        k: v
+        for k, v in items.items()
+        if k.startswith(RUNTIME_ENV_PREFIXES)
+        and v
+        and k not in RAY_INTERNAL_ENV_VARS
+    }
+
+
 # Metrics
 request_total = Counter(
     "deployment_request_total",
@@ -755,23 +826,12 @@ class DeploymentProxyRayActor:
                 actor_options = self.ray_actor_options.copy()
 
                 # Set runtime_env with app name and logging configuration.
-                # Inherit env vars from the proxy's os.environ (which includes
-                # the driver's runtime_env vars such as API keys) so replicas
-                # can access them even though we set an explicit runtime_env.
-                # Exclude node-specific Ray internal env vars that are set by
-                # the local raylet - propagating them to actors on other nodes
-                # causes workers to monitor wrong PIDs and crash.
-                _ray_internal_vars = {
-                    "RAY_RAYLET_PID", "RAY_JOB_ID", "RAY_LD_PRELOAD_ON_WORKERS",
-                    "RAY_NODE_MANAGER_PORT", "RAY_OBJECT_STORE_MEMORY",
-                    "RAY_RAYLET_SOCKET_NAME",
-                }
+                # ``runtime_env_vars_to_propagate`` filters the proxy's
+                # ``os.environ`` to the prefix allowlist (see module-
+                # level :data:`RUNTIME_ENV_PREFIXES`); explicit
+                # ``runtime_env.env_vars`` from the caller override.
                 runtime_env = actor_options.get("runtime_env", {})
-                env_vars = {
-                    k: v for k, v in os.environ.items()
-                    if k.startswith(("POLYMATH", "RAY_", "REDIS_", "ANTHROPIC_", "OPENROUTER_", "OPENAI_", "GOOGLE_", "HUGGING_FACE_"))
-                    and v and k not in _ray_internal_vars
-                }
+                env_vars = runtime_env_vars_to_propagate(dict(os.environ))
                 env_vars.update(runtime_env.get("env_vars", {}))
                 env_vars["POLYMATHERA_SERVING_CURRENT_APP"] = self.app_name
                 env_vars["POLYMATHERA_SERVING_CURRENT_DEPLOYMENT"] = self.deployment_name

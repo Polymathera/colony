@@ -583,8 +583,8 @@ async def create_session(
                     # kwargs (URLs, collection names, dimensions) and
                     # is resolved on the worker via ``local_instance()``
                     # — same pattern as ``ConsciousnessStream(formatter=…)``.
-                    # Same QDRANT_URL, same collection, separate Python
-                    # objects per process.
+                    # Same KnowledgeConfig (loaded from the same YAML),
+                    # same collection, separate Python objects per process.
                     BulkAcquisitionCapability.bind(
                         ingestor=default_ingestor_blueprint(),
                     ),

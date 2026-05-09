@@ -21,7 +21,7 @@
  *                            ingest_repo_map_literature action.
  */
 import { useMemo, useState } from "react";
-import { Database, Search, FileText, Upload } from "lucide-react";
+import { Database, Image as ImageIcon, Search, FileText, Upload } from "lucide-react";
 import {
   useKBChunksForSource,
   useKBIngest,
@@ -31,6 +31,7 @@ import {
   type KBSearchHit,
 } from "@/api/hooks/useKB";
 import { Badge } from "../shared/Badge";
+import { ChunkMarkdown } from "./ChunkMarkdown";
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement>;
 
@@ -298,7 +299,7 @@ export function KnowledgeBaseTab() {
               </PrimaryButton>
             </form>
             {searchHits.length > 0 && (
-              <ul className="divide-y divide-border max-h-64 overflow-auto">
+              <ul className="divide-y divide-border max-h-96 overflow-auto">
                 {searchHits.map((h) => (
                   <li key={h.chunk_id} className="px-3 py-2">
                     <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
@@ -310,8 +311,8 @@ export function KnowledgeBaseTab() {
                         {shortSource(h.source, 48)}
                       </span>
                     </div>
-                    <div className="mt-1 text-xs whitespace-pre-wrap">
-                      {h.text_preview}
+                    <div className="mt-1">
+                      <ChunkMarkdown text={h.text_preview} />
                     </div>
                   </li>
                 ))}
@@ -356,11 +357,25 @@ export function KnowledgeBaseTab() {
                         )}
                         <Badge>{c.data_type}</Badge>
                         <Badge variant="default">{c.tier}</Badge>
+                        {c.metadata_origin && (
+                          <span title="Extractor that produced this chunk">
+                            <Badge variant="info">{c.metadata_origin}</Badge>
+                          </span>
+                        )}
                         <span>{c.token_count} tok</span>
                         {c.page_number != null && <span>p.{c.page_number}</span>}
+                        {c.figure_ids.length > 0 && (
+                          <span
+                            className="inline-flex items-center gap-1 text-blue-400"
+                            title={`References ${c.figure_ids.length} figure(s)`}
+                          >
+                            <ImageIcon size={10} />
+                            {c.figure_ids.length}
+                          </span>
+                        )}
                       </div>
-                      <div className="mt-1 text-xs whitespace-pre-wrap">
-                        {c.text_preview}
+                      <div className="mt-2">
+                        <ChunkMarkdown text={c.text_preview} />
                       </div>
                     </li>
                   ))}

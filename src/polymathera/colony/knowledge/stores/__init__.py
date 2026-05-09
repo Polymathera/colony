@@ -17,6 +17,12 @@ from .graph import (
     InMemoryGraphStore,
     KuzuGraphStore,
 )
+from .image import (
+    ImageStore,
+    ImageStoreError,
+    InMemoryImageStore,
+    LocalFsImageStore,
+)
 from .vector import (
     InMemoryVectorStore,
     QdrantVectorStore,
@@ -37,4 +43,8 @@ __all__ = (
     "GraphQueryResult",
     "InMemoryGraphStore",
     "KuzuGraphStore",
+    "ImageStore",
+    "ImageStoreError",
+    "InMemoryImageStore",
+    "LocalFsImageStore",
 )

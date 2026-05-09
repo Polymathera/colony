@@ -20,7 +20,7 @@ from ...agents.blueprint import Blueprint, blueprint
 from ...tools import ToolAdapter, ToolCall, ToolResult
 from ..embedder import Embedder
 from ..models import RetrievalQuery, RetrievalResult
-from ..stores import GraphStore, VectorStore
+from ..stores import GraphStore, ImageStore, VectorStore
 
 
 logger = logging.getLogger(__name__)
@@ -31,9 +31,10 @@ class RetrievalDeps:
     """Dependencies shared across retrieval-mode adapters.
 
     ``@blueprint`` adds a pickleable ``.bind()``. ``embedder`` /
-    ``vector_store`` / ``graph_store`` accept either a real instance
-    or a :class:`Blueprint` — resolved via ``local_instance()`` here
-    so the same shape works in tests and across the Ray boundary.
+    ``vector_store`` / ``graph_store`` / ``image_store`` accept
+    either a real instance or a :class:`Blueprint` — resolved via
+    ``local_instance()`` here so the same shape works in tests and
+    across the Ray boundary.
     """
 
     def __init__(
@@ -42,6 +43,7 @@ class RetrievalDeps:
         embedder: Embedder | Blueprint,
         vector_store: VectorStore | Blueprint,
         graph_store: GraphStore | Blueprint | None = None,
+        image_store: ImageStore | Blueprint | None = None,
     ) -> None:
         self.embedder = (
             embedder.local_instance() if isinstance(embedder, Blueprint) else embedder
@@ -55,6 +57,11 @@ class RetrievalDeps:
             graph_store.local_instance()
             if isinstance(graph_store, Blueprint)
             else graph_store
+        )
+        self.image_store = (
+            image_store.local_instance()
+            if isinstance(image_store, Blueprint)
+            else image_store
         )
 
 

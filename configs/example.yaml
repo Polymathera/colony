@@ -111,6 +111,72 @@ verbose: false
 #   default_session_ttl: 86400.0
 #   blackboard_backend_type: "distributed"   # "distributed" | "redis" | "memory"
 
+# --- Knowledge layer (PDF extractor + vector store + GROBID) -------------
+# Source: knowledge/cluster_config.py:KnowledgeConfig
+#
+# Single source of truth for knowledge-layer config. Every Ray worker
+# re-reads this from its own ConfigurationManager (the YAML mounts at
+# POLYMATHERA_CONFIG in every container), so driver and actors agree
+# on the configured backends without any env-var passthrough.
+#
+# Cost / quality tiers for pdf_extractor (per page, ballpark):
+#   mistral_ocr  ~$0.001  cheap OCR + figure crops
+#   anthropic    ~$0.003  multimodal, prompt-cache friendly
+#   gemini       ~$0.003  multimodal, long context
+#   llamaparse   $0.003-$0.05  tiered (fast | cost_effective | agentic | agentic_plus)
+#   marker       self-hosted (GPU recommended) — install marker-pdf manually,
+#                see knowledge/readers/marker_deployment.py header
+#   docling      self-hosted (CPU ok)
+#   mineru       self-hosted (GPU recommended)
+knowledge:
+  pdf_extractor:
+    backend: mistral_ocr            # default
+    options: {}                     # forwarded as backend_kwargs to the reader
+
+  # Persist figure bytes across container restarts (visible to the
+  # dashboard's KB tab). Empty selects the in-memory image store.
+  image_dir: "/mnt/shared/colony-images"
+
+  # Vector store. Empty url selects InMemoryVectorStore (fine for
+  # tests / single-process dev). The values below match the
+  # docker-compose service.
+  qdrant:
+    url: "http://qdrant:6333"
+    collection: "colony_knowledge"
+
+  # GROBID PDF-to-TEI metadata extractor. Empty url disables the
+  # GROBID metadata reader.
+  grobid:
+    url: "http://grobid:8070"
+
+  # Other backends — uncomment one and comment out ``pdf_extractor``
+  # above to switch:
+  #
+  # Anthropic (multimodal, prompt-cache friendly):
+  # pdf_extractor:
+  #   backend: anthropic
+  #   options:
+  #     model: "claude-sonnet-4-6"
+  #     prompt_cache: true
+  #
+  # Gemini (multimodal, long context):
+  # pdf_extractor:
+  #   backend: gemini
+  #   options:
+  #     model: "gemini-2.5-pro"     # or gemini-2.5-flash for cheaper
+  #
+  # LlamaParse (tiered):
+  # pdf_extractor:
+  #   backend: llamaparse
+  #   options:
+  #     tier: cost_effective        # fast | cost_effective | agentic | agentic_plus
+  #
+  # Self-hosted (Docling, MinerU, Marker):
+  # pdf_extractor:
+  #   backend: docling
+  #   replicas: 1
+  #   num_gpus: 0                    # set to 1 for GPU; docling runs ok on CPU
+
 # --- Plugin / skill discovery roots ---------------------------------------
 # Source: agents/configs.py:PluginsConfig
 # plugins:

@@ -59,14 +59,43 @@ class GrobidPdfReader(FormatReader):
         consolidate_header: int = 0,
         consolidate_citations: int = 0,
         include_raw_citations: bool = False,
+        mode: str = "full",
     ) -> None:
+        """Construct the GROBID reader.
+
+        Args:
+            base_url: GROBID base URL (``http://grobid:8070``).
+            timeout_s: Per-call HTTP timeout.
+            consolidate_header / consolidate_citations / include_raw_citations:
+                GROBID form-field passthroughs.
+            mode: ``"full"`` (default, legacy behaviour) emits one
+                section per body section plus title + abstract.
+                ``"metadata_only"`` skips body extraction and emits
+                ONLY the title + abstract + bibliographic envelope —
+                used when a layout-aware reader (Mistral OCR,
+                Marker, Docling, MinerU, Anthropic, Gemini,
+                LlamaParse) is the canonical body extractor and
+                GROBID is along just to harvest the citation graph.
+                The "metadata_only" sections carry an
+                ``extra["bibliographic"]`` payload with authors,
+                affiliations, and the parsed reference list so
+                downstream consumers (the Phase 4 cross-reference
+                preserver, future citation-graph features) can hook
+                in.
+        """
         if not base_url:
             raise ValueError("GrobidPdfReader requires a non-empty base_url.")
+        if mode not in ("full", "metadata_only"):
+            raise ValueError(
+                f"GrobidPdfReader.mode must be 'full' or 'metadata_only'; "
+                f"got {mode!r}.",
+            )
         self._base_url = base_url.rstrip("/")
         self._timeout_s = timeout_s
         self._consolidate_header = int(consolidate_header)
         self._consolidate_citations = int(consolidate_citations)
         self._include_raw_citations = bool(include_raw_citations)
+        self._mode = mode
 
     @property
     def base_url(self) -> str:
@@ -211,16 +240,79 @@ class GrobidPdfReader(FormatReader):
                 )
                 char_offset = char_end + 2
 
-        body = root.find(".//tei:text/tei:body", _NS)
-        if body is not None:
-            char_offset = self._walk_body(
-                body, sections, source_uri, char_offset,
-                section_path_prefix=(),
-                counters=[0] * 10,
-                current_page=1,
-            )
+        if self._mode == "full":
+            body = root.find(".//tei:text/tei:body", _NS)
+            if body is not None:
+                char_offset = self._walk_body(
+                    body, sections, source_uri, char_offset,
+                    section_path_prefix=(),
+                    counters=[0] * 10,
+                    current_page=1,
+                )
+
+        # In ``metadata_only`` mode (and harmlessly in ``full`` too),
+        # attach the parsed bibliographic envelope to the FIRST
+        # section's ``extra["bibliographic"]`` so downstream
+        # citation-graph consumers can read it without re-parsing
+        # the TEI. Authors, affiliations, and the references list
+        # are the operator-visible value of GROBID's continued
+        # presence after the body-extraction demote.
+        if sections:
+            bibliographic = self._extract_bibliographic(root)
+            if bibliographic:
+                first = sections[0]
+                merged_extra = dict(first.extra)
+                merged_extra["bibliographic"] = bibliographic
+                merged_extra.setdefault("metadata_origin", "grobid")
+                sections[0] = first.model_copy(update={"extra": merged_extra})
 
         return tuple(sections)
+
+    def _extract_bibliographic(
+        self, root: ET.Element,
+    ) -> dict[str, Any]:
+        """Return the citation-graph payload GROBID is genuinely
+        good at: authors, affiliations, parsed references.
+
+        Empty dict if nothing useful was found — keeps
+        ``extra["bibliographic"]`` from carrying a noisy envelope on
+        documents GROBID couldn't fingerprint.
+        """
+        out: dict[str, Any] = {}
+        authors: list[dict[str, Any]] = []
+        for analytic_author in root.findall(
+            ".//tei:teiHeader//tei:analytic//tei:author", _NS,
+        ):
+            persname = analytic_author.find("tei:persName", _NS)
+            full_name = self._concat_paragraph_text(persname) if persname is not None else ""
+            affiliation_el = analytic_author.find(".//tei:affiliation", _NS)
+            affiliation = (
+                self._concat_paragraph_text(affiliation_el)
+                if affiliation_el is not None
+                else ""
+            )
+            if full_name or affiliation:
+                authors.append(
+                    {"name": full_name, "affiliation": affiliation},
+                )
+        if authors:
+            out["authors"] = authors
+
+        references: list[dict[str, Any]] = []
+        for biblio in root.findall(
+            ".//tei:listBibl//tei:biblStruct", _NS,
+        ):
+            title_el = biblio.find(".//tei:title", _NS)
+            title_text = self._extract_text(title_el)
+            year_el = biblio.find(".//tei:date[@type='published']", _NS)
+            year_text = year_el.get("when") if year_el is not None else None
+            if title_text:
+                references.append(
+                    {"title": title_text, "year": year_text},
+                )
+        if references:
+            out["references"] = references
+        return out
 
     def _walk_body(
         self,
@@ -327,4 +419,41 @@ def _local(tag: str) -> str:
     return tag
 
 
-__all__ = ("GrobidPdfReader",)
+class GrobidMetadataReader(GrobidPdfReader):
+    """Convenience alias: ``GrobidPdfReader(mode="metadata_only")``.
+
+    Use this when a layout-aware reader (Mistral OCR, Marker,
+    Docling, MinerU, Anthropic, Gemini, LlamaParse) is the canonical
+    body extractor and GROBID is along solely to harvest the
+    citation graph. The reader emits the title + abstract sections
+    with ``extra["bibliographic"]`` populated; no body text.
+
+    Today the reader cannot run *alongside* the body extractor in
+    the same registry — :class:`ReaderRegistry` is one reader per
+    format. The Phase 4 multi-reader Ingestor pass (tracked
+    separately in design doc §10) is what unlocks running both.
+    Until that ships, the operator's choice is body-extractor OR
+    metadata-reader; this class exists so the metadata path is
+    one explicit class with the right defaults.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        timeout_s: float = 60.0,
+        consolidate_header: int = 1,
+        consolidate_citations: int = 1,
+        include_raw_citations: bool = True,
+    ) -> None:
+        super().__init__(
+            base_url=base_url,
+            timeout_s=timeout_s,
+            consolidate_header=consolidate_header,
+            consolidate_citations=consolidate_citations,
+            include_raw_citations=include_raw_citations,
+            mode="metadata_only",
+        )
+
+
+__all__ = ("GrobidPdfReader", "GrobidMetadataReader")

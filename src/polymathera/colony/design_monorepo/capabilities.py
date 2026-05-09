@@ -462,8 +462,6 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
         Per-file ingestion errors are logged at WARNING and don't fail
         the whole call — partial progress beats no progress.
         """
-        import os as _os
-
         from polymathera.colony.knowledge.deps import get_knowledge_deps
         from polymathera.colony.knowledge.models import IngestionStatus
 
@@ -506,7 +504,11 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
                     {"source_uri": str(rec.source_uri), "error": rec.error or ""},
                 )
 
+        from polymathera.colony.distributed.config import get_component_or_default
+        from polymathera.colony.knowledge.cluster_config import KnowledgeConfig
+
         deps = get_knowledge_deps()
+        qdrant_cfg = get_component_or_default("knowledge", KnowledgeConfig).qdrant
         return {
             "ingested": ingested,
             "skipped": skipped,
@@ -515,7 +517,7 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
             "by_status": by_status,
             "backend": {
                 "vector_store": type(deps.vector_store).__name__,
-                "qdrant_url": _os.environ.get("QDRANT_URL"),
+                "qdrant_url": qdrant_cfg.url or None,
             },
         }
 
