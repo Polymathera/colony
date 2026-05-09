@@ -2257,6 +2257,31 @@ class Agent(BaseModel):
                     events_only=False,
                 )
 
+        # Phase 1c: Auto-create KnowledgeRetrievalCapability if enabled
+        # and not already present, so every agent can ``search_knowledge``
+        # without operator wiring. Backend (embedder + vector store +
+        # image store) is the same triple the colony's ``Ingestor``
+        # writes to via ``set_knowledge_deps()`` — curation and
+        # retrieval share the embedding space and collection. Skipped
+        # when an operator already wired their own (e.g. with a
+        # non-default adapter mode), same idempotency as Phase 1b.
+        if self.metadata.enable_knowledge_retrieval:
+            from ..knowledge.deps import default_retrieval_deps_blueprint
+            from .patterns.capabilities.knowledge_retrieval import (
+                KnowledgeRetrievalCapability,
+            )
+            if not any(
+                isinstance(cap, KnowledgeRetrievalCapability)
+                for cap in self._capabilities.values()
+            ):
+                retrieval_cap = KnowledgeRetrievalCapability(
+                    agent=self,
+                    deps=default_retrieval_deps_blueprint().local_instance(),
+                    capability_key="knowledge_retrieval",
+                )
+                await retrieval_cap.initialize()
+                self.add_capability(retrieval_cap, events_only=False)
+
         # Phase 2: Create action policy
         # NOTE: Capabilities are NOT passed as action_providers here.
         # They are registered via use_agent_capabilities() in Phase 4,

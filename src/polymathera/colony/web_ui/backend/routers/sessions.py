@@ -281,9 +281,6 @@ async def create_session(
             from polymathera.colony.agents.patterns.capabilities.github import (
                 GitHubCapability,
             )
-            from polymathera.colony.agents.patterns.capabilities.knowledge_retrieval import (
-                KnowledgeRetrievalCapability,
-            )
             from polymathera.colony.agents.roles.knowledge_curator import (
                 KnowledgeCuratorCapability,
             )
@@ -292,7 +289,6 @@ async def create_session(
             )
             from polymathera.colony.knowledge.deps import (
                 default_ingestor_blueprint,
-                default_retrieval_deps_blueprint,
             )
             from polymathera.colony.design_monorepo import (
                 design_monorepo_capability_blueprints,
@@ -590,15 +586,16 @@ async def create_session(
                     # — same pattern as ``ConsciousnessStream(formatter=…)``.
                     # Same KnowledgeConfig (loaded from the same YAML),
                     # same collection, separate Python objects per process.
+                    #
+                    # ``KnowledgeRetrievalCapability`` is auto-injected
+                    # for every agent in ``Agent._create_action_policy``
+                    # (Phase 1c) so we only bind the two write-side
+                    # capabilities here.
                     BulkAcquisitionCapability.bind(
                         ingestor=default_ingestor_blueprint(),
                     ),
                     KnowledgeCuratorCapability.bind(
                         ingestor=default_ingestor_blueprint(),
-                    ),
-                    KnowledgeRetrievalCapability.bind(
-                        scope=BlackboardScope.SESSION,
-                        deps=default_retrieval_deps_blueprint(),
                     ),
                 ],
                 action_policy_blueprints={

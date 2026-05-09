@@ -2650,6 +2650,15 @@ class AgentMetadata(BaseModel):
         "enough for generated code that dispatches real capability actions "
         "(blackboard writes, LLM calls, worker spawning)."
     )
+    enable_knowledge_retrieval: bool = Field(
+        default=True,
+        description=(
+            "Automatically create KnowledgeRetrievalCapability during "
+            "agent initialization so every agent can search the colony's "
+            "knowledge base. Set ``False`` to opt out (e.g. for agents "
+            "that have no business reading the corpus)."
+        ),
+    )
     action_policy_config: dict[str, Any] = Field(default_factory=dict)
     suspended_agent_id: str | None = None
     max_suspension_duration: float | None = None
