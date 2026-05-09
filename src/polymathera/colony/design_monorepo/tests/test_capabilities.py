@@ -87,18 +87,20 @@ async def test_find_existing_tool_partial_match(
     assert any(m.entry.name == "widget_engine" for m in matches)
 
 
-async def test_ingest_repo_map_literature_walks_knowledge_routing(
+async def test_ingest_repo_map_literature_walks_knowledge_sources(
     bootstrapped_repo: DesignMonorepoClient,
     state_provider: RepoStateProvider,
+    monkeypatch,
 ) -> None:
     """The chat-callable ingestion action: write a ``repo_map.yaml``
-    with two ``knowledge_routing`` rows (one ``knowledge_base``, one
-    ``vcm``), seed matching files, run the action with
-    ``refresh=False`` (no remote to fetch from in this fixture), and
-    assert: the kb-routed file is ingested, the vcm-routed file is
-    silently skipped per the materialiser's contract.
+    with two ``knowledge_sources`` rows, seed matching files, run the
+    action with ``refresh=False`` (no remote to fetch from in this
+    fixture). First run with no persisted selection (all rows ingest).
+    Then patch the persisted selection to ``["curated"]`` and re-run —
+    only the curated row's file should ingest.
     """
 
+    from polymathera.colony.design_monorepo import capabilities as cap_mod
     from polymathera.colony.knowledge.deps import (
         get_default_ingestor, reset_knowledge_deps,
     )
@@ -107,16 +109,13 @@ async def test_ingest_repo_map_literature_walks_knowledge_routing(
     try:
         repo_root = bootstrapped_repo.working_dir
 
-        # Seed two literature files; only the ``curated`` one is
-        # routed to the KB.
         (repo_root / "literature" / "curated").mkdir(parents=True)
         (repo_root / "literature" / "promoted").mkdir(parents=True)
         (repo_root / "literature" / "curated" / "a.txt").write_text(
-            "Curated paper A — should be ingested.\n", encoding="utf-8",
+            "Curated paper A.\n", encoding="utf-8",
         )
         (repo_root / "literature" / "promoted" / "b.txt").write_text(
-            "Promoted paper B — vcm-routed, must NOT be ingested.\n",
-            encoding="utf-8",
+            "Promoted paper B.\n", encoding="utf-8",
         )
 
         # Write the repo map. ``refresh=False`` in the call below
@@ -124,27 +123,45 @@ async def test_ingest_repo_map_literature_walks_knowledge_routing(
         # fixture which has no remote.
         (repo_root / ".colony" / "repo_map.yaml").write_text(
             "schema_version: 1\n"
-            "sources:\n"
+            "vcm_sources:\n"
             "  - { name: default, type: git_repo }\n"
-            "knowledge_routing:\n"
-            "  - paths: ['literature/curated/**/*.txt']\n"
-            "    ingest_to: knowledge_base\n"
+            "knowledge_sources:\n"
+            "  - name: curated\n"
+            "    paths: ['literature/curated/**/*.txt']\n"
             "    profile: scientific_paper\n"
-            "  - paths: ['literature/promoted/**/*.txt']\n"
-            "    ingest_to: vcm\n",
+            "  - name: promoted\n"
+            "    paths: ['literature/promoted/**/*.txt']\n",
             encoding="utf-8",
         )
 
-        result = await state_provider.ingest_repo_map_literature(refresh=False)
+        # Stub the persisted-selection lookup. Tracks the value via
+        # ``monkeypatch`` so the second arm can flip it without a
+        # live Redis (which the unit-test process doesn't run).
+        from polymathera.colony.design_monorepo import (
+            source_selection as ss_mod,
+        )
+        persisted: dict[str, list[str] | None] = {"value": None}
 
-        assert result["count"] == 1
-        assert any("a.txt" in uri for uri in result["ingested"])
-        assert not any("b.txt" in uri for uri in result["ingested"])
-        # Diagnostics fields the SessionAgent surfaces back to chat.
-        assert result["skipped"] == []
-        assert result["failed"] == []
-        assert result["by_status"] == {"completed": 1}
+        async def _stub_list(_colony_id: str) -> list[str] | None:
+            return persisted["value"]
+
+        monkeypatch.setattr(
+            ss_mod, "list_enabled_knowledge_sources", _stub_list,
+        )
+
+        # Default (``persisted=None``) — both rows ingest.
+        result = await state_provider.ingest_repo_map_literature(refresh=False)
+        assert result["count"] == 2
+        assert result["by_status"] == {"completed": 2}
         assert result["backend"]["vector_store"] == "InMemoryVectorStore"
+
+        # Operator unticked ``promoted`` — only ``curated`` ingests.
+        reset_knowledge_deps()
+        persisted["value"] = ["curated"]
+        result2 = await state_provider.ingest_repo_map_literature(refresh=False)
+        assert result2["count"] == 1
+        assert any("a.txt" in uri for uri in result2["ingested"])
+        assert not any("b.txt" in uri for uri in result2["ingested"])
     finally:
         reset_knowledge_deps()
 
@@ -203,8 +220,8 @@ async def test_initialize_repo_map_writes_repo_map_when_manifest_exists(
     # Template parses through the repo-map schema with the default
     # ``git_repo`` source as the only active row.
     rm = RepoMap.load(repo_root)
-    assert [s.name for s in rm.sources] == ["default"]
-    assert rm.knowledge_routing == []
+    assert [s.name for s in rm.vcm_sources] == ["default"]
+    assert rm.knowledge_sources == []
 
     # Working tree is clean — the action committed everything it wrote.
     assert not bootstrapped_repo.has_uncommitted_changes()
@@ -269,7 +286,7 @@ async def test_initialize_repo_map_bootstraps_empty_repo(
     assert manifest.target_system == "unspecified"
     # The repo_map parses through its schema.
     rm = RepoMap.load(repo_root)
-    assert [s.name for s in rm.sources] == ["default"]
+    assert [s.name for s in rm.vcm_sources] == ["default"]
 
 
 async def test_initialize_repo_map_attribution_default_colony_co_author_user(

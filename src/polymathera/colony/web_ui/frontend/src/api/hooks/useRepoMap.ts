@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../client";
 
-export interface RepoMapSource {
+export interface VcmSourceRow {
   name: string;
   type: "git_repo" | "literature" | string;
   origin_url?: string | null;
@@ -20,13 +20,20 @@ export interface RepoMapSource {
   pinned?: boolean | null;
 }
 
+export interface KnowledgeSourceRow {
+  name: string;
+  paths: string[];
+  profile?: string | null;
+}
+
 export interface RepoMapResponse {
   origin_url: string;
   branch: string;
   commit: string;
   has_repo_map_file: boolean;
   raw_yaml: string | null;
-  sources: RepoMapSource[];
+  vcm_sources: VcmSourceRow[];
+  knowledge_sources: KnowledgeSourceRow[];
 }
 
 export interface RepoTreeNode {
@@ -116,6 +123,60 @@ export function useRepoMapPreview() {
       }),
   });
 }
+
+// ----------------------------------------------------------------------
+// Per-colony source selection — the operator's checkbox state from
+// the Design Monorepo tab's two lists. Persisted server-side so the
+// chat-driven ``ingest_repo_map_literature`` action and the dashboard
+// buttons share a single source of truth (no request-body filter).
+// ----------------------------------------------------------------------
+
+export interface SourceSelection {
+  enabled: string[] | null;
+}
+
+export function useColonyEnabledVcmSources(colonyId: string | null) {
+  return useQuery({
+    queryKey: ["colonies", colonyId, "enabled-vcm-sources"],
+    queryFn: () =>
+      apiFetch<SourceSelection>(
+        `/colonies/${colonyId}/enabled-vcm-sources`,
+      ),
+    enabled: !!colonyId,
+  });
+}
+
+export function useSetColonyEnabledVcmSources(colonyId: string | null) {
+  return useMutation({
+    mutationFn: (enabled: string[] | null) =>
+      apiFetch<SourceSelection>(
+        `/colonies/${colonyId}/enabled-vcm-sources`,
+        { method: "PUT", body: JSON.stringify({ enabled }) },
+      ),
+  });
+}
+
+export function useColonyEnabledKnowledgeSources(colonyId: string | null) {
+  return useQuery({
+    queryKey: ["colonies", colonyId, "enabled-knowledge-sources"],
+    queryFn: () =>
+      apiFetch<SourceSelection>(
+        `/colonies/${colonyId}/enabled-knowledge-sources`,
+      ),
+    enabled: !!colonyId,
+  });
+}
+
+export function useSetColonyEnabledKnowledgeSources(colonyId: string | null) {
+  return useMutation({
+    mutationFn: (enabled: string[] | null) =>
+      apiFetch<SourceSelection>(
+        `/colonies/${colonyId}/enabled-knowledge-sources`,
+        { method: "PUT", body: JSON.stringify({ enabled }) },
+      ),
+  });
+}
+
 
 // ----------------------------------------------------------------------
 // Per-colony design-monorepo URL — persisted on the ``colonies`` row.

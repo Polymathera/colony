@@ -1,9 +1,9 @@
-"""Tests for ``materialize_knowledge_routing`` and the per-source
-filtering / paging-override logic in ``materialize_repo_map``.
+"""Tests for ``materialize_knowledge_sources`` and the per-source
+filtering / paging-override logic in ``materialize_vcm_sources``.
 
 The VCM round-trip is exercised by the CLI integration test; here we
-only verify that the orchestrator (a) skips rows whose names are not
-in ``enabled_sources`` and (b) layers per-source paging overrides
+only verify that the orchestrators (a) skip rows whose names are not
+in ``enabled_sources`` and (b) layer per-source paging overrides
 onto the base :class:`MmapConfig` before invoking the VCM handle.
 """
 
@@ -15,13 +15,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from polymathera.colony.design_monorepo.materialize import (
-    materialize_knowledge_routing,
-    materialize_repo_map,
+    materialize_knowledge_sources,
+    materialize_vcm_sources,
 )
 from polymathera.colony.design_monorepo.repo_map import (
-    KnowledgeRoute,
+    KnowledgeSource,
     RepoMap,
-    SourceSpec,
+    VcmSource,
 )
 from polymathera.colony.knowledge.deps import (
     get_default_ingestor,
@@ -45,69 +45,65 @@ def _seed_corpus(repo_root: Path) -> None:
     (repo_root / "literature" / "curated").mkdir(parents=True)
     (repo_root / "literature" / "promoted").mkdir(parents=True)
     (repo_root / "literature" / "curated" / "a.txt").write_text(
-        "Curated paper A — to be ingested into the knowledge base.\n",
-        encoding="utf-8",
+        "Curated paper A.\n", encoding="utf-8",
     )
     (repo_root / "literature" / "curated" / "b.txt").write_text(
-        "Curated paper B — also ingested.\n",
-        encoding="utf-8",
+        "Curated paper B.\n", encoding="utf-8",
     )
     (repo_root / "literature" / "promoted" / "c.txt").write_text(
-        "Paper C was promoted to VCM — must NOT be KB-ingested.\n",
-        encoding="utf-8",
+        "Paper C.\n", encoding="utf-8",
     )
 
 
 @pytest.mark.asyncio
-async def test_only_knowledge_base_rows_are_ingested(tmp_path: Path) -> None:
+async def test_knowledge_sources_ingest_matching_files(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     _seed_corpus(repo_root)
 
     repo_map = RepoMap(
-        sources=[SourceSpec(name="default", type="git_repo")],
-        knowledge_routing=[
-            KnowledgeRoute(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        knowledge_sources=[
+            KnowledgeSource(
+                name="curated",
                 paths=["literature/curated/**/*.txt"],
-                ingest_to="knowledge_base",
                 profile="scientific_paper",
-            ),
-            KnowledgeRoute(
-                paths=["literature/promoted/**/*.txt"],
-                ingest_to="vcm",
             ),
         ],
     )
-    records = await materialize_knowledge_routing(
+    records = await materialize_knowledge_sources(
         repo_map=repo_map, repo_root=repo_root,
     )
     sources = sorted(r.source_uri for r in records)
-    # Two ``literature/curated`` files; the ``promoted`` one is skipped.
     assert len(records) == 2
     assert all("literature/curated" in s for s in sources)
 
 
 @pytest.mark.asyncio
-async def test_default_ingest_to_is_knowledge_base(tmp_path: Path) -> None:
+async def test_enabled_sources_filters_knowledge_rows(tmp_path: Path) -> None:
+    """``enabled_sources={"a"}`` skips row ``b`` even though both rows
+    match files on disk."""
+
     repo_root = tmp_path / "r"
     _seed_corpus(repo_root)
 
-    # Construct a route without ``ingest_to`` explicitly set — the
-    # default must be ``knowledge_base`` and the file must be ingested.
     repo_map = RepoMap(
-        sources=[SourceSpec(name="default", type="git_repo")],
-        knowledge_routing=[
-            KnowledgeRoute(paths=["literature/curated/a.txt"]),
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        knowledge_sources=[
+            KnowledgeSource(name="a", paths=["literature/curated/a.txt"]),
+            KnowledgeSource(name="b", paths=["literature/curated/b.txt"]),
         ],
     )
-    records = await materialize_knowledge_routing(
-        repo_map=repo_map, repo_root=repo_root,
+    records = await materialize_knowledge_sources(
+        repo_map=repo_map, repo_root=repo_root, enabled_sources={"a"},
     )
+    sources = [r.source_uri for r in records]
     assert len(records) == 1
+    assert any("a.txt" in s for s in sources)
 
 
 def _stub_storage_chain(repo_root: Path):
     """Build the (polymathera → storage → git_storage) async stub chain
-    that ``materialize_repo_map`` walks before reading the repo map.
+    that ``materialize_vcm_sources`` walks before reading the repo map.
 
     Returns a context manager that patches all four globals at once.
     """
@@ -139,7 +135,7 @@ async def test_enabled_sources_filters_rows_in_repo_map(tmp_path: Path) -> None:
     (repo_root / ".colony").mkdir(parents=True)
     (repo_root / ".colony" / "repo_map.yaml").write_text(
         "schema_version: 1\n"
-        "sources:\n"
+        "vcm_sources:\n"
         "  - { name: a, type: git_repo }\n"
         "  - { name: b, type: git_repo }\n"
         "  - { name: c, type: git_repo }\n",
@@ -151,7 +147,7 @@ async def test_enabled_sources_filters_rows_in_repo_map(tmp_path: Path) -> None:
 
     storage_patch, colony_patch = _stub_storage_chain(repo_root)
     with storage_patch, colony_patch:
-        await materialize_repo_map(
+        await materialize_vcm_sources(
             vcm_handle=vcm_handle,
             origin_url="https://x.test/r.git",
             branch="main", commit="HEAD",
@@ -182,7 +178,7 @@ async def test_per_source_paging_overrides_layer_onto_base_config(
     (repo_root / ".colony").mkdir(parents=True)
     (repo_root / ".colony" / "repo_map.yaml").write_text(
         "schema_version: 1\n"
-        "sources:\n"
+        "vcm_sources:\n"
         "  - { name: bare, type: git_repo }\n"
         "  - name: tuned\n"
         "    type: git_repo\n"
@@ -197,7 +193,7 @@ async def test_per_source_paging_overrides_layer_onto_base_config(
     storage_patch, colony_patch = _stub_storage_chain(repo_root)
     base = MmapConfig(flush_threshold=20, flush_token_budget=4096, pinned=False)
     with storage_patch, colony_patch:
-        await materialize_repo_map(
+        await materialize_vcm_sources(
             vcm_handle=vcm_handle,
             origin_url="https://x.test/r.git",
             branch="main", commit="HEAD",
@@ -215,21 +211,16 @@ async def test_per_source_paging_overrides_layer_onto_base_config(
 
 
 @pytest.mark.asyncio
-async def test_empty_knowledge_routing_is_a_noop(tmp_path: Path) -> None:
+async def test_empty_knowledge_sources_is_a_noop(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     _seed_corpus(repo_root)
 
     repo_map = RepoMap(
-        sources=[SourceSpec(name="default", type="git_repo")],
-        knowledge_routing=[],
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        knowledge_sources=[],
     )
-    records = await materialize_knowledge_routing(
+    records = await materialize_knowledge_sources(
         repo_map=repo_map, repo_root=repo_root,
     )
     assert records == []
-    # No deps singleton was forced into existence — the function must
-    # tolerate an empty list without instantiating an ingestor.
-    # (We don't assert the singleton is None because the helper may
-    # have been touched indirectly; this test just checks the no-op
-    # contract on the return value.)
     _ = get_default_ingestor  # silence unused-import in some linters

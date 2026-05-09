@@ -1,15 +1,21 @@
-"""Bridge between :class:`RepoMap` and the VCM's ``mmap_application_scope``
-endpoint, plus the KB-side seeder for ``knowledge_routing``.
+"""Bridge between :class:`RepoMap` and the two materialisation
+operations it drives:
 
-Both entry points (CLI ``run_integration_test`` and the dashboard
-``/vcm/map-repo`` router) call :func:`materialize_repo_map` instead of
-issuing a single ``mmap_application_scope`` directly. The function
-clones the design monorepo via :class:`GitFileStorage` (idempotent),
-reads ``.colony/repo_map.yaml`` (or falls back to a single
-default source), issues one VCM mapping per source row, and finally
-walks ``knowledge_routing`` to seed the knowledge base with files
-the user has flagged for ingestion (literature committed to the
-monorepo; chat-driven acquisition is a separate path).
+- :func:`materialize_vcm_sources` — issues one
+  ``mmap_application_scope`` per row in ``vcm_sources:`` (VCM
+  mapping; the dashboard's "Map to VCM" button + the CLI auto-deploy
+  flow).
+- :func:`materialize_knowledge_sources` — walks each row in
+  ``knowledge_sources:`` and feeds matching files to the
+  process-singleton :class:`Ingestor` (KB ingestion; the dashboard's
+  "Ingest Knowledge" button + the SessionAgent's
+  ``ingest_repo_map_literature`` action).
+
+Both accept ``enabled_sources`` so the dashboard's per-section
+checkbox lists can filter the rows actually materialised. The two
+operations are orthogonal — the same path can be VCM-mapped,
+KB-ingested, both, or neither, and the dashboard exposes a separate
+button per operation.
 """
 
 from __future__ import annotations
@@ -29,22 +35,22 @@ logger = logging.getLogger(__name__)
 
 
 def materialize_scope_ids(repo_map: RepoMap, base_scope_id: str) -> list[str]:
-    """Pick one ``scope_id`` per source.
+    """Pick one ``scope_id`` per ``vcm_sources`` row.
 
-    The single-source default fallback (``RepoMap.default_for_unmapped_repo``)
+    The single-row default fallback (``RepoMap.default_for_unmapped_repo``)
     keeps using the caller-supplied ``base_scope_id`` so existing
     one-source-per-repo deployments are unaffected. Any
-    ``repo_map.yaml`` with named sources composes
-    ``f"{base_scope_id}:{source.name}"``.
+    ``repo_map.yaml`` with named rows composes
+    ``f"{base_scope_id}:{row.name}"``.
     """
 
-    sources = repo_map.sources
+    sources = repo_map.vcm_sources
     if len(sources) == 1 and sources[0].name == "default":
         return [base_scope_id]
     return [f"{base_scope_id}:{s.name}" for s in sources]
 
 
-async def materialize_repo_map(
+async def materialize_vcm_sources(
     *,
     vcm_handle: Any,
     origin_url: str,
@@ -55,22 +61,20 @@ async def materialize_repo_map(
     enabled_sources: set[str] | None = None,
 ) -> list[Any]:
     """Clone the design monorepo, load its repo map, and issue one
-    ``mmap_application_scope`` call per source row.
+    ``mmap_application_scope`` call per row in ``vcm_sources:``.
 
-    ``mmap_config`` provides the deployment-wide defaults; each
-    source row may override individual fields (``flush_threshold``,
+    ``mmap_config`` provides the deployment-wide defaults; each row
+    may override individual fields (``flush_threshold``,
     ``flush_token_budget``, ``pinned``) via
-    :meth:`SourceSpec.to_mmap_config_overrides`.
+    :meth:`VcmSource.to_mmap_config_overrides`.
 
     ``enabled_sources``, when not ``None``, restricts mapping to rows
     whose ``name`` is in the set. The default (``None``) maps every
-    row — same behaviour as before. The dashboard "Design Monorepo"
-    tab uses this so the user can tick off rows before clicking
-    "Map to VCM".
+    row.
 
-    Returns the list of mmap results in source order. Failures on a
-    single source row are logged and skipped — the rest still
-    materialise — so a typo in one row does not block the whole map.
+    Returns the list of mmap results in row order. Failures on a
+    single row are logged and skipped — the rest still materialise —
+    so a typo in one row does not block the whole map.
     """
 
     polymathera = get_polymathera()
@@ -87,7 +91,7 @@ async def materialize_repo_map(
     scope_ids = materialize_scope_ids(repo_map, base_scope_id)
 
     results: list[Any] = []
-    for spec, scope_id in zip(repo_map.sources, scope_ids, strict=True):
+    for spec, scope_id in zip(repo_map.vcm_sources, scope_ids, strict=True):
         if enabled_sources is not None and spec.name not in enabled_sources:
             continue
         try:
@@ -108,68 +112,58 @@ async def materialize_repo_map(
             results.append(result)
         except Exception:  # noqa: BLE001
             logger.exception(
-                "materialize_repo_map: source %r (scope_id=%s) failed; "
-                "continuing with the remaining sources.",
+                "materialize_vcm_sources: row %r (scope_id=%s) failed; "
+                "continuing with the remaining rows.",
                 spec.name, scope_id,
-            )
-
-    if repo_map.knowledge_routing:
-        try:
-            await materialize_knowledge_routing(
-                repo_map=repo_map, repo_root=repo_root,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "materialize_repo_map: knowledge_routing materialisation "
-                "failed; VCM mappings remain in place.",
             )
     return results
 
 
-async def materialize_knowledge_routing(
+async def materialize_knowledge_sources(
     *,
-    repo_map: "RepoMap",
+    repo_map: RepoMap,
     repo_root: Path,
+    enabled_sources: set[str] | None = None,
 ) -> list[Any]:
-    """Walk ``repo_map.knowledge_routing`` and ingest every matching
+    """Walk ``repo_map.knowledge_sources`` and ingest every matching
     file via the process-singleton :class:`Ingestor`.
 
-    Skips files larger than :data:`MAX_INGEST_BYTES` (the ingestor's
-    own readers do this too — early-exit avoids reading the bytes).
-    Returns the list of :class:`IngestionRecord` so callers (e.g.,
-    the dashboard preview) can surface per-file outcomes.
+    ``enabled_sources``, when not ``None``, restricts ingestion to
+    rows whose ``name`` is in the set. The default (``None``) ingests
+    every row.
+
+    Skips files larger than the readers' size limit (the readers
+    enforce this themselves; we don't pre-filter). Returns the list
+    of :class:`IngestionRecord` so callers (dashboard preview,
+    SessionAgent action) can surface per-file outcomes.
     """
 
     from polymathera.colony.knowledge.deps import get_default_ingestor
 
     ingestor = get_default_ingestor()
     records: list[Any] = []
-    for route in repo_map.knowledge_routing:
-        # ``ingest_to: vcm`` rows are documentation-only — they
-        # declare a path was intentionally promoted to VCM and the
-        # KB materialiser must skip it. The corresponding VCM
-        # mapping comes from a ``sources:`` row.
-        if route.ingest_to != "knowledge_base":
+    for source in repo_map.knowledge_sources:
+        if enabled_sources is not None and source.name not in enabled_sources:
             continue
-        for abs_path in _iter_matching_files(repo_root, route):
+        for abs_path in _iter_matching_files(repo_root, source):
             try:
                 rec = await ingestor.ingest_file(
                     abs_path,
-                    data_type_override=route.profile,
+                    data_type_override=source.profile,
                 )
                 records.append(rec)
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "materialize_knowledge_routing: ingest failed for %s",
+                    "materialize_knowledge_sources: ingest failed for %s",
                     abs_path,
                 )
     return records
 
 
-def _iter_matching_files(repo_root: Path, route: "KnowledgeRoute"):
+def _iter_matching_files(repo_root: Path, source: "KnowledgeSource"):
     """Yield absolute paths under ``repo_root`` whose forward-slash
-    relative path matches ``route``. Walks the tree once; the
-    ``KnowledgeRoute.matches`` call delegates to :class:`pathspec`."""
+    relative path matches ``source``. Walks the tree once; the
+    ``KnowledgeSource.matches`` call delegates to :class:`pathspec`."""
 
     for path in repo_root.rglob("*"):
         if not path.is_file():
@@ -178,18 +172,18 @@ def _iter_matching_files(repo_root: Path, route: "KnowledgeRoute"):
             rel = path.relative_to(repo_root).as_posix()
         except ValueError:
             continue
-        if route.matches(rel):
+        if source.matches(rel):
             yield path
 
 
 # Forward references so the type annotations above resolve without a
 # runtime cycle through the heavy ``RepoMap`` import path.
 if False:  # pragma: no cover
-    from .repo_map import KnowledgeRoute, RepoMap  # noqa: F401
+    from .repo_map import KnowledgeSource, RepoMap  # noqa: F401
 
 
 __all__ = (
-    "materialize_knowledge_routing",
-    "materialize_repo_map",
+    "materialize_knowledge_sources",
     "materialize_scope_ids",
+    "materialize_vcm_sources",
 )

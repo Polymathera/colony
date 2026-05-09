@@ -139,6 +139,85 @@ async def set_colony_design_monorepo(
 
 
 # ---------------------------------------------------------------------------
+# Per-colony source selection — the operator's checkbox state from the
+# "Design Monorepo" tab. Two independent sets, both read by the
+# materialiser at action time so chat-driven ingestion (which has no
+# checkboxes) honours the same selection.
+# ---------------------------------------------------------------------------
+
+
+class SourceSelection(BaseModel):
+    """List of row names the operator has ticked. ``None`` (the
+    default until the operator changes anything) means "all rows
+    enabled" — same convention as
+    ``materialize_*_sources(enabled_sources=...)``."""
+
+    enabled: list[str] | None = None
+
+
+@router.get(
+    "/colonies/{colony_id}/enabled-vcm-sources",
+    response_model=SourceSelection,
+)
+async def get_colony_enabled_vcm_sources(
+    colony_id: str,
+    _user: dict[str, Any] = Depends(require_auth),
+) -> SourceSelection:
+    from polymathera.colony.design_monorepo.source_selection import (
+        list_enabled_vcm_sources,
+    )
+    return SourceSelection(enabled=await list_enabled_vcm_sources(colony_id))
+
+
+@router.put(
+    "/colonies/{colony_id}/enabled-vcm-sources",
+    response_model=SourceSelection,
+)
+async def set_colony_enabled_vcm_sources(
+    colony_id: str,
+    request: SourceSelection,
+    _user: dict[str, Any] = Depends(require_auth),
+) -> SourceSelection:
+    from polymathera.colony.design_monorepo.source_selection import (
+        set_enabled_vcm_sources,
+    )
+    await set_enabled_vcm_sources(colony_id, request.enabled)
+    return request
+
+
+@router.get(
+    "/colonies/{colony_id}/enabled-knowledge-sources",
+    response_model=SourceSelection,
+)
+async def get_colony_enabled_knowledge_sources(
+    colony_id: str,
+    _user: dict[str, Any] = Depends(require_auth),
+) -> SourceSelection:
+    from polymathera.colony.design_monorepo.source_selection import (
+        list_enabled_knowledge_sources,
+    )
+    return SourceSelection(
+        enabled=await list_enabled_knowledge_sources(colony_id),
+    )
+
+
+@router.put(
+    "/colonies/{colony_id}/enabled-knowledge-sources",
+    response_model=SourceSelection,
+)
+async def set_colony_enabled_knowledge_sources(
+    colony_id: str,
+    request: SourceSelection,
+    _user: dict[str, Any] = Depends(require_auth),
+) -> SourceSelection:
+    from polymathera.colony.design_monorepo.source_selection import (
+        set_enabled_knowledge_sources,
+    )
+    await set_enabled_knowledge_sources(colony_id, request.enabled)
+    return request
+
+
+# ---------------------------------------------------------------------------
 # Per-colony git-commit attribution (principal + optional co-author).
 # Default: principal=colony, co_author=user — the persistent
 # collective identity does the work on behalf of the human who

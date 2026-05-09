@@ -1401,9 +1401,9 @@ async def run_integration_test(
         # over the whole tree, so legacy single-source repos behave
         # exactly as before.
         from polymathera.colony.design_monorepo.materialize import (
-            materialize_repo_map,
+            materialize_vcm_sources,
         )
-        mmap_results: list[MmapResult] = await materialize_repo_map(
+        mmap_results: list[MmapResult] = await materialize_vcm_sources(
             vcm_handle=vcm_handle,
             origin_url=config.origin_url,
             branch=config.branch,

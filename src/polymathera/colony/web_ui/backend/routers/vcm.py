@@ -41,14 +41,11 @@ class MapRepoRequest(BaseModel):
     branch: str = Field(default="main", description="Git branch")
     commit: str = Field(default="HEAD", description="Git commit SHA")
     repo_id: str | None = Field(default=None, description="Scope ID (auto-generated if None)")
-    enabled_sources: list[str] | None = Field(
-        default=None,
-        description=(
-            "Subset of source names from ``repo_map.yaml`` to map. "
-            "``None`` (default) maps every row. The Design Monorepo "
-            "tab populates this from per-row checkboxes."
-        ),
-    )
+    # The operator's per-row selection lives in the colony's persisted
+    # source-selection state (see ``design_monorepo.source_selection``);
+    # the dashboard writes it on every checkbox toggle, the materialiser
+    # reads it inside ``_run_mapping``. No request-body filter — single
+    # source of truth.
 
 
 class MapRepoResponse(BaseModel):
@@ -312,7 +309,7 @@ async def _run_mapping(
             from polymathera.colony.vcm.models import MmapConfig
             from polymathera.colony.agents import ScopeUtils
             from polymathera.colony.design_monorepo.materialize import (
-                materialize_repo_map,
+                materialize_vcm_sources,
             )
 
             vcm = await colony.get_vcm()
@@ -327,11 +324,12 @@ async def _run_mapping(
             # otherwise the materialiser falls back to a single
             # default ``git_repo`` source and the call is equivalent to
             # the previous one-shot ``mmap_application_scope``.
-            enabled = (
-                set(request.enabled_sources)
-                if request.enabled_sources is not None else None
+            from polymathera.colony.design_monorepo.source_selection import (
+                list_enabled_vcm_sources,
             )
-            results = await materialize_repo_map(
+            enabled_list = await list_enabled_vcm_sources(colony_id)
+            enabled = set(enabled_list) if enabled_list is not None else None
+            results = await materialize_vcm_sources(
                 vcm_handle=vcm,
                 origin_url=request.origin_url,
                 branch=request.branch,

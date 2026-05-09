@@ -1,15 +1,15 @@
 /**
  * Design Monorepo tab — read-only view of a repo's `.colony/repo_map.yaml`,
  * its directory tree, a dry-run preview of the mmap_application_scope
- * calls the materialiser would issue, AND the entry point for actually
- * mapping the repo into VCM (per-source checkboxes + Map to VCM button +
- * confirmation modal). PUT-and-commit on the YAML is intentionally
- * deferred; the YAML viewer is read-only with syntax highlighting via
- * ``prism-react-renderer``.
+ * calls the materialiser would issue, AND the entry points for the two
+ * orthogonal materialisation operations:
  *
- * The colony's design-monorepo URL is configured on the LandingPage
- * (Colonies panel → pencil → Save). The tab reads the persisted URL
- * to pre-populate the inspector but does not write back here.
+ *   - "Map to VCM"        → ``vcm_sources:``        → ``/vcm/map``
+ *   - "Ingest Knowledge"  → ``knowledge_sources:``  → ``/kb/ingest-repo-map``
+ *
+ * Each section gets its own checkbox list — ticks on one side never
+ * imply ticks on the other. The colony's design-monorepo URL is
+ * configured on the LandingPage (Colonies panel → pencil → Save).
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Tree, type NodeRendererProps } from "react-arborist";
@@ -25,13 +25,19 @@ import {
 } from "lucide-react";
 import {
   useColonyDesignMonorepo,
+  useColonyEnabledKnowledgeSources,
+  useColonyEnabledVcmSources,
   useRepoMap,
   useRepoMapPreview,
   useRepoTree,
-  type RepoMapSource,
+  useSetColonyEnabledKnowledgeSources,
+  useSetColonyEnabledVcmSources,
+  type KnowledgeSourceRow,
   type RepoTreeNode,
+  type VcmSourceRow,
 } from "@/api/hooks/useRepoMap";
 import { useMapRepo } from "@/api/hooks/useVCM";
+import { useKBIngestRepoMap } from "@/api/hooks/useKB";
 
 const DEFAULT_BRANCH = "main";
 
@@ -69,18 +75,55 @@ export function RepoMapTab() {
   const treeQuery = useRepoTree(submitted, { maxDepth: 6, maxNodes: 5000 });
   const preview = useRepoMapPreview();
   const mapRepo = useMapRepo();
+  const ingestKb = useKBIngestRepoMap();
 
-  // Per-source enabled-set. Reset to "all enabled" whenever the loaded
-  // sources change — operator can then untick what they don't want.
-  const sources = repoMapQuery.data?.sources ?? [];
-  const sourcesKey = sources.map((s) => s.name).join("|");
-  const [enabledNames, setEnabledNames] = useState<Set<string>>(new Set());
+  // Two independent persisted selections — one per panel. The
+  // dashboard hydrates the local state from the colony's persisted
+  // source selection so the same checkboxes the operator left on
+  // last visit (and the same selection the chat-driven action sees)
+  // are reflected here. On every toggle we PUT the new set; the
+  // backend / agent reads the persisted value at action time —
+  // there is no request-body filter on the buttons.
+  const vcmSources = repoMapQuery.data?.vcm_sources ?? [];
+  const kbSources = repoMapQuery.data?.knowledge_sources ?? [];
+  const vcmSourcesKey = vcmSources.map((s) => s.name).join("|");
+  const kbSourcesKey = kbSources.map((s) => s.name).join("|");
+
+  const persistedVcm = useColonyEnabledVcmSources(colonyId);
+  const persistedKb = useColonyEnabledKnowledgeSources(colonyId);
+  const setPersistedVcm = useSetColonyEnabledVcmSources(colonyId);
+  const setPersistedKb = useSetColonyEnabledKnowledgeSources(colonyId);
+
+  const [enabledVcm, setEnabledVcm] = useState<Set<string>>(new Set());
+  const [enabledKb, setEnabledKb] = useState<Set<string>>(new Set());
+
+  // Hydrate from persisted state when the loaded rows change.
+  // ``persisted.enabled === null`` means "all enabled" — the default
+  // before the operator has ever toggled. ``enabled`` ⊆ rows; rows
+  // outside the persisted set are unchecked.
   useEffect(() => {
-    setEnabledNames(new Set(sources.map((s) => s.name)));
+    const persisted = persistedVcm.data?.enabled;
+    if (persisted === null || persisted === undefined) {
+      setEnabledVcm(new Set(vcmSources.map((s) => s.name)));
+    } else {
+      const rowNames = new Set(vcmSources.map((s) => s.name));
+      setEnabledVcm(new Set(persisted.filter((n) => rowNames.has(n))));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourcesKey]);
+  }, [vcmSourcesKey, persistedVcm.data]);
+  useEffect(() => {
+    const persisted = persistedKb.data?.enabled;
+    if (persisted === null || persisted === undefined) {
+      setEnabledKb(new Set(kbSources.map((s) => s.name)));
+    } else {
+      const rowNames = new Set(kbSources.map((s) => s.name));
+      setEnabledKb(new Set(persisted.filter((n) => rowNames.has(n))));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kbSourcesKey, persistedKb.data]);
 
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmMapOpen, setConfirmMapOpen] = useState(false);
+  const [confirmIngestOpen, setConfirmIngestOpen] = useState(false);
 
   const onLoad = (e: React.FormEvent) => {
     e.preventDefault();
@@ -101,25 +144,60 @@ export function RepoMapTab() {
 
   const onConfirmMap = () => {
     if (!submitted) return;
-    const allEnabled = enabledNames.size === sources.length;
+    // Selection lives in the colony's persisted source-selection
+    // state; the backend reads it at action time. No body filter.
     mapRepo.mutate({
       origin_url: submitted.originUrl,
       branch: submitted.branch,
-      ...(allEnabled ? {} : { enabled_sources: Array.from(enabledNames) }),
     });
-    setConfirmOpen(false);
+    setConfirmMapOpen(false);
   };
 
-  const toggleSource = (name: string) => {
-    setEnabledNames((prev) => {
+  const onConfirmIngest = () => {
+    if (!submitted) return;
+    ingestKb.mutate({
+      origin_url: submitted.originUrl,
+      branch: submitted.branch,
+    });
+    setConfirmIngestOpen(false);
+  };
+
+  // Persist on every checkbox toggle so the chat-driven
+  // ``ingest_repo_map_literature`` action sees the operator's
+  // current selection without a parameter. ``null`` means "all
+  // enabled" — the convention shared by the materialiser.
+  const persistVcm = (next: Set<string>) => {
+    if (!colonyId) return;
+    const all = next.size === vcmSources.length;
+    setPersistedVcm.mutate(all ? null : Array.from(next));
+  };
+  const persistKb = (next: Set<string>) => {
+    if (!colonyId) return;
+    const all = next.size === kbSources.length;
+    setPersistedKb.mutate(all ? null : Array.from(next));
+  };
+
+  const toggleVcm = (name: string) => {
+    setEnabledVcm((prev) => {
       const next = new Set(prev);
       if (next.has(name)) next.delete(name);
       else next.add(name);
+      persistVcm(next);
+      return next;
+    });
+  };
+  const toggleKb = (name: string) => {
+    setEnabledKb((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      persistKb(next);
       return next;
     });
   };
 
-  const canMap = !!submitted && sources.length > 0 && enabledNames.size > 0;
+  const canMap = !!submitted && vcmSources.length > 0 && enabledVcm.size > 0;
+  const canIngest = !!submitted && kbSources.length > 0 && enabledKb.size > 0;
 
   return (
     <div className="p-4 flex flex-col gap-4 h-full">
@@ -163,10 +241,17 @@ export function RepoMapTab() {
             </SecondaryButton>
             <PrimaryButton
               type="button"
-              onClick={() => setConfirmOpen(true)}
+              onClick={() => setConfirmMapOpen(true)}
               disabled={!canMap || mapRepo.isPending}
             >
               {mapRepo.isPending ? "Mapping…" : "Map to VCM"}
+            </PrimaryButton>
+            <PrimaryButton
+              type="button"
+              onClick={() => setConfirmIngestOpen(true)}
+              disabled={!canIngest || ingestKb.isPending}
+            >
+              {ingestKb.isPending ? "Ingesting…" : "Ingest Knowledge"}
             </PrimaryButton>
           </div>
         </form>
@@ -190,6 +275,16 @@ export function RepoMapTab() {
               ? (mapRepo.error as Error)?.message ?? "Map to VCM failed."
               : null
           }
+          ingestSuccess={
+            ingestKb.isSuccess
+              ? `KB ingest started (op ${ingestKb.data?.op_id ?? "?"}). Watch progress on the Knowledge Base tab.`
+              : null
+          }
+          ingestError={
+            ingestKb.isError
+              ? (ingestKb.error as Error)?.message ?? "KB ingest failed."
+              : null
+          }
         />
       </header>
 
@@ -210,9 +305,12 @@ export function RepoMapTab() {
           <SourcesPanel
             hasFile={repoMapQuery.data?.has_repo_map_file ?? false}
             yaml={repoMapQuery.data?.raw_yaml ?? null}
-            sources={sources}
-            enabledNames={enabledNames}
-            toggleSource={toggleSource}
+            vcmSources={vcmSources}
+            kbSources={kbSources}
+            enabledVcm={enabledVcm}
+            enabledKb={enabledKb}
+            toggleVcm={toggleVcm}
+            toggleKb={toggleKb}
             loading={repoMapQuery.isLoading}
           />
           {preview.data && (
@@ -224,14 +322,30 @@ export function RepoMapTab() {
         </section>
       </div>
 
-      {confirmOpen && submitted && (
-        <ConfirmMapDialog
+      {confirmMapOpen && submitted && (
+        <ConfirmDialog
+          title="Map to VCM?"
+          actionLabel="Map to VCM"
           originUrl={submitted.originUrl}
           branch={submitted.branch}
-          enabledNames={Array.from(enabledNames)}
-          totalSources={sources.length}
-          onCancel={() => setConfirmOpen(false)}
+          enabledNames={Array.from(enabledVcm)}
+          totalSources={vcmSources.length}
+          tailMessage="Mapping runs in the background on the cluster. Progress and results appear on the VCM tab."
+          onCancel={() => setConfirmMapOpen(false)}
           onConfirm={onConfirmMap}
+        />
+      )}
+      {confirmIngestOpen && submitted && (
+        <ConfirmDialog
+          title="Ingest into Knowledge Base?"
+          actionLabel="Ingest"
+          originUrl={submitted.originUrl}
+          branch={submitted.branch}
+          enabledNames={Array.from(enabledKb)}
+          totalSources={kbSources.length}
+          tailMessage="Ingestion runs in the background on the cluster. Progress and results appear on the Knowledge Base tab."
+          onCancel={() => setConfirmIngestOpen(false)}
+          onConfirm={onConfirmIngest}
         />
       )}
     </div>
@@ -282,7 +396,8 @@ function SecondaryButton(props: ButtonProps) {
 /* -------------------------------------------------------------------- */
 
 function Banner({
-  colony, persistedUrl, persistedBranch, loadError, mapSuccess, mapError,
+  colony, persistedUrl, persistedBranch, loadError,
+  mapSuccess, mapError, ingestSuccess, ingestError,
 }: {
   colony: string | null;
   persistedUrl: string | null;
@@ -290,6 +405,8 @@ function Banner({
   loadError: string | null;
   mapSuccess: string | null;
   mapError: string | null;
+  ingestSuccess: string | null;
+  ingestError: string | null;
 }) {
   return (
     <div className="flex flex-col gap-1.5">
@@ -323,6 +440,16 @@ function Banner({
       {mapError && (
         <div className="text-xs rounded border border-red-500/40 bg-red-500/10 px-2.5 py-1.5 text-red-400">
           {mapError}
+        </div>
+      )}
+      {ingestSuccess && (
+        <div className="text-xs rounded border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-emerald-400">
+          {ingestSuccess}
+        </div>
+      )}
+      {ingestError && (
+        <div className="text-xs rounded border border-red-500/40 bg-red-500/10 px-2.5 py-1.5 text-red-400">
+          {ingestError}
         </div>
       )}
     </div>
@@ -452,13 +579,17 @@ function TreeNode({ node, style, dragHandle }: NodeRendererProps<ArboristNode>) 
 /* -------------------------------------------------------------------- */
 
 function SourcesPanel({
-  hasFile, yaml, sources, enabledNames, toggleSource, loading,
+  hasFile, yaml, vcmSources, kbSources,
+  enabledVcm, enabledKb, toggleVcm, toggleKb, loading,
 }: {
   hasFile: boolean;
   yaml: string | null;
-  sources: RepoMapSource[];
-  enabledNames: Set<string>;
-  toggleSource: (name: string) => void;
+  vcmSources: VcmSourceRow[];
+  kbSources: KnowledgeSourceRow[];
+  enabledVcm: Set<string>;
+  enabledKb: Set<string>;
+  toggleVcm: (name: string) => void;
+  toggleKb: (name: string) => void;
   loading: boolean;
 }) {
   return (
@@ -473,37 +604,56 @@ function SourcesPanel({
             : "default fallback (no file present)"}
         </span>
       </div>
-      {/* Sources column fixed-width, YAML takes the remainder. The old
-          50/50 grid cramped the YAML at typical widths. */}
+      {/* Two stacked checkbox columns (VCM + KB), then the YAML view.
+          The two operations are orthogonal — ticks on one side never
+          imply ticks on the other. */}
       <div
         className="grid overflow-hidden min-h-0"
         style={{ gridTemplateColumns: "18rem 1fr" }}
       >
-        <div className="border-r border-border overflow-auto p-3">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">
-            Sources to map
-          </div>
-          {sources.length === 0 ? (
-            <div className="text-xs text-muted-foreground italic">
-              no sources
-            </div>
-          ) : (
-            <div className="flex flex-col gap-0.5">
-              {sources.map((s) => (
-                <SourceCheckbox
-                  key={s.name}
-                  source={s}
-                  enabled={enabledNames.has(s.name)}
-                  onToggle={() => toggleSource(s.name)}
-                />
-              ))}
-            </div>
-          )}
+        <div className="border-r border-border overflow-auto p-3 flex flex-col gap-4">
+          <CheckboxList
+            label="VCM sources"
+            empty="no vcm_sources"
+            rows={vcmSources.map((s) => ({
+              name: s.name,
+              meta: vcmRowMeta(s),
+              enabled: enabledVcm.has(s.name),
+              onToggle: () => toggleVcm(s.name),
+            }))}
+          />
+          <CheckboxList
+            label="Knowledge sources"
+            empty="no knowledge_sources"
+            rows={kbSources.map((s) => ({
+              name: s.name,
+              meta: kbRowMeta(s),
+              enabled: enabledKb.has(s.name),
+              onToggle: () => toggleKb(s.name),
+            }))}
+          />
         </div>
-        <YamlView text={yaml ?? renderDefaultSummary(sources)} />
+        <YamlView text={yaml ?? renderDefaultSummary(vcmSources)} />
       </div>
     </div>
   );
+}
+
+function vcmRowMeta(source: VcmSourceRow): string {
+  const bits: string[] = [source.type];
+  if (source.start_dir) bits.push(`@ ${source.start_dir}`);
+  if (source.flush_threshold != null) bits.push(`flush=${source.flush_threshold}`);
+  if (source.flush_token_budget != null) bits.push(`tok=${source.flush_token_budget}`);
+  if (source.pinned) bits.push("pinned");
+  if (source.chunk_target_tokens != null) bits.push(`chunk=${source.chunk_target_tokens}`);
+  return bits.join(" · ");
+}
+
+function kbRowMeta(source: KnowledgeSourceRow): string {
+  const bits: string[] = [];
+  if (source.profile) bits.push(source.profile);
+  if (source.paths.length > 0) bits.push(source.paths.join(", "));
+  return bits.join(" · ");
 }
 
 function YamlView({ text }: { text: string }) {
@@ -545,45 +695,60 @@ function YamlView({ text }: { text: string }) {
   );
 }
 
-function SourceCheckbox({
-  source, enabled, onToggle,
-}: {
-  source: RepoMapSource;
+interface CheckboxRow {
+  name: string;
+  meta: string;
   enabled: boolean;
   onToggle: () => void;
-}) {
-  const meta = useMemo(() => {
-    const bits: string[] = [source.type];
-    if (source.start_dir) bits.push(`@ ${source.start_dir}`);
-    if (source.flush_threshold != null) bits.push(`flush=${source.flush_threshold}`);
-    if (source.flush_token_budget != null) bits.push(`tok=${source.flush_token_budget}`);
-    if (source.pinned) bits.push("pinned");
-    if (source.chunk_target_tokens != null) bits.push(`chunk=${source.chunk_target_tokens}`);
-    return bits.join(" · ");
-  }, [source]);
+}
 
+function CheckboxList({
+  label, empty, rows,
+}: {
+  label: string;
+  empty: string;
+  rows: CheckboxRow[];
+}) {
   return (
-    <label className="flex items-start gap-2 py-1 px-1 cursor-pointer hover:bg-accent/30 rounded">
-      <input
-        type="checkbox"
-        checked={enabled}
-        onChange={onToggle}
-        className="mt-0.5 accent-primary"
-      />
-      <div className="flex flex-col min-w-0">
-        <span className="text-xs font-medium truncate">{source.name}</span>
-        <span className="text-[10px] text-muted-foreground truncate">{meta}</span>
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">
+        {label}
       </div>
-    </label>
+      {rows.length === 0 ? (
+        <div className="text-xs text-muted-foreground italic">{empty}</div>
+      ) : (
+        <div className="flex flex-col gap-0.5">
+          {rows.map((row) => (
+            <label
+              key={row.name}
+              className="flex items-start gap-2 py-1 px-1 cursor-pointer hover:bg-accent/30 rounded"
+            >
+              <input
+                type="checkbox"
+                checked={row.enabled}
+                onChange={row.onToggle}
+                className="mt-0.5 accent-primary"
+              />
+              <div className="flex flex-col min-w-0">
+                <span className="text-xs font-medium truncate">{row.name}</span>
+                <span className="text-[10px] text-muted-foreground truncate">
+                  {row.meta}
+                </span>
+              </div>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
-function renderDefaultSummary(sources: RepoMapSource[]): string {
+function renderDefaultSummary(sources: VcmSourceRow[]): string {
   if (sources.length === 0) return "(no sources)";
   return [
     "# No .colony/repo_map.yaml found — using the default fallback:",
     "schema_version: 1",
-    "sources:",
+    "vcm_sources:",
     ...sources.map((s) => `  - { name: ${s.name}, type: ${s.type} }`),
   ].join("\n");
 }
@@ -631,13 +796,17 @@ function PreviewPanel({
   );
 }
 
-function ConfirmMapDialog({
-  originUrl, branch, enabledNames, totalSources, onCancel, onConfirm,
+function ConfirmDialog({
+  title, actionLabel, originUrl, branch,
+  enabledNames, totalSources, tailMessage, onCancel, onConfirm,
 }: {
+  title: string;
+  actionLabel: string;
   originUrl: string;
   branch: string;
   enabledNames: string[];
   totalSources: number;
+  tailMessage: string;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -646,7 +815,7 @@ function ConfirmMapDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
       <div className="w-full max-w-md rounded-lg border border-border bg-card shadow-xl">
         <div className="border-b border-border px-5 py-3">
-          <h2 className="text-sm font-semibold">Map to VCM?</h2>
+          <h2 className="text-sm font-semibold">{title}</h2>
         </div>
         <div className="space-y-3 px-5 py-4 text-xs">
           <div>
@@ -658,19 +827,18 @@ function ConfirmMapDialog({
             <div className="text-muted-foreground">Sources</div>
             <div>
               {allEnabled
-                ? `All ${totalSources} source${totalSources === 1 ? "" : "s"} from repo_map.yaml`
+                ? `All ${totalSources} row${totalSources === 1 ? "" : "s"} from repo_map.yaml`
                 : `${enabledNames.length} of ${totalSources}: ${enabledNames.join(", ") || "(none)"}`}
             </div>
           </div>
           <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-muted-foreground">
-            Mapping runs in the background on the cluster. Progress and
-            results appear on the <strong>VCM</strong> tab.
+            {tailMessage}
           </div>
         </div>
         <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
           <SecondaryButton onClick={onCancel}>Cancel</SecondaryButton>
           <PrimaryButton onClick={onConfirm} disabled={enabledNames.length === 0}>
-            Map to VCM
+            {actionLabel}
           </PrimaryButton>
         </div>
       </div>

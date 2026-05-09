@@ -1,17 +1,20 @@
-"""``.colony/repo_map.yaml`` — declarative VCM-mapping manifest for a
-design monorepo.
+"""``.colony/repo_map.yaml`` — declarative manifest for a design monorepo.
 
-The repo map lives at the repo root under ``.colony/repo_map.yaml`` and
-is version-controlled with the rest of the codebase. It declares **one
-``ContextPageSource`` per source entry**; the materialiser issues one
-``mmap_application_scope`` call per entry so a single repo can be
-paged into VCM under multiple scopes (code subtree, literature
-subdirectory, frozen submodule, ...).
+Two independent sections:
 
-This module is *VCM-mapping-only*. Knowledge-base ingestion is
-agent-driven (chat → ``BulkAcquisitionCapability`` /
-``KnowledgeCuratorCapability``); no auto-routing here. See
-``colony/design_monorepo_integration_plan.md`` §5–§7.
+- **``vcm_sources:``** declares VCM mapping. The materialiser issues
+  one ``mmap_application_scope`` call per row so a single repo can be
+  paged into VCM under multiple scopes (code subtree, literature
+  subdirectory, frozen submodule, ...).
+- **``knowledge_sources:``** declares KB ingestion. The materialiser
+  walks each row's path globs and feeds matching files to the
+  process-singleton :class:`Ingestor`.
+
+The two sections are **orthogonal**: the same path can be VCM-mapped,
+KB-ingested, both, or neither, and the operator picks each
+independently. The dashboard's "Design Monorepo" tab renders one
+checkbox list per section so ticks on one side never imply ticks on
+the other.
 """
 
 from __future__ import annotations
@@ -34,11 +37,10 @@ REPO_MAP_FILENAME = "repo_map.yaml"
 REPO_MAP_DIR = ".colony"
 
 SourceType = Literal["git_repo", "literature"]
-IngestDestination = Literal["knowledge_base", "vcm"]
 
 
-class SourceSpec(BaseModel):
-    """One row of ``sources:`` — a single VCM mapping declaration.
+class VcmSource(BaseModel):
+    """One row of ``vcm_sources:`` — a single VCM mapping declaration.
 
     Either ``submodule`` or ``origin_url`` must be set (not both). When
     ``submodule`` is given, :meth:`to_mmap_kwargs` resolves it against
@@ -133,7 +135,7 @@ class SourceSpec(BaseModel):
 
         if self.origin_url and self.submodule:
             raise ValueError(
-                f"SourceSpec[{self.name}]: origin_url and submodule are mutually exclusive.",
+                f"VcmSource[{self.name}]: origin_url and submodule are mutually exclusive.",
             )
 
         if self.submodule:
@@ -177,41 +179,29 @@ class SourceSpec(BaseModel):
         return kwargs
 
 
-class KnowledgeRoute(BaseModel):
-    """One row of ``knowledge_routing:`` — declarative routing
-    decision for a glob of literature paths.
+class KnowledgeSource(BaseModel):
+    """One row of ``knowledge_sources:`` — a single named glob bundle
+    that the KB materialiser ingests via :class:`Ingestor`.
 
-    Each row carries an explicit ``ingest_to`` field naming the
-    destination store. ``ingest_to: knowledge_base`` (the default for
-    new literature) is the only value the materialiser acts on — it
-    feeds matching files into :class:`Ingestor`.
-    ``ingest_to: vcm`` rows are documentation-only: they declare that
-    a path has been promoted to VCM and the materialiser skips KB
-    ingestion for it. The actual VCM mapping for those paths still
-    comes from a ``LiteratureContextPageSource`` (or other) row under
-    ``sources:`` — the two lists are not redundant; they answer
-    different questions.
-
-    The dashboard's "Design Monorepo" tab promotes a file by
-    flipping ``ingest_to`` on a row, so the action stays a single
-    field edit instead of moving entries between two lists.
+    Independent from ``vcm_sources:``: presence here means "ingest
+    these files into the KB"; absence (or unchecking in the dashboard)
+    means "don't." The fact that a path may also appear in a
+    ``vcm_sources:`` row is irrelevant — VCM mapping and KB ingestion
+    are orthogonal.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    name: str = Field(
+        description=(
+            "Human-readable label. Surfaces as the checkbox row in the "
+            "Design Monorepo tab and as the filter key in "
+            "``materialize_knowledge_sources(enabled_sources=...)``."
+        ),
+    )
     paths: list[str] = Field(
         description=(
             "Gitignore-style glob patterns relative to the repo root."
-        ),
-    )
-    ingest_to: IngestDestination = Field(
-        default="knowledge_base",
-        description=(
-            "Where matching files should land. ``knowledge_base`` "
-            "(default) ingests via the process-singleton ``Ingestor``. "
-            "``vcm`` is a no-op for the KB materialiser — it records "
-            "that the path is intentionally excluded from KB "
-            "ingestion because a ``sources:`` row covers it."
         ),
     )
     profile: str | None = Field(
@@ -219,8 +209,7 @@ class KnowledgeRoute(BaseModel):
         description=(
             "Optional ``data_type`` label propagated to the ingested "
             "chunks (e.g., ``scientific_paper``). Forwarded to "
-            "``Ingestor.ingest_file(data_type_override=...)``. Ignored "
-            "when ``ingest_to`` is ``vcm``."
+            "``Ingestor.ingest_file(data_type_override=...)``."
         ),
     )
 
@@ -243,17 +232,17 @@ class RepoMap(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = SCHEMA_VERSION
-    sources: list[SourceSpec]
-    knowledge_routing: list[KnowledgeRoute] = Field(default_factory=list)
+    vcm_sources: list[VcmSource]
+    knowledge_sources: list[KnowledgeSource] = Field(default_factory=list)
 
     @classmethod
     def default_for_unmapped_repo(cls) -> "RepoMap":
-        """Single ``git_repo`` source over the whole tree — the
+        """Single ``git_repo`` row over the whole tree — the
         backwards-compatible fallback when no ``repo_map.yaml`` is
-        present in the design monorepo. ``knowledge_routing`` defaults
+        present in the design monorepo. ``knowledge_sources`` defaults
         to empty so existing repos do not silently start ingesting."""
 
-        return cls(sources=[SourceSpec(name="default", type="git_repo")])
+        return cls(vcm_sources=[VcmSource(name="default", type="git_repo")])
 
     @classmethod
     def load(cls, repo_root: Path) -> "RepoMap":
@@ -283,7 +272,7 @@ class RepoMap(BaseModel):
 
 
 class _ResolvedSubmodule(BaseModel):
-    """The two pieces a submodule ``SourceSpec`` row needs."""
+    """The two pieces a submodule ``VcmSource`` row needs."""
 
     model_config = ConfigDict(frozen=True)
     url: str
@@ -344,11 +333,10 @@ def _resolve_submodule(repo_root: Path, submodule_path: str) -> _ResolvedSubmodu
 
 
 __all__ = (
-    "IngestDestination",
-    "KnowledgeRoute",
+    "KnowledgeSource",
     "REPO_MAP_DIR",
     "REPO_MAP_FILENAME",
     "RepoMap",
     "SCHEMA_VERSION",
-    "SourceSpec",
+    "VcmSource",
 )

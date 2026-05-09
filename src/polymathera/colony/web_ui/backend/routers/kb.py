@@ -13,10 +13,12 @@ All endpoints are ``Ring.USER`` and gated by ``require_auth``.
 from __future__ import annotations
 
 import logging
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from ..auth.middleware import require_auth
@@ -379,8 +381,9 @@ async def kb_ingest(
     """Ad-hoc ingestion of a file or a text blob.
 
     Provided for operator-driven smoke tests of the ingestion pipeline
-    from the KB tab; the routine ingestion path remains the
-    ``materialize_knowledge_routing`` action driven by ``repo_map.yaml``.
+    from the KB tab; the routine bulk-ingest path is the
+    ``/kb/ingest-repo-map`` endpoint (Design Monorepo tab) and the
+    SessionAgent's ``ingest_repo_map_literature`` action.
     """
 
     from polymathera.colony.knowledge.deps import (
@@ -464,3 +467,137 @@ async def kb_ingest(
         chunks_produced=record.chunks_produced,
         error=record.error,
     )
+
+
+# ---------------------------------------------------------------------------
+# /kb/ingest-repo-map — bulk ingest from ``knowledge_sources:`` rows
+# ---------------------------------------------------------------------------
+#
+# Mirrors the VCM ``/vcm/map`` endpoint shape: a fire-and-forget POST
+# with operation tracking via a polled GET. The two endpoints are
+# orthogonal — the operator picks ``vcm_sources`` row names for
+# ``/vcm/map`` and ``knowledge_sources`` row names for this one.
+
+
+class IngestRepoMapRequest(BaseModel):
+    """Bulk-ingest the literature declared in a design monorepo's
+    ``.colony/repo_map.yaml`` ``knowledge_sources:`` block.
+
+    The operator's per-row selection lives in the colony's persisted
+    source-selection state (see ``design_monorepo.source_selection``);
+    the dashboard writes it on every checkbox toggle, the materialiser
+    reads it inside ``_run_ingest_repo_map``. No request-body filter —
+    single source of truth.
+    """
+
+    origin_url: str = Field(description="Git repo URL (https:// or file://)")
+    branch: str = Field(default="main")
+    commit: str = Field(default="HEAD")
+
+
+class IngestRepoMapOpStatus(BaseModel):
+    op_id: str
+    status: str = Field(description="pending | running | completed | error")
+    origin_url: str
+    started_at: float
+    completed_at: float | None = None
+    message: str = ""
+    ingested: int = 0
+    failed: int = 0
+
+
+# In-memory op log — same pattern as ``vcm.py:_mapping_ops``. Survives
+# the lifetime of the dashboard process; not persisted.
+_ingest_ops: dict[str, dict[str, Any]] = {}
+
+
+@router.post("/kb/ingest-repo-map", response_model=IngestRepoMapOpStatus)
+async def kb_ingest_repo_map(
+    request: IngestRepoMapRequest,
+    background_tasks: BackgroundTasks,
+    _user: dict = Depends(require_auth),
+) -> IngestRepoMapOpStatus:
+    """Start bulk KB ingestion from a design monorepo's
+    ``knowledge_sources:`` block. Returns immediately. Poll GET
+    ``/kb/ingest-repo-map/operations`` for progress."""
+
+    op_id = f"ingest_{uuid.uuid4().hex[:12]}"
+    op = {
+        "op_id": op_id,
+        "status": "pending",
+        "origin_url": request.origin_url,
+        "started_at": time.time(),
+        "completed_at": None,
+        "message": "",
+        "ingested": 0,
+        "failed": 0,
+    }
+    _ingest_ops[op_id] = op
+    background_tasks.add_task(_run_ingest_repo_map, op_id, request)
+    return IngestRepoMapOpStatus(**op)
+
+
+@router.get(
+    "/kb/ingest-repo-map/operations",
+    response_model=list[IngestRepoMapOpStatus],
+)
+async def kb_ingest_repo_map_operations(
+    _user: dict = Depends(require_auth),
+) -> list[IngestRepoMapOpStatus]:
+    return [IngestRepoMapOpStatus(**op) for op in _ingest_ops.values()]
+
+
+async def _run_ingest_repo_map(
+    op_id: str, request: IngestRepoMapRequest,
+) -> None:
+    op = _ingest_ops.get(op_id)
+    if not op:
+        return
+    op["status"] = "running"
+    op["message"] = f"Cloning {request.origin_url}..."
+    try:
+        from polymathera.colony.design_monorepo.materialize import (
+            materialize_knowledge_sources,
+        )
+        from polymathera.colony.design_monorepo.repo_map import RepoMap
+        from polymathera.colony.design_monorepo.source_selection import (
+            list_enabled_knowledge_sources,
+        )
+        from polymathera.colony.distributed import get_polymathera
+        from polymathera.colony.distributed.ray_utils import serving
+        from polymathera.colony.knowledge.models import IngestionStatus
+
+        polymathera = get_polymathera()
+        storage = await polymathera.get_storage()
+        repo_path = await storage.git_storage.clone_or_retrieve_repository(
+            origin_url=request.origin_url,
+            branch=request.branch,
+            commit=request.commit,
+        )
+        repo_root = Path(str(repo_path))
+        repo_map = RepoMap.load(repo_root)
+
+        colony_id = serving.get_colony_id() or ""
+        enabled_list = await list_enabled_knowledge_sources(colony_id)
+        enabled = set(enabled_list) if enabled_list is not None else None
+        op["message"] = "Ingesting matching files..."
+        records = await materialize_knowledge_sources(
+            repo_map=repo_map,
+            repo_root=repo_root,
+            enabled_sources=enabled,
+        )
+        ingested = sum(
+            1 for r in records if r.status == IngestionStatus.COMPLETED
+        )
+        failed = sum(
+            1 for r in records if r.status == IngestionStatus.FAILED
+        )
+        op["status"] = "completed"
+        op["ingested"] = ingested
+        op["failed"] = failed
+        op["message"] = f"{ingested} ingested, {failed} failed"
+    except Exception as e:  # noqa: BLE001
+        logger.exception("kb_ingest_repo_map op %s failed", op_id)
+        op["status"] = "error"
+        op["message"] = str(e)
+    op["completed_at"] = time.time()

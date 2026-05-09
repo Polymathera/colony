@@ -144,3 +144,59 @@ export function useKBIngest() {
     },
   });
 }
+
+
+// ----------------------------------------------------------------------
+// /kb/ingest-repo-map — bulk ingest from ``knowledge_sources:`` rows.
+// Mirrors useMapRepo's shape (background op + polled status). The
+// per-row selection lives in the colony's persisted source-selection
+// state (PUT /colonies/{id}/enabled-knowledge-sources) — no body
+// filter here, single source of truth shared with the chat-driven
+// ``ingest_repo_map_literature`` action.
+// ----------------------------------------------------------------------
+
+export interface IngestRepoMapRequest {
+  origin_url: string;
+  branch?: string;
+  commit?: string;
+}
+
+export interface IngestRepoMapOpStatus {
+  op_id: string;
+  status: "pending" | "running" | "completed" | "error";
+  origin_url: string;
+  started_at: number;
+  completed_at: number | null;
+  message: string;
+  ingested: number;
+  failed: number;
+}
+
+export function useKBIngestRepoMap() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: IngestRepoMapRequest) =>
+      apiFetch<IngestRepoMapOpStatus>("/kb/ingest-repo-map", {
+        method: "POST",
+        body: JSON.stringify({ branch: "main", commit: "HEAD", ...req }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["kb"] });
+    },
+  });
+}
+
+export function useKBIngestRepoMapOperations() {
+  return useQuery({
+    queryKey: ["kb", "ingest-repo-map", "operations"],
+    queryFn: () =>
+      apiFetch<IngestRepoMapOpStatus[]>("/kb/ingest-repo-map/operations"),
+    refetchInterval: (query) => {
+      const ops = query.state.data;
+      if (ops && ops.some((op) => op.status === "pending" || op.status === "running")) {
+        return 2000;
+      }
+      return false;
+    },
+  });
+}

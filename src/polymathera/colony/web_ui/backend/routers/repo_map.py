@@ -65,10 +65,17 @@ class RepoMapResponse(BaseModel):
             "a read-only Monaco editor."
         ),
     )
-    sources: list[dict[str, Any]] = Field(
+    vcm_sources: list[dict[str, Any]] = Field(
         description=(
-            "Parsed source rows (Pydantic model_dump) — what the "
-            "materialiser would feed to ``mmap_application_scope``."
+            "Parsed ``vcm_sources`` rows (Pydantic model_dump) — what "
+            "the materialiser would feed to ``mmap_application_scope``."
+        ),
+    )
+    knowledge_sources: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Parsed ``knowledge_sources`` rows. Each carries ``name``, "
+            "``paths``, optional ``profile``."
         ),
     )
 
@@ -304,7 +311,10 @@ async def get_repo_map(
         commit=commit,
         has_repo_map_file=has_file,
         raw_yaml=raw_yaml,
-        sources=[s.model_dump(mode="json") for s in repo_map.sources],
+        vcm_sources=[s.model_dump(mode="json") for s in repo_map.vcm_sources],
+        knowledge_sources=[
+            s.model_dump(mode="json") for s in repo_map.knowledge_sources
+        ],
     )
 
 
@@ -381,7 +391,7 @@ async def preview_repo_map(
     scope_ids = materialize_scope_ids(repo_map, base_scope_id)
 
     previews: list[PreviewedSource] = []
-    for spec, scope_id in zip(repo_map.sources, scope_ids, strict=True):
+    for spec, scope_id in zip(repo_map.vcm_sources, scope_ids, strict=True):
         try:
             kwargs = spec.to_mmap_kwargs(
                 repo_root=repo_path,

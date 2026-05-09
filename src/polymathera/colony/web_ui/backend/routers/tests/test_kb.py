@@ -27,7 +27,7 @@ def _reset_deps() -> None:
 
 
 def test_router_registers_expected_paths() -> None:
-    """The KB tab calls these six endpoints — fail fast if any go
+    """Fail fast if any of the dashboard-facing KB endpoints go
     missing on rename / refactor."""
 
     paths = {route.path for route in kb_router.router.routes}
@@ -37,6 +37,8 @@ def test_router_registers_expected_paths() -> None:
         "/kb/sources/chunks",
         "/kb/search",
         "/kb/ingest",
+        "/kb/ingest-repo-map",
+        "/kb/ingest-repo-map/operations",
         "/kb/images/{sha}",
     }
 

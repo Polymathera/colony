@@ -422,15 +422,15 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
 
     @action_executor(
         planning_summary=(
-            "Ingest every file matched by the design monorepo's "
-            "``knowledge_routing:`` block into the knowledge base."
+            "Ingest files matched by the design monorepo's "
+            "``knowledge_sources:`` block into the knowledge base."
         ),
     )
     async def ingest_repo_map_literature(
         self, *, refresh: bool = True,
     ) -> dict[str, Any]:
         """Walk the design monorepo's ``.colony/repo_map.yaml``
-        ``knowledge_routing:`` block and ingest every matching file
+        ``knowledge_sources:`` block and ingest every matching file
         into the process-singleton knowledge base.
 
         ``refresh=True`` (default) runs ``git fetch origin`` +
@@ -441,12 +441,12 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
         (e.g. when the operator is offline or wants reproducibility
         on a pinned commit).
 
-        Wraps :func:`materialize_knowledge_routing` — the same
-        function the dashboard's "Map to VCM" flow uses for the
-        knowledge-base side. Rows whose ``ingest_to`` is ``vcm`` are
-        silently skipped (those are documentation-only markers that
-        a path was promoted to VCM mapping; the materialiser handles
-        the contract).
+        Per-row filtering follows the operator's persisted selection
+        from the Design Monorepo tab's "Knowledge sources" checkbox
+        list (read via
+        :func:`polymathera.colony.design_monorepo.source_selection.list_enabled_knowledge_sources`).
+        No parameter — the LLM has no reliable way to populate one,
+        and the operator already drives the choice via the dashboard.
 
         Returns a dict the planner can branch on without log access:
 
@@ -462,11 +462,13 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
         Per-file ingestion errors are logged at WARNING and don't fail
         the whole call — partial progress beats no progress.
         """
+        from polymathera.colony.distributed.ray_utils import serving
         from polymathera.colony.knowledge.deps import get_knowledge_deps
         from polymathera.colony.knowledge.models import IngestionStatus
 
         from .repo_map import RepoMap
-        from .materialize import materialize_knowledge_routing
+        from .materialize import materialize_knowledge_sources
+        from .source_selection import list_enabled_knowledge_sources
 
         repo_root = self._working_dir
         if not (repo_root / ".git").is_dir():
@@ -481,8 +483,12 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
             await asyncio.to_thread(self._refresh_against_origin)
 
         repo_map = await asyncio.to_thread(RepoMap.load, repo_root)
-        records = await materialize_knowledge_routing(
-            repo_map=repo_map, repo_root=repo_root,
+        colony_id = serving.get_colony_id() or ""
+        enabled_list = await list_enabled_knowledge_sources(colony_id)
+        records = await materialize_knowledge_sources(
+            repo_map=repo_map,
+            repo_root=repo_root,
+            enabled_sources=set(enabled_list) if enabled_list is not None else None,
         )
 
         ingested: list[str] = []
@@ -862,7 +868,7 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         The repo_map template is intentionally minimal: the only
         active row is the default ``git_repo`` source over the whole
         tree. Below that, every supported source type and
-        ``knowledge_routing`` flavour ships as commented examples for
+        ``knowledge_sources`` flavour ships as commented examples for
         the operator to un-comment and adapt. We do NOT auto-detect
         repo structure or scaffold ``tools/``, ``literature/``, etc.
         — prescribing a layout this early in the lifecycle costs

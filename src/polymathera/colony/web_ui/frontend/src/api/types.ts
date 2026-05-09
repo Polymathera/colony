@@ -247,13 +247,10 @@ export interface MapRepoRequest {
   branch?: string;
   commit?: string;
   repo_id?: string | null;
-  /**
-   * Subset of source names from ``repo_map.yaml`` to map. ``undefined``
-   * (the default) maps every row. The Design Monorepo tab populates
-   * this from per-row checkboxes.
-   *
-   */
-  enabled_sources?: string[];
+  // Per-row selection lives in the colony's persisted source-selection
+  // state (PUT /colonies/{id}/enabled-vcm-sources). The Design Monorepo
+  // tab writes it on every checkbox toggle; the materialiser reads it.
+  // Single source of truth — no body field here.
 }
 
 
