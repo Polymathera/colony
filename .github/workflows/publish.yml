@@ -14,7 +14,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install Poetry
-        run: pip install poetry
+        # Pinned to match ``cli/deploy/docker/Dockerfile.local``; see
+        # ``ci.yml`` for the failure mode unpinned Poetry triggers.
+        run: pip install poetry==1.7.1
       - name: Set version from tag
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"

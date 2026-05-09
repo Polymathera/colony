@@ -29,7 +29,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install Poetry
-        run: pip install poetry
+        # Pinned to match ``cli/deploy/docker/Dockerfile.local``; see
+        # ``ci.yml`` for the failure mode unpinned Poetry triggers.
+        run: pip install poetry==1.7.1
       - name: Configure Poetry
         run: poetry config virtualenvs.create false
       - name: Install dependencies
