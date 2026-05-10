@@ -471,9 +471,9 @@ def load_config_from_yaml(path: str) -> TestConfig:
 
     # Mirror ``--config`` into the global ConfigurationManager so the typed
     # components added in steps 4–10 (cluster, agent_system, plugins, sandbox
-    # images, observability, deployment_names, custom_deployments, ...) are
-    # populated from the operator's YAML when ``polymathera.initialize()`` is
-    # awaited downstream (e.g. inside ``deploy_cluster``).
+    # images, observability, deployment_names, ...) are populated from the
+    # operator's YAML when ``polymathera.initialize()`` is awaited downstream
+    # (e.g. inside ``deploy_cluster``).
     from polymathera.colony.distributed import get_polymathera
     get_polymathera().set_config_path(str(config_path))
 

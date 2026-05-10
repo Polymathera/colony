@@ -49,7 +49,6 @@ path. Everything goes through this YAML.
 | `analysis_registry` | `AnalysisRegistryConfig` | `agents/configs.py` |
 | `capabilities.github` | `GitHubAuthConfig` | `agents/configs.py` |
 | `capabilities.web_search` | `WebSearchConfig` | `agents/configs.py` |
-| `custom_deployments` | `CustomDeploymentsConfig` | `deployments/configs.py` |
 | `deployment_names` | `DeploymentNames` | `deployment_names.py` |
 | `distributed.observability` | `ObservabilityConfig` | `distributed/configs.py` |
 | `llms.inference.cluster.embedding` | `STEmbeddingDeploymentConfig` | `cluster/embedding/st_embedding.py` |
@@ -74,9 +73,8 @@ same YAML; the dataclass parser and the typed manager both read it.
 
 ## Extending the config surface
 
-External packages (e.g. `polymathera-cps`) add new `ConfigComponent`s and
-custom-deployment handlers without touching public colony code. Two
-mechanisms:
+External packages (e.g. `polymathera-cps`) add new `ConfigComponent`s
+without touching public colony code:
 
 ### Register components via entry-point group
 
@@ -117,45 +115,6 @@ my_ext:
   thing:
     knob: 99
 ```
-
-### Register a custom deployment handler
-
-For long-running externally-managed resources (HPC stacks, AWS-CDK,
-Slurm clusters):
-
-```python
-from polymathera.colony.deployments import (
-    DeploymentContext, register_custom_deployment,
-)
-
-@register_custom_deployment("aws_cdk_hpc")
-class AwsCdkHpc(ConfigComponent):
-    name = "aws_cdk_hpc"
-
-    async def provision(self, ctx: DeploymentContext) -> None:
-        # ... bring up resources ...
-        await ctx.write_runtime_overlay(
-            "my_ext.hpc_endpoints",
-            {"scheduler_url": "https://...", "auth_token": "..."},
-        )
-
-    async def query_state(self, ctx): ...
-    async def tear_down(self, ctx): ...
-```
-
-Operator YAML wires it:
-
-```yaml
-custom_deployments:
-  deployments:
-    cps_hpc_aero:
-      handler: aws_cdk_hpc
-      auto_provision: true
-      params: { stack_name: my-stack, region: us-west-2 }
-```
-
-After `provision()`, any consumer reading `my_ext.hpc_endpoints` via
-`cm.get_component_for(...)` observes the runtime values — no restart needed.
 
 ### Register a new LLM deployment provider
 

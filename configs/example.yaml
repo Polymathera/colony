@@ -249,19 +249,3 @@ knowledge:
 #   ray_client_address: "ray://ray-head:10001"
 #   prometheus_url: "http://ray-head:9090"
 
-# --- Custom deployments (extension surface) -------------------------------
-# Source: deployments/configs.py:CustomDeploymentsConfig
-# Each instance maps to a handler registered via
-# `register_custom_deployment("<handler_name>")` in an extension package
-# (e.g. polymathera-cps). On `provision()`, the handler writes runtime
-# values into the L4 ``runtime_overlays`` slot — other components observe
-# them via cm.get_component_for(...).
-# custom_deployments:
-#   deployments:
-#     cps_hpc_aero:
-#       handler: aws_cdk_hpc           # registered in extension
-#       enabled: true
-#       auto_provision: true
-#       params:
-#         stack_name: polymath-hpc-prod
-#         region: us-west-2

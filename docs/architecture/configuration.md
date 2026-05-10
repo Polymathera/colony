@@ -156,69 +156,6 @@ persisted via the existing colony ``StateManager`` (the same primitive VCM and
 the convergence runtime use). Cross-replica consistency rides on the
 StateManager's CAS — no etcd, no separate config-update protocol.
 
-## Custom deployments
-
-The single most important extension surface for operators: a typed mechanism
-to plug in **externally-managed resources** (HPC stacks, AWS-CDK stacks, Slurm
-clusters, MQTT bridges, …) without coupling Colony to the implementation.
-Colony defines the contract; an extension package implements concrete handlers.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Op as Operator YAML
-    participant CM as ConfigurationManager
-    participant H as CustomDeployment handler<br/>(extension)
-    participant OS as OverlayStore (L4)
-    participant Reader as Any consumer
-
-    Op->>CM: custom_deployments.<name>.handler = "aws_cdk_hpc"
-    CM->>H: provision(ctx)  (when auto_provision=true)
-    H->>H: bring up the resource
-    H->>OS: ctx.write_runtime_overlay("hpc.endpoints", {...})
-    Reader->>CM: get_component_for("hpc.endpoints")
-    CM-->>Reader: defaults ⊕ L4 overlay
-```
-
-### Implementing a handler
-
-```python
-from polymathera.colony.deployments import (
-    DeploymentContext, register_custom_deployment,
-)
-
-@register_custom_deployment("aws_cdk_hpc")
-class AwsCdkHpc:
-    name = "aws_cdk_hpc"
-
-    async def provision(self, ctx: DeploymentContext) -> None:
-        endpoint, token = await _stack_up(ctx.config_manager.get_component("aws"))
-        await ctx.write_runtime_overlay(
-            "hpc.endpoints",
-            {"scheduler_url": endpoint, "auth_token": token},
-        )
-
-    async def query_state(self, ctx): return await _describe_stack()
-    async def tear_down(self, ctx): await _stack_destroy()
-```
-
-### Wiring it in the operator YAML
-
-```yaml
-custom_deployments:
-  deployments:
-    cps_hpc_aero:
-      handler: aws_cdk_hpc           # registered name
-      enabled: true
-      auto_provision: true
-      params: { stack_name: my-stack, region: us-west-2 }
-```
-
-The instance name (`cps_hpc_aero`) doubles as the L4 overlay scope key. After
-`provision()`, every consumer reading `hpc.endpoints` via
-`cm.get_component_for("hpc.endpoints")` observes the new values — no
-restart, no signal handling, no manual reload.
-
 ## Pluggable LLM providers
 
 Adding a new remote LLM backend follows the same registration pattern,
@@ -262,9 +199,7 @@ my_extension = "polymathera.cps.config:register_components"
 # polymathera/cps/config.py
 def register_components() -> None:
     """Side-effect: importing these modules triggers their
-    @register_polymathera_config / @register_custom_deployment /
-    @register_remote_llm_provider decorators."""
-    from . import deployments        # noqa: F401
+    @register_polymathera_config / @register_remote_llm_provider decorators."""
     from . import analysis_types     # noqa: F401
     from . import remote_providers   # noqa: F401
 ```
@@ -306,29 +241,7 @@ async def raise_quota(cm, tenant_id: str, new_max: int):
 The next call to ``cm.get_component_for("tenant_quotas",
 tenant_id=tenant_id)`` from any replica observes the new ceiling.
 
-### 3. Inject HPC scheduler endpoints into agents after stack-up
-
-A CPS-side custom deployment provisions an AWS-CDK HPC stack and writes the
-returned scheduler URL + credentials into the L4 overlay:
-
-```python
-await ctx.write_runtime_overlay(
-    "hpc.endpoints",
-    {"scheduler_url": "https://cdk-stack-42.elb...", "auth_token": "..."},
-)
-```
-
-A CFD-analysis agent capability reads it in its action body:
-
-```python
-endpoints = await self.cm.get_component_for("hpc.endpoints")
-result = await self._submit_job(endpoints.scheduler_url, endpoints.auth_token, job)
-```
-
-The capability code is unchanged whether the operator runs against the local
-stub backend, the test sandbox, or production HPC — only the overlay differs.
-
-### 4. Override a capability secret per environment without editing YAML
+### 3. Override a capability secret per environment without editing YAML
 
 ```bash
 # CI environment
@@ -344,7 +257,7 @@ catch-all (`POLYMATHERA_<PATH>_<FIELD>`). Use the declared one when you want
 a stable name; use the catch-all when reaching into a third-party
 ``ConfigComponent`` whose author didn't pre-declare a name you like.
 
-### 5. Disable tracing globally without code changes
+### 4. Disable tracing globally without code changes
 
 Tracing reads from `ObservabilityConfig`. Every tracing call site (agent
 base, both cluster facilities) resolves through `get_observability_config()`,
