@@ -22,8 +22,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from string import Template
 
+from ..manifest import DEFAULT_SURFACE_DIRS
+
 
 _THIS_DIR = Path(__file__).resolve().parent
+_EXTENSION_TEMPLATES_DIR = _THIS_DIR / "monorepo_extensions"
 
 
 AVAILABLE_TEMPLATES: tuple[str, ...] = (
@@ -33,6 +36,26 @@ AVAILABLE_TEMPLATES: tuple[str, ...] = (
     "rust_crate",
     "cmake_project",
 )
+
+
+# Maps each L1-A surface to the on-disk template that L1-E renders into
+# ``.colony/<surface>/``. Surface set must mirror
+# :data:`polymathera.colony.design_monorepo.manifest.DEFAULT_SURFACE_DIRS`
+# — the assertion below fails loudly at import time if the two drift.
+_EXTENSION_TEMPLATE_FILE_BY_SURFACE: dict[str, str] = {
+    "plugins": "plugin.SKILL.md",
+    "agents": "agent.py.tmpl",
+    "deployments": "deployment.py.tmpl",
+    "tools": "tool_adapter.py.tmpl",
+    "profiles": "profile.yaml.tmpl",
+}
+if set(_EXTENSION_TEMPLATE_FILE_BY_SURFACE) != set(DEFAULT_SURFACE_DIRS):
+    raise ImportError(
+        "scaffolds.renderer: L1-E extension-template map is out of sync "
+        f"with DEFAULT_SURFACE_DIRS — templates declare "
+        f"{sorted(_EXTENSION_TEMPLATE_FILE_BY_SURFACE)}, surfaces declare "
+        f"{sorted(DEFAULT_SURFACE_DIRS)}",
+    )
 
 
 class ScaffoldRenderError(RuntimeError):
@@ -204,9 +227,97 @@ def render_template(
     return tuple(written)
 
 
+# ---------------------------------------------------------------------------
+# L1-E monorepo-extension scaffolds
+# ---------------------------------------------------------------------------
+
+
+def _extension_dest_relative(surface: str, name: str) -> str:
+    """Path of the rendered file relative to the resolved surface dir.
+
+    Matches the L1-A discovery convention per surface (see
+    ``design-monorepo-extensions.md``):
+
+    - ``plugins``     → ``<name>/SKILL.md``     (directory-per-skill)
+    - ``profiles``    → ``<name>.yaml``
+    - others (agents, deployments, tools) → ``<name>.py``
+
+    Routes through :data:`DEFAULT_SURFACE_DIRS` so the surface set
+    never gets re-enumerated here.
+    """
+    if surface not in DEFAULT_SURFACE_DIRS:
+        raise ScaffoldRenderError(
+            f"Unknown extension surface {surface!r}; "
+            f"available: {sorted(DEFAULT_SURFACE_DIRS)}",
+        )
+    if surface == "plugins":
+        return f"{name}/SKILL.md"
+    if surface == "profiles":
+        return f"{name}.yaml"
+    return f"{name}.py"
+
+
+def render_extension_scaffold(
+    surface: str,
+    surface_dir: Path,
+    name: str,
+    *,
+    template_vars: Mapping[str, str] | None = None,
+) -> Path:
+    """Render the L1-E extension scaffold for ``surface`` into the file
+    L1-A would discover at ``surface_dir / <surface convention for name>``.
+
+    Returns the absolute path of the file written. Refuses to overwrite
+    an existing destination file (sibling extensions in the same surface
+    are fine — only the per-extension destination must be empty).
+
+    Variables available to ``string.Template`` substitution: ``name``,
+    ``name_snake``, ``name_dash``, plus the union of caller-supplied
+    ``template_vars`` (which override the defaults).
+    """
+    if surface not in _EXTENSION_TEMPLATE_FILE_BY_SURFACE:
+        raise ScaffoldRenderError(
+            f"Unknown extension surface {surface!r}; "
+            f"available: {sorted(_EXTENSION_TEMPLATE_FILE_BY_SURFACE)}",
+        )
+    template_file = _EXTENSION_TEMPLATES_DIR / _EXTENSION_TEMPLATE_FILE_BY_SURFACE[surface]
+    if not template_file.is_file():
+        raise ScaffoldRenderError(
+            f"Extension scaffold {template_file} is missing on disk.",
+        )
+
+    dest_rel = _extension_dest_relative(surface, name)
+    dest = surface_dir / dest_rel
+    if dest.exists():
+        raise ScaffoldRenderError(
+            f"Refusing to overwrite existing extension at {dest}.",
+        )
+
+    variables: dict[str, str] = {
+        "name": name,
+        "name_snake": name.replace("-", "_"),
+        "name_dash": name.replace("_", "-"),
+    }
+    if template_vars:
+        variables.update({str(k): str(v) for k, v in template_vars.items()})
+
+    source = template_file.read_text(encoding="utf-8")
+    try:
+        rendered = Template(source).safe_substitute(variables)
+    except (ValueError, KeyError) as exc:
+        raise ScaffoldRenderError(
+            f"Failed to render extension scaffold {surface}/{name}: {exc}",
+        ) from exc
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(rendered, encoding="utf-8")
+    return dest
+
+
 __all__ = (
     "AVAILABLE_TEMPLATES",
     "ScaffoldRenderError",
     "list_template_files",
+    "render_extension_scaffold",
     "render_template",
 )

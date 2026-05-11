@@ -1,0 +1,21 @@
+"""Deployment ``${class_name}`` — authored via L1-E ``bootstrap_deployment``.
+
+Lives at ``.colony/deployments/${name}.py``. L1-A's
+``discover_deployments`` walks ``.colony/deployments/*.py`` and
+exposes classes carrying the ``__deployment_config__`` attribute the
+``@serving.deployment(...)`` decorator attaches.
+
+Replace the backend-call stub with real behaviour.
+"""
+
+from __future__ import annotations
+
+from polymathera.colony.distributed.ray_utils import serving
+
+
+@serving.deployment(${deployment_kwargs})
+class ${class_name}:
+    """${description}"""
+
+    def __init__(self) -> None:
+        pass

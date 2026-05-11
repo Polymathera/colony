@@ -47,12 +47,14 @@ from .identity import (
     append_co_author_trailer,
     resolve_commit_identity,
 )
+from .ast_validator import validate_python_file
 from .extensions import (
     DiscoveredExtensions,
     discover_all,
     resolve_surface_dirs,
 )
 from .manifest import (
+    DEFAULT_SURFACE_DIRS,
     MANIFEST_RELATIVE_PATH,
     DesignMonorepoManifest,
     ManifestSchemaError,
@@ -64,12 +66,14 @@ from .models import (
     Checkpoint,
     DecisionEntry,
     DesignDiff,
+    ExtensionAuthoredPayload,
     ForkBranch,
     RepoBootstrapSpec,
     RepoState,
     ToolEntry,
     ToolMatch,
 )
+from ..agents.sessions.context import get_current_session_id
 from . import registry as registry_module
 from . import scaffolds as scaffolds_module
 
@@ -1673,6 +1677,261 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
             files_created=tuple(files_created),
             tool_entry=tool_entry,
         )
+
+    # ----- L1-E meta-tooling write surface -----------------------------
+    #
+    # Five ``bootstrap_<surface>`` actions, one per L1-A surface, all
+    # routed through one private helper so the discipline
+    # (resolve surface dir → render scaffold → AST-validate → commit →
+    # emit ``ExtensionAuthored``) cannot drift between surfaces.
+    # ``surface`` strings come from :data:`DEFAULT_SURFACE_DIRS` —
+    # never re-enumerated here.
+
+    async def _author_extension(
+        self,
+        surface: str,
+        name: str,
+        template_vars: dict[str, str],
+    ) -> ExtensionAuthoredPayload:
+        if surface not in DEFAULT_SURFACE_DIRS:
+            raise ValueError(
+                f"unknown surface {surface!r}; valid: {sorted(DEFAULT_SURFACE_DIRS)}",
+            )
+        # Materialise the working tree (lazy clone if configured) so the
+        # surface dir resolves against a real ``working_dir``. The
+        # manifest read is best-effort: a missing/malformed manifest
+        # falls back to default surface dirs, matching L1-A's reader.
+        client = await self._client_async()
+        try:
+            manifest: DesignMonorepoManifest | None = (
+                DesignMonorepoManifest.load_path(self._working_dir)
+            )
+        except ManifestSchemaError:
+            manifest = None
+
+        return await asyncio.to_thread(
+            self._author_extension_sync,
+            client,
+            manifest,
+            surface,
+            name,
+            template_vars,
+        )
+
+    def _author_extension_sync(
+        self,
+        client: DesignMonorepoClient,
+        manifest: DesignMonorepoManifest | None,
+        surface: str,
+        name: str,
+        template_vars: dict[str, str],
+    ) -> ExtensionAuthoredPayload:
+        surface_dir = resolve_surface_dirs(self._working_dir, manifest)[surface]
+        surface_dir.mkdir(parents=True, exist_ok=True)
+
+        written = scaffolds_module.render_extension_scaffold(
+            surface, surface_dir, name, template_vars=template_vars,
+        )
+
+        # AST gate (Risk #5). Only ``.py`` files are validated; the
+        # SKILL.md and YAML scaffolds are text. On rejection, clean up
+        # the just-written file so a retry sees an empty destination.
+        if written.suffix == ".py":
+            report = validate_python_file(written)
+            if not report.ok:
+                try:
+                    written.unlink()
+                except OSError:
+                    pass
+                detail = (
+                    report.syntax_error
+                    or "; ".join(
+                        f"line {iss.line}: {iss.detail}" for iss in report.issues
+                    )
+                )
+                raise DesignMonorepoError(
+                    f"L1-E: scaffold {written.relative_to(self._working_dir)} "
+                    f"failed AST allow-list: {detail}",
+                )
+
+        rel_to_root = written.relative_to(self._working_dir)
+        identity = self._identity()
+        commit_message = f"bootstrap {surface}/{name} (L1-E)"
+        sha = client.commit_with_identity(
+            identity, commit_message, paths=[rel_to_root],
+        )
+
+        # For ``plugins``, the rendered file is ``<name>/SKILL.md`` —
+        # report the directory as the relative_path so the caller and
+        # the audit event point at the discovery unit, not the inner file.
+        if surface == "plugins":
+            relative_path = str(rel_to_root.parent)
+            files_created = (rel_to_root.name,)
+        else:
+            relative_path = str(rel_to_root)
+            files_created = (rel_to_root.name,)
+
+        return ExtensionAuthoredPayload(
+            surface=surface,  # type: ignore[arg-type]
+            name=name,
+            relative_path=relative_path,
+            commit_sha=sha,
+            template=surface,
+            files_created=files_created,
+            authored_at=datetime.now(timezone.utc),
+            session_id=get_current_session_id(),
+        )
+
+    async def _emit_extension_authored(
+        self, payload: ExtensionAuthoredPayload,
+    ) -> None:
+        """Best-effort blackboard write of the L1-E audit event.
+
+        Detached-mode capabilities and unit-test contexts without a
+        configured blackboard log at WARNING and continue — the commit
+        on disk is the durable audit record; the blackboard event is
+        the broadcast.
+        """
+        try:
+            bb = await self.get_blackboard()
+        except Exception as exc:  # noqa: BLE001 - detached / no blackboard
+            logger.warning(
+                "L1-E: blackboard unavailable for ExtensionAuthored "
+                "(%s/%s): %s", payload.surface, payload.name, exc,
+            )
+            return
+        key = DesignMonorepoEventProtocol.extension_authored_key(
+            payload.surface, payload.name,
+        )
+        try:
+            await bb.write(
+                key,
+                payload.model_dump(mode="json"),
+                created_by=self._identity().agent_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "L1-E: ExtensionAuthored write failed for %s: %s", key, exc,
+            )
+
+    @action_executor(
+        planning_summary="Scaffold a new plugin under .colony/plugins/<name>/SKILL.md.",
+    )
+    async def bootstrap_plugin(
+        self, name: str, description: str = "",
+    ) -> ExtensionAuthoredPayload:
+        """Write a ``SKILL.md`` stub under the plugins surface."""
+        payload = await self._author_extension(
+            "plugins", name, {"description": description or name},
+        )
+        await self._emit_extension_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary="Scaffold a new agent under .colony/agents/<name>.py.",
+    )
+    async def bootstrap_agent(
+        self,
+        name: str,
+        *,
+        base_class: str = "Agent",
+        base_module: str = "polymathera.colony.agents.base",
+        class_name: str | None = None,
+        description: str = "",
+    ) -> ExtensionAuthoredPayload:
+        """Write an ``Agent`` subclass stub under the agents surface."""
+        resolved_class = class_name or _default_class_name(name)
+        payload = await self._author_extension(
+            "agents",
+            name,
+            {
+                "base_class": base_class,
+                "base_module": base_module,
+                "class_name": resolved_class,
+                "description": description or f"{resolved_class} agent stub.",
+            },
+        )
+        await self._emit_extension_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary=(
+            "Scaffold a new deployment under .colony/deployments/<name>.py."
+        ),
+    )
+    async def bootstrap_deployment(
+        self,
+        name: str,
+        *,
+        deployment_kwargs: str = "",
+        class_name: str | None = None,
+        description: str = "",
+    ) -> ExtensionAuthoredPayload:
+        """Write a ``@serving.deployment``-wrapped class stub.
+
+        ``deployment_kwargs`` is the raw keyword expression embedded in
+        ``@serving.deployment(<here>)`` — e.g. ``num_replicas=1``.
+        Empty by default; the framework's deployment defaults apply.
+        """
+        resolved_class = class_name or _default_class_name(name)
+        payload = await self._author_extension(
+            "deployments",
+            name,
+            {
+                "class_name": resolved_class,
+                "deployment_kwargs": deployment_kwargs,
+                "description": description or f"{resolved_class} deployment stub.",
+            },
+        )
+        await self._emit_extension_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary="Scaffold a new tool adapter under .colony/tools/<name>.py.",
+    )
+    async def bootstrap_tool_adapter(
+        self, name: str, *, tool_spec_var: str = "None",
+    ) -> ExtensionAuthoredPayload:
+        """Write a ``register(registry)`` stub under the tools surface."""
+        payload = await self._author_extension(
+            "tools", name, {"tool_spec_var": tool_spec_var},
+        )
+        await self._emit_extension_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary="Scaffold a new profile under .colony/profiles/<name>.yaml.",
+    )
+    async def bootstrap_profile(
+        self,
+        name: str,
+        *,
+        tags: list[str] | None = None,
+        embedding_strategy: str = "default",
+        description: str = "",
+    ) -> ExtensionAuthoredPayload:
+        """Write a ``.yaml`` profile stub under the profiles surface."""
+        if tags:
+            tags_yaml = "\n" + "\n".join(f"  - {t}" for t in tags)
+        else:
+            tags_yaml = " []"
+        payload = await self._author_extension(
+            "profiles",
+            name,
+            {
+                "description": description or name,
+                "tags_yaml": tags_yaml,
+                "embedding_strategy": embedding_strategy,
+            },
+        )
+        await self._emit_extension_authored(payload)
+        return payload
+
+
+def _default_class_name(name: str) -> str:
+    """``my_agent`` / ``my-agent`` → ``MyAgent``."""
+    parts = name.replace("-", "_").split("_")
+    return "".join(p[:1].upper() + p[1:] for p in parts if p)
 
 
 __all__ = (

@@ -1,0 +1,22 @@
+"""Tool adapter ``${name}`` — authored via L1-E ``bootstrap_tool_adapter``.
+
+Lives at ``.colony/tools/${name}.py``. L1-A's ``discover_tools``
+walks ``.colony/tools/*.py``, looks for a top-level ``register``
+callable, and invokes it so each file controls its own adapter
+construction (adapters' ``__init__`` signatures vary).
+
+Fill in the ``register`` body with the actual ``ToolAdapter``
+construction and registry calls.
+"""
+
+from __future__ import annotations
+
+from polymathera.colony.tools.registry import ToolRegistry
+
+
+def register(registry: ToolRegistry) -> None:
+    """Construct ${name}'s ``ToolAdapter`` and add it to ``registry``."""
+    # Example:
+    #   adapter = MyToolAdapter(spec=${tool_spec_var})
+    #   registry.add(adapter)
+    del registry  # placeholder — replace with the real registration.

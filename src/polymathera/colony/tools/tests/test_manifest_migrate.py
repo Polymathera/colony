@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 
 import pytest
-from git import Repo
+from git import Actor, Repo
 
 from polymathera.colony.design_monorepo.identity import AgentIdentity
 from polymathera.colony.design_monorepo.manifest import (
@@ -143,17 +143,17 @@ def git_repo(tmp_path: Path) -> Path:
     """A real git repo with a v1 manifest committed on main, so the
     migrator can re-commit the v2 result."""
     repo = Repo.init(tmp_path)
-    # Initial commit so HEAD exists before the migration commit.
+    # Initial commit so HEAD exists before the migration commit. Use
+    # ``index.commit`` (in-process) rather than ``git commit``: the
+    # CLI path needs ``user.name`` / ``user.email`` from git config,
+    # which CI runners don't ship.
+    actor = Actor("seed", "seed@example.com")
     (tmp_path / "README.md").write_text("seed\n")
     repo.index.add(["README.md"])
-    repo.index.commit(
-        "seed",
-        author=repo.git.Actor("seed", "seed@example.com"),
-        committer=repo.git.Actor("seed", "seed@example.com"),
-    ) if False else repo.git.commit("-m", "seed", "--author=seed <seed@example.com>")
+    repo.index.commit("seed", author=actor, committer=actor)
     _write_v1(tmp_path)
-    repo.git.add(MANIFEST_RELATIVE_PATH)
-    repo.git.commit("-m", "v1 manifest", "--author=seed <seed@example.com>")
+    repo.index.add([MANIFEST_RELATIVE_PATH])
+    repo.index.commit("v1 manifest", author=actor, committer=actor)
     return tmp_path
 
 

@@ -1645,6 +1645,7 @@ class DesignMonorepoEventProtocol(BlackboardProtocol):
     _BRANCH_CHANGED_PREFIX: ClassVar[str] = "branch_changed:"
     _BRANCH_MERGED_PREFIX: ClassVar[str] = "branch_merged:"
     _CHECKPOINT_EMITTED_PREFIX: ClassVar[str] = "checkpoint_emitted:"
+    _EXTENSION_AUTHORED_PREFIX: ClassVar[str] = "extension_authored:"
 
     @staticmethod
     def branch_changed_key(scope_id: str) -> str:
@@ -1659,6 +1660,17 @@ class DesignMonorepoEventProtocol(BlackboardProtocol):
         return f"{DesignMonorepoEventProtocol._CHECKPOINT_EMITTED_PREFIX}{scope_id}"
 
     @staticmethod
+    def extension_authored_key(surface: str, name: str) -> str:
+        """L1-E authoring event. Tail is ``<surface>:<name>`` where
+        ``surface`` is one of the five
+        :data:`polymathera.colony.design_monorepo.manifest.DEFAULT_SURFACE_DIRS`
+        keys and ``name`` is the agent-supplied extension name."""
+        return (
+            f"{DesignMonorepoEventProtocol._EXTENSION_AUTHORED_PREFIX}"
+            f"{surface}:{name}"
+        )
+
+    @staticmethod
     def branch_changed_pattern() -> str:
         return f"{DesignMonorepoEventProtocol._BRANCH_CHANGED_PREFIX}*"
 
@@ -1671,11 +1683,33 @@ class DesignMonorepoEventProtocol(BlackboardProtocol):
         return f"{DesignMonorepoEventProtocol._CHECKPOINT_EMITTED_PREFIX}*"
 
     @staticmethod
+    def extension_authored_pattern() -> str:
+        return f"{DesignMonorepoEventProtocol._EXTENSION_AUTHORED_PREFIX}*"
+
+    @staticmethod
     def parse_branch_changed_key(key: str) -> str:
         prefix = DesignMonorepoEventProtocol._BRANCH_CHANGED_PREFIX
         if not key.startswith(prefix):
             raise ValueError(f"Not a DesignMonorepoEventProtocol branch_changed key: {key!r}")
         return key[len(prefix):]
+
+    @staticmethod
+    def parse_extension_authored_key(key: str) -> tuple[str, str]:
+        """Inverse of :meth:`extension_authored_key` — returns
+        ``(surface, name)``. ``name`` may contain ``:`` so the tail is
+        split on the first ``:`` only."""
+        prefix = DesignMonorepoEventProtocol._EXTENSION_AUTHORED_PREFIX
+        if not key.startswith(prefix):
+            raise ValueError(
+                f"Not a DesignMonorepoEventProtocol extension_authored key: {key!r}",
+            )
+        tail = key[len(prefix):]
+        if ":" not in tail:
+            raise ValueError(
+                f"Malformed extension_authored key (no surface:name tail): {key!r}",
+            )
+        surface, name = tail.split(":", 1)
+        return surface, name
 
 
 class GitHubEventProtocol(BlackboardProtocol):

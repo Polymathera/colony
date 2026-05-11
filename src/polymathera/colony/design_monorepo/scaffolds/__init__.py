@@ -25,6 +25,7 @@ from .renderer import (
     AVAILABLE_TEMPLATES,
     ScaffoldRenderError,
     list_template_files,
+    render_extension_scaffold,
     render_template,
 )
 
@@ -33,5 +34,6 @@ __all__ = (
     "AVAILABLE_TEMPLATES",
     "ScaffoldRenderError",
     "list_template_files",
+    "render_extension_scaffold",
     "render_template",
 )

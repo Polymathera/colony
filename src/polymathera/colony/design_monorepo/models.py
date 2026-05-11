@@ -370,6 +370,68 @@ class BootstrapResult(BaseModel):
     )
 
 
+class ExtensionAuthoredPayload(BaseModel):
+    """Audit payload for an L1-E ``bootstrap_<surface>`` call.
+
+    Written to the blackboard under
+    :meth:`DesignMonorepoEventProtocol.extension_authored_key` and
+    returned by every ``ToolBuilder.bootstrap_<surface>`` action.
+    Carries the provenance that lets a future session answer "which
+    session authored this extension, when, in response to which user
+    message" (Risk #5 in the alignment plan).
+
+    ``user_message_id`` is reserved for future provenance plumbing —
+    no entry-point sets it today, so the default is ``None``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    surface: Literal[
+        "plugins", "agents", "deployments", "tools", "profiles",
+    ] = Field(
+        description=(
+            "Surface kind — must match a key in "
+            "``DEFAULT_SURFACE_DIRS``."
+        ),
+    )
+    name: str = Field(
+        description="Agent-supplied extension name (file/directory stem).",
+    )
+    relative_path: str = Field(
+        description=(
+            "Path of the authored file or directory, relative to the "
+            "design monorepo working tree."
+        ),
+    )
+    commit_sha: str = Field(
+        description="Commit that contains the new extension.",
+    )
+    template: str = Field(
+        description="Scaffold template name that produced the file.",
+    )
+    files_created: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Paths written, relative to ``relative_path``.",
+    )
+    authored_at: datetime = Field(
+        description="UTC timestamp at which the bootstrap action committed.",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Session that requested the authoring — pulled from "
+            "``get_current_session_id()`` at call time."
+        ),
+    )
+    user_message_id: str | None = Field(
+        default=None,
+        description=(
+            "Future-reserved: the user-message id that triggered the "
+            "authoring. No provenance source populates this today."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Page-change events — yielded by ``ContextPageSource.watch()`` and fed
 # directly into the convergence runtime by VCM's watch bridge.

@@ -1,0 +1,19 @@
+"""Agent ``${class_name}`` — authored via L1-E ``bootstrap_agent``.
+
+Lives at ``.colony/agents/${name}.py``. L1-A's ``discover_agents``
+walks ``.colony/agents/*.py`` and exposes the ``Agent`` subclasses
+defined in each file (re-exported / imported classes are filtered
+out by their ``__module__``).
+
+Replace the ``...`` bodies with real behaviour and re-discover.
+"""
+
+from __future__ import annotations
+
+from ${base_module} import ${base_class}
+
+
+class ${class_name}(${base_class}):
+    """${description}"""
+
+    pass
