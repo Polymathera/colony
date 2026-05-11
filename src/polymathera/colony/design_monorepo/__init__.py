@@ -49,11 +49,14 @@ from .client import (
 )
 from .identity import AgentIdentity, signing_enabled
 from .manifest import (
+    DEFAULT_SURFACE_DIRS,
     DesignMonorepoManifest,
+    ExtensionsConfig,
     LFSConfig,
     MANIFEST_RELATIVE_PATH,
     MANIFEST_SCHEMA_VERSION,
     ManifestSchemaError,
+    SurfaceConfig,
     WebhookConfig,
 )
 from .models import (
@@ -99,12 +102,15 @@ __all__ = (
     "ToolEntry",
     "ToolMatch",
     # Manifest
+    "DEFAULT_SURFACE_DIRS",
     "DesignMonorepoManifest",
+    "ExtensionsConfig",
     "LFSConfig",
     "WebhookConfig",
     "MANIFEST_RELATIVE_PATH",
     "MANIFEST_SCHEMA_VERSION",
     "ManifestSchemaError",
+    "SurfaceConfig",
     # Identity
     "AgentIdentity",
     "signing_enabled",

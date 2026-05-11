@@ -47,7 +47,16 @@ from .identity import (
     append_co_author_trailer,
     resolve_commit_identity,
 )
-from .manifest import MANIFEST_RELATIVE_PATH, DesignMonorepoManifest
+from .extensions import (
+    DiscoveredExtensions,
+    discover_all,
+    resolve_surface_dirs,
+)
+from .manifest import (
+    MANIFEST_RELATIVE_PATH,
+    DesignMonorepoManifest,
+    ManifestSchemaError,
+)
 from .repo_map import REPO_MAP_DIR, REPO_MAP_FILENAME
 from .models import (
     BootstrapResult,
@@ -342,9 +351,125 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
             capability_key=capability_key,
             app_name=app_name,
         )
+        # Lazy: discovery walks disk + imports L4 ``.py`` files, neither
+        # of which we want to do before the working_dir is actually
+        # materialized (base class may defer cloning). First access of
+        # :attr:`discovered_extensions` triggers the walk.
+        # Cache layout:
+        #   - manifest: re-parsed only when its file mtime changes
+        #     (one stat() per access, parse only on change). The
+        #     parsed manifest is what discovery + the fingerprint
+        #     both consult, so they never disagree about override
+        #     paths.
+        #   - extensions snapshot: re-computed when the fingerprint
+        #     differs, where the fingerprint = (manifest_mtime,
+        #     .colony/ mtime, mtime of each *resolved* surface dir
+        #     for the CURRENT manifest).
+        self._cached_manifest: DesignMonorepoManifest | None = None
+        self._cached_manifest_mtime: int | None = None
+        self._discovered_extensions: DiscoveredExtensions | None = None
+        self._discovered_extensions_fp: tuple[int | None, ...] | None = None
 
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"design_state", "git", "read"})
+
+    @property
+    def discovered_extensions(self) -> DiscoveredExtensions:
+        """L1-A snapshot of L4 extensions declared in this monorepo.
+
+        Walks the surface directories lazily and caches the result. The
+        cache is keyed by a mtime fingerprint over the manifest plus
+        the *actual resolved* surface dirs for the current manifest
+        (overrides if any, defaults otherwise) — so the fingerprint
+        stat()s the same paths discovery walks. Adding / removing
+        entries in any watched dir (the L1-E authoring path) auto-
+        invalidates.
+
+        Residual case the fingerprint cannot catch: editing an
+        *existing* file's contents in place. Linux dir mtime does not
+        bump on child-content modify; call :meth:`invalidate_extensions`
+        in that case.
+
+        A missing / unreadable manifest is non-fatal — discovery falls
+        back to :data:`DEFAULT_SURFACE_DIRS`.
+        """
+        manifest = self._resolve_manifest()
+        fp = self._discovery_fingerprint(manifest)
+        if self._discovered_extensions is None or self._discovered_extensions_fp != fp:
+            self._discovered_extensions = discover_all(
+                self._working_dir, manifest,
+            )
+            self._discovered_extensions_fp = fp
+        return self._discovered_extensions
+
+    def invalidate_extensions(self) -> None:
+        """Force :attr:`discovered_extensions` to re-walk on next access.
+
+        Use when an in-place edit of an existing file's contents must
+        be picked up — that's the only mutation pattern the mtime
+        fingerprint cannot catch (override-dir changes ARE caught,
+        because the fingerprint stats the resolved override paths).
+
+        Also drops the cached manifest parse so a fresh load happens
+        on next access — cheap belt-and-suspenders for the rare case
+        where the manifest's contents change but its mtime doesn't.
+        """
+        self._discovered_extensions = None
+        self._discovered_extensions_fp = None
+        self._cached_manifest = None
+        self._cached_manifest_mtime = None
+
+    def _mtime(self, p: Path) -> int | None:
+        try:
+            return p.stat().st_mtime_ns
+        except (FileNotFoundError, NotADirectoryError, PermissionError):
+            return None
+
+    def _resolve_manifest(self) -> DesignMonorepoManifest | None:
+        """Return the parsed manifest, re-reading from disk only when
+        its file mtime has changed since the last cached parse. Returns
+        ``None`` when the file is absent or unparseable; the same
+        cache slot stores both outcomes keyed by mtime, so a
+        repeatedly-malformed manifest is parsed at most once per edit.
+        """
+        manifest_path = self._working_dir / MANIFEST_RELATIVE_PATH
+        mtime = self._mtime(manifest_path)
+        if mtime == self._cached_manifest_mtime:
+            return self._cached_manifest
+        self._cached_manifest_mtime = mtime
+        if mtime is None:
+            self._cached_manifest = None
+        else:
+            try:
+                self._cached_manifest = DesignMonorepoManifest.load_path(
+                    self._working_dir,
+                )
+            except ManifestSchemaError:
+                self._cached_manifest = None
+        return self._cached_manifest
+
+    def _discovery_fingerprint(
+        self, manifest: DesignMonorepoManifest | None,
+    ) -> tuple[int | None, ...]:
+        """Mtime summary of the discovery inputs against ``manifest``.
+
+        Captures: the manifest's cached mtime (set by the most recent
+        :meth:`_resolve_manifest` call) + the mtime of ``.colony/`` +
+        the mtime of each resolved surface directory for ``manifest``.
+        ``manifest`` is always the freshly-resolved value, so the
+        fingerprint stats the dirs discovery would actually walk
+        right now — not the dirs from a previous discovery's manifest.
+        """
+
+        parts: list[int | None] = [
+            self._cached_manifest_mtime,
+            self._mtime(self._working_dir / ".colony"),
+        ]
+        for surface_dir in resolve_surface_dirs(
+            self._working_dir, manifest,
+        ).values():
+            parts.append(self._mtime(surface_dir))
+        return tuple(parts)
 
     @action_executor(planning_summary="Snapshot the program's design-monorepo state.")
     async def get_repo_state(self) -> RepoState:

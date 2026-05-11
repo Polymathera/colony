@@ -24,16 +24,71 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .models import ImportedRemote
 
 
-MANIFEST_SCHEMA_VERSION = 1
-"""Bumped whenever the manifest's on-disk shape changes incompatibly."""
+MANIFEST_SCHEMA_VERSION = 2
+"""Bumped whenever the manifest's on-disk shape changes incompatibly.
+
+v2 adds the optional ``extensions`` block (L1-A). v1 manifests still
+parse cleanly — their ``extensions`` field defaults to ``None``. The
+:mod:`polymathera.colony.tools.manifest_migrate` utility bumps existing
+v1 manifests to v2 in place."""
 
 
 MANIFEST_RELATIVE_PATH = ".colony/manifest.json"
 """Path within the design monorepo where the manifest lives."""
 
 
+DEFAULT_SURFACE_DIRS: dict[str, str] = {
+    "plugins": ".colony/plugins/",
+    "agents": ".colony/agents/",
+    "deployments": ".colony/deployments/",
+    "tools": ".colony/tools/",
+    "profiles": ".colony/profiles/",
+}
+"""Per-surface default directories under the design-monorepo root.
+
+A v2 manifest may override any of these via its ``extensions`` block; an
+omitted surface (or an entire missing ``extensions`` block) means "use
+the default — discover from this path if it exists, else surface is
+empty"."""
+
+
 class ManifestSchemaError(ValueError):
     """Raised when ``.colony/manifest.json`` is missing or malformed."""
+
+
+class SurfaceConfig(BaseModel):
+    """One ``extensions.<surface>`` entry: where to find that surface's
+    extension files inside the design monorepo (path is relative to the
+    repo root). Each surface kind shares the same shape today; per-surface
+    knobs can grow here without re-bumping the schema."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    directory: str
+
+
+class ExtensionsConfig(BaseModel):
+    """``extensions`` block on a v2+ manifest. Declares the per-surface
+    directories L1-A discovery walks. A missing surface falls back to
+    :data:`DEFAULT_SURFACE_DIRS`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    plugins: SurfaceConfig = Field(
+        default_factory=lambda: SurfaceConfig(directory=DEFAULT_SURFACE_DIRS["plugins"]),
+    )
+    agents: SurfaceConfig = Field(
+        default_factory=lambda: SurfaceConfig(directory=DEFAULT_SURFACE_DIRS["agents"]),
+    )
+    deployments: SurfaceConfig = Field(
+        default_factory=lambda: SurfaceConfig(directory=DEFAULT_SURFACE_DIRS["deployments"]),
+    )
+    tools: SurfaceConfig = Field(
+        default_factory=lambda: SurfaceConfig(directory=DEFAULT_SURFACE_DIRS["tools"]),
+    )
+    profiles: SurfaceConfig = Field(
+        default_factory=lambda: SurfaceConfig(directory=DEFAULT_SURFACE_DIRS["profiles"]),
+    )
 
 
 class LFSConfig(BaseModel):
@@ -129,6 +184,12 @@ class DesignMonorepoManifest(BaseModel):
     lfs: LFSConfig = Field(default_factory=LFSConfig)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
 
+    # L1-A: per-monorepo extension surfaces. Optional — v1 manifests parse
+    # with ``extensions=None`` (no L4 extensions surface declared); v2+
+    # manifests carry an :class:`ExtensionsConfig` so operators can
+    # override the per-surface directories.
+    extensions: ExtensionsConfig | None = None
+
     # Default branch & identity convention
     default_branch: str = Field(default="main")
     agent_email_domain: str = Field(
@@ -218,10 +279,13 @@ class DesignMonorepoManifest(BaseModel):
 
 
 __all__ = (
+    "DEFAULT_SURFACE_DIRS",
     "DesignMonorepoManifest",
+    "ExtensionsConfig",
     "LFSConfig",
     "WebhookConfig",
     "MANIFEST_SCHEMA_VERSION",
     "MANIFEST_RELATIVE_PATH",
     "ManifestSchemaError",
+    "SurfaceConfig",
 )

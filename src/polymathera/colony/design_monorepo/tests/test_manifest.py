@@ -8,12 +8,15 @@ from pathlib import Path
 import pytest
 
 from polymathera.colony.design_monorepo import (
+    DEFAULT_SURFACE_DIRS,
     DesignMonorepoManifest,
+    ExtensionsConfig,
     ImportedRemote,
     LFSConfig,
     MANIFEST_RELATIVE_PATH,
     MANIFEST_SCHEMA_VERSION,
     ManifestSchemaError,
+    SurfaceConfig,
     WebhookConfig,
 )
 
@@ -92,3 +95,72 @@ def test_webhook_defaults() -> None:
     assert isinstance(m.webhook, WebhookConfig)
     assert m.webhook.enabled is False
     assert m.webhook.endpoint is None
+
+
+# ---------------------------------------------------------------------------
+# L1-A: schema v2 ``extensions`` block — load v1 cleanly, round-trip v2.
+# ---------------------------------------------------------------------------
+
+
+def test_v1_manifest_loads_with_extensions_none(tmp_path: Path) -> None:
+    """v1 on-disk manifests (pre-L1-A) MUST keep parsing — bumping the
+    in-process schema_version to 2 does not invalidate stored v1
+    manifests. ``extensions`` defaults to None for them."""
+    payload = {"schema_version": 1, **_minimal_kwargs()}
+    p = tmp_path / MANIFEST_RELATIVE_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = DesignMonorepoManifest.load_path(tmp_path)
+    assert loaded.schema_version == 1
+    assert loaded.extensions is None
+
+
+def test_v2_manifest_round_trip_with_default_extensions(tmp_path: Path) -> None:
+    m = DesignMonorepoManifest(extensions=ExtensionsConfig(), **_minimal_kwargs())
+    m.write_path(tmp_path)
+
+    reloaded = DesignMonorepoManifest.load_path(tmp_path)
+    assert reloaded.schema_version == MANIFEST_SCHEMA_VERSION == 2
+    assert reloaded.extensions is not None
+    assert reloaded.extensions.plugins.directory == DEFAULT_SURFACE_DIRS["plugins"]
+    assert reloaded.extensions.agents.directory == DEFAULT_SURFACE_DIRS["agents"]
+    assert reloaded.extensions.deployments.directory == DEFAULT_SURFACE_DIRS["deployments"]
+    assert reloaded.extensions.tools.directory == DEFAULT_SURFACE_DIRS["tools"]
+    assert reloaded.extensions.profiles.directory == DEFAULT_SURFACE_DIRS["profiles"]
+
+
+def test_v2_manifest_per_surface_directory_override(tmp_path: Path) -> None:
+    m = DesignMonorepoManifest(
+        extensions=ExtensionsConfig(
+            tools=SurfaceConfig(directory="vendor/tooling/"),
+        ),
+        **_minimal_kwargs(),
+    )
+    m.write_path(tmp_path)
+    reloaded = DesignMonorepoManifest.load_path(tmp_path)
+    assert reloaded.extensions.tools.directory == "vendor/tooling/"
+    # Other surfaces keep defaults — overriding one does not strand the others.
+    assert reloaded.extensions.plugins.directory == DEFAULT_SURFACE_DIRS["plugins"]
+
+
+def test_extensions_block_rejects_unknown_surface(tmp_path: Path) -> None:
+    """``extra='forbid'`` on ExtensionsConfig catches typos; future schema
+    versions adding new surface kinds bump the schema_version."""
+    payload = {
+        "schema_version": 2,
+        "extensions": {"plgins": {"directory": ".colony/plugins/"}},  # typo
+        **_minimal_kwargs(),
+    }
+    p = tmp_path / MANIFEST_RELATIVE_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(Exception):  # pydantic ValidationError subclass
+        DesignMonorepoManifest.load_path(tmp_path)
+
+
+def test_surface_config_rejects_unknown_field() -> None:
+    """Per-surface config locks unknown fields out — future per-surface
+    knobs grow the SurfaceConfig schema explicitly."""
+    with pytest.raises(Exception):
+        SurfaceConfig.model_validate({"directory": ".colony/plugins/", "weird": 1})
