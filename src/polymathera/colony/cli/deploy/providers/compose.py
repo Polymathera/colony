@@ -12,11 +12,17 @@ from overrides import override
 
 from ..config import DeployConfig
 from ..env import collect_passthrough_env, load_dotenv
+from ..extensions import dedupe_packages, lint_setup_commands
 from ..health import (
     docker_container_healthy,
     docker_container_running,
     redis_ping,
     wait_until_ready,
+)
+from ..runtime_writer import (
+    write_cluster_runtime,
+    write_operator_config,
+    write_path_extensions_override,
 )
 from .base import DeploymentProvider, ProviderStatus, ServiceInfo
 
@@ -24,6 +30,16 @@ from .base import DeploymentProvider, ProviderStatus, ServiceInfo
 _COMPOSE_FILE = Path(__file__).parent.parent / "docker" / "docker-compose.yml"
 # User .env file for API keys (same directory as .env.template)
 _ENV_FILE = Path(__file__).parent.parent / ".env"
+# Docker build artefacts: base/runtime Dockerfiles and the per-run
+# .runtime/ directory (cluster-runtime.json + path-extensions override).
+_DOCKER_DIR = _COMPOSE_FILE.parent
+_DOCKERFILE_BASE = _DOCKER_DIR / "Dockerfile.base"
+_BUILD_CONTEXT = _DOCKER_DIR.parents[5]  # .../colony/ — same as compose's context: ../../../../../..
+_RUNTIME_DIR = _DOCKER_DIR / ".runtime"
+# Tag of the locally-built base image. Match Dockerfile.local's default
+# ``COLONY_BASE_IMAGE`` ARG so compose's runtime build picks it up
+# without needing --build-arg.
+_BASE_IMAGE_TAG = "polymathera/colony-base:local"
 
 
 class DockerComposeProvider(DeploymentProvider):
@@ -32,7 +48,9 @@ class DockerComposeProvider(DeploymentProvider):
     def __init__(self, config: DeployConfig) -> None:
         self._config = config
 
-    def _compose_cmd(self, *args: str) -> list[str]:
+    def _compose_cmd(
+        self, *args: str, extra_files: list[Path] | None = None,
+    ) -> list[str]:
         """Build a docker compose command with the correct file path.
 
         Always passes ``--env-file`` when ``deploy/.env`` is present so
@@ -43,8 +61,14 @@ class DockerComposeProvider(DeploymentProvider):
         ``--env-file``). The subprocess env built by
         :meth:`_compose_subprocess_env` is what makes ``.env``
         authoritative — see that method's docstring.
+
+        ``extra_files`` are additional ``-f`` arguments appended after the
+        primary compose file; compose merges them in order. Used by
+        :meth:`up` to layer in path-source extension volume mounts.
         """
         cmd = ["docker", "compose", "-f", str(_COMPOSE_FILE)]
+        for extra in (extra_files or []):
+            cmd.extend(["-f", str(extra)])
         if _ENV_FILE.is_file():
             cmd.extend(["--env-file", str(_ENV_FILE)])
         cmd.extend(args)
@@ -101,6 +125,99 @@ class DockerComposeProvider(DeploymentProvider):
             await proc.wait()
             return proc.returncode, "", ""
 
+    async def _build_base_image(
+        self, *, on_status: Callable[[str], None] | None,
+    ) -> None:
+        """Build ``polymathera/colony-base:local`` from Dockerfile.base.
+
+        Compose's runtime build (Dockerfile.local) does ``FROM
+        polymathera/colony-base:local`` — that tag must exist before the
+        compose build runs. First-run is slow (Python deps, system
+        packages, Node, Linguist); cached layers thereafter.
+        """
+        if on_status:
+            on_status(
+                f"Building {_BASE_IMAGE_TAG} (heavy deps; cached on subsequent runs)...",
+            )
+        rc, _, stderr = await self._exec(
+            "docker", "build",
+            "-f", str(_DOCKERFILE_BASE),
+            "-t", _BASE_IMAGE_TAG,
+            str(_BUILD_CONTEXT),
+            capture=False, env=self._compose_subprocess_env(),
+        )
+        if rc != 0:
+            raise RuntimeError(f"Base image build failed:\n{stderr}")
+
+    async def _build_bake_image(
+        self,
+        *,
+        runtime_cfg,
+        runtime_dir: Path,
+        on_status: Callable[[str], None] | None,
+    ) -> str:
+        """Snapshot the resolved ``cluster.extensions.packages`` into a
+        pinned ``colony-local:<hash>`` image. ``FROM colony:local`` (the
+        runtime image already built by compose) and pip-installs the
+        resolved package list into the same persistent-overlay path the
+        container-start hook reads, so the hook's hash check skips the
+        install on every boot.
+
+        Returns the bake image tag for compose to pick up via
+        ``COLONY_IMAGE``. Path-source packages are not yet supported in
+        bake mode (they require copying host paths into the build context;
+        deferred). Use the default fast path for path-source workflows.
+        """
+        pkgs = dedupe_packages(runtime_cfg.extensions.packages)
+        path_pkgs = [p for p in pkgs if p.source == "path"]
+        if path_pkgs:
+            names = ", ".join(p.name for p in path_pkgs)
+            raise NotImplementedError(
+                f"--bake does not yet support path-source packages ({names}). "
+                f"Use the default fast path for path-source workflows.",
+            )
+        from ..extensions import resolve_pip_args, resolved_hash
+        pip_args = resolve_pip_args(pkgs)  # version-only — no yaml_dir needed
+        h = resolved_hash(
+            pkgs,
+            setup_commands=runtime_cfg.setup_commands,
+            head_setup_commands=runtime_cfg.head_setup_commands,
+            worker_setup_commands=runtime_cfg.worker_setup_commands,
+        )
+        bake_dir = runtime_dir / f"bake-{h}"
+        bake_dir.mkdir(parents=True, exist_ok=True)
+        bake_dockerfile = bake_dir / "Dockerfile"
+        # Same /opt/colony-overlay layout the container-start hook reads.
+        # Writing the hash file under the overlay tells the hook "already
+        # installed; skip"; setup_commands still run from the JSON.
+        if pip_args:
+            install_cmd = "pip install --target=/opt/colony-overlay " + " ".join(
+                f'"{arg}"' for arg in pip_args
+            )
+        else:
+            install_cmd = "true"
+        bake_dockerfile.write_text(
+            "FROM colony:local\n"
+            "USER root\n"
+            f"RUN {install_cmd} && "
+            f'echo "{h}" > /opt/colony-overlay/.installed-hash && '
+            "chown -R ray:ray /opt/colony-overlay\n"
+            "USER ray\n",
+        )
+        bake_tag = f"colony-local:{h}"
+        if on_status:
+            on_status(f"Baking pinned image {bake_tag} ({len(pip_args)} package(s))...")
+        rc, _, stderr = await self._exec(
+            "docker", "build",
+            "-f", str(bake_dockerfile),
+            "-t", bake_tag,
+            str(bake_dir),
+            capture=False, env=self._compose_subprocess_env(),
+        )
+        if rc != 0:
+            raise RuntimeError(f"Bake image build failed:\n{stderr}")
+        return bake_tag
+
     @override
     async def up(
         self,
@@ -108,30 +225,65 @@ class DockerComposeProvider(DeploymentProvider):
         workers: int = 1,
         config_path: str | None = None,
         on_status: Callable[[str], None] | None = None,
+        bake: bool = False,
     ) -> list[ServiceInfo]:
         """Build image and start Ray cluster + Redis."""
         def _log(msg: str) -> None:
             if on_status:
                 on_status(msg)
 
+        # L1-G runtime artefacts: cluster-runtime.json (always written, stub
+        # when no extensions), the operator config (always written so the
+        # ``/etc/colony/cluster.yaml`` bind mount has a real source —
+        # otherwise ray-head's entrypoint hits FileNotFoundError before
+        # colony-env's docker-cp can populate /mnt/shared/config.yaml), and
+        # the optional path-extensions override. All must exist BEFORE
+        # compose up so docker-compose's bind mounts resolve.
+        runtime_cfg = write_cluster_runtime(
+            config_path=config_path,
+            runtime_dir=_RUNTIME_DIR,
+            bake_pip_inline=bake,
+        )
+        write_operator_config(config_path=config_path, runtime_dir=_RUNTIME_DIR)
+        for warning in lint_setup_commands(runtime_cfg):
+            _log(f"WARN: {warning}")
+        yaml_dir = Path(config_path).resolve().parent if config_path else None
+        override_path = write_path_extensions_override(
+            packages=runtime_cfg.extensions.packages,
+            yaml_dir=yaml_dir,
+            runtime_dir=_RUNTIME_DIR,
+        )
+        extra_compose_files = [override_path] if override_path else []
+
         if build:
-            _log("Building colony:local image...")
+            await self._build_base_image(on_status=on_status)
+            _log("Building colony:local image (runtime stage)...")
             # Stream build output to terminal so user sees download/compile progress
             rc, _, stderr = await self._exec(
-                *self._compose_cmd("build"), capture=False,
+                *self._compose_cmd("build", extra_files=extra_compose_files),
+                capture=False,
                 env=self._compose_subprocess_env(),
             )
             if rc != 0:
                 raise RuntimeError(f"Docker Compose build failed:\n{stderr}")
+
+        compose_env = self._compose_subprocess_env()
+        if bake:
+            bake_tag = await self._build_bake_image(
+                runtime_cfg=runtime_cfg, runtime_dir=_RUNTIME_DIR,
+                on_status=on_status,
+            )
+            compose_env["COLONY_IMAGE"] = bake_tag
 
         _log(f"Starting services (workers={workers})...")
         rc, _, stderr = await self._exec(
             *self._compose_cmd(
                 "up", "-d",
                 "--scale", f"ray-worker={workers}",
+                extra_files=extra_compose_files,
             ),
             capture=True,
-            env=self._compose_subprocess_env(),
+            env=compose_env,
         )
         if rc != 0:
             raise RuntimeError(f"Docker Compose up failed:\n{stderr}")
@@ -426,8 +578,83 @@ class DockerComposeProvider(DeploymentProvider):
         # Check compose file exists
         checks["compose_file"] = _COMPOSE_FILE.is_file()
 
-        # Check Dockerfile exists
-        dockerfile = _COMPOSE_FILE.parent / "Dockerfile.local"
-        checks["dockerfile"] = dockerfile.is_file()
+        # Check Dockerfile exists (base + runtime)
+        checks["dockerfile_base"] = _DOCKERFILE_BASE.is_file()
+        checks["dockerfile_local"] = (_DOCKER_DIR / "Dockerfile.local").is_file()
 
         return checks
+
+    @override
+    async def image_info(self) -> dict[str, list[str]]:
+        """Inspect the running ray-head: list polymathera-* packages, splitting
+        baked (from the runtime image) vs. overlay-installed (from the L1-G
+        extensions overlay at /opt/colony-overlay).
+        """
+        head = self._config.ray.head_container_name
+        # ``pip list --path`` shows packages installed in a specific dir.
+        # ``--format freeze`` is just "name==version", easy to parse.
+        rc_overlay, overlay_out, _ = await self._exec(
+            "docker", "exec", head,
+            "pip", "list", "--path", "/opt/colony-overlay", "--format", "freeze",
+        )
+        # All polymathera-* — baked + overlay together. Subtract overlay to
+        # get baked. ``pip list`` (no --path) lists everything on sys.path.
+        rc_all, all_out, _ = await self._exec(
+            "docker", "exec", head, "pip", "list", "--format", "freeze",
+        )
+        if rc_all != 0:
+            raise RuntimeError(
+                f"docker exec {head} pip list failed; is the cluster up?",
+            )
+        overlay_lines = [
+            line for line in (overlay_out or "").splitlines()
+            if line.strip() and line.lower().startswith("polymathera")
+        ]
+        all_polymathera = [
+            line for line in all_out.splitlines()
+            if line.strip() and line.lower().startswith("polymathera")
+        ]
+        overlay_set = set(overlay_lines)
+        baked_lines = [line for line in all_polymathera if line not in overlay_set]
+        return {"baked": baked_lines, "overlay": overlay_lines}
+
+    @override
+    async def image_build(
+        self,
+        config_path: str | None = None,
+        bake: bool = False,
+        on_status: Callable[[str], None] | None = None,
+    ) -> str:
+        """Build the base + runtime images (and optionally a bake image)
+        without bringing the cluster up. Returns the final image tag.
+        """
+        runtime_cfg = write_cluster_runtime(
+            config_path=config_path,
+            runtime_dir=_RUNTIME_DIR,
+            bake_pip_inline=bake,
+        )
+        write_operator_config(config_path=config_path, runtime_dir=_RUNTIME_DIR)
+        yaml_dir = Path(config_path).resolve().parent if config_path else None
+        override_path = write_path_extensions_override(
+            packages=runtime_cfg.extensions.packages,
+            yaml_dir=yaml_dir,
+            runtime_dir=_RUNTIME_DIR,
+        )
+        extra_compose_files = [override_path] if override_path else []
+
+        await self._build_base_image(on_status=on_status)
+        if on_status:
+            on_status("Building colony:local image (runtime stage)...")
+        rc, _, stderr = await self._exec(
+            *self._compose_cmd("build", extra_files=extra_compose_files),
+            capture=False, env=self._compose_subprocess_env(),
+        )
+        if rc != 0:
+            raise RuntimeError(f"Docker Compose build failed:\n{stderr}")
+
+        if bake:
+            return await self._build_bake_image(
+                runtime_cfg=runtime_cfg, runtime_dir=_RUNTIME_DIR,
+                on_status=on_status,
+            )
+        return "colony:local"

@@ -10,6 +10,20 @@
 
 set -e
 
+# L1-G: install ``cluster.extensions.packages`` into the persistent overlay
+# and run head-role setup commands BEFORE Ray starts, so any extension
+# packages and any operator-supplied setup are visible to the Ray process
+# tree. The hook is a no-op when no operator config is present. Run as a
+# subprocess so its ``set -euo pipefail`` does not leak into this script;
+# we explicitly export PYTHONPATH afterward so the overlay is importable
+# in everything the head spawns.
+HOOK="$(dirname "$0")/cluster-runtime-hook.sh"
+OVERLAY_DIR="${COLONY_OVERLAY_DIR:-/opt/colony-overlay}"
+if [ -x "$HOOK" ]; then
+    "$HOOK" head
+fi
+export PYTHONPATH="$OVERLAY_DIR:${PYTHONPATH:-}"
+
 echo "[colony] Starting Ray head node..."
 ray start --head \
     --port=6379 \

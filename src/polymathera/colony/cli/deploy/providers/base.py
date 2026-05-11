@@ -34,8 +34,17 @@ class DeploymentProvider(ABC):
         workers: int = 1,
         config_path: str | None = None,
         on_status: Callable[[str], None] | None = None,
+        bake: bool = False,
     ) -> list[ServiceInfo]:
-        """Start all infrastructure. Returns status of each service."""
+        """Start all infrastructure. Returns status of each service.
+
+        ``bake=True`` snapshots the resolved L1-G ``cluster.extensions.packages``
+        into a pinned ``colony-local:<hash>`` image so the container-start
+        hook does not need to pip-install on every boot. Default fast path
+        (``bake=False``) installs into a persistent overlay volume at
+        container start and re-uses it across restarts via the resolved
+        hash.
+        """
 
     @abstractmethod
     async def down(self) -> None:
@@ -61,3 +70,22 @@ class DeploymentProvider(ABC):
     @abstractmethod
     async def doctor(self) -> dict[str, bool]:
         """Check prerequisites. Returns {check_name: passed}."""
+
+    @abstractmethod
+    async def image_info(self) -> dict[str, list[str]]:
+        """Inspect the running cluster's images: which polymathera-* packages
+        are baked into the runtime image vs. overlay-installed at container
+        start. Returns ``{"baked": [pkg_lines], "overlay": [pkg_lines]}``.
+        Each entry is a ``"name version"`` line as ``pip list`` prints it.
+        """
+
+    @abstractmethod
+    async def image_build(
+        self,
+        config_path: str | None = None,
+        bake: bool = False,
+        on_status: Callable[[str], None] | None = None,
+    ) -> str:
+        """Build the base + runtime images (and optionally a bake image)
+        WITHOUT bringing the cluster up. Returns the final image tag the
+        cluster would run."""

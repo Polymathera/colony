@@ -30,9 +30,11 @@ class DeploymentManager:
         workers: int = 1,
         config_path: str | None = None,
         on_status: Callable[[str], None] | None = None,
+        bake: bool = False,
     ) -> list[ServiceInfo]:
         return await self._provider.up(
-            build=build, workers=workers, config_path=config_path, on_status=on_status,
+            build=build, workers=workers, config_path=config_path,
+            on_status=on_status, bake=bake,
         )
 
     async def down(self) -> None:
@@ -63,3 +65,16 @@ class DeploymentManager:
 
     async def doctor(self) -> dict[str, bool]:
         return await self._provider.doctor()
+
+    async def image_info(self) -> dict[str, list[str]]:
+        return await self._provider.image_info()
+
+    async def image_build(
+        self,
+        config_path: str | None = None,
+        bake: bool = False,
+        on_status: Callable[[str], None] | None = None,
+    ) -> str:
+        return await self._provider.image_build(
+            config_path=config_path, bake=bake, on_status=on_status,
+        )

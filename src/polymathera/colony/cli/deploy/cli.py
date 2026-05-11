@@ -42,6 +42,13 @@ def up(
     no_build: bool = typer.Option(False, "--no-build", help="Skip image build"),
     k8s: bool = typer.Option(False, "--k8s", help="Use Kind + KubeRay (advanced)"),
     config: Optional[str] = typer.Option(None, "--config", "-c", help="Path to cluster YAML config to use for auto-deploy"),
+    bake: bool = typer.Option(
+        False, "--bake",
+        help="Snapshot resolved cluster.extensions.packages into a pinned "
+             "``colony-local:<hash>`` image instead of installing into a "
+             "persistent overlay at container start. Slower up, faster steady"
+             "-state, fully reproducible — recommended for production.",
+    ),
 ):
     """Build Colony image and start Ray cluster + Redis."""
     deploy_config = DeployConfig(mode="k8s" if k8s else "compose")
@@ -53,6 +60,7 @@ def up(
             workers=workers,
             config_path=config,
             on_status=lambda msg: console.print(f"  [blue]{msg}[/blue]"),
+            bake=bake,
         ))
     except RuntimeError as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -191,6 +199,54 @@ def dashboard(
     url = f"http://localhost:{port}"
     console.print(f"Opening dashboard at [blue]{url}[/blue]")
     webbrowser.open(url)
+
+
+@app.command("image-info")
+def image_info():
+    """List polymathera-* packages installed in the running cluster.
+
+    Splits ``baked`` (in the runtime image) vs ``overlay`` (installed at
+    container start from ``cluster.extensions.packages``). Useful for
+    debugging "why isn't my CPS entry showing up".
+    """
+    manager = DeploymentManager()
+    try:
+        info = _run(manager.image_info())
+    except RuntimeError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    for kind in ("baked", "overlay"):
+        lines = info.get(kind, [])
+        header = f"[bold]{kind} ({len(lines)})[/bold]"
+        console.print(header)
+        if not lines:
+            console.print("  [dim](none)[/dim]")
+            continue
+        for line in lines:
+            console.print(f"  {line}")
+
+
+@app.command("image-build")
+def image_build(
+    config: Optional[str] = typer.Option(None, "--config", "-c", help="Path to cluster YAML config"),
+    bake: bool = typer.Option(
+        False, "--bake",
+        help="Build a pinned ``colony-local:<hash>`` image with extensions baked in.",
+    ),
+):
+    """Build base + runtime images (and optionally bake) without bringing the cluster up."""
+    manager = DeploymentManager()
+    try:
+        tag = _run(manager.image_build(
+            config_path=config, bake=bake,
+            on_status=lambda msg: console.print(f"  [blue]{msg}[/blue]"),
+        ))
+    except (RuntimeError, NotImplementedError) as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print(f"[green]Built:[/green] {tag}")
 
 
 @app.command()

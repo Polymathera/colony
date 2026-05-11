@@ -1,0 +1,31 @@
+# Optional GPU overlay for ``colony-env up``. Activate by adding ``-f`` to
+# the compose invocation:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Reserves all visible NVIDIA GPUs for ray-head and each ray-worker. Requires
+# the NVIDIA Container Toolkit on the host (Docker 19.03+); falls back to a
+# clear Docker error if the toolkit is missing rather than silently dropping
+# GPU resource requests.
+#
+# This file deliberately contains *only* the GPU additions — every other
+# field merges from docker-compose.yml.
+
+services:
+  ray-head:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  ray-worker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

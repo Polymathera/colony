@@ -1,8 +1,16 @@
-# Colony local development image — CPU only
-# Adapted from deployment/docker/Dockerfile.ray-cpu (production)
-# Stripped: SSH, AWS CLI, NFS, monitoring, metrics scripts
-# Kept: All Colony deps, faiss-cpu, git, linguist, Ray user setup
-FROM rayproject/ray:2.49.0-py311-cpu
+# Colony local development image — CPU only.
+#
+# ``FROM`` the base image (heavy deps, system packages, Node, Linguist, Ray
+# user setup). This file only adds Colony's own source code, builds the
+# dashboard frontend, fixes permissions, and sets the runtime ENV / USER /
+# CMD.
+#
+# Build context is the colony repo root. ``COLONY_BASE_IMAGE`` defaults to
+# ``polymathera/colony-base:local`` for ``colony-env up`` workflows, which
+# build the base in a prior step. CI / release builds override this with
+# the published tag (``polymathera/colony-base:<colony-version>``).
+ARG COLONY_BASE_IMAGE=polymathera/colony-base:local
+FROM ${COLONY_BASE_IMAGE}
 
 ARG RAY_CONTAINER_USER=ray
 ARG APP_MOUNT_PATH=/home/ray/app
@@ -10,111 +18,26 @@ ARG APP_MOUNT_PATH=/home/ray/app
 USER root
 WORKDIR ${APP_MOUNT_PATH}
 
-# Prevent interactive prompts
-ENV DEBIAN_FRONTEND=noninteractive
-RUN ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime
-
-# Copy project configuration first (layer caching)
-COPY pyproject.toml poetry.lock ./
-
-# Install Poetry
-ARG POLYMATHERA_PYTHON_CMD=python3.11
-RUN ${POLYMATHERA_PYTHON_CMD} -m pip install --no-cache-dir poetry==1.7.1
-
-# Upgrade virtualenv to avoid stale cache conflicts (virtualenv.seed.embed)
-# RUN pip install --no-cache-dir --upgrade virtualenv==20.36.1
-
-# Install Python dependencies.
-#
-# python-louvain is sdist-only and triggers a poetry-internal virtualenv bug
-# during its source build (``VirtualEnvOptions`` missing ``py_version``) when
-# poetry runs in the middle of this large install set. pip's build isolation
-# is unaffected. Pre-installing it here makes poetry see ``Already installed``
-# during ``poetry install`` and skip the source build entirely. Pin matches
-# the committed ``poetry.lock``.
-RUN --mount=type=cache,target=/root/.cache \
-    poetry config virtualenvs.create false && \
-    poetry config virtualenvs.in-project false && \
-    pip install --no-cache-dir python-louvain==0.16 && \
-    poetry install --only main --extras "code_analysis cpu dashboard observability knowledge design_monorepo" --no-interaction --no-ansi --no-root && \
-    pip install --no-cache-dir faiss-cpu==1.7.4
-
-# System dependencies (subset of production — no SSH, AWS, NFS, monitoring)
-RUN apt-get update -yq && apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    git-lfs \
-    graphviz \
-    graphviz-dev \
-    pkg-config \
-    libmagic1 \
-    python3-dev \
-    libblas-dev \
-    liblapack-dev \
-    libopenblas-dev \
-    cloc \
-    ruby-dev \
-    libssl-dev \
-    libkrb5-dev \
-    libicu-dev \
-    zlib1g-dev \
-    libcurl4-openssl-dev \
-    cmake \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Credential helpers for HTTPS Git operations against github.com /
-# gitlab.com. git invokes the helper when it needs auth and reads
-# ``username=oauth2`` plus the token from its stdout — the same scheme
-# ``gh auth setup-git`` configures on a developer's laptop, and the only
-# scheme that works for every PAT type GitHub issues today (classic,
-# fine-grained, App installation). ``$GITHUB_TOKEN`` / ``$GITLAB_TOKEN``
-# expand from the container environment at git-invocation time, so the
-# image ships only the helper's literal text — never the secret. Written
-# to ``/etc/gitconfig`` (``--system``) so it covers every user in the
-# container (root, ``RAY_CONTAINER_USER``, etc.). An unset env var
-# yields git's standard "Invalid username or token" failure, which the
-# auth-error classifier surfaces as a 401 in the dashboard.
-RUN git config --system credential.https://github.com.helper \
-        '!f() { echo "username=oauth2"; echo "password=$GITHUB_TOKEN"; }; f' \
- && git config --system credential.https://gitlab.com.helper \
-        '!f() { echo "username=oauth2"; echo "password=$GITLAB_TOKEN"; }; f'
-
-# Node.js (for building the dashboard frontend)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
-    rm -rf /var/lib/apt/lists/*
-
-# Linguist Ruby gem (code metrics analysis)
-RUN gem install github-linguist
-
-# Create ray user group if needed and set up permissions
-RUN groupadd -r ${RAY_CONTAINER_USER} 2>/dev/null || true && \
-    useradd -r -g ${RAY_CONTAINER_USER} -s /bin/bash ${RAY_CONTAINER_USER} 2>/dev/null || true && \
-    usermod -aG sudo ${RAY_CONTAINER_USER} && \
-    echo "${RAY_CONTAINER_USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-
-# Copy project code
+# Copy Colony's own source. The base image already installed the Python dep
+# tree from a prior pyproject.toml + poetry.lock; Colony itself is on
+# PYTHONPATH (set in the base via ``ENV PYTHONPATH=${APP_MOUNT_PATH}/src``),
+# not pip-installed. Operators who edit pyproject.toml must rebuild the base.
 COPY --chown=${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} . .
 
-# Build dashboard frontend
+# Build dashboard frontend (depends on the source COPY above).
 RUN cd src/polymathera/colony/web_ui/frontend && npm install && npm run build && rm -rf node_modules
 
 # Fix permissions
 # /mnt/shared is the mount point for the colony-shared Docker volume.
 # Docker named volumes inherit ownership from the image on first creation.
-RUN mkdir -p /tmp/ray /mnt/shared \
+RUN mkdir -p /tmp/ray /mnt/shared /opt/colony-overlay \
         /home/${RAY_CONTAINER_USER}/.config \
         /home/${RAY_CONTAINER_USER}/.local && \
-    chown -R ${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} /tmp/ray /mnt/shared && \
+    chown -R ${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} /tmp/ray /mnt/shared /opt/colony-overlay && \
     chown -R ${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} ${APP_MOUNT_PATH} && \
     chmod -R 755 ${APP_MOUNT_PATH} && \
     chown -R ${RAY_CONTAINER_USER}:users /home/${RAY_CONTAINER_USER}/.config && \
     chown -R ${RAY_CONTAINER_USER}:users /home/${RAY_CONTAINER_USER}/.local
-
-ENV RAY_DISABLE_DOCKER_CPU_WARNING=1
-ENV PYTHONPATH=${APP_MOUNT_PATH}/src
 
 USER ${RAY_CONTAINER_USER}
 CMD ["/bin/bash"]

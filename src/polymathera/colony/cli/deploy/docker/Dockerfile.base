@@ -1,0 +1,116 @@
+# Colony base image — heavy dependencies pinned to a Colony release.
+# Published as ``polymathera/colony-base:<colony-version>``. Users layer their
+# own extensions on top via ``FROM polymathera/colony-base:<colony-version>``.
+#
+# Excludes Colony's own source code and the dashboard frontend build (those
+# live in Dockerfile.local on top of this base). Does include the Python
+# dependency tree pinned to the release's pyproject.toml + poetry.lock —
+# bumping a Colony dep requires rebuilding the base.
+#
+# Build context is the colony repo root (where pyproject.toml lives), same
+# as Dockerfile.local.
+FROM rayproject/ray:2.49.0-py311-cpu
+
+ARG RAY_CONTAINER_USER=ray
+ARG APP_MOUNT_PATH=/home/ray/app
+ARG POLYMATHERA_PYTHON_CMD=python3.11
+
+USER root
+WORKDIR ${APP_MOUNT_PATH}
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime
+
+# Python dependency tree, pinned to this release's pyproject.toml + poetry.lock.
+# Only the lock files are copied here so the base image's content is
+# independent of Colony's source tree; downstream layers (Dockerfile.local)
+# supply the source.
+COPY pyproject.toml poetry.lock ./
+
+# Install Poetry
+RUN ${POLYMATHERA_PYTHON_CMD} -m pip install --no-cache-dir poetry==1.7.1
+
+# Upgrade virtualenv to avoid stale cache conflicts (virtualenv.seed.embed)
+# RUN pip install --no-cache-dir --upgrade virtualenv==20.36.1
+
+# Install Python dependencies.
+#
+# python-louvain is sdist-only and triggers a poetry-internal virtualenv bug
+# during its source build (``VirtualEnvOptions`` missing ``py_version``) when
+# poetry runs in the middle of this large install set. pip's build isolation
+# is unaffected. Pre-installing it here makes poetry see ``Already installed``
+# during ``poetry install`` and skip the source build entirely. Pin matches
+# the committed ``poetry.lock``.
+RUN --mount=type=cache,target=/root/.cache \
+    poetry config virtualenvs.create false && \
+    poetry config virtualenvs.in-project false && \
+    pip install --no-cache-dir python-louvain==0.16 && \
+    poetry install --only main --extras "code_analysis cpu dashboard observability knowledge design_monorepo" --no-interaction --no-ansi --no-root && \
+    pip install --no-cache-dir faiss-cpu==1.7.4
+
+# System dependencies (subset of production — no SSH, AWS, NFS, monitoring)
+RUN apt-get update -yq && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    git-lfs \
+    graphviz \
+    graphviz-dev \
+    pkg-config \
+    libmagic1 \
+    python3-dev \
+    libblas-dev \
+    liblapack-dev \
+    libopenblas-dev \
+    cloc \
+    ruby-dev \
+    libssl-dev \
+    libkrb5-dev \
+    libicu-dev \
+    zlib1g-dev \
+    libcurl4-openssl-dev \
+    cmake \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+
+# Credential helpers for HTTPS Git operations against github.com /
+# gitlab.com. git invokes the helper when it needs auth and reads
+# ``username=oauth2`` plus the token from its stdout — the same scheme
+# ``gh auth setup-git`` configures on a developer's laptop, and the only
+# scheme that works for every PAT type GitHub issues today (classic,
+# fine-grained, App installation). ``$GITHUB_TOKEN`` / ``$GITLAB_TOKEN``
+# expand from the container environment at git-invocation time, so the
+# image ships only the helper's literal text — never the secret. Written
+# to ``/etc/gitconfig`` (``--system``) so it covers every user in the
+# container (root, ``RAY_CONTAINER_USER``, etc.). An unset env var
+# yields git's standard "Invalid username or token" failure, which the
+# auth-error classifier surfaces as a 401 in the dashboard.
+RUN git config --system credential.https://github.com.helper \
+        '!f() { echo "username=oauth2"; echo "password=$GITHUB_TOKEN"; }; f' \
+ && git config --system credential.https://gitlab.com.helper \
+        '!f() { echo "username=oauth2"; echo "password=$GITLAB_TOKEN"; }; f'
+
+# Node.js (for building the dashboard frontend in Dockerfile.local)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# Linguist Ruby gem (code metrics analysis)
+RUN gem install github-linguist
+
+# Create ray user group if needed and set up permissions
+RUN groupadd -r ${RAY_CONTAINER_USER} 2>/dev/null || true && \
+    useradd -r -g ${RAY_CONTAINER_USER} -s /bin/bash ${RAY_CONTAINER_USER} 2>/dev/null || true && \
+    usermod -aG sudo ${RAY_CONTAINER_USER} && \
+    echo "${RAY_CONTAINER_USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+ENV RAY_DISABLE_DOCKER_CPU_WARNING=1
+# /opt/colony-overlay is the persistent overlay the L1-G container-start hook
+# pip-installs ``cluster.extensions.packages`` into. Baking it into the image's
+# PYTHONPATH ENV means every Python invocation in the container — including
+# ad-hoc ``docker exec`` shells — sees the overlay; the hook's own
+# ``export PYTHONPATH=...`` would only reach the service command it exec's.
+# Non-existent at image-build time; Python tolerates missing path entries.
+ENV PYTHONPATH=/opt/colony-overlay:${APP_MOUNT_PATH}/src
+

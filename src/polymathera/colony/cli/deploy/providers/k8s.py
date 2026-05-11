@@ -34,6 +34,7 @@ class KindKubeRayProvider(DeploymentProvider):
         workers: int = 1,
         config_path: str | None = None,
         on_status: Callable[[str], None] | None = None,
+        bake: bool = False,
     ) -> list[ServiceInfo]:
         raise NotImplementedError(
             "Kind + KubeRay deployment is not yet implemented. "
@@ -62,4 +63,17 @@ class KindKubeRayProvider(DeploymentProvider):
         raise NotImplementedError("Kind + KubeRay deployment is not yet implemented.")
 
     async def doctor(self) -> dict[str, bool]:
+        raise NotImplementedError("Kind + KubeRay deployment is not yet implemented.")
+
+    @override
+    async def image_info(self) -> dict[str, list[str]]:
+        raise NotImplementedError("Kind + KubeRay deployment is not yet implemented.")
+
+    @override
+    async def image_build(
+        self,
+        config_path: str | None = None,
+        bake: bool = False,
+        on_status: Callable[[str], None] | None = None,
+    ) -> str:
         raise NotImplementedError("Kind + KubeRay deployment is not yet implemented.")

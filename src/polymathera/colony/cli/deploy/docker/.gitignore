@@ -1,0 +1,4 @@
+# Generated at runtime by ``colony-env up``. Holds cluster-runtime.json
+# (the L1-G operator-config snapshot) and any other ephemeral state
+# bind-mounted into colony services.
+.runtime/

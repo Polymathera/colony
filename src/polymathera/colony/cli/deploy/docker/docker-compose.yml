@@ -7,7 +7,7 @@ services:
     build:
       context: ../../../../../..   # colony repo root (where pyproject.toml lives)
       dockerfile: src/polymathera/colony/cli/deploy/docker/Dockerfile.local
-    image: colony:local
+    image: ${COLONY_IMAGE:-colony:local}
     container_name: colony-ray-head
     command: ["/bin/bash", "/home/ray/app/src/polymathera/colony/cli/deploy/docker/ray-head-entrypoint.sh"]
     ports:
@@ -16,6 +16,20 @@ services:
       - "${COLONY_METRICS_PORT:-9090}:9090"
     volumes:
       - colony-shared:/mnt/shared
+      - colony-overlay:/opt/colony-overlay
+      # L1-G runtime config: written by ``colony-env up`` before compose
+      # invocation. The container-start hook reads it on boot. The host
+      # path always exists (colony-env writes a stub when no extensions
+      # are configured) so the bind mount never silently turns into a
+      # directory.
+      - ./.runtime/cluster-runtime.json:/etc/colony/cluster-runtime.json:ro
+      # Operator YAML (the ``--config`` arg to ``colony-env up``) materialized
+      # into ``.runtime/operator-config.yaml`` before compose runs. The
+      # ray-head entrypoint checks /etc/colony/cluster.yaml *first* ahead of
+      # the /mnt/shared/config.yaml fallback, so this bind sidesteps the
+      # ``docker cp`` race (polymath deploy would otherwise read /mnt/shared
+      # before colony-env can populate it and exit with FileNotFoundError).
+      - ./.runtime/operator-config.yaml:/etc/colony/cluster.yaml:ro
       # Dev-only: lets SandboxedShellCapability spawn sibling containers
       # on the host Docker daemon. Production should talk to a remote
       # daemon over TLS via DOCKER_HOST — see the capability design doc.
@@ -94,7 +108,7 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
-    shm_size: '4gb'
+    shm_size: ${COLONY_SHM_SIZE:-4gb}
     networks:
       - colony-net
     healthcheck:
@@ -105,13 +119,30 @@ services:
       start_period: 30s
 
   ray-worker:
-    image: colony:local
-    command: >
-      ray start
-      --address=ray-head:6379
-      --block
+    image: ${COLONY_IMAGE:-colony:local}
+    command:
+      - /home/ray/app/src/polymathera/colony/cli/deploy/docker/cluster-runtime-hook.sh
+      - worker
+      - --
+      - bash
+      - -c
+      - "ray start --address=ray-head:6379 --block"
     volumes:
       - colony-shared:/mnt/shared
+      - colony-overlay:/opt/colony-overlay
+      # L1-G runtime config: written by ``colony-env up`` before compose
+      # invocation. The container-start hook reads it on boot. The host
+      # path always exists (colony-env writes a stub when no extensions
+      # are configured) so the bind mount never silently turns into a
+      # directory.
+      - ./.runtime/cluster-runtime.json:/etc/colony/cluster-runtime.json:ro
+      # Operator YAML (the ``--config`` arg to ``colony-env up``) materialized
+      # into ``.runtime/operator-config.yaml`` before compose runs. The
+      # ray-head entrypoint checks /etc/colony/cluster.yaml *first* ahead of
+      # the /mnt/shared/config.yaml fallback, so this bind sidesteps the
+      # ``docker cp`` race (polymath deploy would otherwise read /mnt/shared
+      # before colony-env can populate it and exit with FileNotFoundError).
+      - ./.runtime/operator-config.yaml:/etc/colony/cluster.yaml:ro
       # Workers also need Docker access so SandboxedShellCapability can
       # run from agents scheduled on them. Same dev/prod tradeoff as the
       # ray-head mount.
@@ -177,7 +208,7 @@ services:
     depends_on:
       ray-head:
         condition: service_healthy
-    shm_size: '4gb'
+    shm_size: ${COLONY_SHM_SIZE:-4gb}
     networks:
       - colony-net
 
@@ -290,10 +321,15 @@ services:
       start_period: 30s
 
   dashboard:
-    image: colony:local
+    image: ${COLONY_IMAGE:-colony:local}
     container_name: colony-dashboard
-    command: >
-      python -m polymathera.colony.web_ui.backend.main
+    command:
+      - /home/ray/app/src/polymathera/colony/cli/deploy/docker/cluster-runtime-hook.sh
+      - dashboard
+      - --
+      - python
+      - -m
+      - polymathera.colony.web_ui.backend.main
     ports:
       - "${COLONY_DASHBOARD_UI_PORT:-8080}:8080"
     environment:
@@ -357,6 +393,20 @@ services:
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
     volumes:
       - colony-shared:/mnt/shared
+      - colony-overlay:/opt/colony-overlay
+      # L1-G runtime config: written by ``colony-env up`` before compose
+      # invocation. The container-start hook reads it on boot. The host
+      # path always exists (colony-env writes a stub when no extensions
+      # are configured) so the bind mount never silently turns into a
+      # directory.
+      - ./.runtime/cluster-runtime.json:/etc/colony/cluster-runtime.json:ro
+      # Operator YAML (the ``--config`` arg to ``colony-env up``) materialized
+      # into ``.runtime/operator-config.yaml`` before compose runs. The
+      # ray-head entrypoint checks /etc/colony/cluster.yaml *first* ahead of
+      # the /mnt/shared/config.yaml fallback, so this bind sidesteps the
+      # ``docker cp`` race (polymath deploy would otherwise read /mnt/shared
+      # before colony-env can populate it and exit with FileNotFoundError).
+      - ./.runtime/operator-config.yaml:/etc/colony/cluster.yaml:ro
     depends_on:
       ray-head:
         condition: service_healthy
@@ -372,6 +422,11 @@ services:
 
 volumes:
   colony-shared:
+  # Persistent overlay for L1-G ``cluster.extensions.packages``: the
+  # container-start hook pip-installs the resolved package list here,
+  # cache-keyed by the resolved hash. Survives ``colony-env down`` so
+  # restart-with-same-config skips reinstall.
+  colony-overlay:
   redis-data:
   postgres-data:
   kafka-data:

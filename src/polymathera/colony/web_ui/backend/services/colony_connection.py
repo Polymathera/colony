@@ -11,10 +11,13 @@ colony.deployment_names.get_deployment_names().
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Any
 from contextlib import contextmanager
 from typing import Iterator
 import httpx
+import yaml
 
 from polymathera.colony.distributed.ray_utils.serving.context import (
     Ring, execution_context, ExecutionContext
@@ -23,8 +26,56 @@ from polymathera.colony.distributed.ray_utils.serving.context import (
 
 logger = logging.getLogger(__name__)
 
-# Default app name — matches polymath.py default
+# Final fallback when no operator YAML is present and no app_name is supplied.
+# ``polymath deploy`` reads ``cluster.app_name`` from the operator YAML; the
+# dashboard MUST target the same name or its actor lookups miss. The default
+# only applies in dev / unit-test paths where neither a YAML nor an explicit
+# argument is provided.
 _DEFAULT_APP_NAME = "polymathera"
+
+
+def _resolve_app_name_from_operator_yaml() -> str:
+    """Read ``cluster.app_name`` from the operator YAML the cluster was
+    deployed with.
+
+    Falls back to :data:`_DEFAULT_APP_NAME` only when no YAML can be found
+    or the key is missing. Checks ``POLYMATHERA_CONFIG`` (compose-set in
+    every colony service) first, then the bind-mounted
+    ``/etc/colony/cluster.yaml`` L1-G writes. Both contain the same content
+    in the current deployment; the dual lookup is defence in depth.
+    """
+    candidates = []
+    cfg_env = os.environ.get("POLYMATHERA_CONFIG")
+    if cfg_env:
+        candidates.append(Path(cfg_env))
+    candidates.append(Path("/etc/colony/cluster.yaml"))
+
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            with open(path) as f:
+                raw = yaml.safe_load(f) or {}
+            name = (raw.get("cluster") or {}).get("app_name")
+            if name:
+                logger.info(
+                    "ColonyConnection: resolved app_name=%r from %s",
+                    name, path,
+                )
+                return str(name)
+        except Exception as exc:  # noqa: BLE001 — best-effort read
+            logger.warning(
+                "ColonyConnection: failed to read app_name from %s: %s",
+                path, exc,
+            )
+            continue
+    logger.warning(
+        "ColonyConnection: no cluster.app_name in operator YAML; "
+        "falling back to %r — dashboard will only see deployments created "
+        "under that exact app name",
+        _DEFAULT_APP_NAME,
+    )
+    return _DEFAULT_APP_NAME
 
 
 class ColonyConnection:
@@ -35,12 +86,15 @@ class ColonyConnection:
         ray_client_address: str = "ray://ray-head:10001",
         ray_dashboard_url: str = "http://ray-head:8265",
         prometheus_url: str = "http://ray-head:9090",
-        app_name: str = _DEFAULT_APP_NAME,
+        app_name: str | None = None,
     ):
         self.ray_client_address = ray_client_address
         self.ray_dashboard_url = ray_dashboard_url
         self.prometheus_url = prometheus_url
-        self.app_name = app_name
+        # Callers may pin app_name explicitly (tests / specialized contexts);
+        # the default flow reads it from the same operator YAML
+        # ``polymath deploy`` consumes so dashboard and deploy never disagree.
+        self.app_name = app_name if app_name is not None else _resolve_app_name_from_operator_yaml()
         self._connected = False
         self._handle_cache: dict[str, Any] = {}
         self._http_client: httpx.AsyncClient | None = None
