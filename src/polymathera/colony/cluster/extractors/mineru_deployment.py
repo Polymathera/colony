@@ -13,7 +13,7 @@ are an operator-deployment-time concern.
 Lazy-imports its ML backend (the ``magic_pdf`` package, MinerU's
 underlying engine) on first call. Construction stays cheap so the
 deployment can sit dormant until the operator flips
-``polymathera_cluster.knowledge.pdf_extractor.backend: mineru`` in
+``knowledge.pdf_extractor.backend: mineru`` in
 YAML.
 """
 

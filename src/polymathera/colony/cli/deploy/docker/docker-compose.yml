@@ -71,7 +71,7 @@ services:
       - KAFKA_BOOTSTRAP=kafka:9092
       # Knowledge stack — Qdrant URL, GROBID URL, PDF extractor
       # backend, and image directory live in the operator YAML
-      # (``polymathera_cluster.knowledge`` — see configs/example.yaml).
+      # (``knowledge`` — see configs/example.yaml).
       # Workers re-read the same YAML via POLYMATHERA_CONFIG, so no
       # env-var passthrough is needed for these knobs.
       # API keys — forwarded from host environment
@@ -380,7 +380,7 @@ services:
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}
       # Knowledge stack — Qdrant URL, GROBID URL, PDF extractor
       # backend, and image directory live in the operator YAML
-      # (``polymathera_cluster.knowledge`` — see configs/example.yaml).
+      # (``knowledge`` — see configs/example.yaml).
       # The dashboard reads the same YAML via POLYMATHERA_CONFIG, so
       # it sees the SAME Qdrant the agents ingest into.
       # PDF-extractor API keys — only the one matching the active

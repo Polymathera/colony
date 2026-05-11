@@ -15,7 +15,7 @@ Two implementations:
 - :class:`LocalFsImageStore` — writes to a sharded directory tree on
   the shared volume (``/mnt/shared/colony-images/<sha[:2]>/<sha>``)
   with a sidecar ``.json`` carrying mime + size. Picked when
-  ``polymathera_cluster.knowledge.image_dir`` is set in the operator
+  ``knowledge.image_dir`` is set in the operator
   YAML (see
   :func:`~polymathera.colony.knowledge.deps._default_image_store`).
 

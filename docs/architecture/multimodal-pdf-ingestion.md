@@ -3,7 +3,7 @@
 Status: **Phase 1+2 — iteration 3.1 landed (2026-05-08)**. All four
 hosted readers (Mistral OCR / Anthropic / Gemini / LlamaParse)
 plus three self-hosted deployments (Marker / Docling / MinerU)
-selectable via the `polymathera_cluster.knowledge` YAML section.
+selectable via the top-level `knowledge:` YAML section.
 GROBID demoted to a metadata-only sibling reader. Cost/quality
 tradeoff is first-class — every backend exposes a tier knob via
 its reader constructor, forwarded verbatim through the `options`
@@ -473,7 +473,7 @@ The ingestor calls `caption_figure` per extracted `FigureRef`, writes the captio
 | 1.9b | `GeminiPdfReader` (hosted, `google-genai` SDK; ``model`` is the cost/quality tier knob — `gemini-2.5-flash` ≈ $0.003/page balanced default, `gemini-2.5-pro` ≈ $0.010/page premium; same page-marker prompt as Anthropic; `cached_content_name` for the 90% repeat-input discount; api-key resolves from `GOOGLE_API_KEY`; picklable) | `knowledge/readers/gemini_pdf.py` (new) | claude | ✅ |
 | 1.9c | `LlamaParsePdfReader` (hosted, full LlamaParse v2 REST: upload → poll → result with `expand=markdown,images_content_metadata,metadata` → presigned-URL image fetch; `tier` knob (`fast` / `cost_effective` / `agentic` / `agentic_plus`); per-call timeout + poll-interval bounds; image-fetch failures degrade to skipped figures rather than failed document; picklable) | `knowledge/readers/llamaparse_pdf.py` (new) | claude | ✅ |
 | 1.10 | `MistralOcrPdfReader` (hosted; full HTTP impl: Files API → signed URL → `/v1/ocr`; base64 image decode; markdown image-ref rewrite to `colony-image://`; picklable; no instance-level `httpx.AsyncClient`) | `knowledge/readers/mistral_ocr_pdf.py` (new) | claude | ✅ |
-| 1.11 | `KnowledgeConfig` + `PdfExtractorConfig` Pydantic models (`@register_polymathera_config(path="knowledge")`); `polymathera_cluster.knowledge.pdf_extractor` YAML section with `backend`, free-form `options` dict (forwarded as backend kwargs), `replicas`, `num_gpus`; `add_deployments_to_app` sets `KB_PDF_EXTRACTOR` env var on every worker AND brings up the matching `*ExtractorDeployment` for self-hosted backends via the lazy registry; missing-library import errors logged + skipped (env var still applied); hosted backends are no-ops at deploy time (vendor-direct calls) | `knowledge/cluster_config.py` (new), `system.py` | claude | ✅ |
+| 1.11 | `KnowledgeConfig` + `PdfExtractorConfig` Pydantic models (`@register_polymathera_config(path="knowledge")`); top-level `knowledge.pdf_extractor` YAML section with `backend`, free-form `options` dict (forwarded as backend kwargs), `replicas`, `num_gpus`; `add_deployments_to_app` sets `KB_PDF_EXTRACTOR` env var on every worker AND brings up the matching `*ExtractorDeployment` for self-hosted backends via the lazy registry; missing-library import errors logged + skipped (env var still applied); hosted backends are no-ops at deploy time (vendor-direct calls) | `knowledge/cluster_config.py` (new), `system.py` | claude | ✅ |
 | 1.12 | `default_registry_with_pdf_extractor(backend=...)` factory in readers; env-driven `KB_PDF_EXTRACTOR` selector in `set_knowledge_deps` (auto-fallback when the selected backend is reserved-but-unimplemented) | `knowledge/readers/__init__.py`, `knowledge/deps.py` | claude | ✅ |
 | 1.13 | GROBID demote: `GrobidPdfReader.mode="metadata_only"` skips body extraction and emits ONLY title + abstract sections with a structured `extra["bibliographic"]` payload (authors with affiliations, parsed reference list); `GrobidMetadataReader` is the operator-facing alias with header / citation consolidation enabled by default. Multi-reader pass (running GROBID-metadata alongside the body extractor) deferred to its own iteration — needs a clean Ingestor refactor | `knowledge/readers/grobid_pdf.py` | claude | ✅ |
 | 1.14 | Chunker propagates `figure_ids` through `chunk.extra` (matches `colony-image://` URIs against `section.figures`); also forwards `metadata_origin` provenance; both `ProseChunker` + `CodeChunker`; empty-extra preserved for plain-text sections | `knowledge/chunking.py` | claude | ✅ |
@@ -581,19 +581,18 @@ routers); zero regressions outside live-Redis-only tests.
 What an operator can now do without writing code:
 
 ```yaml
-# polymathera_cluster.yaml
-polymathera_cluster:
-  knowledge:
-    pdf_extractor:
-      backend: gemini             # cost/quality tier 2
-      options:
-        model: gemini-2.5-flash   # ~$0.003/page balanced default
-    image_dir: /mnt/shared/colony-images
-    qdrant:
-      url: http://qdrant:6333
-      collection: colony_knowledge
-    grobid:
-      url: http://grobid:8070
+# operator.yaml
+knowledge:
+  pdf_extractor:
+    backend: gemini             # cost/quality tier 2
+    options:
+      model: gemini-2.5-flash   # ~$0.003/page balanced default
+  image_dir: /mnt/shared/colony-images
+  qdrant:
+    url: http://qdrant:6333
+    collection: colony_knowledge
+  grobid:
+    url: http://grobid:8070
 
 # Or, for the highest-fidelity tier:
 #   pdf_extractor:
@@ -639,20 +638,19 @@ What is NOT in this iteration:
    LLAMA_CLOUD_API_KEY=...
    ```
 
-3. **Pick a backend in YAML.** Edit `polymathera_cluster.yaml` (or a copy) under `polymathera_cluster.knowledge.pdf_extractor`:
+3. **Pick a backend in YAML.** Edit your operator config (or a copy) under the top-level `knowledge.pdf_extractor` key:
 
    ```yaml
-   polymathera_cluster:
-     knowledge:
-       pdf_extractor:
-         backend: gemini
-         options:
-           model: gemini-2.5-flash
+   knowledge:
+     pdf_extractor:
+       backend: gemini
+       options:
+         model: gemini-2.5-flash
    ```
 
    The default `configs/example.yaml` already has docker-stack URLs for `qdrant` / `grobid` / `image_dir`. Override anything else you need.
 
-4. **`colony-env down && colony-env up --workers 3 && colony-env run --config polymathera_cluster.yaml ...`** — rebuilds the image (poetry installs the new deps from the refreshed lock), brings up the stack, mounts the YAML at `/mnt/shared/config.yaml`. Every container's `POLYMATHERA_CONFIG` points at it, so driver + workers + dashboard all resolve the same `KnowledgeConfig`.
+4. **`colony-env down && colony-env up --workers 3 --config operator.yaml`** — rebuilds the image (poetry installs the new deps from the refreshed lock), brings up the stack, mounts the YAML at `/mnt/shared/config.yaml`. Every container's `POLYMATHERA_CONFIG` points at it, so driver + workers + dashboard all resolve the same `KnowledgeConfig`.
 
 5. **Re-ingest the literature corpus from the chat UI.** The chunks land in Qdrant via the chosen reader; the KB tab renders multi-line markdown with inline figure previews (Mistral / LlamaParse) or prose figure descriptions (Anthropic / Gemini).
 

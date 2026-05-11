@@ -190,7 +190,7 @@ def default_registry_with_pdf_extractor(
         backend: Body extractor for ``KnowledgeFormat.PDF``.
         image_store: Active :class:`ImageStore` — readers REQUIRE one
             to land figure bytes; ``set_knowledge_deps`` resolves it
-            from ``polymathera_cluster.knowledge.image_dir``.
+            from ``knowledge.image_dir``.
         backend_kwargs: Per-backend constructor kwargs (forwarded
             verbatim — ``model`` / ``tier`` / ``api_base`` / etc.).
         fallback_backend: Optional backend to route to when

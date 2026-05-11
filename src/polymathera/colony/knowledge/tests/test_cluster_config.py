@@ -111,7 +111,7 @@ def test_knowledge_config_default_shape() -> None:
 
 
 def test_knowledge_config_from_yaml_shape() -> None:
-    """Mirror the ``polymathera_cluster.knowledge`` YAML shape an
+    """Mirror the ``knowledge`` YAML shape an
     operator writes — single source of truth, no env vars."""
     cfg = KnowledgeConfig(
         pdf_extractor={
@@ -242,7 +242,7 @@ def test_get_deployment_class_unknown_backend_raises() -> None:
 # ``KnowledgeConfig`` from the typed config tree, NOT from
 # ``os.environ``. The chain is:
 #
-#   YAML (``polymathera_cluster.knowledge``)
+#   YAML (``knowledge``)
 #     → driver loads via ConfigurationManager.initialize()
 #     → POLYMATHERA_CONFIG forwards to actor runtime_env.env_vars
 #     → worker's PolymatheraApp singleton loads SAME YAML

@@ -1,8 +1,8 @@
 """Knowledge-layer configuration plumbed through PolymatheraClusterConfig.
 
 Operators declare which PDF extractor backend to bring up at
-cluster bring-up time via the YAML ``polymathera_cluster.knowledge``
-section. The config decides:
+cluster bring-up time via the top-level ``knowledge`` section in
+the operator YAML. The config decides:
 
 1. Which (if any) self-hosted ``*ExtractorDeployment`` to add to
    the serving Application — Marker / Docling / MinerU.
@@ -14,23 +14,22 @@ section. The config decides:
 
 YAML shape::
 
-    polymathera_cluster:
-      knowledge:
-        pdf_extractor:
-          backend: docling          # mistral_ocr | anthropic | gemini |
-                                    # llamaparse | marker | docling | mineru
-          options:                  # forwarded as backend_kwargs to the
-                                    # reader; tier knobs live here
-            tier: cost_effective    # for llamaparse
-          # Self-hosted-only options:
-          replicas: 1
-          num_gpus: 0
-        image_dir: "/mnt/shared/colony-images"
-        qdrant:
-          url: "http://qdrant:6333"
-          collection: "colony_knowledge"
-        grobid:
-          url: "http://grobid:8070"
+    knowledge:
+      pdf_extractor:
+        backend: docling          # mistral_ocr | anthropic | gemini |
+                                  # llamaparse | marker | docling | mineru
+        options:                  # forwarded as backend_kwargs to the
+                                  # reader; tier knobs live here
+          tier: cost_effective    # for llamaparse
+        # Self-hosted-only options:
+        replicas: 1
+        num_gpus: 0
+      image_dir: "/mnt/shared/colony-images"
+      qdrant:
+        url: "http://qdrant:6333"
+        collection: "colony_knowledge"
+      grobid:
+        url: "http://grobid:8070"
 
 Hosted backends (Mistral / Anthropic / Gemini / LlamaParse) need
 no Ray deployment — only the reader registration. Self-hosted

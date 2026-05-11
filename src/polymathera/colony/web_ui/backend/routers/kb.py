@@ -137,7 +137,7 @@ class KBIngestRequest(BaseModel):
     """Force a specific PDF extractor for this single ingest call —
     one of ``mistral_ocr`` / ``anthropic`` / ``marker`` / ``docling``
     / ``mineru``. Useful for A/B tests from the KB tab without
-    redeploying or editing ``polymathera_cluster.knowledge.pdf_extractor``
+    redeploying or editing ``knowledge.pdf_extractor``
     in the operator YAML. ``None`` (the default) uses the colony's
     configured extractor. Ignored for non-PDF ingests."""
 

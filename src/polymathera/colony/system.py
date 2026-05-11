@@ -11,12 +11,7 @@ from typing import Any, Type, TYPE_CHECKING
 from pydantic import ConfigDict, Field
 
 from .distributed import get_polymathera
-from .distributed.config import (
-    ConfigComponent,
-    Tier,
-    register_polymathera_config,
-    tier_metadata,
-)
+from .distributed.config import ConfigComponent
 from .distributed.state_management import SharedState, StateManager
 from .distributed.ray_utils import serving
 from .cluster.config import ClusterConfig
@@ -33,30 +28,32 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@register_polymathera_config(path="polymathera_cluster")
 class PolymatheraClusterConfig(ConfigComponent):
-    """Configuration for the complete Polymathera system stack.
+    """Runtime-built configuration for the complete Polymathera system stack.
 
-    Includes LLM cluster, VCM, and optional agent system. ``app_name`` and
-    ``llm_cluster_config`` are ``Optional`` so the config-registry can default-
-    instantiate this component at startup; ``validate_config()`` enforces both
+    NOT a registered config-registry component — operator YAML drives this
+    indirectly via the ``cluster.*`` block (legacy ``LLMClusterYAMLConfig``);
+    ``polymath.cli.polymath._build_cluster_config`` constructs an instance
+    from ``TestConfig.cluster`` at deploy time. The class stays a
+    :class:`ConfigComponent` subclass for the Pydantic / validator
+    plumbing but does not claim its own YAML path — that avoids the
+    historical confusion where ``cluster.app_name`` (the consumed key) and
+    ``polymathera_cluster.app_name`` (a phantom registered key that nothing
+    read) could disagree.
+
+    ``app_name`` and ``llm_cluster_config`` are ``Optional`` so callers
+    can default-instantiate; :meth:`assert_ready_for_deploy` enforces both
     are set before deploy.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    app_name: str | None = Field(
-        default=None,
-        json_schema_extra=tier_metadata(tier=Tier.L1_OPERATOR),
-    )
+    app_name: str | None = None
     llm_cluster_config: ClusterConfig | None = None
     vcm_config: VCMConfig = Field(default_factory=VCMConfig)
     agent_system_config: AgentSystemConfig = Field(default_factory=AgentSystemConfig)
     knowledge_config: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
-    cleanup_on_init: bool = Field(
-        default=False,
-        json_schema_extra=tier_metadata(tier=Tier.L1_OPERATOR),
-    )
+    cleanup_on_init: bool = False
 
     def assert_ready_for_deploy(self) -> None:
         """Fail fast if any deploy-required field is unset.

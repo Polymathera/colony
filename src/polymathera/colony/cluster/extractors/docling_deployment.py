@@ -8,7 +8,7 @@ extraction quality benefits the same way).
 
 MIT-licensed — included in the default ``knowledge`` poetry extra
 (no build flag) so the operator can flip
-``polymathera_cluster.knowledge.pdf_extractor.backend: docling`` in
+``knowledge.pdf_extractor.backend: docling`` in
 YAML without a rebuild.
 
 Library imports are lazy so a Ray worker without the Docling

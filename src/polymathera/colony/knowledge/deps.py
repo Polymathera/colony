@@ -12,7 +12,7 @@ Out-of-the-box defaults are :class:`InMemoryEmbedder` and
 :class:`InMemoryVectorStore` — usable for development, single-node
 deployments, and chat-driven curation that does not need persistence
 across processes. Production operators set
-``polymathera_cluster.knowledge`` in the operator YAML; every Ray
+``knowledge`` in the operator YAML; every Ray
 worker re-reads the same :class:`KnowledgeConfig` from its own
 :class:`ConfigurationManager` (the YAML is mounted at
 ``POLYMATHERA_CONFIG`` in every container), so the driver and every
