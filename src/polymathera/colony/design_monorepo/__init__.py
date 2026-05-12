@@ -29,7 +29,12 @@ from __future__ import annotations
 
 from .blueprints import design_monorepo_capability_blueprints
 from .bootstrap import SCAFFOLD_DIRS, bootstrap_design_monorepo
-from .capabilities import DesignCheckpointer, RepoStateProvider, ToolBuilder
+from .capabilities import (
+    DesignCheckpointer,
+    ProjectAuthoringCapability,
+    RepoStateProvider,
+    ToolBuilder,
+)
 from .clones import resolve_clone_path
 from .client import (
     AGENT_BRANCH_PREFIX,
@@ -60,6 +65,7 @@ from .manifest import (
     WebhookConfig,
 )
 from .models import (
+    PROJECT_ACTION_KINDS,
     BootstrapResult,
     BranchNode,
     BranchTopology,
@@ -71,6 +77,8 @@ from .models import (
     ForkBranch,
     ImportedRemote,
     PageChangeEvent,
+    ProjectArtifactAuthoredPayload,
+    ProjectArtifactValidationResult,
     RepoBootstrapSpec,
     RepoState,
     ToolEntry,
@@ -88,6 +96,7 @@ from .registry import (
 
 __all__ = (
     # Models
+    "PROJECT_ACTION_KINDS",
     "BootstrapResult",
     "BranchNode",
     "BranchTopology",
@@ -99,6 +108,8 @@ __all__ = (
     "ForkBranch",
     "ImportedRemote",
     "PageChangeEvent",
+    "ProjectArtifactAuthoredPayload",
+    "ProjectArtifactValidationResult",
     "RepoBootstrapSpec",
     "RepoState",
     "ToolEntry",
@@ -143,6 +154,7 @@ __all__ = (
     # Capabilities
     "RepoStateProvider",
     "DesignCheckpointer",
+    "ProjectAuthoringCapability",
     "ToolBuilder",
     "design_monorepo_capability_blueprints",
     "resolve_clone_path",

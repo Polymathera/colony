@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -47,6 +48,7 @@ from .identity import (
     append_co_author_trailer,
     resolve_commit_identity,
 )
+from . import artifact_validators
 from .ast_validator import validate_python_file
 from .extensions import (
     DiscoveredExtensions,
@@ -68,6 +70,8 @@ from .models import (
     DesignDiff,
     ExtensionAuthoredPayload,
     ForkBranch,
+    ProjectArtifactAuthoredPayload,
+    ProjectArtifactValidationResult,
     RepoBootstrapSpec,
     RepoState,
     ToolEntry,
@@ -101,6 +105,15 @@ def _commit_paths(
     return client.commit_with_identity(
         identity, message, paths=paths, all_changes=all_changes,
     )
+
+
+#: Top-level path segments that are NOT project substance — both
+#: ``RepoStateProvider``'s read-side walks and
+#: ``ProjectAuthoringCapability``'s write-side path guard exclude
+#: these. Single source of truth for "what's framework-managed, not
+#: user content": ``.colony/`` is L1-E's territory (route writes
+#: through :class:`ToolBuilder`); ``.git/`` is git internals.
+_NON_SUBSTANCE_TOP_LEVEL: frozenset[str] = frozenset({".colony", ".git"})
 
 
 def _lfs_patterns_from_gitattributes(path: Path) -> list[str]:
@@ -698,6 +711,139 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
                 "refresh: reset --hard origin/%s failed (%s); "
                 "using cached state", branch, e,
             )
+
+    # ---- L1-F read-side companions to ProjectAuthoringCapability ----
+
+    @action_executor(
+        planning_summary=(
+            "List top-level Python packages under src/ (directories "
+            "containing __init__.py)."
+        ),
+    )
+    async def list_packages(self) -> list[str]:
+        """Names of immediate ``src/<pkg>/`` directories that look like
+        Python packages (have an ``__init__.py``). Empty when ``src/``
+        is missing.
+
+        The planner uses this to decide whether a new module landing
+        under ``src/<pkg>/foo.py`` extends an existing package or
+        needs a new one."""
+        return await asyncio.to_thread(self._list_packages_sync)
+
+    def _list_packages_sync(self) -> list[str]:
+        src = self._working_dir / "src"
+        if not src.is_dir():
+            return []
+        out: list[str] = []
+        for child in sorted(src.iterdir()):
+            if child.is_dir() and (child / "__init__.py").is_file():
+                out.append(child.name)
+        return out
+
+    @action_executor(
+        planning_summary=(
+            "List design artifacts by kind (cad, fea, dossier, reqif, "
+            "notebook, test, python_module)."
+        ),
+    )
+    async def list_design_artifacts(
+        self, kind: str | None = None,
+    ) -> list[str]:
+        """Walk the working tree for files matching ``kind`` and return
+        their relative paths.
+
+        Supported kinds (free-form strings to keep the planner
+        contract loose):
+
+        - ``cad``           — ``.step`` / ``.stp`` / ``.iges`` / ``.igs``
+        - ``fea``           — ``.inp`` / ``.med``
+        - ``reqif``         — ``.reqif``
+        - ``notebook``      — ``.ipynb``
+        - ``dossier``       — ``dossier/**/*.md``
+        - ``test``          — ``tests/**/*.py``
+        - ``python_module`` — ``src/**/*.py``
+        - ``None``          — all of the above, unioned
+
+        Files under ``.colony/`` and ``.git/`` are always excluded.
+        """
+        return await asyncio.to_thread(self._list_design_artifacts_sync, kind)
+
+    def _list_design_artifacts_sync(self, kind: str | None) -> list[str]:
+        suffix_kinds: dict[str, tuple[str, ...]] = {
+            "cad": (".step", ".stp", ".iges", ".igs"),
+            "fea": (".inp", ".med"),
+            "reqif": (".reqif",),
+            "notebook": (".ipynb",),
+        }
+        prefix_suffix_kinds: dict[str, tuple[str, tuple[str, ...]]] = {
+            "dossier": ("dossier", (".md",)),
+            "test": ("tests", (".py",)),
+            "python_module": ("src", (".py",)),
+        }
+        if kind is not None and kind not in suffix_kinds and kind not in prefix_suffix_kinds:
+            raise ValueError(
+                f"unknown kind {kind!r}; valid: "
+                f"{sorted(set(suffix_kinds) | set(prefix_suffix_kinds))}",
+            )
+        out: list[str] = []
+        for path in self._working_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                rel = path.relative_to(self._working_dir)
+            except ValueError:
+                continue
+            if rel.parts and rel.parts[0] in _NON_SUBSTANCE_TOP_LEVEL:
+                continue
+            suffix = path.suffix.lower()
+            if kind is None or kind in suffix_kinds:
+                hits = suffix_kinds[kind] if kind else tuple(
+                    s for sufs in suffix_kinds.values() for s in sufs
+                )
+                if suffix in hits:
+                    out.append(rel.as_posix())
+                    continue
+            if kind is None or kind in prefix_suffix_kinds:
+                pairs = (
+                    [prefix_suffix_kinds[kind]] if kind in prefix_suffix_kinds
+                    else list(prefix_suffix_kinds.values())
+                )
+                for prefix, suffixes in pairs:
+                    if rel.parts and rel.parts[0] == prefix and suffix in suffixes:
+                        out.append(rel.as_posix())
+                        break
+        return sorted(set(out))
+
+    @action_executor(
+        planning_summary=(
+            "Summarise top-level layout — counts of source modules, "
+            "tests, design artifacts."
+        ),
+    )
+    async def summarize_project_layout(self) -> dict[str, Any]:
+        """One-shot snapshot for the planner's first turn: top-level
+        directory inventory + per-kind file counts.
+
+        Returns a dict with ``top_level`` (list of immediate
+        directories present under the working tree, excluding
+        ``.colony`` / ``.git``) and ``counts`` (mapping kind →
+        count, using the same kinds as :meth:`list_design_artifacts`).
+        """
+        return await asyncio.to_thread(self._summarize_project_layout_sync)
+
+    def _summarize_project_layout_sync(self) -> dict[str, Any]:
+        top_level = sorted(
+            child.name
+            for child in self._working_dir.iterdir()
+            if child.is_dir() and child.name not in _NON_SUBSTANCE_TOP_LEVEL
+        ) if self._working_dir.is_dir() else []
+        counts: dict[str, int] = {}
+        for kind in (
+            "cad", "fea", "reqif", "notebook",
+            "dossier", "test", "python_module",
+        ):
+            counts[kind] = len(self._list_design_artifacts_sync(kind))
+        return {"top_level": top_level, "counts": counts}
 
 
 # ---------------------------------------------------------------------------
@@ -1934,8 +2080,499 @@ def _default_class_name(name: str) -> str:
     return "".join(p[:1].upper() + p[1:] for p in parts if p)
 
 
+# ---------------------------------------------------------------------------
+# ProjectAuthoringCapability — L1-F project-substance write surface
+# ---------------------------------------------------------------------------
+
+
+def _resolve_safe_path(working_dir: Path, rel: str | Path) -> Path:
+    """Resolve ``rel`` against ``working_dir`` and reject anything that
+    escapes the tree or lands under :data:`_NON_SUBSTANCE_TOP_LEVEL`.
+
+    Returns the absolute resolved path. Raises :class:`DesignMonorepoError`
+    for path-traversal attempts, absolute paths, ``.colony/`` /
+    ``.git/`` targets, or empty inputs.
+    """
+    rel_path = Path(rel)
+    if rel_path.is_absolute():
+        raise DesignMonorepoError(
+            f"L1-F: path must be relative to the working tree, got {rel!r}",
+        )
+    if not rel_path.parts:
+        raise DesignMonorepoError("L1-F: empty path")
+    base = working_dir.resolve()
+    resolved = (base / rel_path).resolve()
+    try:
+        rel_resolved = resolved.relative_to(base)
+    except ValueError as exc:
+        raise DesignMonorepoError(
+            f"L1-F: path {rel!r} escapes the working tree",
+        ) from exc
+    if rel_resolved.parts and rel_resolved.parts[0] in _NON_SUBSTANCE_TOP_LEVEL:
+        raise DesignMonorepoError(
+            f"L1-F: path {rel!r} targets {rel_resolved.parts[0]!r}; route "
+            f"through ToolBuilder (L1-E) for .colony/ or use git directly "
+            f"for .git/",
+        )
+    return resolved
+
+
+class ProjectAuthoringCapability(_DesignMonorepoCapabilityBase):
+    """L1-F: minimal, language-agnostic, composable file/line operations
+    for project substance (``src/``, ``tests/``, ``data/``, ``dossier/``,
+    ``docs/``, …).
+
+    Seven low-level actions: ``write_file``, ``edit_file``,
+    ``delete_file``, ``move_file``, ``insert_lines``, ``delete_lines``,
+    ``replace_lines``. Higher-level outcomes are *sequences* of these
+    — see CPS L2-G for the planner-prompt layer that emits them.
+
+    Same validation+audit discipline as L1-E. Same AST allow-list
+    runs on every ``.py`` write under ``src/``/``tests/`` (Risk #5
+    one-uniform-pipeline). Same provenance-rich event
+    (:class:`ProjectArtifactAuthoredPayload`) on every commit.
+
+    Distinct from :class:`SandboxedShellCapability`'s same-named
+    actions: those operate inside a container; these operate on the
+    design-monorepo working tree and go through ``DesignCheckpointer``-
+    style audit. See ``project-substance-authoring.md`` for the
+    boundary.
+
+    Pure action surface — passes ``input_patterns=[]`` for the same
+    reason as :class:`RepoStateProvider` (no ``@event_handler``
+    methods, must opt out of the wildcard fallback).
+    """
+
+    def __init__(
+        self,
+        agent: Agent | None = None,
+        scope_id: str | None = None,
+        *,
+        working_dir: Path | str | None = None,
+        clone_scope_id: str | None = None,
+        capability_key: str | None = None,
+        app_name: str | None = None,
+    ) -> None:
+        super().__init__(
+            agent=agent,
+            scope_id=scope_id,
+            working_dir=working_dir,
+            clone_scope_id=clone_scope_id,
+            read_only=False,
+            input_patterns=[],
+            capability_key=capability_key,
+            app_name=app_name,
+        )
+
+    def get_capability_tags(self) -> frozenset[str]:
+        return frozenset({"design_state", "git", "project_authoring", "write"})
+
+    # ---- One shared action helper ------------------------------------
+    #
+    # Every L1-F action funnels through ``_run_action_sync``:
+    #   1. Build a "snapshot" of pre-action state for every affected
+    #      path (content if it existed, else None — used to rollback).
+    #   2. Apply the mutation (in-process file IO).
+    #   3. Run the artifact validator registry on every resulting file.
+    #   4. On failure, restore the snapshot and raise.
+    #   5. On success, ``client.commit_with_identity`` with the
+    #      structured L1-F message; emit the audit event.
+    #
+    # The five steps are non-negotiable; the per-action lambdas only
+    # supply the "apply the mutation" closure plus which paths to
+    # snapshot and which to validate.
+
+    async def _run_action(
+        self,
+        action_kind: str,
+        snapshot_paths: Sequence[Path],
+        validate_paths: Sequence[Path],
+        commit_paths: Sequence[Path],
+        primary_path: Path,
+        apply_mutation: Callable[[], None],
+    ) -> ProjectArtifactAuthoredPayload:
+        client = await self._client_async()
+        return await asyncio.to_thread(
+            self._run_action_sync,
+            client, action_kind,
+            snapshot_paths, validate_paths, commit_paths,
+            primary_path, apply_mutation,
+        )
+
+    def _run_action_sync(
+        self,
+        client: DesignMonorepoClient,
+        action_kind: str,
+        snapshot_paths: Sequence[Path],
+        validate_paths: Sequence[Path],
+        commit_paths: Sequence[Path],
+        primary_path: Path,
+        apply_mutation: Callable[[], None],
+    ) -> ProjectArtifactAuthoredPayload:
+        # 1) Snapshot. ``None`` means "did not exist before".
+        snapshots: dict[Path, bytes | None] = {}
+        for abs_p in snapshot_paths:
+            if abs_p.exists():
+                snapshots[abs_p] = abs_p.read_bytes()
+            else:
+                snapshots[abs_p] = None
+
+        # 2) Mutate.
+        try:
+            apply_mutation()
+        except OSError as exc:
+            self._restore_snapshots(snapshots)
+            raise DesignMonorepoError(
+                f"L1-F {action_kind}: mutation failed: {exc}",
+            ) from exc
+
+        # 3) Validate every changed file that still exists.
+        results: list[ProjectArtifactValidationResult] = []
+        for abs_p in validate_paths:
+            if not abs_p.exists():
+                continue
+            try:
+                rel = abs_p.relative_to(self._working_dir)
+            except ValueError:
+                continue
+            results.extend(artifact_validators.run_validators(self._working_dir, rel))
+        failures = artifact_validators.all_failed(results)
+        if failures:
+            # 4) Rollback.
+            self._restore_snapshots(snapshots)
+            detail = "; ".join(f"{r.validator}: {r.detail}" for r in failures)
+            raise DesignMonorepoError(
+                f"L1-F {action_kind}: validation failed for {primary_path}: {detail}",
+            )
+
+        # 5) Commit + emit. Pass paths relative to the working tree —
+        # ``commit_with_identity`` ``git add``s them.
+        identity = self._identity()
+        rel_commit_paths = [p.relative_to(self._working_dir) for p in commit_paths]
+        primary_rel = primary_path.relative_to(self._working_dir).as_posix()
+        message = f"L1-F {action_kind}: {primary_rel}"
+        sha = client.commit_with_identity(
+            identity, message, paths=rel_commit_paths,
+        )
+        return ProjectArtifactAuthoredPayload(
+            action_kind=action_kind,  # type: ignore[arg-type]
+            affected_paths=tuple(p.as_posix() for p in rel_commit_paths),
+            commit_sha=sha,
+            authored_at=datetime.now(timezone.utc),
+            pre_commit_validation_results=tuple(results),
+            session_id=get_current_session_id(),
+        )
+
+    def _restore_snapshots(
+        self, snapshots: dict[Path, bytes | None],
+    ) -> None:
+        """Restore every file in ``snapshots`` to its pre-action state.
+        Failures during restore log at ERROR — best-effort cleanup;
+        the original exception is more important to surface."""
+        for abs_p, content in snapshots.items():
+            try:
+                if content is None:
+                    if abs_p.exists():
+                        abs_p.unlink()
+                else:
+                    abs_p.parent.mkdir(parents=True, exist_ok=True)
+                    abs_p.write_bytes(content)
+            except OSError:
+                logger.exception("L1-F: rollback failed for %s", abs_p)
+
+    async def _emit_project_artifact_authored(
+        self, payload: ProjectArtifactAuthoredPayload,
+    ) -> None:
+        """Best-effort blackboard write of the L1-F audit event —
+        symmetric with :meth:`ToolBuilder._emit_extension_authored`."""
+        try:
+            bb = await self.get_blackboard()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "L1-F: blackboard unavailable for ProjectArtifactAuthored "
+                "(%s on %s): %s",
+                payload.action_kind, payload.affected_paths, exc,
+            )
+            return
+        if not payload.affected_paths:
+            return
+        primary = (
+            payload.affected_paths[-1]
+            if payload.action_kind == "move_file"
+            else payload.affected_paths[0]
+        )
+        key = DesignMonorepoEventProtocol.project_artifact_authored_key(
+            payload.action_kind, primary,
+        )
+        try:
+            await bb.write(
+                key,
+                payload.model_dump(mode="json"),
+                created_by=self._identity().agent_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "L1-F: ProjectArtifactAuthored write failed for %s: %s", key, exc,
+            )
+
+    # ---- The seven actions --------------------------------------------
+
+    @action_executor(
+        planning_summary="Create or overwrite a file at <path> with <content>.",
+    )
+    async def write_file(
+        self, path: str, content: str,
+    ) -> ProjectArtifactAuthoredPayload:
+        """Create or overwrite ``path`` with ``content``."""
+        abs_p = _resolve_safe_path(self._working_dir, path)
+
+        def _apply() -> None:
+            abs_p.parent.mkdir(parents=True, exist_ok=True)
+            abs_p.write_text(content, encoding="utf-8")
+
+        payload = await self._run_action(
+            "write_file",
+            snapshot_paths=(abs_p,),
+            validate_paths=(abs_p,),
+            commit_paths=(abs_p,),
+            primary_path=abs_p,
+            apply_mutation=_apply,
+        )
+        await self._emit_project_artifact_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary=(
+            "Replace exactly one occurrence of <old_content> in <path> "
+            "with <new_content>."
+        ),
+    )
+    async def edit_file(
+        self, path: str, old_content: str, new_content: str,
+    ) -> ProjectArtifactAuthoredPayload:
+        """Replace ``old_content`` with ``new_content`` in ``path``.
+
+        ``old_content`` must match exactly once — zero / multiple
+        matches abort the action with a clear error so the planner can
+        narrow the snippet."""
+        abs_p = _resolve_safe_path(self._working_dir, path)
+        if not abs_p.is_file():
+            raise DesignMonorepoError(
+                f"L1-F edit_file: {path!r} does not exist",
+            )
+        before = abs_p.read_text(encoding="utf-8")
+        count = before.count(old_content)
+        if count == 0:
+            raise DesignMonorepoError(
+                f"L1-F edit_file: old_content not found in {path!r}",
+            )
+        if count > 1:
+            raise DesignMonorepoError(
+                f"L1-F edit_file: old_content matches {count} times in "
+                f"{path!r}; narrow the snippet for a unique match",
+            )
+
+        def _apply() -> None:
+            abs_p.write_text(
+                before.replace(old_content, new_content, 1),
+                encoding="utf-8",
+            )
+
+        payload = await self._run_action(
+            "edit_file",
+            snapshot_paths=(abs_p,),
+            validate_paths=(abs_p,),
+            commit_paths=(abs_p,),
+            primary_path=abs_p,
+            apply_mutation=_apply,
+        )
+        await self._emit_project_artifact_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary="Delete the file at <path>.",
+    )
+    async def delete_file(self, path: str) -> ProjectArtifactAuthoredPayload:
+        abs_p = _resolve_safe_path(self._working_dir, path)
+        if not abs_p.is_file():
+            raise DesignMonorepoError(
+                f"L1-F delete_file: {path!r} does not exist",
+            )
+
+        def _apply() -> None:
+            abs_p.unlink()
+
+        # Deleted file cannot be validated; pass empty validate_paths.
+        payload = await self._run_action(
+            "delete_file",
+            snapshot_paths=(abs_p,),
+            validate_paths=(),
+            commit_paths=(abs_p,),
+            primary_path=abs_p,
+            apply_mutation=_apply,
+        )
+        await self._emit_project_artifact_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary="Move/rename file from <src> to <dst>.",
+    )
+    async def move_file(
+        self, src: str, dst: str,
+    ) -> ProjectArtifactAuthoredPayload:
+        src_abs = _resolve_safe_path(self._working_dir, src)
+        dst_abs = _resolve_safe_path(self._working_dir, dst)
+        if not src_abs.is_file():
+            raise DesignMonorepoError(
+                f"L1-F move_file: src {src!r} does not exist",
+            )
+        if dst_abs.exists():
+            raise DesignMonorepoError(
+                f"L1-F move_file: dst {dst!r} already exists",
+            )
+
+        def _apply() -> None:
+            dst_abs.parent.mkdir(parents=True, exist_ok=True)
+            src_abs.rename(dst_abs)
+
+        payload = await self._run_action(
+            "move_file",
+            snapshot_paths=(src_abs, dst_abs),
+            validate_paths=(dst_abs,),
+            commit_paths=(src_abs, dst_abs),
+            primary_path=dst_abs,
+            apply_mutation=_apply,
+        )
+        await self._emit_project_artifact_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary=(
+            "Insert <content> after line <after_line> of <path> "
+            "(0 = before first line)."
+        ),
+    )
+    async def insert_lines(
+        self, path: str, after_line: int, content: str,
+    ) -> ProjectArtifactAuthoredPayload:
+        """Insert ``content`` after the 1-indexed ``after_line``.
+
+        ``after_line=0`` means "before line 1"; ``after_line=N``
+        (where ``N`` is the line count) means "append at end".
+        Out-of-range values raise."""
+        abs_p = _resolve_safe_path(self._working_dir, path)
+        if not abs_p.is_file():
+            raise DesignMonorepoError(
+                f"L1-F insert_lines: {path!r} does not exist",
+            )
+        before = abs_p.read_text(encoding="utf-8")
+        lines = before.splitlines(keepends=True)
+        if not 0 <= after_line <= len(lines):
+            raise DesignMonorepoError(
+                f"L1-F insert_lines: after_line={after_line} out of range "
+                f"[0..{len(lines)}] for {path!r}",
+            )
+        insertion = content if content.endswith("\n") else content + "\n"
+
+        def _apply() -> None:
+            head = "".join(lines[:after_line])
+            tail = "".join(lines[after_line:])
+            abs_p.write_text(head + insertion + tail, encoding="utf-8")
+
+        payload = await self._run_action(
+            "insert_lines",
+            snapshot_paths=(abs_p,),
+            validate_paths=(abs_p,),
+            commit_paths=(abs_p,),
+            primary_path=abs_p,
+            apply_mutation=_apply,
+        )
+        await self._emit_project_artifact_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary=(
+            "Delete lines [start_line..end_line] (inclusive, 1-indexed) "
+            "from <path>."
+        ),
+    )
+    async def delete_lines(
+        self, path: str, start_line: int, end_line: int,
+    ) -> ProjectArtifactAuthoredPayload:
+        abs_p = _resolve_safe_path(self._working_dir, path)
+        if not abs_p.is_file():
+            raise DesignMonorepoError(
+                f"L1-F delete_lines: {path!r} does not exist",
+            )
+        before = abs_p.read_text(encoding="utf-8")
+        lines = before.splitlines(keepends=True)
+        n = len(lines)
+        if not (1 <= start_line <= end_line <= n):
+            raise DesignMonorepoError(
+                f"L1-F delete_lines: range [{start_line}..{end_line}] not "
+                f"a subset of [1..{n}] for {path!r}",
+            )
+
+        def _apply() -> None:
+            head = "".join(lines[: start_line - 1])
+            tail = "".join(lines[end_line:])
+            abs_p.write_text(head + tail, encoding="utf-8")
+
+        payload = await self._run_action(
+            "delete_lines",
+            snapshot_paths=(abs_p,),
+            validate_paths=(abs_p,),
+            commit_paths=(abs_p,),
+            primary_path=abs_p,
+            apply_mutation=_apply,
+        )
+        await self._emit_project_artifact_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary=(
+            "Replace lines [start_line..end_line] (inclusive, 1-indexed) "
+            "of <path> with <content>."
+        ),
+    )
+    async def replace_lines(
+        self, path: str, start_line: int, end_line: int, content: str,
+    ) -> ProjectArtifactAuthoredPayload:
+        abs_p = _resolve_safe_path(self._working_dir, path)
+        if not abs_p.is_file():
+            raise DesignMonorepoError(
+                f"L1-F replace_lines: {path!r} does not exist",
+            )
+        before = abs_p.read_text(encoding="utf-8")
+        lines = before.splitlines(keepends=True)
+        n = len(lines)
+        if not (1 <= start_line <= end_line <= n):
+            raise DesignMonorepoError(
+                f"L1-F replace_lines: range [{start_line}..{end_line}] not "
+                f"a subset of [1..{n}] for {path!r}",
+            )
+        replacement = content if content.endswith("\n") else content + "\n"
+
+        def _apply() -> None:
+            head = "".join(lines[: start_line - 1])
+            tail = "".join(lines[end_line:])
+            abs_p.write_text(head + replacement + tail, encoding="utf-8")
+
+        payload = await self._run_action(
+            "replace_lines",
+            snapshot_paths=(abs_p,),
+            validate_paths=(abs_p,),
+            commit_paths=(abs_p,),
+            primary_path=abs_p,
+            apply_mutation=_apply,
+        )
+        await self._emit_project_artifact_authored(payload)
+        return payload
+
+
 __all__ = (
     "RepoStateProvider",
     "DesignCheckpointer",
+    "ProjectAuthoringCapability",
     "ToolBuilder",
 )

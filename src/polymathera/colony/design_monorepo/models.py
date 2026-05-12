@@ -370,6 +370,110 @@ class BootstrapResult(BaseModel):
     )
 
 
+#: Single source of truth for the seven L1-F action kinds. Used by both
+#: ``ProjectArtifactAuthoredPayload.action_kind``'s ``Literal`` AND by
+#: the :class:`ProjectAuthoringCapability` method dispatch. The
+#: ``Literal`` annotation below must enumerate the same strings — a
+#: test asserts the two stay in sync, so adding an eighth action without
+#: updating both fails loudly.
+PROJECT_ACTION_KINDS: tuple[str, ...] = (
+    "write_file",
+    "edit_file",
+    "delete_file",
+    "move_file",
+    "insert_lines",
+    "delete_lines",
+    "replace_lines",
+)
+
+
+class ProjectArtifactValidationResult(BaseModel):
+    """One per-file validation outcome recorded on a
+    :class:`ProjectArtifactAuthoredPayload`.
+
+    Validators run before the L1-F commit and must all pass; a failure
+    aborts the action with the affected file restored to its pre-action
+    state. The result is recorded on success too so the audit trail
+    captures *which* checks ran (e.g. AST allow-list, pytest collect,
+    markdown sanity).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    validator: str = Field(
+        description="Registered validator name (e.g. 'ast_allow_list').",
+    )
+    ok: bool
+    detail: str = Field(
+        default="",
+        description=(
+            "On failure, a short reason. On success, optionally a "
+            "summary the planner can read back (e.g. 'collected 4 tests')."
+        ),
+    )
+
+
+class ProjectArtifactAuthoredPayload(BaseModel):
+    """Audit payload for an L1-F ``ProjectAuthoringCapability`` action.
+
+    Written to the blackboard under
+    :meth:`DesignMonorepoEventProtocol.project_artifact_authored_key`
+    and returned by every L1-F action. Provenance shape mirrors
+    :class:`ExtensionAuthoredPayload` (Risk #5: same audit pipeline
+    across both halves of L4).
+
+    ``affected_paths`` is one entry for single-file actions
+    (``write_file``, ``edit_file``, ``delete_file``, ``insert_lines``,
+    ``delete_lines``, ``replace_lines``) and two for ``move_file``
+    (``[src, dst]``).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    action_kind: Literal[
+        "write_file",
+        "edit_file",
+        "delete_file",
+        "move_file",
+        "insert_lines",
+        "delete_lines",
+        "replace_lines",
+    ] = Field(description="Which L1-F method produced this commit.")
+    affected_paths: tuple[str, ...] = Field(
+        description=(
+            "Paths the action touched, relative to the design monorepo "
+            "working tree."
+        ),
+    )
+    commit_sha: str = Field(
+        description="Commit that contains the mutation.",
+    )
+    authored_at: datetime = Field(
+        description="UTC timestamp at which the action committed.",
+    )
+    pre_commit_validation_results: tuple[ProjectArtifactValidationResult, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Every validator that ran against the resulting file. All "
+            "entries have ``ok=True`` (a failure aborts the action)."
+        ),
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Session that requested the authoring — pulled from "
+            "``get_current_session_id()`` at call time."
+        ),
+    )
+    user_message_id: str | None = Field(
+        default=None,
+        description=(
+            "Future-reserved: the user-message id that triggered the "
+            "authoring. No provenance source populates this today."
+        ),
+    )
+
+
 class ExtensionAuthoredPayload(BaseModel):
     """Audit payload for an L1-E ``bootstrap_<surface>`` call.
 

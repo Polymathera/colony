@@ -1646,6 +1646,7 @@ class DesignMonorepoEventProtocol(BlackboardProtocol):
     _BRANCH_MERGED_PREFIX: ClassVar[str] = "branch_merged:"
     _CHECKPOINT_EMITTED_PREFIX: ClassVar[str] = "checkpoint_emitted:"
     _EXTENSION_AUTHORED_PREFIX: ClassVar[str] = "extension_authored:"
+    _PROJECT_ARTIFACT_AUTHORED_PREFIX: ClassVar[str] = "project_artifact_authored:"
 
     @staticmethod
     def branch_changed_key(scope_id: str) -> str:
@@ -1710,6 +1711,41 @@ class DesignMonorepoEventProtocol(BlackboardProtocol):
             )
         surface, name = tail.split(":", 1)
         return surface, name
+
+    @staticmethod
+    def project_artifact_authored_key(action_kind: str, primary_path: str) -> str:
+        """L1-F authoring event. Tail is ``<action_kind>:<primary_path>``
+        where ``action_kind`` is one of
+        :data:`polymathera.colony.design_monorepo.models.PROJECT_ACTION_KINDS`
+        and ``primary_path`` is the working-tree-relative path of the
+        primary file the action touched (the destination for
+        ``move_file``)."""
+        return (
+            f"{DesignMonorepoEventProtocol._PROJECT_ARTIFACT_AUTHORED_PREFIX}"
+            f"{action_kind}:{primary_path}"
+        )
+
+    @staticmethod
+    def project_artifact_authored_pattern() -> str:
+        return f"{DesignMonorepoEventProtocol._PROJECT_ARTIFACT_AUTHORED_PREFIX}*"
+
+    @staticmethod
+    def parse_project_artifact_authored_key(key: str) -> tuple[str, str]:
+        """Inverse of :meth:`project_artifact_authored_key` — returns
+        ``(action_kind, primary_path)``. Path may contain ``:`` so the
+        tail is split on the first ``:`` only."""
+        prefix = DesignMonorepoEventProtocol._PROJECT_ARTIFACT_AUTHORED_PREFIX
+        if not key.startswith(prefix):
+            raise ValueError(
+                f"Not a DesignMonorepoEventProtocol project_artifact_authored key: {key!r}",
+            )
+        tail = key[len(prefix):]
+        if ":" not in tail:
+            raise ValueError(
+                f"Malformed project_artifact_authored key: {key!r}",
+            )
+        kind, path = tail.split(":", 1)
+        return kind, path
 
 
 class GitHubEventProtocol(BlackboardProtocol):
