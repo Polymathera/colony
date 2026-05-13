@@ -256,7 +256,7 @@ export interface MapRepoRequest {
 
 /* Job submission */
 
-export interface AnalysisSpec {
+export interface MissionSpec {
   type: string;
   coordinator_version?: string;
   max_agents?: number;
@@ -269,7 +269,7 @@ export interface AnalysisSpec {
 
 export interface JobSubmitRequest {
   session_id: string;
-  analyses: AnalysisSpec[];
+  missions: MissionSpec[];
   timeout_seconds?: number;
   budget_usd?: number | null;
 }
@@ -278,7 +278,7 @@ export interface JobSubmitResponse {
   job_id: string;
   session_id: string;
   status: string;
-  analyses: string[];
+  missions: string[];
   message: string;
 }
 
@@ -286,8 +286,8 @@ export interface JobStatusResponse {
   job_id: string;
   session_id: string;
   status: string;
-  analyses_completed: number;
-  analyses_total: number;
+  missions_completed: number;
+  missions_total: number;
   message: string;
 }
 
@@ -303,7 +303,7 @@ export interface ChatControls {
     exclude_patterns?: string[];
   };
   agent_preferences?: {
-    analysis_types?: string[];
+    mission_types?: string[];
     max_agents?: number;
     capabilities?: string[];
     tools?: string[];

@@ -1,14 +1,14 @@
-"""Analysis ``${name}`` — authored via L1-E ``bootstrap_analysis``.
+"""Mission ``${name}`` — authored via L1-E ``bootstrap_mission``.
 
-Lives at ``.colony/analyses/${name}.py``. L1-A's ``discover_analyses``
-walks ``.colony/analyses/*.py``, calls the ``analysis_entry()`` factory
+Lives at ``.colony/missions/${name}.py``. L1-A's ``discover_missions``
+walks ``.colony/missions/*.py``, calls the ``mission_entry()`` factory
 exposed by each file, validates the returned dict against
-:class:`polymathera.colony.agents.configs.AnalysisSpec`, and keys the
-result by the file stem (so ``${name}`` becomes the analysis key the
-``SessionAgent``'s planner sees in ``available_analyses``).
+:class:`polymathera.colony.agents.configs.MissionSpec`, and keys the
+result by the file stem (so ``${name}`` becomes the mission key the
+``SessionAgent``'s planner sees in ``available_missions``).
 
 Fill in the placeholder fields and re-discover. The factory must
-return every key declared on ``AnalysisSpec``; ``extra='forbid'`` is
+return every key declared on ``MissionSpec``; ``extra='forbid'`` is
 on, so unknown keys fail validation rather than silently passing.
 """
 
@@ -17,10 +17,10 @@ from __future__ import annotations
 from typing import Any
 
 
-def analysis_entry() -> dict[str, Any]:
+def mission_entry() -> dict[str, Any]:
     return {
-        "label": "${name} analysis",
-        "description": "TODO: one-line description of what this analysis does.",
+        "label": "${name} mission",
+        "description": "TODO: one-line description of what this mission does.",
         "coordinator_v1": "TODO.module.path.CoordinatorClass",
         "coordinator_v2": "TODO.module.path.CoordinatorClass",
         "worker": "TODO.module.path.WorkerClass",

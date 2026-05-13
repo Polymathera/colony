@@ -27,7 +27,7 @@ cluster:
 
 ## Why this exists
 
-Colony's three entry-point groups (`polymathera.analysis_types`, `polymathera.cli_extensions`, `polymathera.config_components`) discover extensions via `importlib.metadata.entry_points` — environment-wide. Without `cluster.extensions.packages` in the YAML, an extension package's entries are invisible at runtime because the package is not installed in the container's Python environment. L1-G fixes that gap.
+Colony's three entry-point groups (`polymathera.mission_types`, `polymathera.cli_extensions`, `polymathera.config_components`) discover extensions via `importlib.metadata.entry_points` — environment-wide. Without `cluster.extensions.packages` in the YAML, an extension package's entries are invisible at runtime because the package is not installed in the container's Python environment. L1-G fixes that gap.
 
 ## Surface anatomy
 

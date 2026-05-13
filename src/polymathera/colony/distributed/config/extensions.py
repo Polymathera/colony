@@ -13,8 +13,8 @@ that declare new ``ConfigComponent`` subclasses (each decorated with
 registration into the shared registry. Failures are logged and isolated —
 one broken extension does not prevent others from loading.
 
-The single existing legacy group ``polymathera.analysis_types`` (consumed by
-``agents.analysis_registry.get_analysis_registry``) is unrelated and remains
+The single existing legacy group ``polymathera.mission_types`` (consumed by
+``agents.mission_registry.get_mission_registry``) is unrelated and remains
 in place; both can coexist.
 """
 

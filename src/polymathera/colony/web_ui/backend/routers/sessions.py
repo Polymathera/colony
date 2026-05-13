@@ -301,24 +301,24 @@ async def create_session(
                 ActionKeySubstringFilter,
                 SuccessfulActionFilter,
             )
-            from polymathera.colony.agents.analysis_registry import get_analysis_registry
+            from polymathera.colony.agents.mission_registry import get_mission_registry
             from polymathera.colony.distributed.ray_utils.serving.context import get_tenant_id, get_colony_id
 
-            # Build the available analysis types info for the LLM planner.
-            # ``get_analysis_registry()`` returns the union of colony-builtin
+            # Build the available mission types info for the LLM planner.
+            # ``get_mission_registry()`` returns the union of colony-builtin
             # entries and any registered via the
-            # ``polymathera.analysis_types`` entry-point group (master plan
+            # ``polymathera.mission_types`` entry-point group (master plan
             # §12.3 — domain packages like polymathera-cps register their
-            # coordinator analyses there so they show up in chat without
+            # coordinator missions there so they show up in chat without
             # colony having to import them).
-            available_analyses = {
+            available_missions = {
                 atype: {
                     "label": reg["label"],
                     "description": reg.get("description", ""),
                     "coordinator_class": reg.get("coordinator_v2", ""),
                     "worker_class": reg.get("worker", ""),
                 }
-                for atype, reg in get_analysis_registry().items()
+                for atype, reg in get_mission_registry().items()
             }
 
             agent_metadata = AgentMetadata(
@@ -326,8 +326,8 @@ async def create_session(
                 session_id=session_id,
                 goals=[
                     "Orchestrate user interactions within this session",
-                    "Interpret user intent and decide whether to respond directly or spawn analysis agents",
-                    "Spawn and monitor coordinator agents for code analysis tasks",
+                    "Interpret user intent and decide whether to respond directly or spawn mission agents",
+                    "Spawn and monitor coordinator agents for mission tasks",
                     "Relay agent progress and results back to the user",
                 ],
                 self_concept=AgentSelfConcept(
@@ -337,13 +337,13 @@ async def create_session(
                         "the session orchestrator responsible for handling all user "
                         "interactions in this session. You receive user messages, decide "
                         "how to handle them, and can either respond directly or spawn "
-                        "specialized coordinator agents to perform code analysis tasks."
+                        "specialized coordinator agents to perform mission tasks."
                     ),
                     description=(
                         "You are the primary interface between the user and the Colony's "
                         "multi-agent system. You have access to an agent pool for spawning "
-                        "coordinator agents (one per analysis type), and you can respond "
-                        "directly to user questions. When the user requests an analysis, "
+                        "coordinator agents (one per mission type), and you can respond "
+                        "directly to user questions. When the user requests a mission, "
                         "use create_agent to spawn the appropriate coordinator. When the "
                         "user asks a question or needs information, use respond_to_user.\n\n"
                         "DESIGN-MONOREPO BOOTSTRAP:\n"
@@ -496,7 +496,7 @@ async def create_session(
                     ),
                 ),
                 parameters={
-                    "available_analyses": available_analyses,
+                    "available_missions": available_missions,
                     "session_id": session_id,
                     "repl_guidance_override": (
                         "## REPL\n\n"

@@ -491,7 +491,7 @@ class ExtensionAuthoredPayload(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     surface: Literal[
-        "plugins", "agents", "deployments", "tools", "profiles", "analyses",
+        "plugins", "agents", "deployments", "tools", "profiles", "missions",
     ] = Field(
         description=(
             "Surface kind — must match a key in "

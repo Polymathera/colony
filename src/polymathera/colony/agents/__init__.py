@@ -64,10 +64,10 @@ from .system import AgentSystemDeployment, AgentSystemState
 
 from .config import AgentSystemConfig
 from .configs import (
-    AnalysisRegistryConfig,
-    AnalysisSelfConcept,
-    AnalysisSpec,
     ChromaConfig,
+    MissionRegistryConfig,
+    MissionSelfConcept,
+    MissionSpec,
     GitHubAuthConfig,
     PluginsConfig,
     SandboxImage,
@@ -157,10 +157,10 @@ __all__ = [
     "AgentSystemState",
     "AgentSystemConfig",
     # Configs
-    "AnalysisRegistryConfig",
-    "AnalysisSelfConcept",
-    "AnalysisSpec",
     "ChromaConfig",
+    "MissionRegistryConfig",
+    "MissionSelfConcept",
+    "MissionSpec",
     "GitHubAuthConfig",
     "PluginsConfig",
     "SandboxImage",

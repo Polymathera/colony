@@ -22,7 +22,7 @@ from polymathera.colony.design_monorepo.extensions import (
     DiscoveredExtensions,
     discover_agents,
     discover_all,
-    discover_analyses,
+    discover_missions,
     discover_deployments,
     discover_plugins,
     discover_profiles,
@@ -55,7 +55,7 @@ def test_all_discoverers_handle_missing_surface_dirs(tmp_path: Path) -> None:
     assert snap.deployments == {}
     assert len(snap.tools) == 0
     assert snap.profiles == {}
-    assert snap.analyses == {}
+    assert snap.missions == {}
 
 
 def test_all_discoverers_handle_empty_surface_dirs(tmp_path: Path) -> None:
@@ -69,7 +69,7 @@ def test_all_discoverers_handle_empty_surface_dirs(tmp_path: Path) -> None:
     assert snap.deployments == {}
     assert len(snap.tools) == 0
     assert snap.profiles == {}
-    assert snap.analyses == {}
+    assert snap.missions == {}
 
 
 # ---------------------------------------------------------------------------
@@ -203,17 +203,17 @@ def test_discover_profiles_skips_non_mapping_top_level(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# discover_analyses — analysis_entry() factory + AnalysisSpec validation
+# discover_missions — mission_entry() factory + MissionSpec validation
 # ---------------------------------------------------------------------------
 
 
-def _write_valid_analysis_file(surface: Path, stem: str) -> None:
-    """Write a ``.colony/analyses/<stem>.py`` whose ``analysis_entry()``
-    returns a dict matching :class:`AnalysisSpec`."""
+def _write_valid_mission_file(surface: Path, stem: str) -> None:
+    """Write a ``.colony/missions/<stem>.py`` whose ``mission_entry()``
+    returns a dict matching :class:`MissionSpec`."""
     (surface / f"{stem}.py").write_text(
-        "def analysis_entry():\n"
+        "def mission_entry():\n"
         "    return {\n"
-        f"        'label': '{stem} analysis',\n"
+        f"        'label': '{stem} mission',\n"
         "        'description': 'demo',\n"
         f"        'coordinator_v1': 'test.{stem}.Coordinator',\n"
         f"        'coordinator_v2': 'test.{stem}.Coordinator',\n"
@@ -223,62 +223,62 @@ def _write_valid_analysis_file(surface: Path, stem: str) -> None:
     )
 
 
-def test_discover_analyses_loads_valid_factories(tmp_path: Path) -> None:
-    surface = tmp_path / ".colony/analyses"
+def test_discover_missions_loads_valid_factories(tmp_path: Path) -> None:
+    surface = tmp_path / ".colony/missions"
     surface.mkdir(parents=True)
-    _write_valid_analysis_file(surface, "demo")
-    _write_valid_analysis_file(surface, "other")
-    found = discover_analyses(tmp_path)
+    _write_valid_mission_file(surface, "demo")
+    _write_valid_mission_file(surface, "other")
+    found = discover_missions(tmp_path)
     assert set(found.keys()) == {"demo", "other"}
-    assert found["demo"]["label"] == "demo analysis"
+    assert found["demo"]["label"] == "demo mission"
     assert found["demo"]["coordinator_v2"] == "test.demo.Coordinator"
 
 
-def test_discover_analyses_skips_file_without_factory(
+def test_discover_missions_skips_file_without_factory(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    surface = tmp_path / ".colony/analyses"
+    surface = tmp_path / ".colony/missions"
     surface.mkdir(parents=True)
-    _write_valid_analysis_file(surface, "good")
-    (surface / "nofactory.py").write_text("# no analysis_entry defined\n")
+    _write_valid_mission_file(surface, "good")
+    (surface / "nofactory.py").write_text("# no mission_entry defined\n")
     with caplog.at_level("WARNING", logger="polymathera.colony.design_monorepo.extensions"):
-        found = discover_analyses(tmp_path)
+        found = discover_missions(tmp_path)
     assert set(found.keys()) == {"good"}
     assert any(
-        "exposes no callable analysis_entry" in r.getMessage()
+        "exposes no callable mission_entry" in r.getMessage()
         for r in caplog.records
     )
 
 
-def test_discover_analyses_skips_factory_that_raises(
+def test_discover_missions_skips_factory_that_raises(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    surface = tmp_path / ".colony/analyses"
+    surface = tmp_path / ".colony/missions"
     surface.mkdir(parents=True)
-    _write_valid_analysis_file(surface, "good")
+    _write_valid_mission_file(surface, "good")
     (surface / "boom.py").write_text(
-        "def analysis_entry():\n"
+        "def mission_entry():\n"
         "    raise RuntimeError('factory exploded')\n",
     )
     with caplog.at_level("WARNING", logger="polymathera.colony.design_monorepo.extensions"):
-        found = discover_analyses(tmp_path)
+        found = discover_missions(tmp_path)
     assert set(found.keys()) == {"good"}
     assert any(
-        "analysis_entry() in" in r.getMessage() and "raised" in r.getMessage()
+        "mission_entry() in" in r.getMessage() and "raised" in r.getMessage()
         for r in caplog.records
     )
 
 
-def test_discover_analyses_rejects_unknown_key(
+def test_discover_missions_rejects_unknown_key(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """``AnalysisSpec.extra='forbid'`` catches typos at discovery time —
+    """``MissionSpec.extra='forbid'`` catches typos at discovery time —
     the cross-mechanism schema-drift guard that the strict spec exists
     to provide."""
-    surface = tmp_path / ".colony/analyses"
+    surface = tmp_path / ".colony/missions"
     surface.mkdir(parents=True)
     (surface / "typoed.py").write_text(
-        "def analysis_entry():\n"
+        "def mission_entry():\n"
         "    return {\n"
         "        'label': 't', 'description': 't',\n"
         "        'coordinator_v1': 'x.Y', 'coordinator_v2': 'x.Y', 'worker': 'x.W',\n"
@@ -287,7 +287,7 @@ def test_discover_analyses_rejects_unknown_key(
         "    }\n",
     )
     with caplog.at_level("WARNING", logger="polymathera.colony.design_monorepo.extensions"):
-        found = discover_analyses(tmp_path)
+        found = discover_missions(tmp_path)
     assert found == {}
     assert any(
         "failed schema validation" in r.getMessage()

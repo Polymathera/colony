@@ -254,7 +254,7 @@ class ConsciousnessCapability(AgentCapability):
 
         Identity is assembled from three sources (highest priority wins):
         1. ``metadata.parameters["self_concept"]`` — explicit overrides from the
-           spawner (e.g., analysis-specific goals/constraints from ANALYSIS_REGISTRY)
+           spawner (e.g., mission-specific goals/constraints from MISSION_REGISTRY)
         2. Agent instance attributes — class name, docstring, metadata.role
         3. Generic defaults — agent_id prefix, type-based role description
 

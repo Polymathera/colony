@@ -34,7 +34,7 @@ export interface ParseResult {
 }
 
 const COMMANDS: Record<string, { description: string; usage: string }> = {
-  analyze:  { description: "Start a structured analysis run", usage: "/analyze <type> [--max-agents N] [--quality N]" },
+  analyze:  { description: "Start a structured mission run", usage: "/analyze <type> [--max-agents N] [--quality N]" },
   map:      { description: "Map content to VCM", usage: "/map <url> [--branch name]" },
   abort:    { description: "Abort the current or specified run", usage: "/abort [run_id]" },
   status:   { description: "Show current run/session status", usage: "/status" },

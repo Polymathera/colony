@@ -1,9 +1,9 @@
 """Typed configuration for the agent layer.
 
 This module hosts ``ConfigComponent``s that the rest of the agent system
-reads (analysis registry today; plugin/sandbox/job configs in later steps).
-The registry-style ``AnalysisRegistryConfig`` replaces the previously-
-hardcoded ``ANALYSIS_REGISTRY`` dict in ``cli/polymath.py``; the dict is
+reads (mission registry today; plugin/sandbox/job configs in later steps).
+The registry-style ``MissionRegistryConfig`` replaces the previously-
+hardcoded ``MISSION_REGISTRY`` dict in ``cli/polymath.py``; the dict is
 re-exported there so existing call sites keep indexing it as a plain
 ``dict[str, dict]`` until step 11 lifts ``TestConfig``.
 """
@@ -25,11 +25,11 @@ from ..distributed.config import (
 
 
 # ---------------------------------------------------------------------------
-# Analysis registry — typed surface
+# Mission registry — typed surface
 # ---------------------------------------------------------------------------
 
 
-class AnalysisSelfConcept(BaseModel):
+class MissionSelfConcept(BaseModel):
     """The self-concept fields a coordinator agent reads at spawn time."""
 
     model_config = ConfigDict(extra="forbid")
@@ -39,8 +39,8 @@ class AnalysisSelfConcept(BaseModel):
     constraints: list[str] = Field(default_factory=list)
 
 
-class AnalysisSpec(BaseModel):
-    """Definition of one analysis type (coordinator + worker classes + metadata).
+class MissionSpec(BaseModel):
+    """Definition of one mission type (coordinator + worker classes + metadata).
 
     Worker capabilities are documentation-only — workers self-configure their
     capabilities in their ``initialize()`` methods. Coordinator capabilities
@@ -48,9 +48,9 @@ class AnalysisSpec(BaseModel):
     spawn time.
 
     Schema is the single source of truth for every registration mechanism that
-    surfaces an analysis to the SessionAgent (the colony-builtin dict, the
-    ``polymathera.analysis_types`` entry-point group, and L1-A's
-    :func:`polymathera.colony.design_monorepo.extensions.discover_analyses`).
+    surfaces a mission to the SessionAgent (the colony-builtin dict, the
+    ``polymathera.mission_types`` entry-point group, and L1-A's
+    :func:`polymathera.colony.design_monorepo.extensions.discover_missions`).
     ``extra="forbid"`` keeps drift visible: typo'd keys in any of those paths
     surface as validation errors at load time rather than silently passing.
     """
@@ -65,16 +65,16 @@ class AnalysisSpec(BaseModel):
     coordinator_capabilities: list[str] = Field(default_factory=list)
     worker_capabilities: list[str] = Field(default_factory=list)
     extra_metadata_keys: list[str] = Field(default_factory=list)
-    self_concept: AnalysisSelfConcept
+    self_concept: MissionSelfConcept
 
 
-# Built-in analyses shipped by colony. CPS and other extensions add more via
+# Built-in missions shipped by colony. CPS and other extensions add more via
 # the ``polymathera.config_components`` entry-point group (see
 # ``distributed.config.extensions``) or via the existing legacy
-# ``polymathera.analysis_types`` group consumed by
-# ``agents.analysis_registry.get_analysis_registry``.
+# ``polymathera.mission_types`` group consumed by
+# ``agents.mission_registry.get_mission_registry``.
 
-# Maps analysis types to their coordinator and worker agent class paths.
+# Maps mission types to their coordinator and worker agent class paths.
 # These are the fully-qualified Python class paths used by the agent system
 # to instantiate agent classes dynamically.
 #
@@ -84,7 +84,7 @@ class AnalysisSpec(BaseModel):
 # which adds HypothesisGameProtocol automatically). The lists here are used by
 # the `describe` and `list` commands to show what each worker provides.
 
-_BUILTIN_ANALYSES: dict[str, dict[str, Any]] = {
+_BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
     "impact": {
         "label": "Change Impact Analysis",
         "description": (
@@ -322,25 +322,25 @@ _BUILTIN_ANALYSES: dict[str, dict[str, Any]] = {
 }
 
 
-def _builtin_analyses() -> dict[str, AnalysisSpec]:
-    """Build typed defaults from ``_BUILTIN_ANALYSES``."""
-    return {key: AnalysisSpec(**value) for key, value in _BUILTIN_ANALYSES.items()}
+def _builtin_missions() -> dict[str, MissionSpec]:
+    """Build typed defaults from ``_BUILTIN_MISSIONS``."""
+    return {key: MissionSpec(**value) for key, value in _BUILTIN_MISSIONS.items()}
 
 
-@register_polymathera_config(path="analysis_registry")
-class AnalysisRegistryConfig(ConfigComponent):
-    """Registered repository of analysis types.
+@register_polymathera_config(path="mission_registry")
+class MissionRegistryConfig(ConfigComponent):
+    """Registered repository of mission types.
 
-    Defaults are the colony built-ins lifted from the legacy ``ANALYSIS_REGISTRY``
+    Defaults are the colony built-ins lifted from the legacy ``MISSION_REGISTRY``
     dict in ``cli/polymath.py``. Extensions add entries either by registering
-    additional ``AnalysisSpec`` values into this component (via the
+    additional ``MissionSpec`` values into this component (via the
     ``polymathera.config_components`` entry-point group) or via the legacy
-    ``polymathera.analysis_types`` discovery (see
-    ``agents.analysis_registry.get_analysis_registry``).
+    ``polymathera.mission_types`` discovery (see
+    ``agents.mission_registry.get_mission_registry``).
     """
 
-    analyses: dict[str, AnalysisSpec] = Field(
-        default_factory=_builtin_analyses,
+    missions: dict[str, MissionSpec] = Field(
+        default_factory=_builtin_missions,
         json_schema_extra=tier_metadata(
             tier=Tier.L1_OPERATOR,
             ownership=Ownership.COLONY,
@@ -349,11 +349,11 @@ class AnalysisRegistryConfig(ConfigComponent):
     )
 
 
-# Backwards-compatible re-export. ``cli.polymath.ANALYSIS_REGISTRY`` and
-# ``agents.analysis_registry.get_analysis_registry`` index this dict as the
+# Backwards-compatible re-export. ``cli.polymath.MISSION_REGISTRY`` and
+# ``agents.mission_registry.get_mission_registry`` index this dict as the
 # colony-builtin baseline. Step 11 (lifting ``TestConfig``) removes the dict
-# alias and routes everything through ``AnalysisRegistryConfig``.
-ANALYSIS_REGISTRY: dict[str, dict[str, Any]] = _BUILTIN_ANALYSES
+# alias and routes everything through ``MissionRegistryConfig``.
+MISSION_REGISTRY: dict[str, dict[str, Any]] = _BUILTIN_MISSIONS
 
 
 # ---------------------------------------------------------------------------
@@ -553,10 +553,10 @@ async def _get_component_or_default(path: str, cls: type[ConfigComponent]):
 
 
 __all__ = (
-    "ANALYSIS_REGISTRY",
-    "AnalysisRegistryConfig",
-    "AnalysisSelfConcept",
-    "AnalysisSpec",
+    "MISSION_REGISTRY",
+    "MissionRegistryConfig",
+    "MissionSelfConcept",
+    "MissionSpec",
     "ChromaConfig",
     "GitHubAuthConfig",
     "PluginsConfig",

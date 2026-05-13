@@ -1,18 +1,18 @@
-"""Tests for ``polymathera.colony.agents.analysis_registry``.
+"""Tests for ``polymathera.colony.agents.mission_registry``.
 
 Covers the entry-point-group discovery surface that lets domain
-packages (e.g. ``polymathera-cps``) register coordinator analyses
+packages (e.g. ``polymathera-cps``) register coordinator missions
 without colony having to import them.
 
 Domain coverage:
 
-- The hardcoded ``ANALYSIS_REGISTRY`` is always present in the
+- The hardcoded ``MISSION_REGISTRY`` is always present in the
   union (regression on the legacy code-analysis sample types).
 - Plugin entries appear alongside builtins.
 - Plugin entries can shadow builtins (with a warning).
 - Plugin load failures (factory raises, missing keys, wrong type)
   are isolated — the rest of the registry survives.
-- The module exposes ``ANALYSIS_TYPES_ENTRY_POINT_GROUP`` as a
+- The module exposes ``MISSION_TYPES_ENTRY_POINT_GROUP`` as a
   stable string constant (cps and other domain packages depend on
   this value).
 """
@@ -24,9 +24,9 @@ from typing import Any
 
 import pytest
 
-from polymathera.colony.agents.analysis_registry import (
-    ANALYSIS_TYPES_ENTRY_POINT_GROUP,
-    get_analysis_registry,
+from polymathera.colony.agents.mission_registry import (
+    MISSION_TYPES_ENTRY_POINT_GROUP,
+    get_mission_registry,
 )
 
 
@@ -52,7 +52,7 @@ def _make_ep(name: str, loaded_factory) -> EntryPoint:
     return _StubEntryPoint(
         name=name,
         value=f"test_module:{name}",
-        group=ANALYSIS_TYPES_ENTRY_POINT_GROUP,
+        group=MISSION_TYPES_ENTRY_POINT_GROUP,
     )
 
 
@@ -64,12 +64,12 @@ def _patch_entry_points(
     tuple for any other group."""
 
     def _fake_entry_points(*, group: str = "") -> tuple[EntryPoint, ...]:
-        if group == ANALYSIS_TYPES_ENTRY_POINT_GROUP:
+        if group == MISSION_TYPES_ENTRY_POINT_GROUP:
             return eps
         return ()
 
     monkeypatch.setattr(
-        "polymathera.colony.agents.analysis_registry.entry_points",
+        "polymathera.colony.agents.mission_registry.entry_points",
         _fake_entry_points,
     )
 
@@ -104,11 +104,11 @@ def test_builtins_always_present(monkeypatch: pytest.MonkeyPatch) -> None:
     """No plugins registered → registry equals the colony-builtin set."""
 
     _patch_entry_points(monkeypatch, ())
-    reg = get_analysis_registry()
-    # Builtin sample analyses (declared in colony/cli/polymath.py).
+    reg = get_mission_registry()
+    # Builtin sample missions (declared in colony/cli/polymath.py).
     for builtin in ("impact", "slicing", "compliance", "intent", "contracts", "basic"):
         assert builtin in reg, (
-            f"Builtin analysis {builtin!r} disappeared from get_analysis_registry()"
+            f"Builtin mission {builtin!r} disappeared from get_mission_registry()"
         )
         assert reg[builtin]["label"]
         assert "coordinator_v2" in reg[builtin]
@@ -118,12 +118,12 @@ def test_returns_a_copy_not_the_underlying_dict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Mutating the return value must NOT affect the underlying
-    ``ANALYSIS_REGISTRY`` (each call returns a fresh dict)."""
+    ``MISSION_REGISTRY`` (each call returns a fresh dict)."""
 
     _patch_entry_points(monkeypatch, ())
-    first = get_analysis_registry()
+    first = get_mission_registry()
     first["impact"]["label"] = "POISONED"
-    second = get_analysis_registry()
+    second = get_mission_registry()
     assert second["impact"]["label"] != "POISONED"
 
 
@@ -139,7 +139,7 @@ def test_plugin_entry_appears_in_registry(
         monkeypatch,
         (_make_ep("opm_meg", _opm_meg_entry),),
     )
-    reg = get_analysis_registry()
+    reg = get_mission_registry()
     assert "opm_meg" in reg
     assert reg["opm_meg"]["label"].startswith("OPM-MEG")
     assert "coordinator_v2" in reg["opm_meg"]
@@ -167,7 +167,7 @@ def test_multiple_plugin_entries_all_discovered(
             _make_ep("racer", _racer_entry),
         ),
     )
-    reg = get_analysis_registry()
+    reg = get_mission_registry()
     assert "opm_meg" in reg
     assert "racer" in reg
     # Builtins still here.
@@ -198,8 +198,8 @@ def test_plugin_can_shadow_builtin_with_warning(
     _patch_entry_points(
         monkeypatch, (_make_ep("impact", _shadow_impact),),
     )
-    with caplog.at_level("WARNING", logger="polymathera.colony.agents.analysis_registry"):
-        reg = get_analysis_registry()
+    with caplog.at_level("WARNING", logger="polymathera.colony.agents.mission_registry"):
+        reg = get_mission_registry()
     assert reg["impact"]["label"] == "Custom Impact (overridden)"
     assert any(
         "shadows a colony-builtin entry" in record.getMessage()
@@ -228,8 +228,8 @@ def test_plugin_factory_raise_does_not_break_registry(
             _make_ep("opm_meg", _opm_meg_entry),
         ),
     )
-    with caplog.at_level("WARNING", logger="polymathera.colony.agents.analysis_registry"):
-        reg = get_analysis_registry()
+    with caplog.at_level("WARNING", logger="polymathera.colony.agents.mission_registry"):
+        reg = get_mission_registry()
     assert "broken" not in reg
     assert "opm_meg" in reg  # untouched by the failure
     assert "impact" in reg   # builtins survive
@@ -246,8 +246,8 @@ def test_plugin_returning_non_dict_is_skipped(
         monkeypatch,
         (_make_ep("badshape", _wrong_shape),),
     )
-    with caplog.at_level("WARNING", logger="polymathera.colony.agents.analysis_registry"):
-        reg = get_analysis_registry()
+    with caplog.at_level("WARNING", logger="polymathera.colony.agents.mission_registry"):
+        reg = get_mission_registry()
     assert "badshape" not in reg
     assert any("expected dict" in r.getMessage() for r in caplog.records)
 
@@ -256,7 +256,7 @@ def test_plugin_missing_required_keys_is_skipped(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     def _no_label() -> dict[str, Any]:
-        # Missing 'label' (required by AnalysisSpec).
+        # Missing 'label' (required by MissionSpec).
         return {
             "description": "An analysis without a label.",
             "coordinator_v1": "x.Y",
@@ -269,8 +269,8 @@ def test_plugin_missing_required_keys_is_skipped(
         monkeypatch,
         (_make_ep("no_label", _no_label),),
     )
-    with caplog.at_level("WARNING", logger="polymathera.colony.agents.analysis_registry"):
-        reg = get_analysis_registry()
+    with caplog.at_level("WARNING", logger="polymathera.colony.agents.mission_registry"):
+        reg = get_mission_registry()
     assert "no_label" not in reg
     assert any(
         "failed schema validation" in r.getMessage() for r in caplog.records
@@ -280,7 +280,7 @@ def test_plugin_missing_required_keys_is_skipped(
 def test_plugin_with_unknown_key_is_skipped(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """AnalysisSpec sets ``extra='forbid'`` so a typo'd key in a plugin
+    """MissionSpec sets ``extra='forbid'`` so a typo'd key in a plugin
     entry fails validation rather than silently passing through. This
     is the schema-drift guard the strict spec exists to provide."""
 
@@ -296,8 +296,8 @@ def test_plugin_with_unknown_key_is_skipped(
     _patch_entry_points(
         monkeypatch, (_make_ep("typoed", _typoed_entry),),
     )
-    with caplog.at_level("WARNING", logger="polymathera.colony.agents.analysis_registry"):
-        reg = get_analysis_registry()
+    with caplog.at_level("WARNING", logger="polymathera.colony.agents.mission_registry"):
+        reg = get_mission_registry()
     assert "typoed" not in reg
     assert any(
         "failed schema validation" in r.getMessage()
@@ -310,9 +310,9 @@ def test_plugin_without_coordinator_class_is_skipped(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Without ``coordinator_v1`` / ``coordinator_v2`` an entry cannot be
-    spawned. AnalysisSpec marks both fields as required, so a plugin
+    spawned. MissionSpec marks both fields as required, so a plugin
     missing either is rejected at validation time rather than producing
-    a half-broken entry visible in ``available_analyses``."""
+    a half-broken entry visible in ``available_missions``."""
 
     def _no_coordinator() -> dict[str, Any]:
         return {
@@ -326,8 +326,8 @@ def test_plugin_without_coordinator_class_is_skipped(
     _patch_entry_points(
         monkeypatch, (_make_ep("docs_only", _no_coordinator),),
     )
-    with caplog.at_level("WARNING", logger="polymathera.colony.agents.analysis_registry"):
-        reg = get_analysis_registry()
+    with caplog.at_level("WARNING", logger="polymathera.colony.agents.mission_registry"):
+        reg = get_mission_registry()
     assert "docs_only" not in reg
     assert any(
         "failed schema validation" in r.getMessage()
@@ -345,4 +345,4 @@ def test_entry_point_group_name_is_stable() -> None:
     """The group name is referenced from every domain package's
     ``pyproject.toml``. Renaming silently breaks all CPS plugins."""
 
-    assert ANALYSIS_TYPES_ENTRY_POINT_GROUP == "polymathera.analysis_types"
+    assert MISSION_TYPES_ENTRY_POINT_GROUP == "polymathera.mission_types"

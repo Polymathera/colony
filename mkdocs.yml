@@ -118,6 +118,7 @@ nav:
     - colony-env: guides/colony-env.md
     - Web Dashboard: guides/web-dashboard.md
     - Capability Operator Setup: guides/capability-setup.md
+    - Registering a Mission: guides/registering-a-mission.md
     - Publishing & CI/CD: guides/publishing.md
   - API Reference:
     - reference/index.md

@@ -200,7 +200,7 @@ my_extension = "polymathera.cps.config:register_components"
 def register_components() -> None:
     """Side-effect: importing these modules triggers their
     @register_polymathera_config / @register_remote_llm_provider decorators."""
-    from . import analysis_types     # noqa: F401
+    from . import mission_types      # noqa: F401
     from . import remote_providers   # noqa: F401
 ```
 

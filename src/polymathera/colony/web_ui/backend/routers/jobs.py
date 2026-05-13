@@ -28,28 +28,28 @@ router = APIRouter()
 # Request/response models
 # ---------------------------------------------------------------------------
 
-class AnalysisSpec(BaseModel):
-    """Specification for a single analysis within a job."""
+class MissionSpec(BaseModel):
+    """Specification for a single mission within a job."""
 
-    type: str = Field(description="Analysis type: impact, compliance, intent, contracts, slicing, basic")
+    type: str = Field(description="Mission type: impact, compliance, intent, contracts, slicing, basic")
     coordinator_version: str = Field(default="v2", description="Coordinator version")
     max_agents: int = Field(default=10, description="Max concurrent worker agents")
     quality_threshold: float = Field(default=0.7, description="Min quality score (0-1)")
     max_iterations: int = Field(default=10, description="Max planning iterations")
     batching_policy: str = Field(default="hybrid", description="Batching: hybrid, clustering, continuous")
     extra_capabilities: list[str] = Field(default_factory=list, description="Extra capability names")
-    parameters: dict[str, Any] = Field(default_factory=dict, description="Analysis-specific params")
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Mission-specific params")
 
 
 class JobSubmitRequest(BaseModel):
-    """Submit an analysis job to the running Colony.
+    """Submit an mission job to the running Colony.
 
     Content must already be mapped in VCM before submitting a job.
     Use POST /vcm/map to map a codebase first.
     """
 
-    session_id: str = Field(description="Session to run analyses in (created via sidebar)")
-    analyses: list[AnalysisSpec] = Field(description="Analyses to run")
+    session_id: str = Field(description="Session to run missions in (created via sidebar)")
+    missions: list[MissionSpec] = Field(description="Analyses to run")
     timeout_seconds: int = Field(default=600, description="Max time for the job")
     budget_usd: float | None = Field(default=None, description="Max budget in USD")
 
@@ -60,7 +60,7 @@ class JobSubmitResponse(BaseModel):
     job_id: str
     session_id: str
     status: str  # "submitted", "error"
-    analyses: list[str]
+    missions: list[str]
     message: str = ""
 
 
@@ -70,8 +70,8 @@ class JobStatusResponse(BaseModel):
     job_id: str
     session_id: str
     status: str  # "running", "completed", "failed", "cancelled"
-    analyses_completed: int = 0
-    analyses_total: int = 0
+    missions_completed: int = 0
+    missions_total: int = 0
     message: str = ""
 
 
@@ -93,31 +93,31 @@ async def submit_job(
     user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> JobSubmitResponse:
-    """Submit an analysis job. Returns immediately — monitoring via SSE/polling.
+    """Submit an mission job. Returns immediately — monitoring via SSE/polling.
 
     Content must already be mapped in VCM.
     The job runs asynchronously in the background:
-    1. Spawns coordinator agents for each analysis in the given session
+    1. Spawns coordinator agents for each mission in the given session
     2. Coordinators run autonomously until completion or timeout
     """
     if not colony.is_connected:
         return JobSubmitResponse(
             job_id="", session_id="", status="error",
-            analyses=[], message="Not connected to cluster",
+            missions=[], message="Not connected to cluster",
         )
 
     job_id = f"job_{uuid.uuid4().hex[:12]}"
     session_id = request.session_id
-    analysis_types = [a.type for a in request.analyses]
+    mission_types = [a.type for a in request.missions]
 
     # Track job
     _active_jobs[job_id] = {
         "job_id": job_id,
         "session_id": session_id,
         "status": "submitted",
-        "analyses": analysis_types,
-        "analyses_completed": 0,
-        "analyses_total": len(request.analyses),
+        "missions": mission_types,
+        "missions_completed": 0,
+        "missions_total": len(request.missions),
         "request": request.model_dump(),
     }
 
@@ -136,7 +136,7 @@ async def submit_job(
         job_id=job_id,
         session_id=session_id,
         status="submitted",
-        analyses=analysis_types,
+        missions=mission_types,
         message=f"Job submitted. Session: {session_id}",
     )
 
@@ -152,8 +152,8 @@ async def get_job_status(job_id: str, _user: dict = Depends(require_auth)) -> Jo
         job_id=job["job_id"],
         session_id=job["session_id"],
         status=job["status"],
-        analyses_completed=job.get("analyses_completed", 0),
-        analyses_total=job.get("analyses_total", 0),
+        missions_completed=job.get("missions_completed", 0),
+        missions_total=job.get("missions_total", 0),
         message=job.get("message", ""),
     )
 
@@ -166,8 +166,8 @@ async def list_jobs(_user: dict = Depends(require_auth)) -> list[JobStatusRespon
             job_id=j["job_id"],
             session_id=j["session_id"],
             status=j["status"],
-            analyses_completed=j.get("analyses_completed", 0),
-            analyses_total=j.get("analyses_total", 0),
+            missions_completed=j.get("missions_completed", 0),
+            missions_total=j.get("missions_total", 0),
             message=j.get("message", ""),
         )
         for j in _active_jobs.values()
@@ -193,7 +193,7 @@ async def _run_job(
     to background tasks.
 
     Content must already be mapped in VCM. Steps:
-    1. Spawn coordinator agents for each analysis
+    1. Spawn coordinator agents for each mission
     2. Monitor coordinators until completion or timeout
     """
     job = _active_jobs.get(job_id)
@@ -213,8 +213,8 @@ async def _run_job(
             from polymathera.colony.agents import AgentMetadata, AgentHandle
             from polymathera.colony.agents import AgentSelfConcept
 
-            # Import the analysis registry from polymath.py
-            from polymathera.colony.cli.polymath import ANALYSIS_REGISTRY, EXTRA_CAPABILITIES_REGISTRY, _resolve_class
+            # Import the mission registry from polymath.py
+            from polymathera.colony.cli.polymath import MISSION_REGISTRY, EXTRA_CAPABILITIES_REGISTRY, _resolve_class
 
             run_id = f"run_{uuid.uuid4().hex[:8]}"
 
@@ -227,15 +227,15 @@ async def _run_job(
                 run_id=run_id,
             )
 
-            coordinator_handles: list[tuple[AnalysisSpec, AgentHandle]] = []
+            coordinator_handles: list[tuple[MissionSpec, AgentHandle]] = []
 
-            for analysis in request.analyses:
-                reg = ANALYSIS_REGISTRY.get(analysis.type)
+            for mission in request.missions:
+                reg = MISSION_REGISTRY.get(mission.type)
                 if not reg:
-                    logger.warning("Unknown analysis type: %s", analysis.type)
+                    logger.warning("Unknown mission type: %s", mission.type)
                     continue
 
-                coord_key = f"coordinator_{analysis.coordinator_version}"
+                coord_key = f"coordinator_{mission.coordinator_version}"
                 coord_class = reg.get(coord_key, reg.get("coordinator_v2", ""))
 
                 self_concept_config = reg.get("self_concept", {})
@@ -243,16 +243,16 @@ async def _run_job(
                     role=f"{reg['label']} coordinator",
                     run_id=run_id,
                     session_id=session_id,
-                    goals=[f"Run {reg['label']} analysis"],
-                    max_iterations=analysis.max_iterations,
+                    goals=[f"Run {reg['label']} mission"],
+                    max_iterations=mission.max_iterations,
                     self_concept=AgentSelfConcept(**self_concept_config) if self_concept_config else None,
                     parameters={
-                        "max_agents": analysis.max_agents,
-                        "quality_threshold": analysis.quality_threshold,
-                        "max_iterations": analysis.max_iterations,
-                        "batching_policy": {"type": analysis.batching_policy},
-                        "analysis_type": analysis.type,
-                        **analysis.parameters,
+                        "max_agents": mission.max_agents,
+                        "quality_threshold": mission.quality_threshold,
+                        "max_iterations": mission.max_iterations,
+                        "batching_policy": {"type": mission.batching_policy},
+                        "mission_type": mission.type,
+                        **mission.parameters,
                     },
                 )
 
@@ -262,7 +262,7 @@ async def _run_job(
                     if cap in EXTRA_CAPABILITIES_REGISTRY
                 ]
                 all_extra_caps = list(set(
-                    ["ConsciousnessCapability"] + registry_coord_caps + analysis.extra_capabilities
+                    ["ConsciousnessCapability"] + registry_coord_caps + mission.extra_capabilities
                 ))
                 capability_paths = [
                     EXTRA_CAPABILITIES_REGISTRY[cap]["path"]
@@ -283,19 +283,19 @@ async def _run_job(
                     agent_blueprint=bp,
                     app_name=colony.app_name,
                 )
-                coordinator_handles.append((analysis, handle))
+                coordinator_handles.append((mission, handle))
 
             if not coordinator_handles:
                 job["status"] = "failed"
-                job["message"] = "No valid analyses to run"
+                job["message"] = "No valid missions to run"
                 return
 
         # Monitor coordinators
         job["status"] = "running"
-        job["message"] = f"Running {len(coordinator_handles)} analysis coordinator(s)"
+        job["message"] = f"Running {len(coordinator_handles)} mission coordinator(s)"
 
         completed = 0
-        for analysis_spec, handle in coordinator_handles:
+        for mission_spec, handle in coordinator_handles:
             try:
                 with colony.user_execution_context(
                     tenant_id=tenant_id, colony_id=colony_id,
@@ -303,26 +303,26 @@ async def _run_job(
                 ):
                     async for event in handle.run_streamed(
                         input_data={
-                            "analysis_type": analysis_spec.type,
-                            **analysis_spec.parameters,
+                            "mission_type": mission_spec.type,
+                            **mission_spec.parameters,
                         },
                         timeout=float(request.timeout_seconds),
                         session_id=session_id,
                         run_id=run_id,
-                        namespace=analysis_spec.type,
+                        namespace=mission_spec.type,
                     ):
                         if event.event_type in ("completed", "error", "timeout"):
                             break
 
                 completed += 1
-                job["analyses_completed"] = completed
+                job["missions_completed"] = completed
             except Exception as e:
                 logger.error("Coordinator %s failed: %s", handle.agent_id, e)
                 completed += 1
-                job["analyses_completed"] = completed
+                job["missions_completed"] = completed
 
         job["status"] = "completed"
-        job["message"] = f"Completed {completed}/{len(coordinator_handles)} analyses"
+        job["message"] = f"Completed {completed}/{len(coordinator_handles)} missions"
 
     except Exception as e:
         logger.error("Job %s failed: %s", job_id, e, exc_info=True)

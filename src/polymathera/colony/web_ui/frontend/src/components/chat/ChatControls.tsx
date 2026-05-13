@@ -11,7 +11,7 @@ export interface ChatControlsState {
     exclude_patterns?: string[];
   };
   agent_preferences?: {
-    analysis_types?: string[];
+    mission_types?: string[];
     max_agents?: number;
     capabilities?: string[];
     tools?: string[];
@@ -26,7 +26,7 @@ interface ChatControlsProps {
   onChange: (controls: ChatControlsState) => void;
 }
 
-const ANALYSIS_TYPES = ["impact", "compliance", "intent", "contracts", "slicing", "basic"];
+const MISSION_TYPES = ["impact", "compliance", "intent", "contracts", "slicing", "basic"];
 const EFFORT_LEVELS = ["low", "medium", "high"] as const;
 
 export function ChatControls({ controls, onChange }: ChatControlsProps) {
@@ -38,25 +38,25 @@ export function ChatControls({ controls, onChange }: ChatControlsProps) {
     if (!expanded) setExpanded(true);
   };
 
-  const analysisTypes = controls.agent_preferences?.analysis_types || [];
+  const missionTypes = controls.agent_preferences?.mission_types || [];
   const maxAgents = controls.agent_preferences?.max_agents || 10;
   const effort = controls.effort || "medium";
   const timeout = controls.timeout_seconds || 600;
 
-  const toggleAnalysisType = (type: string) => {
-    const current = [...analysisTypes];
+  const toggleMissionType = (type: string) => {
+    const current = [...missionTypes];
     const idx = current.indexOf(type);
     if (idx >= 0) current.splice(idx, 1);
     else current.push(type);
     onChange({
       ...controls,
-      agent_preferences: { ...controls.agent_preferences, analysis_types: current },
+      agent_preferences: { ...controls.agent_preferences, mission_types: current },
     });
   };
 
   // Summary of active controls (shown when collapsed)
   const summaryParts: string[] = [];
-  if (analysisTypes.length > 0) summaryParts.push(`${analysisTypes.length} analyses`);
+  if (missionTypes.length > 0) summaryParts.push(`${missionTypes.length} missions`);
   if (controls.vcm_context?.file_patterns?.length) summaryParts.push(`${controls.vcm_context.file_patterns.length} filters`);
   if (effort !== "medium") summaryParts.push(`effort: ${effort}`);
 
@@ -97,9 +97,9 @@ export function ChatControls({ controls, onChange }: ChatControlsProps) {
           )}
           {activeSection === "agents" && (
             <AgentPreferencesSection
-              analysisTypes={analysisTypes}
+              missionTypes={missionTypes}
               maxAgents={maxAgents}
-              onToggleType={toggleAnalysisType}
+              onToggleType={toggleMissionType}
               onMaxAgentsChange={(n) => onChange({
                 ...controls,
                 agent_preferences: { ...controls.agent_preferences, max_agents: n },
@@ -191,26 +191,26 @@ function VCMContextSection({
 }
 
 function AgentPreferencesSection({
-  analysisTypes,
+  missionTypes,
   maxAgents,
   onToggleType,
   onMaxAgentsChange,
 }: {
-  analysisTypes: string[];
+  missionTypes: string[];
   maxAgents: number;
   onToggleType: (type: string) => void;
   onMaxAgentsChange: (n: number) => void;
 }) {
   return (
     <div className="space-y-1.5">
-      <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Analysis Types</label>
+      <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Mission Types</label>
       <div className="flex flex-wrap gap-1">
-        {ANALYSIS_TYPES.map((type) => (
+        {MISSION_TYPES.map((type) => (
           <button
             key={type}
             onClick={() => onToggleType(type)}
             className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
-              analysisTypes.includes(type)
+              missionTypes.includes(type)
                 ? "bg-primary/10 text-primary border border-primary/30"
                 : "bg-accent/30 text-muted-foreground border border-transparent hover:border-border"
             }`}

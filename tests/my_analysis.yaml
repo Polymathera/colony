@@ -1,7 +1,7 @@
 # Polymath Integration Test Configuration
 # ========================================
-# This file configures a complete analysis workflow using the Polymathera
-# multi-agent framework. Edit it to customize agent hierarchies, analysis
+# This file configures a complete mission workflow using the Polymathera
+# multi-agent framework. Edit it to customize agent hierarchies, mission
 # types, capabilities, and paging parameters.
 
 repo_id: "my-project"
@@ -135,24 +135,24 @@ paging:
   locality_policy_type: "tag"  # "tag" or "temporal"
   flush_policy_type: "threshold"  # "threshold", "periodic", or "immediate"
 
-# --- Analysis Configurations ---
+# --- Mission Configurations ---
 # Each entry spawns a coordinator agent that manages a team of workers.
-# Multiple analyses can run concurrently on the same paged codebase.
+# Multiple missions can run concurrently on the same paged codebase.
 #
-# Common fields (apply to all analysis types):
+# Common fields (apply to all mission types):
 #   type, coordinator_version, max_agents, quality_threshold, max_iterations,
 #   batching_policy, overlap_threshold, batch_size, prefetch_depth,
 #   extra_capabilities, planning_params
 #
-# Analysis-specific fields are extracted into metadata.parameters automatically.
-# Each analysis type declares its own keys in ANALYSIS_REGISTRY["extra_metadata_keys"]:
+# Mission-specific fields are extracted into metadata.parameters automatically.
+# Each mission type declares its own keys in MISSION_REGISTRY["extra_metadata_keys"]:
 #   impact:     changes, change_description
 #   slicing:    slice_criteria
 #   compliance: compliance_types
 #   intent:     granularity
 #   contracts:  formalism
 #   basic:      (none)
-analyses:
+missions:
 
   # 1. Change Impact Analysis
   #    Coordinator → per-page ChangeImpactAnalysisAgent workers
@@ -238,8 +238,8 @@ analyses:
 # Override default coordinator/worker classes and attach extra capabilities
 # to all agents in the hierarchy.
 hierarchy:
-  # coordinator_class: null     # Use analysis-specific default
-  # worker_class: null          # Use analysis-specific default
+  # coordinator_class: null     # Use mission-specific default
+  # worker_class: null          # Use mission-specific default
   extra_capabilities:
     - ReflectionCapability       # Self-reflection on actions
     - ConsciousnessCapability    # Self-awareness via SystemDocumentation
@@ -264,7 +264,7 @@ verbose: false
 
 # --- Budget Enforcement (Remote LLM APIs) ---
 # Maximum spend in USD for remote LLM API calls (Anthropic, OpenRouter).
-# When the budget is exceeded, remaining analyses are skipped (soft stop).
+# When the budget is exceeded, remaining missions are skipped (soft stop).
 # Omit or set to null for unlimited spending.
 # budget_usd: 5.00
 # warn_budget_pct: 0.8    # Warn when cost reaches 80% of budget (default)

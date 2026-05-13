@@ -11,7 +11,7 @@ multi-agent framework. It demonstrates:
    teams of specialized page-level analysis agents, creating rich parent-child
    hierarchies with cache-aware scheduling.
 
-3. **Analysis Workflows** — Running one or more analysis types (impact analysis,
+3. **Analysis Workflows** — Running one or more mission types (impact analysis,
    program slicing, compliance checking, intent inference, contract inference)
    each orchestrated by its own coordinator agent with domain-specific
    capabilities, merge policies, and game-theoretic validation.
@@ -29,16 +29,16 @@ Prerequisites:
 
 Usage:
     # Quick start — run impact analysis on a local codebase
-    polymath run --local-repo /path/to/codebase --analysis impact
+    polymath run --local-repo /path/to/codebase --mission impact
 
     # Remote repository
-    polymath run --origin-url https://github.com/org/repo --analysis impact
+    polymath run --origin-url https://github.com/org/repo --mission impact
 
-    # Run multiple analyses with a YAML config
+    # Run multiple missions with a YAML config
     polymath run --local-repo /path/to/codebase --config my_test.yaml
 
-    # List available analyses, agents, and capabilities
-    polymath list analyses
+    # List available missions, agents, and capabilities
+    polymath list missions
     polymath list agents
     polymath list capabilities
 
@@ -55,7 +55,7 @@ Example YAML config (my_test.yaml):
       flush_token_budget: 4096
       pinned: false
 
-    analyses:
+    missions:
       - type: impact
         coordinator_version: v2       # v1 = cache-oblivious, v2 = cache-aware
         max_agents: 10
@@ -76,8 +76,8 @@ Example YAML config (my_test.yaml):
 
     hierarchy:
       # Optional: override default coordinator/worker agent classes
-      coordinator_class: null   # uses analysis-specific default
-      worker_class: null        # uses analysis-specific default
+      coordinator_class: null   # uses mission-specific default
+      worker_class: null        # uses mission-specific default
       extra_capabilities:
         - ReflectionCapability
         - ConsciousnessCapability
@@ -142,11 +142,11 @@ logger = logging.getLogger("polymath")
 
 
 # ===========================================================================
-# Registry of available analyses, agents, and capabilities
+# Registry of available missions, agents, and capabilities
 # ===========================================================================
 
-class AnalysisType(str, Enum):
-    """Supported analysis types."""
+class MissionType(str, Enum):
+    """Supported mission types."""
     IMPACT = "impact"
     SLICING = "slicing"
     COMPLIANCE = "compliance"
@@ -155,11 +155,11 @@ class AnalysisType(str, Enum):
     BASIC = "basic"  # General code structure analysis
 
 
-# Source of truth for analysis specs lives in
-# ``polymathera.colony.agents.configs:_BUILTIN_ANALYSES``. Re-exported here
-# under the historical ``ANALYSIS_REGISTRY`` name so existing call sites and
-# the ``polymathera.cli.polymath.ANALYSIS_REGISTRY`` import path keep working.
-from polymathera.colony.agents.configs import ANALYSIS_REGISTRY  # noqa: E402, F401
+# Source of truth for mission specs lives in
+# ``polymathera.colony.agents.configs:_BUILTIN_MISSIONS``. Re-exported here
+# under the historical ``MISSION_REGISTRY`` name so existing call sites and
+# the ``polymathera.cli.polymath.MISSION_REGISTRY`` import path keep working.
+from polymathera.colony.agents.configs import MISSION_REGISTRY  # noqa: E402, F401
 
 
 # Capabilities that can be attached to any agent for cross-cutting concerns.
@@ -255,8 +255,8 @@ class PagingConfig:
 
 
 @dataclass
-class AnalysisConfig:
-    """Configuration for a single analysis run."""
+class MissionConfig:
+    """Configuration for a single mission run."""
     type: str = "basic"
     coordinator_version: str = "v2"
     max_agents: int = 10
@@ -269,7 +269,7 @@ class AnalysisConfig:
     extra_capabilities: list[str] = field(default_factory=list)
     # Planning parameters (strategy, prompt_formatting, horizon, etc.)
     planning_params: dict[str, Any] = field(default_factory=dict)
-    # Analysis-specific parameters (e.g., changes for impact, criteria for slicing)
+    # Mission-specific parameters (e.g., changes for impact, criteria for slicing)
     parameters: dict[str, Any] = field(default_factory=dict)
 
 
@@ -415,7 +415,7 @@ class TestConfig:
     session_id: str = field(default_factory=lambda: f"polymath-{uuid.uuid4().hex[:8]}")
     run_id: str = field(default_factory=lambda: f"run-{uuid.uuid4().hex[:8]}")
     paging: PagingConfig = field(default_factory=PagingConfig)
-    analyses: list[AnalysisConfig] = field(default_factory=lambda: [AnalysisConfig(type="basic")])
+    missions: list[MissionConfig] = field(default_factory=lambda: [MissionConfig(type="basic")])
     hierarchy: HierarchyConfig = field(default_factory=HierarchyConfig)
     cluster: LLMClusterYAMLConfig = field(default_factory=LLMClusterYAMLConfig)
     vcm: VCMYAMLConfig = field(default_factory=VCMYAMLConfig)
@@ -482,27 +482,27 @@ def load_config_from_yaml(path: str) -> TestConfig:
 
     paging = PagingConfig(**raw.get("paging", {}))
 
-    analyses = []
-    for a in raw.get("analyses", []):
+    missions = []
+    for a in raw.get("missions", []):
         params = {}
-        # Extract analysis-specific keys into parameters
-        analysis_type = a.get("type", "basic")
-        if analysis_type in ANALYSIS_REGISTRY:
-            for key in ANALYSIS_REGISTRY[analysis_type].get("extra_metadata_keys", []):
+        # Extract mission-specific keys into parameters
+        mission_type = a.get("type", "basic")
+        if mission_type in MISSION_REGISTRY:
+            for key in MISSION_REGISTRY[mission_type].get("extra_metadata_keys", []):
                 if key in a:
                     params[key] = a.pop(key)
         # Standard fields
         extra_caps = a.pop("extra_capabilities", [])
         a.pop("type", None)
-        analyses.append(AnalysisConfig(
-            type=analysis_type,
+        missions.append(MissionConfig(
+            type=mission_type,
             extra_capabilities=extra_caps,
             parameters=params,
-            **{k: v for k, v in a.items() if k in AnalysisConfig.__dataclass_fields__},
+            **{k: v for k, v in a.items() if k in MissionConfig.__dataclass_fields__},
         ))
 
-    if not analyses:
-        analyses = [AnalysisConfig(type="basic")]
+    if not missions:
+        missions = [MissionConfig(type="basic")]
 
     hierarchy_raw = raw.get("hierarchy", {})
     hierarchy = HierarchyConfig(
@@ -577,7 +577,7 @@ def load_config_from_yaml(path: str) -> TestConfig:
         session_id=raw.get("session_id", f"polymath-{uuid.uuid4().hex[:8]}"),
         run_id=raw.get("run_id", f"run-{uuid.uuid4().hex[:8]}"),
         paging=paging,
-        analyses=analyses,
+        missions=missions,
         hierarchy=hierarchy,
         cluster=cluster,
         vcm=vcm_cfg,
@@ -707,24 +707,24 @@ paging:
   locality_policy_type: "tag"  # "tag" or "temporal"
   flush_policy_type: "threshold"  # "threshold", "periodic", or "immediate"
 
-# --- Analysis Configurations ---
+# --- Mission Configurations ---
 # Each entry spawns a coordinator agent that manages a team of workers.
-# Multiple analyses can run concurrently on the same paged codebase.
+# Multiple missions can run concurrently on the same paged codebase.
 #
-# Common fields (apply to all analysis types):
+# Common fields (apply to all mission types):
 #   type, coordinator_version, max_agents, quality_threshold, max_iterations,
 #   batching_policy, overlap_threshold, batch_size, prefetch_depth,
 #   extra_capabilities, planning_params
 #
-# Analysis-specific fields are extracted into metadata.parameters automatically.
-# Each analysis type declares its own keys in ANALYSIS_REGISTRY["extra_metadata_keys"]:
+# Mission-specific fields are extracted into metadata.parameters automatically.
+# Each mission type declares its own keys in MISSION_REGISTRY["extra_metadata_keys"]:
 #   impact:     changes, change_description
 #   slicing:    slice_criteria
 #   compliance: compliance_types
 #   intent:     granularity
 #   contracts:  formalism
 #   basic:      (none)
-analyses:
+missions:
 
   # 1. Change Impact Analysis
   #    Coordinator → per-page ChangeImpactAnalysisAgent workers
@@ -808,8 +808,8 @@ analyses:
 # Override default coordinator/worker classes and attach extra capabilities
 # to all agents in the hierarchy.
 hierarchy:
-  # coordinator_class: null     # Use analysis-specific default
-  # worker_class: null          # Use analysis-specific default
+  # coordinator_class: null     # Use mission-specific default
+  # worker_class: null          # Use mission-specific default
   extra_capabilities:
     - ReflectionCapability       # Self-reflection on actions
     - ConsciousnessCapability    # Self-awareness via SystemDocumentation
@@ -834,7 +834,7 @@ verbose: false
 
 # --- Budget Enforcement (Remote LLM APIs) ---
 # Maximum spend in USD for remote LLM API calls (Anthropic, OpenRouter).
-# When the budget is exceeded, remaining analyses are skipped (soft stop).
+# When the budget is exceeded, remaining missions are skipped (soft stop).
 # Omit or set to null for unlimited spending.
 # budget_usd: 5.00
 # warn_budget_pct: 0.8    # Warn when cost reaches 80% of budget (default)
@@ -845,7 +845,7 @@ verbose: false
 # Display helpers
 # ===========================================================================
 
-def build_analysis_tree(config: TestConfig) -> Tree:
+def build_mission_tree(config: TestConfig) -> Tree:
     """Build a rich Tree showing the planned agent hierarchy."""
     tree = Tree(
         f"[bold cyan]Polymath Integration Test[/bold cyan]  "
@@ -861,13 +861,13 @@ def build_analysis_tree(config: TestConfig) -> Tree:
     # Agent hierarchy
     agents_node = tree.add("[bold green]Agent Hierarchy[/bold green]")
 
-    for i, analysis in enumerate(config.analyses):
-        reg = ANALYSIS_REGISTRY.get(analysis.type)
+    for i, mission in enumerate(config.missions):
+        reg = MISSION_REGISTRY.get(mission.type)
         if not reg:
             continue
 
         label = reg["label"]
-        version = analysis.coordinator_version
+        version = mission.coordinator_version
         coord_key = f"coordinator_{version}"
         coord_class = (
             config.hierarchy.coordinator_class
@@ -886,29 +886,29 @@ def build_analysis_tree(config: TestConfig) -> Tree:
         caps_node = coord_node.add("[dim]Capabilities:[/dim]")
         for cap in reg.get("coordinator_capabilities", []):
             caps_node.add(f"[dim]{cap}[/dim]")
-        for cap in analysis.extra_capabilities + config.hierarchy.extra_capabilities:
+        for cap in mission.extra_capabilities + config.hierarchy.extra_capabilities:
             caps_node.add(f"[dim italic]{cap} (extra)[/dim italic]")
 
         # Config
         cfg_node = coord_node.add("[dim]Config:[/dim]")
-        cfg_node.add(f"max_agents: {analysis.max_agents}")
-        cfg_node.add(f"batching: {analysis.batching_policy}")
-        cfg_node.add(f"quality_threshold: {analysis.quality_threshold}")
+        cfg_node.add(f"max_agents: {mission.max_agents}")
+        cfg_node.add(f"batching: {mission.batching_policy}")
+        cfg_node.add(f"quality_threshold: {mission.quality_threshold}")
 
         # Worker agents (shown as template)
         worker_name = worker_class.rsplit(".", 1)[-1] if worker_class else "Worker"
         workers_node = coord_node.add(
             f"[yellow]Workers[/yellow] — [cyan]{worker_name}[/cyan] "
-            f"(x{analysis.max_agents} max)"
+            f"(x{mission.max_agents} max)"
         )
         worker_caps_node = workers_node.add("[dim]Capabilities:[/dim]")
         for cap in reg.get("worker_capabilities", []):
             worker_caps_node.add(f"[dim]{cap}[/dim]")
 
-        # Analysis-specific parameters
-        if analysis.parameters:
+        # Mission-specific parameters
+        if mission.parameters:
             params_node = coord_node.add("[dim]Parameters:[/dim]")
-            for k, v in analysis.parameters.items():
+            for k, v in mission.parameters.items():
                 val_str = json.dumps(v) if isinstance(v, (list, dict)) else str(v)
                 if len(val_str) > 80:
                     val_str = val_str[:77] + "..."
@@ -918,7 +918,7 @@ def build_analysis_tree(config: TestConfig) -> Tree:
 
 
 def display_results_table(results: list[dict[str, Any]]) -> None:
-    """Display analysis results in a rich table."""
+    """Display mission results in a rich table."""
     # Check if any result has cost data to decide whether to show cost columns
     has_cost_data = any(r.get("cost_usd", 0) > 0 for r in results)
     has_token_data = any(
@@ -926,8 +926,8 @@ def display_results_table(results: list[dict[str, Any]]) -> None:
         for r in results
     )
 
-    table = Table(title="Analysis Results", show_lines=True)
-    table.add_column("Analysis", style="bold cyan", min_width=20)
+    table = Table(title="Mission Results", show_lines=True)
+    table.add_column("Mission", style="bold cyan", min_width=20)
     table.add_column("Status", min_width=10)
     table.add_column("Coordinator", style="dim", min_width=20)
     table.add_column("Agents Spawned", justify="right", min_width=8)
@@ -956,7 +956,7 @@ def display_results_table(results: list[dict[str, Any]]) -> None:
             summary = summary[:57] + "..."
 
         row = [
-            r.get("analysis_type", "-"),
+            r.get("mission_type", "-"),
             status_style,
             r.get("coordinator_id", "-"),
             str(r.get("agents_spawned", "-")),
@@ -1315,7 +1315,7 @@ async def run_integration_test(
             uses the current application context.
 
     Returns:
-        List of result dictionaries, one per analysis.
+        List of result dictionaries, one per mission.
     """
     """Run the integration test workflow.
 
@@ -1429,33 +1429,33 @@ async def run_integration_test(
             "; ".join(f"{r.scope_id}:{r.message}" for r in mmap_results)
             if mmap_results else "no sources materialised"
         )
-        return [{"analysis_type": "paging", "status": "failed", "summary": summary}]
+        return [{"mission_type": "paging", "status": "failed", "summary": summary}]
 
     # -----------------------------------------------------------------------
     # Step 2: Spawn coordinator agents via AgentHandle
     # -----------------------------------------------------------------------
     console.print()
     console.print(Panel(
-        f"[bold]Step 2:[/bold] Spawning {len(config.analyses)} analysis coordinator(s)",
+        f"[bold]Step 2:[/bold] Spawning {len(config.missions)} mission coordinator(s)",
         title="[bold green]Agent Spawning[/bold green]",
         border_style="green",
     ))
 
-    coordinator_handles: list[tuple[AnalysisConfig, AgentHandle]] = []
+    coordinator_handles: list[tuple[MissionConfig, AgentHandle]] = []
 
-    for analysis in config.analyses:
-        reg = ANALYSIS_REGISTRY.get(analysis.type)
+    for mission in config.missions:
+        reg = MISSION_REGISTRY.get(mission.type)
         if not reg:
-            console.print(f"  [yellow]SKIP[/yellow] Unknown analysis type: {analysis.type}")
+            console.print(f"  [yellow]SKIP[/yellow] Unknown mission type: {mission.type}")
             results.append({
-                "analysis_type": analysis.type,
+                "mission_type": mission.type,
                 "status": "skipped",
-                "summary": f"Unknown analysis type: {analysis.type}",
+                "summary": f"Unknown mission type: {mission.type}",
             })
             continue
 
         # Resolve coordinator class
-        version = analysis.coordinator_version
+        version = mission.coordinator_version
         coord_key = f"coordinator_{version}"
         coord_class = (
             config.hierarchy.coordinator_class
@@ -1469,7 +1469,7 @@ async def run_integration_test(
             run_id=config.run_id,
             session_id=config.session_id,
             goals=[f"Run {reg['label']} on {config.repo_id}"],
-            max_iterations=analysis.max_iterations,
+            max_iterations=mission.max_iterations,
             self_concept=AgentSelfConcept(
                 agent_id="",  # Placeholder — overwritten by ConsciousnessCapability
                 name="",      # Placeholder — overwritten by ConsciousnessCapability
@@ -1477,18 +1477,18 @@ async def run_integration_test(
             ) if self_concept_config else None,
             parameters={
                 "repo_id": config.repo_id,
-                "max_agents": analysis.max_agents,
-                "quality_threshold": analysis.quality_threshold,
-                "max_iterations": analysis.max_iterations,
+                "max_agents": mission.max_agents,
+                "quality_threshold": mission.quality_threshold,
+                "max_iterations": mission.max_iterations,
                 "batching_policy": {
-                    "type": analysis.batching_policy,
-                    "overlap_threshold": analysis.overlap_threshold,
-                    "batch_size": analysis.batch_size,
+                    "type": mission.batching_policy,
+                    "overlap_threshold": mission.overlap_threshold,
+                    "batch_size": mission.batch_size,
                 },
-                "prefetch_depth": analysis.prefetch_depth,
-                "analysis_type": analysis.type,
-                "planning_params": analysis.planning_params,
-                **analysis.parameters,
+                "prefetch_depth": mission.prefetch_depth,
+                "mission_type": mission.type,
+                "planning_params": mission.planning_params,
+                **mission.parameters,
             },
         )
 
@@ -1505,7 +1505,7 @@ async def run_integration_test(
         all_extra_caps = list(set(
             ["ConsciousnessCapability"]
             + registry_coord_caps
-            + analysis.extra_capabilities
+            + mission.extra_capabilities
             + config.hierarchy.extra_capabilities
         ))
         capability_paths = []
@@ -1534,7 +1534,7 @@ async def run_integration_test(
         coord_name = coord_class.rsplit(".", 1)[-1]
         console.print(
             f"  [green]+[/green] {reg['label']} — [cyan]{coord_name}[/cyan] "
-            f"(max_agents={analysis.max_agents}, batching={analysis.batching_policy})"
+            f"(max_agents={mission.max_agents}, batching={mission.batching_policy})"
         )
 
         # Spawn via AgentHandle.from_blueprint() — higher-level than raw
@@ -1546,10 +1546,10 @@ async def run_integration_test(
             )
 
         console.print(f"    [dim]agent_id: {handle.agent_id}[/dim]")
-        coordinator_handles.append((analysis, handle))
+        coordinator_handles.append((mission, handle))
 
     if not coordinator_handles:
-        console.print("  [red]No valid analyses to run.[/red]")
+        console.print("  [red]No valid missions to run.[/red]")
         return results
 
     console.print(f"\n  Spawned {len(coordinator_handles)} coordinator(s)")
@@ -1559,7 +1559,7 @@ async def run_integration_test(
     # -----------------------------------------------------------------------
     console.print()
     console.print(Panel(
-        f"[bold]Step 3:[/bold] Monitoring analysis progress "
+        f"[bold]Step 3:[/bold] Monitoring mission progress "
         f"(timeout={config.timeout_seconds}s)",
         title="[bold yellow]Monitoring[/bold yellow]",
         border_style="yellow",
@@ -1590,15 +1590,15 @@ async def run_integration_test(
         }
 
     async def monitor_coordinator(
-        analysis_cfg: AnalysisConfig,
+        mission_cfg: MissionConfig,
         handle: AgentHandle,
     ) -> dict[str, Any]:
         """Monitor a single coordinator via handle.run_streamed().
 
-        Sends the analysis task to the coordinator and streams events
+        Sends the mission task to the coordinator and streams events
         until completion, error, or timeout.
         """
-        reg = ANALYSIS_REGISTRY[analysis_cfg.type]
+        reg = MISSION_REGISTRY[mission_cfg.type]
         start = time.time()
         event_count = 0
         last_event_type = "unknown"
@@ -1607,7 +1607,7 @@ async def run_integration_test(
             status: str, agents_spawned: int, summary: str,
         ) -> dict[str, Any]:
             return {
-                "analysis_type": reg["label"],
+                "mission_type": reg["label"],
                 "coordinator_id": handle.agent_id,
                 "status": status,
                 "agents_spawned": agents_spawned,
@@ -1620,13 +1620,13 @@ async def run_integration_test(
             async for event in handle.run_streamed(
                 input_data={
                     "repo_id": config.repo_id,
-                    "analysis_type": analysis_cfg.type,
-                    **analysis_cfg.parameters,
+                    "mission_type": mission_cfg.type,
+                    **mission_cfg.parameters,
                 },
                 timeout=float(config.timeout_seconds),
                 session_id=config.session_id,
                 run_id=config.run_id,
-                namespace=analysis_cfg.type,
+                namespace=mission_cfg.type,
             ):
                 event_count += 1
                 last_event_type = event.event_type
@@ -1643,7 +1643,7 @@ async def run_integration_test(
                         value = event.data.get("value", {})
                         if isinstance(value, dict):
                             agents_spawned = value.get("agents_spawned", 0)
-                    result = _make_result("completed", agents_spawned, "Analysis complete")
+                    result = _make_result("completed", agents_spawned, "Mission complete")
                     cost_data = await _get_run_cost(config.run_id)
                     result.update(cost_data)
                     return result
@@ -1698,8 +1698,8 @@ async def run_integration_test(
         )
 
         monitor_tasks = [
-            asyncio.create_task(monitor_coordinator(analysis_cfg, handle))
-            for analysis_cfg, handle in coordinator_handles
+            asyncio.create_task(monitor_coordinator(mission_cfg, handle))
+            for mission_cfg, handle in coordinator_handles
         ]
 
         ### remaining_tasks = list(monitor_tasks)
@@ -1716,7 +1716,7 @@ async def run_integration_test(
             results.append(result)
             progress.update(progress_task, advance=1)
 
-            label = result.get("analysis_type", "?")
+            label = result.get("mission_type", "?")
             status = result.get("status", "?")
             cost = result.get("cost_usd", 0.0)
             accumulated_cost_usd += cost
@@ -1739,24 +1739,24 @@ async def run_integration_test(
                     console.print(
                         f"\n  [bold red]BUDGET EXCEEDED:[/bold red] "
                         f"${accumulated_cost_usd:.4f} >= ${config.budget_usd:.2f} limit. "
-                        f"Cancelling remaining analyses."
+                        f"Cancelling remaining missions."
                     )
                     # Cancel remaining monitor tasks
                     for t in remaining_tasks:
                         t.cancel()
-                    # Record skipped analyses
+                    # Record skipped missions
                     for t in remaining_tasks:
                         try:
                             await t
                         except asyncio.CancelledError:
                             pass
-                    # Add budget_exceeded entries for cancelled analyses
+                    # Add budget_exceeded entries for cancelled missions
                     completed_ids = {r["coordinator_id"] for r in results}
-                    for analysis_cfg, handle in coordinator_handles:
+                    for mission_cfg, handle in coordinator_handles:
                         if handle.agent_id not in completed_ids:
-                            reg = ANALYSIS_REGISTRY[analysis_cfg.type]
+                            reg = MISSION_REGISTRY[mission_cfg.type]
                             results.append({
-                                "analysis_type": reg["label"],
+                                "mission_type": reg["label"],
                                 "coordinator_id": handle.agent_id,
                                 "status": "budget_exceeded",
                                 "agents_spawned": 0,
@@ -1799,7 +1799,7 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 
-list_app = typer.Typer(help="List available analyses, agents, and capabilities.")
+list_app = typer.Typer(help="List available missions, agents, and capabilities.")
 app.add_typer(list_app, name="list")
 
 
@@ -1835,7 +1835,7 @@ def deploy(
         help="Enable verbose logging.",
     ),
 ) -> None:
-    """Deploy the Colony cluster without running any analyses.
+    """Deploy the Colony cluster without running any missions.
 
     Connects to Ray, deploys LLM deployments, VCM, agent system, and
     session manager. Idempotent — safe to call if already deployed.
@@ -1920,15 +1920,15 @@ def run(
         "--config", "-c",
         help="Path to a YAML configuration file.",
     ),
-    analysis: Optional[list[str]] = typer.Option(
+    mission: Optional[list[str]] = typer.Option(
         None,
-        "--analysis", "-a",
-        help="Analysis type(s) to run. Can be specified multiple times.",
+        "--mission", "-a",
+        help="Mission type(s) to run. Can be specified multiple times.",
     ),
     max_agents: int = typer.Option(
         10,
         "--max-agents", "-n",
-        help="Maximum number of concurrent worker agents per analysis.",
+        help="Maximum number of concurrent worker agents per mission.",
     ),
     coordinator_version: str = typer.Option(
         "v2",
@@ -1958,7 +1958,7 @@ def run(
     timeout: int = typer.Option(
         600,
         "--timeout", "-t",
-        help="Maximum time (seconds) to wait for analyses to complete.",
+        help="Maximum time (seconds) to wait for missions to complete.",
     ),
     output_dir: str = typer.Option(
         "./polymath-results",
@@ -2013,11 +2013,11 @@ def run(
 
     [bold]Quick Start (remote repo):[/bold]
 
-        polymath run --origin-url https://github.com/org/repo --analysis impact
+        polymath run --origin-url https://github.com/org/repo --mission impact
 
     [bold]Quick Start (local repo):[/bold]
 
-        polymath run --local-repo /path/to/codebase --analysis impact
+        polymath run --local-repo /path/to/codebase --mission impact
 
     [bold]With Config File:[/bold]
 
@@ -2046,10 +2046,10 @@ def run(
             raise typer.Exit(1)
     else:
         # Build config from CLI arguments
-        analyses_list = []
-        analysis_types = analysis or ["basic"]
-        for a in analysis_types:
-            analyses_list.append(AnalysisConfig(
+        missions_list = []
+        mission_types = mission or ["basic"]
+        for a in mission_types:
+            missions_list.append(MissionConfig(
                 type=a,
                 coordinator_version=coordinator_version,
                 max_agents=max_agents,
@@ -2060,7 +2060,7 @@ def run(
         test_config = TestConfig(
             repo_id=repo_id,
             tenant_id=tenant_id,
-            analyses=analyses_list,
+            missions=missions_list,
             hierarchy=HierarchyConfig(
                 extra_capabilities=extra_capabilities or [],
             ),
@@ -2097,7 +2097,7 @@ def run(
 
     # Display planned hierarchy
     console.print()
-    tree = build_analysis_tree(test_config)
+    tree = build_mission_tree(test_config)
     console.print(tree)
     console.print()
 
@@ -2178,35 +2178,35 @@ def run(
 
     console.print(f"\n[dim]Results saved to {results_file}[/dim]")
 
-    # Exit with error code if any analysis failed
+    # Exit with error code if any mission failed
     failures = [r for r in test_results if r.get("status") in ("failed", "timeout")]
     budget_skipped = [r for r in test_results if r.get("status") == "budget_exceeded"]
     if failures:
-        console.print(f"\n[yellow]{len(failures)} analysis(es) failed or timed out.[/yellow]")
+        console.print(f"\n[yellow]{len(failures)} mission(s) failed or timed out.[/yellow]")
         raise typer.Exit(1)
     if budget_skipped:
         console.print(
-            f"\n[yellow]{len(budget_skipped)} analysis(es) skipped due to budget limit.[/yellow]"
+            f"\n[yellow]{len(budget_skipped)} mission(s) skipped due to budget limit.[/yellow]"
         )
         raise typer.Exit(2)
 
-    console.print("\n[bold green]All analyses completed successfully.[/bold green]")
+    console.print("\n[bold green]All missions completed successfully.[/bold green]")
 
 
 # ---------------------------------------------------------------------------
-# polymath list analyses
+# polymath list missions
 # ---------------------------------------------------------------------------
 
-@list_app.command("analyses")
-def list_analyses() -> None:
-    """List all available analysis types."""
-    table = Table(title="Available Analysis Types", show_lines=True)
+@list_app.command("missions")
+def list_missions() -> None:
+    """List all available mission types."""
+    table = Table(title="Available Mission Types", show_lines=True)
     table.add_column("Type", style="bold cyan", min_width=12)
     table.add_column("Label", min_width=25)
     table.add_column("Description", min_width=40)
     table.add_column("Coordinator Capabilities", style="dim", min_width=30)
 
-    for atype, reg in ANALYSIS_REGISTRY.items():
+    for atype, reg in MISSION_REGISTRY.items():
         caps = ", ".join(reg.get("coordinator_capabilities", []))
         table.add_row(atype, reg["label"], reg["description"], caps)
 
@@ -2219,14 +2219,14 @@ def list_analyses() -> None:
 
 @list_app.command("agents")
 def list_agents() -> None:
-    """List all available agent classes for each analysis type."""
+    """List all available agent classes for each mission type."""
     table = Table(title="Available Agent Classes", show_lines=True)
-    table.add_column("Analysis", style="bold cyan", min_width=12)
+    table.add_column("Mission", style="bold cyan", min_width=12)
     table.add_column("Role", min_width=12)
     table.add_column("Class Path", style="dim")
     table.add_column("Version", min_width=8)
 
-    for atype, reg in ANALYSIS_REGISTRY.items():
+    for atype, reg in MISSION_REGISTRY.items():
         for version in ("v1", "v2"):
             coord_key = f"coordinator_{version}"
             if coord_key in reg:
@@ -2297,20 +2297,20 @@ def init_config(
 
 @app.command("describe")
 def describe(
-    analysis_type: str = typer.Argument(
+    mission_type: str = typer.Argument(
         ...,
-        help="Analysis type to describe (e.g., 'impact', 'compliance').",
+        help="Mission type to describe (e.g., 'impact', 'compliance').",
     ),
 ) -> None:
-    """Show detailed information about an analysis type.
+    """Show detailed information about a mission type.
 
     Displays the full agent hierarchy, capabilities, game protocols,
-    and merge policies used by the analysis.
+    and merge policies used by the mission.
     """
-    reg = ANALYSIS_REGISTRY.get(analysis_type)
+    reg = MISSION_REGISTRY.get(mission_type)
     if not reg:
-        console.print(f"[red]Unknown analysis type: {analysis_type}[/red]")
-        console.print(f"[dim]Available: {', '.join(ANALYSIS_REGISTRY.keys())}[/dim]")
+        console.print(f"[red]Unknown mission type: {mission_type}[/red]")
+        console.print(f"[dim]Available: {', '.join(MISSION_REGISTRY.keys())}[/dim]")
         raise typer.Exit(1)
 
     # Title panel
@@ -2398,7 +2398,7 @@ def describe(
         ],
     }
 
-    flow = flow_items.get(analysis_type, ["No execution flow documentation available."])
+    flow = flow_items.get(mission_type, ["No execution flow documentation available."])
     console.print(Panel(
         "\n".join(flow),
         title="[bold]Execution Flow[/bold]",
@@ -2409,7 +2409,7 @@ def describe(
     extra_keys = reg.get("extra_metadata_keys", [])
     if extra_keys:
         console.print(
-            f"\n[dim]Analysis-specific parameters: {', '.join(extra_keys)}[/dim]"
+            f"\n[dim]Mission-specific parameters: {', '.join(extra_keys)}[/dim]"
         )
 
 
@@ -2427,13 +2427,13 @@ own commands (e.g. ``polymath cps validate-corpus``,
 ``polymath cps inspect-budget``) without colony having to import them.
 
 Distinct from
-:func:`polymathera.colony.agents.analysis_registry.get_analysis_registry`,
-which is the *runtime / chat-driven* analysis registry the SessionAgent
+:func:`polymathera.colony.agents.mission_registry.get_mission_registry`,
+which is the *runtime / chat-driven* mission registry the SessionAgent
 consults. The two extension points serve different surfaces:
 
 - ``polymathera.cli_extensions``: CLI commands (one-shot, deployment,
   diagnostics, debug helpers).
-- ``polymathera.analysis_types``: coordinator agent classes the
+- ``polymathera.mission_types``: coordinator agent classes the
   SessionAgent's planner can spawn from chat.
 
 Boundary discipline: colony stays generic; domain CLIs ship in their

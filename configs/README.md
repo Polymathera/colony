@@ -46,7 +46,7 @@ path. Everything goes through this YAML.
 | YAML path | Component | Source |
 |---|---|---|
 | `agent_system` | `AgentSystemConfig` | `agents/config.py` |
-| `analysis_registry` | `AnalysisRegistryConfig` | `agents/configs.py` |
+| `mission_registry` | `MissionRegistryConfig` | `agents/configs.py` |
 | `capabilities.github` | `GitHubAuthConfig` | `agents/configs.py` |
 | `capabilities.web_search` | `WebSearchConfig` | `agents/configs.py` |
 | `deployment_names` | `DeploymentNames` | `deployment_names.py` |

@@ -527,7 +527,7 @@ class SessionOrchestratorCapability(AgentCapability):
         """Send a text response to the user in the chat.
 
         Use this action to respond to user questions, provide status updates,
-        or acknowledge requests. For analysis tasks, use AgentPoolCapability's
+        or acknowledge requests. For mission tasks, use AgentPoolCapability's
         create_agent instead.
 
         Args:
@@ -1020,7 +1020,7 @@ class SessionOrchestratorCapability(AgentCapability):
     async def _cmd_help(self, args: str, controls: dict | None) -> None:
         """Show available commands."""
         commands = {
-            "/analyze <type>": "Start an analysis run (impact, compliance, intent, contracts, slicing, basic)",
+            "/analyze <type>": "Start a mission run (impact, compliance, intent, contracts, slicing, basic)",
             "/map <url>": "Map a repository or content to VCM",
             "/abort [run_id]": "Abort the current or specified run",
             "/status": "Show current session and run status",
@@ -1129,8 +1129,8 @@ class SessionOrchestratorCapability(AgentCapability):
         await self._post_response("Abort not yet implemented. Coming in a future update.")
 
     async def _cmd_analyze(self, args: str, controls: dict | None) -> None:
-        """Start an analysis run by spawning coordinator agents."""
-        # TODO: Parse analysis type and parameters, spawn coordinators
+        """Start a mission run by spawning coordinator agents."""
+        # TODO: Parse mission type and parameters, spawn coordinators
         # via AgentPoolCapability (same flow as jobs.py _run_job).
         if not args.strip():
             await self._post_response(
@@ -1139,14 +1139,14 @@ class SessionOrchestratorCapability(AgentCapability):
             )
             return
 
-        analysis_type = args.split()[0]
+        mission_type = args.split()[0]
         valid_types = {"impact", "compliance", "intent", "contracts", "slicing", "basic"}
-        if analysis_type not in valid_types:
-            await self._post_response(f"Unknown analysis type: {analysis_type}. Valid: {', '.join(sorted(valid_types))}")
+        if mission_type not in valid_types:
+            await self._post_response(f"Unknown mission type: {mission_type}. Valid: {', '.join(sorted(valid_types))}")
             return
 
         await self._post_response(
-            f"Starting **{analysis_type}** analysis...\n"
+            f"Starting **{mission_type}** mission...\n"
             f"(Coordinator spawning not yet implemented — coming in the next update.)"
         )
 
