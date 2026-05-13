@@ -241,6 +241,14 @@ class DesignMonorepoClient:
     def working_dir(self) -> Path:
         return Path(self._repo.working_tree_dir or self._repo.working_dir)
 
+    @property
+    def active_branch(self) -> str:
+        """Name of the currently-checked-out branch (raises ``TypeError``
+        if HEAD is detached — same shape as ``Repo.active_branch.name``).
+        Capabilities key per-branch distributed state on this so a
+        ``fork`` / ``checkout`` automatically isolates working state."""
+        return self._repo.active_branch.name
+
     # -- Local config: merge drivers + LFS hooks -------------------------
 
     def install_merge_drivers(self) -> None:

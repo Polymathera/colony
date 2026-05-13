@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -200,6 +200,16 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
     @property
     def working_dir(self) -> Path:
         return self._working_dir
+
+    @property
+    def current_branch(self) -> str:
+        """Active branch of the capability's clone — lazy, re-read each
+        call. Subclasses that key distributed state per-branch (e.g.
+        :class:`~polymathera.cps.agents.regulatory.RegulatoryCapability`)
+        read this on every action so a mid-session ``fork_design`` /
+        ``merge_design`` checkout automatically isolates working
+        state under the new branch."""
+        return self._client_sync().active_branch
 
     _DESIGN_MONOREPO_URL_KEY = "design_monorepo_url"
 
@@ -1838,6 +1848,7 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
         surface: str,
         name: str,
         template_vars: dict[str, str],
+        scaffold: str | None = None,
     ) -> ExtensionAuthoredPayload:
         if surface not in DEFAULT_SURFACE_DIRS:
             raise ValueError(
@@ -1862,6 +1873,7 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
             surface,
             name,
             template_vars,
+            scaffold,
         )
 
     def _author_extension_sync(
@@ -1871,12 +1883,15 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
         surface: str,
         name: str,
         template_vars: dict[str, str],
+        scaffold: str | None,
     ) -> ExtensionAuthoredPayload:
         surface_dir = resolve_surface_dirs(self._working_dir, manifest)[surface]
         surface_dir.mkdir(parents=True, exist_ok=True)
 
         written = scaffolds_module.render_extension_scaffold(
-            surface, surface_dir, name, template_vars=template_vars,
+            surface, surface_dir, name,
+            template_vars=template_vars,
+            scaffold_id=scaffold,
         )
 
         # AST gate (Risk #5). Only ``.py`` files are validated; the
@@ -1902,7 +1917,10 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
 
         rel_to_root = written.relative_to(self._working_dir)
         identity = self._identity()
-        commit_message = f"bootstrap {surface}/{name} (L1-E)"
+        scaffold_label = scaffold if scaffold is not None else f"blank_{surface}"
+        commit_message = (
+            f"bootstrap {surface}/{name} (L1-E, scaffold={scaffold_label})"
+        )
         sha = client.commit_with_identity(
             identity, commit_message, paths=[rel_to_root],
         )
@@ -1922,7 +1940,7 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
             name=name,
             relative_path=relative_path,
             commit_sha=sha,
-            template=surface,
+            template=scaffold_label,
             files_created=files_created,
             authored_at=datetime.now(timezone.utc),
             session_id=get_current_session_id(),
@@ -1964,11 +1982,26 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
         planning_summary="Scaffold a new plugin under .colony/plugins/<name>/SKILL.md.",
     )
     async def bootstrap_plugin(
-        self, name: str, description: str = "",
+        self,
+        name: str,
+        description: str = "",
+        *,
+        scaffold: str | None = None,
+        template_vars: Mapping[str, str] | None = None,
     ) -> ExtensionAuthoredPayload:
-        """Write a ``SKILL.md`` stub under the plugins surface."""
+        """Write a ``SKILL.md`` stub under the plugins surface.
+
+        ``scaffold`` selects a registered L2-F scaffold for this
+        surface (e.g. CPS's domain-shaped plugin variants). ``None``
+        renders the blank L1-E template. ``template_vars`` supplies
+        any extra substitutions the registered scaffold requires
+        beyond ``description``.
+        """
+        vars: dict[str, str] = {"description": description or name}
+        if template_vars:
+            vars.update({str(k): str(v) for k, v in template_vars.items()})
         payload = await self._author_extension(
-            "plugins", name, {"description": description or name},
+            "plugins", name, vars, scaffold=scaffold,
         )
         await self._emit_extension_authored(payload)
         return payload
@@ -1984,18 +2017,27 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
         base_module: str = "polymathera.colony.agents.base",
         class_name: str | None = None,
         description: str = "",
+        scaffold: str | None = None,
+        template_vars: Mapping[str, str] | None = None,
     ) -> ExtensionAuthoredPayload:
-        """Write an ``Agent`` subclass stub under the agents surface."""
+        """Write an ``Agent`` subclass stub under the agents surface.
+
+        ``scaffold`` selects a registered L2-F scaffold (e.g.
+        ``"agent_regulatory"``) so the file produced subclasses a
+        CPS L2-B base instead of the abstract ``Agent``. ``template_vars``
+        supplies the scaffold-specific substitutions.
+        """
         resolved_class = class_name or _default_class_name(name)
+        vars: dict[str, str] = {
+            "base_class": base_class,
+            "base_module": base_module,
+            "class_name": resolved_class,
+            "description": description or f"{resolved_class} agent stub.",
+        }
+        if template_vars:
+            vars.update({str(k): str(v) for k, v in template_vars.items()})
         payload = await self._author_extension(
-            "agents",
-            name,
-            {
-                "base_class": base_class,
-                "base_module": base_module,
-                "class_name": resolved_class,
-                "description": description or f"{resolved_class} agent stub.",
-            },
+            "agents", name, vars, scaffold=scaffold,
         )
         await self._emit_extension_authored(payload)
         return payload
@@ -2012,22 +2054,26 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
         deployment_kwargs: str = "",
         class_name: str | None = None,
         description: str = "",
+        scaffold: str | None = None,
+        template_vars: Mapping[str, str] | None = None,
     ) -> ExtensionAuthoredPayload:
         """Write a ``@serving.deployment``-wrapped class stub.
 
         ``deployment_kwargs`` is the raw keyword expression embedded in
         ``@serving.deployment(<here>)`` — e.g. ``num_replicas=1``.
         Empty by default; the framework's deployment defaults apply.
+        ``scaffold`` + ``template_vars`` select an L2-F variant.
         """
         resolved_class = class_name or _default_class_name(name)
+        vars: dict[str, str] = {
+            "class_name": resolved_class,
+            "deployment_kwargs": deployment_kwargs,
+            "description": description or f"{resolved_class} deployment stub.",
+        }
+        if template_vars:
+            vars.update({str(k): str(v) for k, v in template_vars.items()})
         payload = await self._author_extension(
-            "deployments",
-            name,
-            {
-                "class_name": resolved_class,
-                "deployment_kwargs": deployment_kwargs,
-                "description": description or f"{resolved_class} deployment stub.",
-            },
+            "deployments", name, vars, scaffold=scaffold,
         )
         await self._emit_extension_authored(payload)
         return payload
@@ -2036,11 +2082,24 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
         planning_summary="Scaffold a new tool adapter under .colony/tools/<name>.py.",
     )
     async def bootstrap_tool_adapter(
-        self, name: str, *, tool_spec_var: str = "None",
+        self,
+        name: str,
+        *,
+        tool_spec_var: str = "None",
+        scaffold: str | None = None,
+        template_vars: Mapping[str, str] | None = None,
     ) -> ExtensionAuthoredPayload:
-        """Write a ``register(registry)`` stub under the tools surface."""
+        """Write a ``register(registry)`` stub under the tools surface.
+
+        ``scaffold`` selects an L2-F variant (e.g. ``"tool_adapter_fem"``
+        for a CalculiX/Code_Aster-shaped adapter); ``template_vars``
+        supplies its scaffold-specific substitutions.
+        """
+        vars: dict[str, str] = {"tool_spec_var": tool_spec_var}
+        if template_vars:
+            vars.update({str(k): str(v) for k, v in template_vars.items()})
         payload = await self._author_extension(
-            "tools", name, {"tool_spec_var": tool_spec_var},
+            "tools", name, vars, scaffold=scaffold,
         )
         await self._emit_extension_authored(payload)
         return payload
@@ -2055,20 +2114,28 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
         tags: list[str] | None = None,
         embedding_strategy: str = "default",
         description: str = "",
+        scaffold: str | None = None,
+        template_vars: Mapping[str, str] | None = None,
     ) -> ExtensionAuthoredPayload:
-        """Write a ``.yaml`` profile stub under the profiles surface."""
+        """Write a ``.yaml`` profile stub under the profiles surface.
+
+        ``scaffold`` selects an L2-F variant (e.g.
+        ``"profile_regulatory_clause"`` for a framework-specific tag
+        taxonomy); ``template_vars`` supplies its substitutions.
+        """
         if tags:
             tags_yaml = "\n" + "\n".join(f"  - {t}" for t in tags)
         else:
             tags_yaml = " []"
+        vars: dict[str, str] = {
+            "description": description or name,
+            "tags_yaml": tags_yaml,
+            "embedding_strategy": embedding_strategy,
+        }
+        if template_vars:
+            vars.update({str(k): str(v) for k, v in template_vars.items()})
         payload = await self._author_extension(
-            "profiles",
-            name,
-            {
-                "description": description or name,
-                "tags_yaml": tags_yaml,
-                "embedding_strategy": embedding_strategy,
-            },
+            "profiles", name, vars, scaffold=scaffold,
         )
         await self._emit_extension_authored(payload)
         return payload

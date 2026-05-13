@@ -285,7 +285,7 @@ async def test_bootstrap_lands_session_attributed_commit(
     payload = await tool_builder.bootstrap_agent("audit_agent")
     repo = bootstrapped_repo._repo
     commit = repo.commit(payload.commit_sha)
-    assert "bootstrap agents/audit_agent (L1-E)" in commit.message
+    assert "bootstrap agents/audit_agent (L1-E, scaffold=blank_agents)" in commit.message
 
 
 @pytest.mark.asyncio

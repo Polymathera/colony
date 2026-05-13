@@ -21,6 +21,14 @@ FEniCS plug-in shape, Julia SciML module shape) live in
 
 from __future__ import annotations
 
+from .registry import (
+    ExtensionScaffold,
+    ExtensionScaffoldRegistryError,
+    available_scaffolds,
+    get_extension_scaffold,
+    register_extension_scaffold,
+    reset_registry,
+)
 from .renderer import (
     AVAILABLE_TEMPLATES,
     ScaffoldRenderError,
@@ -32,8 +40,14 @@ from .renderer import (
 
 __all__ = (
     "AVAILABLE_TEMPLATES",
+    "ExtensionScaffold",
+    "ExtensionScaffoldRegistryError",
     "ScaffoldRenderError",
+    "available_scaffolds",
+    "get_extension_scaffold",
     "list_template_files",
+    "register_extension_scaffold",
     "render_extension_scaffold",
     "render_template",
+    "reset_registry",
 )

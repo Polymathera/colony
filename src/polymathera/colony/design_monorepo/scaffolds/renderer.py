@@ -263,6 +263,7 @@ def render_extension_scaffold(
     name: str,
     *,
     template_vars: Mapping[str, str] | None = None,
+    scaffold_id: str | None = None,
 ) -> Path:
     """Render the L1-E extension scaffold for ``surface`` into the file
     L1-A would discover at ``surface_dir / <surface convention for name>``.
@@ -270,6 +271,15 @@ def render_extension_scaffold(
     Returns the absolute path of the file written. Refuses to overwrite
     an existing destination file (sibling extensions in the same surface
     are fine — only the per-extension destination must be empty).
+
+    When ``scaffold_id`` is ``None``, renders the blank L1-E template
+    for the surface (the original behavior). When set, looks up the
+    registered :class:`ExtensionScaffold` via the registry; the
+    scaffold's bound surface must match ``surface``. This is the L2-F
+    extension point: CPS (and any third-party extension package)
+    registers domain-shaped scaffolds via
+    :func:`register_extension_scaffold` at startup, and callers pick
+    them by id.
 
     Variables available to ``string.Template`` substitution: ``name``,
     ``name_snake``, ``name_dash``, plus the union of caller-supplied
@@ -280,7 +290,25 @@ def render_extension_scaffold(
             f"Unknown extension surface {surface!r}; "
             f"available: {sorted(_EXTENSION_TEMPLATE_FILE_BY_SURFACE)}",
         )
-    template_file = _EXTENSION_TEMPLATES_DIR / _EXTENSION_TEMPLATE_FILE_BY_SURFACE[surface]
+
+    if scaffold_id is None:
+        template_file = (
+            _EXTENSION_TEMPLATES_DIR
+            / _EXTENSION_TEMPLATE_FILE_BY_SURFACE[surface]
+        )
+    else:
+        # Local import keeps the registry an optional collaborator
+        # of the renderer (the blank-template path doesn't need it).
+        from .registry import get_extension_scaffold
+        scaffold = get_extension_scaffold(scaffold_id)
+        if scaffold.surface != surface:
+            raise ScaffoldRenderError(
+                f"scaffold {scaffold_id!r} targets surface "
+                f"{scaffold.surface!r}, but render was requested for "
+                f"surface {surface!r}",
+            )
+        template_file = scaffold.template_path
+
     if not template_file.is_file():
         raise ScaffoldRenderError(
             f"Extension scaffold {template_file} is missing on disk.",
