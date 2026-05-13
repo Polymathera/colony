@@ -22,6 +22,7 @@ from polymathera.colony.design_monorepo.extensions import (
     DiscoveredExtensions,
     discover_agents,
     discover_all,
+    discover_analyses,
     discover_deployments,
     discover_plugins,
     discover_profiles,
@@ -54,6 +55,7 @@ def test_all_discoverers_handle_missing_surface_dirs(tmp_path: Path) -> None:
     assert snap.deployments == {}
     assert len(snap.tools) == 0
     assert snap.profiles == {}
+    assert snap.analyses == {}
 
 
 def test_all_discoverers_handle_empty_surface_dirs(tmp_path: Path) -> None:
@@ -67,6 +69,7 @@ def test_all_discoverers_handle_empty_surface_dirs(tmp_path: Path) -> None:
     assert snap.deployments == {}
     assert len(snap.tools) == 0
     assert snap.profiles == {}
+    assert snap.analyses == {}
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +200,100 @@ def test_discover_profiles_skips_non_mapping_top_level(tmp_path: Path) -> None:
     (surface / "good.yaml").write_text("k: v\n")
     found = discover_profiles(tmp_path)
     assert set(found.keys()) == {"good"}
+
+
+# ---------------------------------------------------------------------------
+# discover_analyses — analysis_entry() factory + AnalysisSpec validation
+# ---------------------------------------------------------------------------
+
+
+def _write_valid_analysis_file(surface: Path, stem: str) -> None:
+    """Write a ``.colony/analyses/<stem>.py`` whose ``analysis_entry()``
+    returns a dict matching :class:`AnalysisSpec`."""
+    (surface / f"{stem}.py").write_text(
+        "def analysis_entry():\n"
+        "    return {\n"
+        f"        'label': '{stem} analysis',\n"
+        "        'description': 'demo',\n"
+        f"        'coordinator_v1': 'test.{stem}.Coordinator',\n"
+        f"        'coordinator_v2': 'test.{stem}.Coordinator',\n"
+        f"        'worker': 'test.{stem}.Worker',\n"
+        "        'self_concept': {'description': 'stub'},\n"
+        "    }\n",
+    )
+
+
+def test_discover_analyses_loads_valid_factories(tmp_path: Path) -> None:
+    surface = tmp_path / ".colony/analyses"
+    surface.mkdir(parents=True)
+    _write_valid_analysis_file(surface, "demo")
+    _write_valid_analysis_file(surface, "other")
+    found = discover_analyses(tmp_path)
+    assert set(found.keys()) == {"demo", "other"}
+    assert found["demo"]["label"] == "demo analysis"
+    assert found["demo"]["coordinator_v2"] == "test.demo.Coordinator"
+
+
+def test_discover_analyses_skips_file_without_factory(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    surface = tmp_path / ".colony/analyses"
+    surface.mkdir(parents=True)
+    _write_valid_analysis_file(surface, "good")
+    (surface / "nofactory.py").write_text("# no analysis_entry defined\n")
+    with caplog.at_level("WARNING", logger="polymathera.colony.design_monorepo.extensions"):
+        found = discover_analyses(tmp_path)
+    assert set(found.keys()) == {"good"}
+    assert any(
+        "exposes no callable analysis_entry" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_discover_analyses_skips_factory_that_raises(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    surface = tmp_path / ".colony/analyses"
+    surface.mkdir(parents=True)
+    _write_valid_analysis_file(surface, "good")
+    (surface / "boom.py").write_text(
+        "def analysis_entry():\n"
+        "    raise RuntimeError('factory exploded')\n",
+    )
+    with caplog.at_level("WARNING", logger="polymathera.colony.design_monorepo.extensions"):
+        found = discover_analyses(tmp_path)
+    assert set(found.keys()) == {"good"}
+    assert any(
+        "analysis_entry() in" in r.getMessage() and "raised" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_discover_analyses_rejects_unknown_key(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``AnalysisSpec.extra='forbid'`` catches typos at discovery time —
+    the cross-mechanism schema-drift guard that the strict spec exists
+    to provide."""
+    surface = tmp_path / ".colony/analyses"
+    surface.mkdir(parents=True)
+    (surface / "typoed.py").write_text(
+        "def analysis_entry():\n"
+        "    return {\n"
+        "        'label': 't', 'description': 't',\n"
+        "        'coordinator_v1': 'x.Y', 'coordinator_v2': 'x.Y', 'worker': 'x.W',\n"
+        "        'self_concept': {'description': 'stub'},\n"
+        "        'coordinator_capabilites': ['typo'],\n"
+        "    }\n",
+    )
+    with caplog.at_level("WARNING", logger="polymathera.colony.design_monorepo.extensions"):
+        found = discover_analyses(tmp_path)
+    assert found == {}
+    assert any(
+        "failed schema validation" in r.getMessage()
+        and "coordinator_capabilites" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------

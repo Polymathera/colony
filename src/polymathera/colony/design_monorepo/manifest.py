@@ -43,6 +43,7 @@ DEFAULT_SURFACE_DIRS: dict[str, str] = {
     "deployments": ".colony/deployments/",
     "tools": ".colony/tools/",
     "profiles": ".colony/profiles/",
+    "analyses": ".colony/analyses/",
 }
 """Per-surface default directories under the design-monorepo root.
 
@@ -88,6 +89,9 @@ class ExtensionsConfig(BaseModel):
     )
     profiles: SurfaceConfig = Field(
         default_factory=lambda: SurfaceConfig(directory=DEFAULT_SURFACE_DIRS["profiles"]),
+    )
+    analyses: SurfaceConfig = Field(
+        default_factory=lambda: SurfaceConfig(directory=DEFAULT_SURFACE_DIRS["analyses"]),
     )
 
 

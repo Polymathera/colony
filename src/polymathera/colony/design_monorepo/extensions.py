@@ -1,6 +1,6 @@
 """L1-A: read the L4 extensions a design monorepo declares under ``.colony/``.
 
-Five surfaces — for each, a single discover function:
+Six surfaces — for each, a single discover function:
 
 - :func:`discover_plugins`     — ``SKILL.md``-shaped skills under the
                                   plugins surface; delegates to
@@ -22,6 +22,14 @@ Five surfaces — for each, a single discover function:
                                   themselves explicitly inside ``register``.
 - :func:`discover_profiles`    — ``*.yaml`` files under the profiles surface,
                                   parsed and keyed by filename stem.
+- :func:`discover_analyses`    — each ``*.py`` file under the analyses surface
+                                  exposes a top-level ``analysis_entry()``
+                                  callable returning a dict matching
+                                  :class:`polymathera.colony.agents.configs.AnalysisSpec`.
+                                  The file stem is the analysis key. This is
+                                  the per-program counterpart to the
+                                  ``polymathera.analysis_types`` entry-point
+                                  group (which is pip-distribution-time).
 
 Surface directories come from :class:`ExtensionsConfig` on the v2 manifest
 (or :data:`DEFAULT_SURFACE_DIRS` when the manifest is v1 / no extensions
@@ -45,8 +53,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
 from ..agents.base import Agent
+from ..agents.configs import AnalysisSpec
 from ..agents.patterns.capabilities._plugin.discovery import discover_skills
 from ..agents.patterns.capabilities._plugin.schema import SkillSource, SkillSpec
 from ..tools.registry import ToolRegistry
@@ -282,6 +292,61 @@ def discover_profiles(
     return out
 
 
+def discover_analyses(
+    repo_root: Path, manifest: DesignMonorepoManifest | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Walk the analyses surface. Each ``*.py`` file must expose a
+    top-level ``analysis_entry()`` callable returning a dict matching
+    :class:`polymathera.colony.agents.configs.AnalysisSpec`; the file
+    stem becomes the analysis key. Files without a callable
+    ``analysis_entry``, factories that raise, and entries that fail
+    :class:`AnalysisSpec` validation are logged and skipped.
+
+    Shape parity with :func:`polymathera.colony.agents.analysis_registry.get_analysis_registry`
+    is enforced through the same Pydantic model — drift between the
+    entry-point-group path and this per-monorepo path surfaces as a
+    validation error at load time, not silently."""
+    surface = _surface_dir(repo_root, "analyses", manifest)
+    if not surface.is_dir():
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for path in sorted(surface.glob("*.py")):
+        module = _load_py_module(path)
+        if module is None:
+            continue
+        factory = getattr(module, "analysis_entry", None)
+        if not callable(factory):
+            logger.warning(
+                "L1-A: analysis %s exposes no callable analysis_entry — skipping",
+                path,
+            )
+            continue
+        try:
+            entry = factory()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "L1-A: analysis_entry() in %s raised (%s: %s) — skipping",
+                path, type(exc).__name__, exc,
+            )
+            continue
+        if not isinstance(entry, dict):
+            logger.warning(
+                "L1-A: analysis_entry() in %s returned %s, expected dict — skipping",
+                path, type(entry).__name__,
+            )
+            continue
+        try:
+            AnalysisSpec.model_validate(entry)
+        except ValidationError as exc:
+            logger.warning(
+                "L1-A: analysis %s failed schema validation — skipping. %s",
+                path, exc,
+            )
+            continue
+        out[path.stem] = entry
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Bundle — one call site for RepoStateProvider
 # ---------------------------------------------------------------------------
@@ -289,7 +354,7 @@ def discover_profiles(
 
 @dataclass(frozen=True)
 class DiscoveredExtensions:
-    """Snapshot of all five surfaces, populated by :func:`discover_all`.
+    """Snapshot of all six surfaces, populated by :func:`discover_all`.
 
     Empty containers — not None — are the "surface declared but empty"
     state; absence of the surface directory entirely produces the same
@@ -301,6 +366,7 @@ class DiscoveredExtensions:
     deployments: dict[str, type] = field(default_factory=dict)
     tools: ToolRegistry = field(default_factory=ToolRegistry)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    analyses: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def discover_all(
@@ -317,6 +383,7 @@ def discover_all(
         deployments=discover_deployments(repo_root, manifest),
         tools=discover_tools(repo_root, manifest),
         profiles=discover_profiles(repo_root, manifest),
+        analyses=discover_analyses(repo_root, manifest),
     )
 
 
@@ -324,6 +391,7 @@ __all__ = (
     "DiscoveredExtensions",
     "discover_agents",
     "discover_all",
+    "discover_analyses",
     "discover_deployments",
     "discover_plugins",
     "discover_profiles",

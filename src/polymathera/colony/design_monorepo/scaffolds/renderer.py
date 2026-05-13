@@ -48,6 +48,7 @@ _EXTENSION_TEMPLATE_FILE_BY_SURFACE: dict[str, str] = {
     "deployments": "deployment.py.tmpl",
     "tools": "tool_adapter.py.tmpl",
     "profiles": "profile.yaml.tmpl",
+    "analyses": "analysis.py.tmpl",
 }
 if set(_EXTENSION_TEMPLATE_FILE_BY_SURFACE) != set(DEFAULT_SURFACE_DIRS):
     raise ImportError(

@@ -8,18 +8,23 @@ Markdown file."). This module is that injection point: it walks the
 returns the union of the colony-builtin entries and any
 user-package entries.
 
-Domain packages register their coordinator analyses by adding a
-plugin to their ``pyproject.toml``:
+Pip-distributable packages register their coordinator analyses by
+adding a plugin to their ``pyproject.toml``:
 
 .. code-block:: toml
 
     [tool.poetry.plugins."polymathera.analysis_types"]
-    opm_meg = "polymathera.cps.domains.quantum.registry:opm_meg_analysis_entry"
+    <analysis_id> = "<module.path>:<factory_callable>"
 
-Each entry-point is a callable returning a dict in the same shape
-as a hardcoded ``ANALYSIS_REGISTRY`` value (see the docstring on
-that dict for the schema). The entry-point's *name* (left side of
-``=``) is the analysis key — e.g. ``opm_meg``.
+Each entry-point is a callable returning a dict matching
+:class:`polymathera.colony.agents.configs.AnalysisSpec` — the single
+source of truth for the analysis-registry schema across every
+registration path (this group, the colony-builtin dict, and L1-A's
+:func:`polymathera.colony.design_monorepo.extensions.discover_analyses`).
+The entry-point's *name* (left side of ``=``) is the analysis key.
+
+Per-program analyses that live in a design monorepo register through
+L1-A instead of this group — see ``discover_analyses`` for that path.
 
 Consumers (currently
 ``polymathera.colony.web_ui.backend.routers.sessions.create_session``)
@@ -29,8 +34,9 @@ in ``metadata.parameters['available_analyses']`` and can dispatch
 ``AgentPoolCapability.create_agent`` against any registered
 coordinator class — colony-builtin or domain-supplied.
 
-Failures isolated: a broken plugin is logged + skipped; the rest
-of the registry is unaffected.
+Failures isolated: a broken plugin is logged + skipped (including
+schema-validation failures from :class:`AnalysisSpec`); the rest of
+the registry is unaffected.
 """
 
 from __future__ import annotations
@@ -38,6 +44,10 @@ from __future__ import annotations
 import logging
 from importlib.metadata import entry_points
 from typing import Any
+
+from pydantic import ValidationError
+
+from .configs import AnalysisSpec
 
 
 logger = logging.getLogger(__name__)
@@ -50,20 +60,6 @@ Stable name — consumed by domain packages' ``pyproject.toml``.
 Don't rename without coordinating with every downstream package
 (`polymathera-cps`, future racer / fusion / duv / cami / rocket).
 """
-
-
-_REQUIRED_REGISTRY_KEYS = (
-    "label",
-    "description",
-)
-"""Minimum keys an entry must declare to be accepted.
-
-Matches the keys :func:`polymathera.colony.web_ui.backend.routers.sessions.create_session`
-reads from each registry entry when it builds ``available_analyses``.
-The ``coordinator_v2`` / ``worker`` keys are not strictly required
-to render in the SessionAgent prompt, but the planner needs them
-to actually spawn a coordinator — so plugins that omit them get a
-warning."""
 
 
 def get_analysis_registry() -> dict[str, dict[str, Any]]:
@@ -115,19 +111,14 @@ def get_analysis_registry() -> dict[str, dict[str, Any]]:
                 ep.name, type(entry).__name__,
             )
             continue
-        missing = [k for k in _REQUIRED_REGISTRY_KEYS if k not in entry]
-        if missing:
+        try:
+            AnalysisSpec.model_validate(entry)
+        except ValidationError as exc:
             logger.warning(
-                "analysis_registry: entry-point %r missing required keys %r — skipping",
-                ep.name, missing,
+                "analysis_registry: entry-point %r failed schema validation — skipping. %s",
+                ep.name, exc,
             )
             continue
-        if "coordinator_v2" not in entry and "coordinator_v1" not in entry:
-            logger.warning(
-                "analysis_registry: entry-point %r has no coordinator_v1 / coordinator_v2 — "
-                "the SessionAgent's planner will see it but cannot spawn it",
-                ep.name,
-            )
 
         if ep.name in merged:
             logger.warning(

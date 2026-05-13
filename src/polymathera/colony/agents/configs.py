@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..distributed.config import (
     ConfigComponent,
@@ -32,6 +32,8 @@ from ..distributed.config import (
 class AnalysisSelfConcept(BaseModel):
     """The self-concept fields a coordinator agent reads at spawn time."""
 
+    model_config = ConfigDict(extra="forbid")
+
     description: str
     goals: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
@@ -44,7 +46,16 @@ class AnalysisSpec(BaseModel):
     capabilities in their ``initialize()`` methods. Coordinator capabilities
     are passed to the agent system so it can wire the named capabilities at
     spawn time.
+
+    Schema is the single source of truth for every registration mechanism that
+    surfaces an analysis to the SessionAgent (the colony-builtin dict, the
+    ``polymathera.analysis_types`` entry-point group, and L1-A's
+    :func:`polymathera.colony.design_monorepo.extensions.discover_analyses`).
+    ``extra="forbid"`` keeps drift visible: typo'd keys in any of those paths
+    surface as validation errors at load time rather than silently passing.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     label: str
     description: str

@@ -81,15 +81,17 @@ def _opm_meg_entry() -> dict[str, Any]:
             "Quantum-sensing OPM-MEG (Optically-Pumped Magnetometer "
             "Magnetoencephalography) design analysis."
         ),
-        "coordinator_v2": (
-            "polymathera.cps.domains.quantum.agents.coordinator.OPMMEGCoordinator"
-        ),
-        "worker": (
-            "polymathera.cps.domains.quantum.agents.atomic_physics.AtomicPhysicsAgent"
-        ),
+        "coordinator_v1": "test.opm_meg.OPMMEGCoordinator",
+        "coordinator_v2": "test.opm_meg.OPMMEGCoordinator",
+        "worker": "test.opm_meg.AtomicPhysicsAgent",
         "coordinator_capabilities": ["OPMMEGAnalysisCapability"],
         "worker_capabilities": ["AtomicPhysicsCapability"],
         "extra_metadata_keys": ["budget_id", "design_repo_path"],
+        "self_concept": {
+            "description": "OPM-MEG noise-floor design coordinator.",
+            "goals": ["Reconcile physics-worker results into budget tree."],
+            "constraints": ["Cite every physics prediction to a paper."],
+        },
     }
 
 
@@ -150,8 +152,12 @@ def test_multiple_plugin_entries_all_discovered(
         return {
             "label": "RACER Lap-Time Optimization",
             "description": "Autonomous EV racing analysis.",
-            "coordinator_v2": "polymathera.cps.domains.racer.agents.RacerCoordinator",
-            "worker": "polymathera.cps.domains.racer.agents.LapTimeAgent",
+            "coordinator_v1": "test.racer.RacerCoordinator",
+            "coordinator_v2": "test.racer.RacerCoordinator",
+            "worker": "test.racer.LapTimeAgent",
+            "self_concept": {
+                "description": "Lap-time optimisation coordinator.",
+            },
         }
 
     _patch_entry_points(
@@ -183,7 +189,10 @@ def test_plugin_can_shadow_builtin_with_warning(
         return {
             "label": "Custom Impact (overridden)",
             "description": "Plugin shadow of impact.",
+            "coordinator_v1": "test.shadow.ImpactCoordinator",
             "coordinator_v2": "test.shadow.ImpactCoordinator",
+            "worker": "test.shadow.ImpactWorker",
+            "self_concept": {"description": "Shadow impact coordinator."},
         }
 
     _patch_entry_points(
@@ -247,10 +256,13 @@ def test_plugin_missing_required_keys_is_skipped(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     def _no_label() -> dict[str, Any]:
-        # Missing 'label' (required key).
+        # Missing 'label' (required by AnalysisSpec).
         return {
             "description": "An analysis without a label.",
+            "coordinator_v1": "x.Y",
             "coordinator_v2": "x.Y",
+            "worker": "x.W",
+            "self_concept": {"description": "stub"},
         }
 
     _patch_entry_points(
@@ -261,22 +273,53 @@ def test_plugin_missing_required_keys_is_skipped(
         reg = get_analysis_registry()
     assert "no_label" not in reg
     assert any(
-        "missing required keys" in r.getMessage() for r in caplog.records
+        "failed schema validation" in r.getMessage() for r in caplog.records
     )
 
 
-def test_plugin_without_coordinator_class_warns_but_keeps_entry(
+def test_plugin_with_unknown_key_is_skipped(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Without ``coordinator_v1`` / ``coordinator_v2`` the SessionAgent
-    can show the entry but cannot spawn from it. Surface a warning,
-    but keep the entry — the operator may want to see it in
-    ``available_analyses`` for diagnostic purposes."""
+    """AnalysisSpec sets ``extra='forbid'`` so a typo'd key in a plugin
+    entry fails validation rather than silently passing through. This
+    is the schema-drift guard the strict spec exists to provide."""
+
+    def _typoed_entry() -> dict[str, Any]:
+        entry = _opm_meg_entry()
+        # Typo: 'coordinator_capabilites' (missing 'i') instead of
+        # 'coordinator_capabilities'. Under the old loose contract this
+        # would have passed and silently lost the value; the strict
+        # contract rejects it.
+        entry["coordinator_capabilites"] = entry.pop("coordinator_capabilities")
+        return entry
+
+    _patch_entry_points(
+        monkeypatch, (_make_ep("typoed", _typoed_entry),),
+    )
+    with caplog.at_level("WARNING", logger="polymathera.colony.agents.analysis_registry"):
+        reg = get_analysis_registry()
+    assert "typoed" not in reg
+    assert any(
+        "failed schema validation" in r.getMessage()
+        and "coordinator_capabilites" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_plugin_without_coordinator_class_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Without ``coordinator_v1`` / ``coordinator_v2`` an entry cannot be
+    spawned. AnalysisSpec marks both fields as required, so a plugin
+    missing either is rejected at validation time rather than producing
+    a half-broken entry visible in ``available_analyses``."""
 
     def _no_coordinator() -> dict[str, Any]:
         return {
             "label": "Documentation-only entry",
             "description": "An analysis stub with no coordinator yet.",
+            "worker": "x.W",
+            "self_concept": {"description": "stub"},
             # No coordinator_v1 / coordinator_v2.
         }
 
@@ -285,9 +328,10 @@ def test_plugin_without_coordinator_class_warns_but_keeps_entry(
     )
     with caplog.at_level("WARNING", logger="polymathera.colony.agents.analysis_registry"):
         reg = get_analysis_registry()
-    assert "docs_only" in reg
+    assert "docs_only" not in reg
     assert any(
-        "no coordinator_v1 / coordinator_v2" in r.getMessage()
+        "failed schema validation" in r.getMessage()
+        and "coordinator_v1" in r.getMessage()
         for r in caplog.records
     )
 
