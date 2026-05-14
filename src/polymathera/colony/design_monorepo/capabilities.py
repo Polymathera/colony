@@ -66,16 +66,25 @@ from .models import (
     BootstrapResult,
     BranchTopology,
     Checkpoint,
+    CommitInfo,
     DecisionEntry,
     DesignDiff,
     ExtensionAuthoredPayload,
+    FileContent,
+    FileEntry,
+    FileStat,
     ForkBranch,
+    GrepMatch,
+    GrepResult,
+    LineRangeContent,
     ProjectArtifactAuthoredPayload,
     ProjectArtifactValidationResult,
     RepoBootstrapSpec,
     RepoState,
+    StashEntry,
     ToolEntry,
     ToolMatch,
+    WorkingTreeStatus,
 )
 from ..agents.sessions.context import get_current_session_id
 from . import registry as registry_module
@@ -912,6 +921,369 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
             counts[kind] = len(self._list_design_artifacts_sync(kind))
         return {"top_level": top_level, "counts": counts}
 
+    # ---- Filesystem reads (working tree) ----------------------------
+
+    @action_executor(
+        planning_summary=(
+            "Read a file from the working tree. Use ``max_bytes`` to "
+            "cap; very large files return only the prefix and set "
+            "``truncated=True``."
+        ),
+    )
+    async def read_file(
+        self, path: str, *, max_bytes: int = 1_048_576,
+    ) -> FileContent:
+        """Read up to ``max_bytes`` of UTF-8 text from ``path``.
+
+        ``path`` is rejected if it escapes the working tree, is
+        absolute, or targets ``.git/`` / ``.colony/`` (route via
+        :class:`ToolBuilder` for the latter). Binary files surface as
+        Latin-1 fallback so the planner still gets a usable string.
+        """
+        abs_p = _resolve_safe_path(self._working_dir, path)
+        return await asyncio.to_thread(
+            self._read_file_sync, abs_p, path, int(max_bytes),
+        )
+
+    def _read_file_sync(
+        self, abs_p: Path, requested_path: str, max_bytes: int,
+    ) -> FileContent:
+        if not abs_p.is_file():
+            raise DesignMonorepoError(
+                f"read_file: not a regular file: {requested_path}",
+            )
+        if max_bytes <= 0:
+            raise DesignMonorepoError(
+                f"read_file: max_bytes must be positive (got {max_bytes})",
+            )
+        size = abs_p.stat().st_size
+        with abs_p.open("rb") as f:
+            data = f.read(max_bytes)
+        truncated = size > max_bytes
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("latin-1", errors="replace")
+        return FileContent(
+            path=requested_path,
+            content=text,
+            truncated=truncated,
+            total_bytes=size,
+        )
+
+    @action_executor(
+        planning_summary=(
+            "Read a line range from a file. ``start`` is 1-indexed; "
+            "negative ``start`` means N lines from the end (tail). "
+            "Use for files too large for ``read_file``."
+        ),
+    )
+    async def read_lines(
+        self, path: str, *, start: int = 1, count: int = 200,
+    ) -> LineRangeContent:
+        """Bounded line-range read.
+
+        ``start=1, count=N`` returns the first N lines. ``start=-N,
+        count=N`` returns the last N (tail). ``count=0`` returns no
+        content but still surfaces ``total_lines`` — useful for sizing
+        without paying the IO of reading."""
+        abs_p = _resolve_safe_path(self._working_dir, path)
+        return await asyncio.to_thread(
+            self._read_lines_sync, abs_p, path, int(start), int(count),
+        )
+
+    def _read_lines_sync(
+        self, abs_p: Path, requested_path: str, start: int, count: int,
+    ) -> LineRangeContent:
+        if not abs_p.is_file():
+            raise DesignMonorepoError(
+                f"read_lines: not a regular file: {requested_path}",
+            )
+        if count < 0:
+            raise DesignMonorepoError(
+                f"read_lines: count must be >= 0 (got {count})",
+            )
+        try:
+            text = abs_p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = abs_p.read_text(encoding="latin-1", errors="replace")
+        lines = text.splitlines(keepends=True)
+        total = len(lines)
+        if start < 0:
+            start_idx = max(0, total + start)
+        else:
+            start_idx = max(0, start - 1)
+        end_idx = (
+            min(total, start_idx + count) if count > 0 else start_idx
+        )
+        slab = "".join(lines[start_idx:end_idx])
+        return LineRangeContent(
+            path=requested_path,
+            content=slab,
+            start_line=start_idx + 1 if end_idx > start_idx else start_idx,
+            end_line=end_idx,
+            total_lines=total,
+            truncated=end_idx < total,
+        )
+
+    @action_executor(
+        planning_summary=(
+            "List directory entries (optionally recursive, optionally "
+            "glob-filtered)."
+        ),
+    )
+    async def list_directory(
+        self,
+        path: str = ".",
+        *,
+        recursive: bool = False,
+        pattern: str | None = None,
+        max_entries: int = 1000,
+    ) -> list[FileEntry]:
+        """List children of ``path`` (default: working-tree root).
+
+        With ``recursive=True`` walks the subtree; ``pattern`` is a
+        gitignore-style glob filter (e.g. ``"**/*.py"``) — when set,
+        only matching paths are returned. The sidecar ``.ingested/``
+        subtree (KB extraction outputs) and ``.git`` / ``.colony`` are
+        always skipped — those have dedicated query surfaces.
+        """
+        if path in {"", ".", "/"}:
+            abs_p = self._working_dir.resolve()
+        else:
+            abs_p = _resolve_safe_path(self._working_dir, path)
+        return await asyncio.to_thread(
+            self._list_directory_sync,
+            abs_p,
+            recursive,
+            pattern,
+            int(max_entries),
+        )
+
+    def _list_directory_sync(
+        self,
+        abs_p: Path,
+        recursive: bool,
+        pattern: str | None,
+        max_entries: int,
+    ) -> list[FileEntry]:
+        if not abs_p.is_dir():
+            raise DesignMonorepoError(
+                f"list_directory: not a directory: {abs_p}",
+            )
+        if max_entries <= 0:
+            raise DesignMonorepoError(
+                f"list_directory: max_entries must be positive (got "
+                f"{max_entries})",
+            )
+        spec = None
+        if pattern:
+            from pathspec import PathSpec
+            from pathspec.patterns import GitWildMatchPattern
+
+            spec = PathSpec.from_lines(GitWildMatchPattern, [pattern])
+
+        base = self._working_dir.resolve()
+        out: list[FileEntry] = []
+        iterator = abs_p.rglob("*") if recursive else abs_p.iterdir()
+        for child in iterator:
+            try:
+                rel = child.relative_to(base)
+            except ValueError:
+                continue
+            if not rel.parts:
+                continue
+            if rel.parts[0] in _NON_SUBSTANCE_TOP_LEVEL:
+                continue
+            # Skip MonorepoPersistedIngestor sidecars at any depth.
+            if ".ingested" in rel.parts:
+                continue
+            rel_posix = rel.as_posix()
+            if spec is not None and not spec.match_file(rel_posix):
+                continue
+            try:
+                size = child.stat().st_size if child.is_file() else 0
+            except OSError:
+                size = 0
+            out.append(
+                FileEntry(
+                    path=rel_posix,
+                    is_dir=child.is_dir(),
+                    size_bytes=size,
+                ),
+            )
+            if len(out) >= max_entries:
+                break
+        out.sort(key=lambda e: e.path)
+        return out
+
+    @action_executor(
+        planning_summary=(
+            "Inspect a path: exists / is_file / is_dir / size / mtime."
+        ),
+    )
+    async def stat_path(self, path: str) -> FileStat:
+        """Cheap metadata probe — use before ``read_file`` to bound
+        IO, or to confirm a write landed.
+
+        Returns ``exists=False`` rather than raising for missing paths
+        so the planner can branch on it without an exception handler.
+        """
+        abs_p = _resolve_safe_path(self._working_dir, path)
+        return await asyncio.to_thread(self._stat_path_sync, abs_p, path)
+
+    def _stat_path_sync(self, abs_p: Path, requested_path: str) -> FileStat:
+        if not abs_p.exists():
+            return FileStat(path=requested_path, exists=False)
+        st = abs_p.stat()
+        return FileStat(
+            path=requested_path,
+            exists=True,
+            is_file=abs_p.is_file(),
+            is_dir=abs_p.is_dir(),
+            size_bytes=st.st_size if abs_p.is_file() else 0,
+            mtime=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc),
+        )
+
+    @action_executor(
+        planning_summary=(
+            "Search file contents (recursive). Returns hits as "
+            "``{path, line_no, line}``. Uses ripgrep when available, "
+            "falls back to Python ``re``."
+        ),
+    )
+    async def grep_content(
+        self,
+        pattern: str,
+        *,
+        path: str = ".",
+        glob: str | None = None,
+        max_matches: int = 200,
+        ignore_case: bool = False,
+        regex: bool = True,
+    ) -> GrepResult:
+        """Codebase content search.
+
+        ``pattern`` is a regex by default; pass ``regex=False`` for
+        literal-string search. ``glob`` (e.g. ``"**/*.py"``) restricts
+        the file set. ``ignore_case=True`` is case-insensitive. Caps
+        at ``max_matches``; ``GrepResult.truncated`` flags when hit.
+
+        Backed by ripgrep when on PATH (fast, respects ``.gitignore``);
+        falls back to a Python walker over the same path-safety gate
+        used by the rest of L1-F."""
+        if not pattern:
+            raise DesignMonorepoError("grep_content: empty pattern")
+        if path in {"", ".", "/"}:
+            abs_root = self._working_dir.resolve()
+        else:
+            abs_root = _resolve_safe_path(self._working_dir, path)
+        return await asyncio.to_thread(
+            self._grep_content_sync,
+            pattern,
+            abs_root,
+            glob,
+            int(max_matches),
+            ignore_case,
+            regex,
+        )
+
+    def _grep_content_sync(
+        self,
+        pattern: str,
+        abs_root: Path,
+        glob: str | None,
+        max_matches: int,
+        ignore_case: bool,
+        regex: bool,
+    ) -> GrepResult:
+        if max_matches <= 0:
+            raise DesignMonorepoError(
+                f"grep_content: max_matches must be positive (got "
+                f"{max_matches})",
+            )
+        # Prefer ripgrep when available — fast + respects .gitignore.
+        rg = _which("rg")
+        if rg is not None:
+            return _grep_via_ripgrep(
+                rg_path=rg,
+                pattern=pattern,
+                root=abs_root,
+                glob=glob,
+                max_matches=max_matches,
+                ignore_case=ignore_case,
+                regex=regex,
+            )
+        return _grep_via_python(
+            pattern=pattern,
+            root=abs_root,
+            working_dir=self._working_dir,
+            glob=glob,
+            max_matches=max_matches,
+            ignore_case=ignore_case,
+            regex=regex,
+        )
+
+    # ---- Git reads --------------------------------------------------
+
+    @action_executor(
+        planning_summary=(
+            "Recent commits (``git log``-like). Restrict by ``paths``; "
+            "default ``limit=20``."
+        ),
+    )
+    async def git_log(
+        self,
+        *,
+        paths: Sequence[str] | None = None,
+        limit: int = 20,
+        ref: str = "HEAD",
+    ) -> list[CommitInfo]:
+        """Up to ``limit`` commits reachable from ``ref``.
+
+        ``paths`` (forward-slash, repo-root-relative) restricts to
+        commits that touched any listed path — same semantics as
+        ``git log -- <paths>``."""
+        client = await self._client_async()
+        rows = await asyncio.to_thread(
+            client.log,
+            paths=list(paths) if paths else None,
+            limit=int(limit),
+            ref=ref,
+        )
+        return list(rows)
+
+    @action_executor(
+        planning_summary=(
+            "Uncommitted state: ``{staged, unstaged, untracked}`` "
+            "path lists."
+        ),
+    )
+    async def git_status(self) -> WorkingTreeStatus:
+        """Three-way split of ``git status``: staged, unstaged,
+        untracked. Complement to the existing
+        :meth:`get_repo_state` (which carries the boolean
+        ``is_dirty``)."""
+        client = await self._client_async()
+        return await asyncio.to_thread(client.status)
+
+    @action_executor(
+        planning_summary=(
+            "Raw unified diff of the working tree vs HEAD. Restrict "
+            "by ``paths``. Capped at 256 KiB."
+        ),
+    )
+    async def diff_working_tree(
+        self, *, paths: Sequence[str] | None = None,
+    ) -> str:
+        """Working-tree-vs-HEAD raw diff — what would land in a
+        ``git commit -a``. Symmetric with :meth:`diff_design` (ref-vs-ref)."""
+        client = await self._client_async()
+        return await asyncio.to_thread(
+            client.diff_working_tree,
+            paths=list(paths) if paths else None,
+        )
+
 
 # ---------------------------------------------------------------------------
 # DesignCheckpointer — write-side wrappers (master §8.1)
@@ -1165,6 +1537,164 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
     async def diff_design(self, ref_a: str, ref_b: str) -> DesignDiff:
         client = await self._client_async()
         return await asyncio.to_thread(client.diff, ref_a, ref_b)
+
+    # ---- Remote sync -----------------------------------------------
+
+    @action_executor(
+        planning_summary=(
+            "Fetch from a remote (default ``origin``) — refs only, no "
+            "working-tree change."
+        ),
+    )
+    async def fetch_remote(self, remote: str = "origin") -> None:
+        """Update remote-tracking refs from ``remote``. Working tree
+        is untouched; pair with :meth:`pull_remote` to integrate."""
+        client = await self._client_async()
+        await asyncio.to_thread(client.fetch, remote)
+
+    @action_executor(
+        planning_summary=(
+            "Pull from a remote into the current branch. "
+            "``strategy``: ``ff_only`` (default) / ``merge`` / "
+            "``rebase``. Refuses to run with uncommitted changes."
+        ),
+    )
+    async def pull_remote(
+        self,
+        *,
+        remote: str = "origin",
+        branch: str | None = None,
+        strategy: str = "ff_only",
+    ) -> str:
+        """Fetch + integrate. Returns the new HEAD SHA. Defaults to
+        ``ff_only`` so a divergent remote surfaces as an error
+        instead of silently merging."""
+        client = await self._client_async()
+        return await asyncio.to_thread(
+            client.pull,
+            remote=remote,
+            branch=branch,
+            strategy=strategy,
+        )
+
+    # ---- User-driven branch ops ------------------------------------
+    #
+    # Distinct from :meth:`fork_design` (fork/* prefix), the
+    # framework's own ``checkpoint_state`` / ``restore_checkpoint``
+    # (checkpoint/* tags), and the auto-managed session/* / agent/* /
+    # tool/* prefixes — those have their own helpers. These three
+    # cover the everyday "branch off, work, switch back" workflow
+    # without reserving a namespace prefix.
+
+    @action_executor(
+        planning_summary=(
+            "Create a new branch off ``base`` (default: current "
+            "HEAD). Refuses framework-reserved prefixes."
+        ),
+    )
+    async def create_branch(
+        self, name: str, *, base: str | None = None,
+    ) -> str:
+        """Create a regular working branch. ``checkpoint/``,
+        ``fork/``, ``session/``, ``agent/``, ``tool/`` are reserved
+        for framework helpers and refused here."""
+        client = await self._client_async()
+        return await asyncio.to_thread(
+            client.create_branch, name, base=base,
+        )
+
+    @action_executor(
+        planning_summary=(
+            "Delete a branch. Refuses framework-reserved prefixes "
+            "and the current HEAD."
+        ),
+    )
+    async def delete_branch(
+        self, name: str, *, force: bool = False,
+    ) -> None:
+        """Remove ``name``. ``force=True`` for unmerged-branch
+        deletes (``git branch -D``)."""
+        client = await self._client_async()
+        await asyncio.to_thread(
+            client.delete_branch, name, force=force,
+        )
+
+    @action_executor(
+        planning_summary=(
+            "Switch HEAD to ``name`` (or create + switch when "
+            "``create=True``). Refuses with uncommitted changes."
+        ),
+    )
+    async def checkout_branch(
+        self, name: str, *, create: bool = False,
+    ) -> str:
+        """Switch to ``name``. Refuses when the working tree has
+        uncommitted changes — stash or commit first."""
+        client = await self._client_async()
+        return await asyncio.to_thread(
+            client.checkout_branch, name, create=create,
+        )
+
+    # ---- Stash -----------------------------------------------------
+
+    @action_executor(
+        planning_summary=(
+            "Stash the current working tree. Returns ``True`` when "
+            "something was stashed, ``False`` on a clean tree."
+        ),
+    )
+    async def stash_save(self, message: str = "") -> bool:
+        """Save uncommitted state to a new stash. No-op (returns
+        ``False``) when the working tree is clean."""
+        client = await self._client_async()
+        return await asyncio.to_thread(client.stash_save, message)
+
+    @action_executor(
+        planning_summary="Pop the most recent stash onto the current tree.",
+    )
+    async def stash_pop(self) -> None:
+        client = await self._client_async()
+        await asyncio.to_thread(client.stash_pop)
+
+    @action_executor(planning_summary="List entries in the stash stack.")
+    async def list_stashes(self) -> list[StashEntry]:
+        client = await self._client_async()
+        return list(await asyncio.to_thread(client.list_stashes))
+
+    # ---- Rebase ----------------------------------------------------
+
+    @action_executor(
+        planning_summary=(
+            "Non-interactive ``git rebase`` onto ``target_ref``. "
+            "Refuses with uncommitted changes; conflict mid-rebase "
+            "leaves the repo in the standard git rebasing state."
+        ),
+    )
+    async def rebase_onto(self, target_ref: str) -> None:
+        """Replay the current branch on top of ``target_ref``."""
+        client = await self._client_async()
+        await asyncio.to_thread(client.rebase_onto, target_ref)
+
+    # ---- User-driven tag ops --------------------------------------
+
+    @action_executor(
+        planning_summary=(
+            "Create an annotated tag at the current HEAD. Refuses "
+            "the ``checkpoint/`` prefix (use ``tag_checkpoint``)."
+        ),
+    )
+    async def create_tag(self, name: str, *, message: str = "") -> str:
+        """Create ``name`` at the current HEAD. Returns the tag
+        name."""
+        client = await self._client_async()
+        return await asyncio.to_thread(
+            client.create_tag, name, message=message,
+        )
+
+    @action_executor(planning_summary="Delete a tag.")
+    async def delete_tag(self, name: str) -> None:
+        client = await self._client_async()
+        await asyncio.to_thread(client.delete_tag, name)
 
     @action_executor(
         planning_summary=(
@@ -2209,6 +2739,164 @@ def _default_class_name(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _which(name: str) -> str | None:
+    """Tiny ``shutil.which`` wrapper — present as a hook for tests
+    that want to disable ripgrep detection deterministically."""
+
+    import shutil
+
+    return shutil.which(name)
+
+
+def _grep_via_ripgrep(
+    *,
+    rg_path: str,
+    pattern: str,
+    root: Path,
+    glob: str | None,
+    max_matches: int,
+    ignore_case: bool,
+    regex: bool,
+) -> "GrepResult":
+    """Run ``rg`` and parse its JSON-lines output into ``GrepResult``.
+
+    ``rg --json`` emits one JSON object per event; we only consume
+    ``match`` events. Hard-stops at ``max_matches`` matches via
+    ``--max-count`` on the rg side AND a Python-side count so a single
+    file packed with hits can't blow the cap."""
+
+    import json
+    import subprocess
+
+    args = [
+        rg_path, "--json",
+        "--no-messages",
+        "--max-count", str(max_matches),
+    ]
+    if ignore_case:
+        args.append("--ignore-case")
+    if not regex:
+        args.append("--fixed-strings")
+    if glob:
+        args.extend(["--glob", glob])
+    args.extend(["--", pattern, str(root)])
+
+    try:
+        completed = subprocess.run(
+            args, capture_output=True, text=True, check=False, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return GrepResult(matches=(), truncated=True)
+
+    matches: list[GrepMatch] = []
+    truncated = False
+    base = root.resolve()
+    for raw in completed.stdout.splitlines():
+        try:
+            evt = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if evt.get("type") != "match":
+            continue
+        data = evt.get("data", {})
+        path_text = (data.get("path") or {}).get("text") or ""
+        line_no = int(data.get("line_number") or 0)
+        line_text = (data.get("lines") or {}).get("text", "").rstrip("\n")
+        if not path_text:
+            continue
+        try:
+            rel = Path(path_text).resolve().relative_to(base).as_posix()
+        except ValueError:
+            rel = path_text
+        matches.append(
+            GrepMatch(path=rel, line_no=line_no, line=line_text),
+        )
+        if len(matches) >= max_matches:
+            truncated = True
+            break
+    return GrepResult(matches=tuple(matches), truncated=truncated)
+
+
+def _grep_via_python(
+    *,
+    pattern: str,
+    root: Path,
+    working_dir: Path,
+    glob: str | None,
+    max_matches: int,
+    ignore_case: bool,
+    regex: bool,
+) -> "GrepResult":
+    """Fallback grep: walk ``root`` with the same path-safety filter
+    L1-F uses elsewhere and apply a regex / literal match per line."""
+
+    import re as _re
+
+    if regex:
+        try:
+            rx = _re.compile(
+                pattern, _re.IGNORECASE if ignore_case else 0,
+            )
+        except _re.error as exc:
+            raise DesignMonorepoError(
+                f"grep_content: invalid regex {pattern!r}: {exc}",
+            ) from exc
+    else:
+        literal = pattern.lower() if ignore_case else pattern
+        rx = None  # signals literal mode
+
+    spec = None
+    if glob:
+        from pathspec import PathSpec
+        from pathspec.patterns import GitWildMatchPattern
+
+        spec = PathSpec.from_lines(GitWildMatchPattern, [glob])
+
+    matches: list[GrepMatch] = []
+    truncated = False
+    base = working_dir.resolve()
+    for child in root.rglob("*"):
+        if not child.is_file():
+            continue
+        try:
+            rel = child.relative_to(base).as_posix()
+        except ValueError:
+            continue
+        if rel.startswith(".git/") or rel.startswith(".colony/"):
+            continue
+        if ".ingested/" in rel or rel.endswith("/.ingested"):
+            continue
+        if spec is not None and not spec.match_file(rel):
+            continue
+        try:
+            with child.open("r", encoding="utf-8", errors="replace") as f:
+                for line_no, line in enumerate(f, start=1):
+                    if rx is not None:
+                        hit = rx.search(line) is not None
+                    else:
+                        haystack = (
+                            line.lower() if ignore_case else line
+                        )
+                        hit = literal in haystack
+                    if not hit:
+                        continue
+                    matches.append(
+                        GrepMatch(
+                            path=rel,
+                            line_no=line_no,
+                            line=line.rstrip("\n"),
+                        ),
+                    )
+                    if len(matches) >= max_matches:
+                        truncated = True
+                        break
+        except OSError:
+            continue
+        if truncated:
+            break
+    return GrepResult(matches=tuple(matches), truncated=truncated)
+
+
 def _resolve_safe_path(working_dir: Path, rel: str | Path) -> Path:
     """Resolve ``rel`` against ``working_dir`` and reject anything that
     escapes the tree or lands under :data:`_NON_SUBSTANCE_TOP_LEVEL`.
@@ -2684,6 +3372,174 @@ class ProjectAuthoringCapability(_DesignMonorepoCapabilityBase):
 
         payload = await self._run_action(
             "replace_lines",
+            snapshot_paths=(abs_p,),
+            validate_paths=(abs_p,),
+            commit_paths=(abs_p,),
+            primary_path=abs_p,
+            apply_mutation=_apply,
+        )
+        await self._emit_project_artifact_authored(payload)
+        return payload
+
+    # ---- Directory + copy + chmod -------------------------------------
+
+    @action_executor(
+        planning_summary=(
+            "Create a directory at <path>. A ``.gitkeep`` file is "
+            "written so the empty directory is committable."
+        ),
+    )
+    async def make_directory(
+        self, path: str,
+    ) -> ProjectArtifactAuthoredPayload:
+        """Create ``path`` (and parents). Drops a ``.gitkeep`` inside
+        so the directory survives commit — git doesn't track empty
+        directories. No-op-friendly when the directory already exists,
+        but ``.gitkeep`` is created if it isn't there yet."""
+        abs_p = _resolve_safe_path(self._working_dir, path)
+        gitkeep = abs_p / ".gitkeep"
+
+        def _apply() -> None:
+            abs_p.mkdir(parents=True, exist_ok=True)
+            if not gitkeep.exists():
+                gitkeep.write_text("", encoding="utf-8")
+
+        payload = await self._run_action(
+            "make_directory",
+            snapshot_paths=(gitkeep,),
+            validate_paths=(),
+            commit_paths=(gitkeep,),
+            primary_path=gitkeep,
+            apply_mutation=_apply,
+        )
+        await self._emit_project_artifact_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary=(
+            "Remove a directory. ``recursive=False`` requires the "
+            "directory to be empty (or contain only ``.gitkeep``)."
+        ),
+    )
+    async def remove_directory(
+        self, path: str, *, recursive: bool = False,
+    ) -> ProjectArtifactAuthoredPayload:
+        """Delete ``path``. With ``recursive=True`` deletes the
+        subtree; without it, the directory must be empty save for
+        ``.gitkeep`` (treated as no content)."""
+        abs_p = _resolve_safe_path(self._working_dir, path)
+        if not abs_p.is_dir():
+            raise DesignMonorepoError(
+                f"L1-F remove_directory: not a directory: {path}",
+            )
+        # Snapshot every file under the tree so a validation failure
+        # (extremely unlikely for a pure-delete, but
+        # ``_run_action_sync`` always runs validators on
+        # ``validate_paths``) can roll back fully.
+        children = [p for p in abs_p.rglob("*") if p.is_file()]
+        if not recursive:
+            non_gitkeep = [
+                p for p in children if p.name != ".gitkeep"
+            ]
+            if non_gitkeep:
+                raise DesignMonorepoError(
+                    f"L1-F remove_directory: {path!r} not empty "
+                    f"(use recursive=True); contains "
+                    f"{len(non_gitkeep)} non-.gitkeep file(s)",
+                )
+
+        def _apply() -> None:
+            import shutil
+            shutil.rmtree(abs_p)
+
+        payload = await self._run_action(
+            "remove_directory",
+            snapshot_paths=tuple(children),
+            validate_paths=(),
+            commit_paths=(abs_p,),
+            primary_path=abs_p,
+            apply_mutation=_apply,
+        )
+        await self._emit_project_artifact_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary=(
+            "Copy a file from <src> to <dest>. Refuses if <dest> "
+            "already exists."
+        ),
+    )
+    async def copy_file(
+        self, src: str, dest: str,
+    ) -> ProjectArtifactAuthoredPayload:
+        """Copy ``src`` (must be a regular file) to ``dest``. Refuses
+        when ``dest`` already exists — prevents an agent from silently
+        clobbering content; use :meth:`write_file` for explicit
+        overwrite."""
+        src_abs = _resolve_safe_path(self._working_dir, src)
+        dest_abs = _resolve_safe_path(self._working_dir, dest)
+        if not src_abs.is_file():
+            raise DesignMonorepoError(
+                f"L1-F copy_file: source is not a regular file: {src}",
+            )
+        if dest_abs.exists():
+            raise DesignMonorepoError(
+                f"L1-F copy_file: destination exists: {dest}",
+            )
+
+        def _apply() -> None:
+            dest_abs.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.copy2(str(src_abs), str(dest_abs))
+
+        payload = await self._run_action(
+            "copy_file",
+            snapshot_paths=(dest_abs,),
+            validate_paths=(dest_abs,),
+            commit_paths=(dest_abs,),
+            primary_path=dest_abs,
+            apply_mutation=_apply,
+        )
+        await self._emit_project_artifact_authored(payload)
+        return payload
+
+    @action_executor(
+        planning_summary=(
+            "Toggle the executable bit on a file. Mode change is "
+            "committed so it's portable across clones."
+        ),
+    )
+    async def set_file_executable(
+        self, path: str, *, executable: bool = True,
+    ) -> ProjectArtifactAuthoredPayload:
+        """Set / clear the user-executable bit on ``path``.
+
+        Git tracks the executable bit (``100644`` ↔ ``100755``), so
+        the mode change lands in a commit and is portable across
+        clones. Used when an agent authors a shell script under
+        ``tools/`` and needs it runnable."""
+        abs_p = _resolve_safe_path(self._working_dir, path)
+        if not abs_p.is_file():
+            raise DesignMonorepoError(
+                f"L1-F set_file_executable: not a regular file: {path}",
+            )
+
+        prior_mode = abs_p.stat().st_mode
+
+        def _apply() -> None:
+            new_mode = (
+                prior_mode | 0o111 if executable
+                else prior_mode & ~0o111
+            )
+            abs_p.chmod(new_mode)
+
+        # ``snapshot_paths`` only captures content for rollback —
+        # safe to include even though we're changing mode, because
+        # the content is unchanged so a restore-from-snapshot is a
+        # no-op. Validators get the file as input; they don't see
+        # mode but they don't care about it either.
+        payload = await self._run_action(
+            "set_file_executable",
             snapshot_paths=(abs_p,),
             validate_paths=(abs_p,),
             commit_paths=(abs_p,),

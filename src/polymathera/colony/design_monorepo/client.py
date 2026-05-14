@@ -41,14 +41,17 @@ from .models import (
     BranchNode,
     BranchTopology,
     Checkpoint,
+    CommitInfo,
     DecisionEntry,
     DesignDiff,
     DesignDiffEntry,
     ForkBranch,
     ImportedRemote,
     RepoState,
+    StashEntry,
     ToolEntry,
     ToolMatch,
+    WorkingTreeStatus,
 )
 from . import registry as registry_module
 
@@ -76,6 +79,28 @@ DECISIONS_DIR = "design/decisions"
 
 MAX_DIFF_BYTES = 256 * 1024
 """Cap on the raw unified-diff text returned by ``DesignMonorepoClient.diff``."""
+
+_LOG_PATHS_CAP = 100
+"""Per-commit cap on ``CommitInfo.paths_changed`` length. Single sweeping
+commits (huge merges, mass renames) otherwise blow the planner's
+context. The truncation is reflected in ``paths_changed_truncated``."""
+
+_USER_REF_RESERVED_PREFIXES: tuple[str, ...] = (
+    CHECKPOINT_TAG_PREFIX,
+    FORK_BRANCH_PREFIX,
+    SESSION_BRANCH_PREFIX,
+    AGENT_BRANCH_PREFIX,
+    TOOL_BRANCH_PREFIX,
+)
+"""Prefixes the framework manages on its own (checkpoint tags, fork
+branches, per-session branches, per-agent branches, per-tool
+branches). User-driven branch/tag actions refuse these — those go
+through the framework's own helpers (``tag_checkpoint``, ``fork``,
+``restore_checkpoint``)."""
+
+_STASH_LINE_RE = re.compile(
+    r"^stash@\{(?P<index>\d+)\}:\s*(?P<branch>[^:]*):\s*(?P<message>.*)$",
+)
 
 
 # Maps file patterns in `.gitattributes` to the merge-driver entry-point
@@ -1101,6 +1126,370 @@ class DesignMonorepoClient:
             raise DesignMonorepoError(
                 f"Failed to push to {remote}: {exc}",
             ) from exc
+
+    # -- History / status / working-tree diff ----------------------------
+
+    def log(
+        self,
+        *,
+        paths: Sequence[str] | None = None,
+        limit: int = 20,
+        ref: str = "HEAD",
+    ) -> tuple[CommitInfo, ...]:
+        """Return up to ``limit`` commits reachable from ``ref``.
+
+        When ``paths`` is set, restrict to commits that touched any of
+        them (``git log -- <paths>`` semantics). Per-commit
+        ``paths_changed`` is capped at ``_LOG_PATHS_CAP`` entries so a
+        single sweeping merge commit can't blow the planner's token
+        budget; ``paths_changed_truncated`` flags when capped.
+        """
+
+        if limit <= 0:
+            return ()
+
+        iter_kwargs: dict[str, object] = {"max_count": int(limit)}
+        if paths:
+            iter_kwargs["paths"] = list(paths)
+        rows: list[CommitInfo] = []
+        for commit in self._repo.iter_commits(ref, **iter_kwargs):
+            changed = list(commit.stats.files.keys())
+            truncated = len(changed) > _LOG_PATHS_CAP
+            if truncated:
+                changed = changed[:_LOG_PATHS_CAP]
+            rows.append(
+                CommitInfo(
+                    sha=commit.hexsha,
+                    author=str(commit.author),
+                    committed_at=datetime.fromtimestamp(
+                        commit.committed_date, tz=timezone.utc,
+                    ),
+                    message=str(commit.message).rstrip(),
+                    paths_changed=tuple(changed),
+                    paths_changed_truncated=truncated,
+                ),
+            )
+        return tuple(rows)
+
+    def status(self) -> WorkingTreeStatus:
+        """Three-way split of ``git status``: staged, unstaged, untracked.
+
+        Lighter than parsing ``--porcelain`` by hand — GitPython exposes
+        each bucket directly. Paths are repo-root-relative
+        forward-slash strings.
+        """
+
+        index = self._repo.index
+        # ``diff(None)`` is index-vs-working-tree → unstaged paths.
+        # ``diff("HEAD")`` is HEAD-vs-index → staged paths.
+        try:
+            staged_paths = {d.a_path or d.b_path for d in index.diff("HEAD")}
+        except Exception:  # noqa: BLE001 — empty repo / no HEAD yet
+            staged_paths = set()
+        try:
+            unstaged_paths = {d.a_path or d.b_path for d in index.diff(None)}
+        except Exception:  # noqa: BLE001
+            unstaged_paths = set()
+        untracked = tuple(sorted(self._repo.untracked_files))
+        # Filter out None just in case GitPython emits an unset path.
+        return WorkingTreeStatus(
+            staged=tuple(sorted(p for p in staged_paths if p)),
+            unstaged=tuple(sorted(p for p in unstaged_paths if p)),
+            untracked=untracked,
+        )
+
+    def diff_working_tree(
+        self,
+        *,
+        paths: Sequence[str] | None = None,
+        max_bytes: int = MAX_DIFF_BYTES,
+    ) -> str:
+        """Return the working-tree-vs-HEAD raw unified diff.
+
+        Includes uncommitted changes (both staged and unstaged) — the
+        symmetric "what would I commit if I ran ``commit -a``" view.
+        Capped at ``max_bytes``; oversized diffs return the prefix
+        with a trailing truncation marker.
+        """
+
+        from git import GitCommandError
+
+        args: list[str] = ["HEAD"]
+        if paths:
+            args.append("--")
+            args.extend(paths)
+        try:
+            text = self._repo.git.diff(*args)
+        except GitCommandError as exc:
+            raise DesignMonorepoError(
+                f"Failed to diff working tree: {exc}",
+            ) from exc
+        if len(text) > max_bytes:
+            return (
+                text[:max_bytes]
+                + f"\n... (truncated at {max_bytes} bytes)\n"
+            )
+        return text
+
+    # -- Branch ops ------------------------------------------------------
+
+    def create_branch(
+        self, name: str, *, base: str | None = None,
+    ) -> str:
+        """Create a new branch off ``base`` (default: current HEAD).
+
+        Rejects names beginning with framework-reserved prefixes
+        (``checkpoint/``, ``fork/``, ``session/``, ``agent/``,
+        ``tool/``); those use the dedicated framework helpers
+        (``tag_checkpoint``, ``fork``) so the branch namespace stays
+        partitioned.
+        """
+
+        _validate_user_ref_name(name, kind="branch")
+        from git import GitCommandError
+
+        target = base or "HEAD"
+        try:
+            self._repo.git.branch(name, target)
+        except GitCommandError as exc:
+            raise DesignMonorepoError(
+                f"Failed to create branch {name!r} from {target!r}: {exc}",
+            ) from exc
+        return name
+
+    def delete_branch(self, name: str, *, force: bool = False) -> None:
+        """Delete a non-reserved branch.
+
+        Refuses framework-reserved prefixes and refuses to delete the
+        current HEAD.
+        """
+
+        _validate_user_ref_name(name, kind="branch")
+        if self._repo.head.is_valid() and self._repo.active_branch.name == name:
+            raise DesignMonorepoError(
+                f"Cannot delete branch {name!r}: it is the current HEAD",
+            )
+        from git import GitCommandError
+
+        try:
+            self._repo.git.branch("-D" if force else "-d", name)
+        except GitCommandError as exc:
+            raise DesignMonorepoError(
+                f"Failed to delete branch {name!r}: {exc}",
+            ) from exc
+
+    def checkout_branch(self, name: str, *, create: bool = False) -> str:
+        """Switch HEAD to ``name``. With ``create=True``, creates the
+        branch off the current HEAD first.
+
+        Refuses framework-reserved prefixes — those have dedicated
+        helpers (``fork``, ``restore_checkpoint``) so the convention
+        stays a single-writer thing.
+        """
+
+        _validate_user_ref_name(name, kind="branch")
+        if self.has_uncommitted_changes():
+            raise UncommittedChangesError(
+                f"Cannot checkout {name!r}: working tree has uncommitted "
+                "changes; commit or stash first.",
+            )
+        from git import GitCommandError
+
+        try:
+            if create:
+                self._repo.git.checkout("-b", name)
+            else:
+                self._repo.git.checkout(name)
+        except GitCommandError as exc:
+            raise DesignMonorepoError(
+                f"Failed to checkout {name!r}: {exc}",
+            ) from exc
+        return name
+
+    # -- Stash ops -------------------------------------------------------
+
+    def stash_save(self, message: str = "") -> bool:
+        """Save the working tree to a new stash. Returns ``True`` when
+        something was stashed, ``False`` when the tree was already
+        clean."""
+
+        from git import GitCommandError
+
+        args = ["push"]
+        if message:
+            args.extend(["-m", message])
+        try:
+            output = self._repo.git.stash(*args)
+        except GitCommandError as exc:
+            raise DesignMonorepoError(
+                f"Failed to stash: {exc}",
+            ) from exc
+        # ``git stash push`` prints "No local changes to save" on a
+        # clean tree and exits 0 — disambiguate from a real stash here
+        # so the action layer can surface it cleanly.
+        return "No local changes" not in (output or "")
+
+    def stash_pop(self) -> None:
+        """Pop the most recent stash onto the current working tree."""
+
+        from git import GitCommandError
+
+        try:
+            self._repo.git.stash("pop")
+        except GitCommandError as exc:
+            raise DesignMonorepoError(
+                f"Failed to pop stash: {exc}",
+            ) from exc
+
+    def list_stashes(self) -> tuple[StashEntry, ...]:
+        """Return the current stash stack, most-recent first."""
+
+        try:
+            text = self._repo.git.stash("list")
+        except Exception:  # noqa: BLE001
+            return ()
+        rows: list[StashEntry] = []
+        # Each line: ``stash@{N}: <branch info>: <message>``.
+        for line in (text or "").splitlines():
+            m = _STASH_LINE_RE.match(line)
+            if not m:
+                continue
+            rows.append(
+                StashEntry(
+                    index=int(m.group("index")),
+                    message=m.group("message").strip(),
+                    branch=m.group("branch").strip(),
+                ),
+            )
+        return tuple(rows)
+
+    # -- Rebase ----------------------------------------------------------
+
+    def rebase_onto(self, target_ref: str) -> None:
+        """Non-interactive ``git rebase <target_ref>`` on the current branch.
+
+        Refuses to run with uncommitted changes (caller must stash or
+        commit first). Conflict-mid-rebase leaves the repo in the
+        standard git rebasing state for the operator to resolve.
+        """
+
+        if self.has_uncommitted_changes():
+            raise UncommittedChangesError(
+                "Cannot rebase: working tree has uncommitted changes; "
+                "commit or stash first.",
+            )
+        from git import GitCommandError
+
+        try:
+            self._repo.git.rebase(target_ref)
+        except GitCommandError as exc:
+            raise DesignMonorepoError(
+                f"Rebase onto {target_ref!r} failed: {exc}",
+            ) from exc
+
+    # -- Pull (fetch + ff-only / merge / rebase) -------------------------
+
+    def pull(
+        self,
+        *,
+        remote: str = "origin",
+        branch: str | None = None,
+        strategy: str = "ff_only",
+    ) -> str:
+        """Fetch from ``remote`` and integrate ``branch`` (default:
+        current branch) into the working tree via ``strategy``:
+
+        - ``"ff_only"`` (default): refuse non-fast-forward.
+        - ``"merge"``: merge commit.
+        - ``"rebase"``: replay local commits on top of the remote head.
+
+        Returns the new HEAD SHA. Refuses to run with uncommitted
+        changes so a conflict doesn't strand the caller mid-merge.
+        """
+
+        if strategy not in {"ff_only", "merge", "rebase"}:
+            raise DesignMonorepoError(
+                f"pull: unknown strategy {strategy!r} (expected "
+                f"ff_only / merge / rebase)",
+            )
+        if self.has_uncommitted_changes():
+            raise UncommittedChangesError(
+                "Cannot pull: working tree has uncommitted changes; "
+                "commit or stash first.",
+            )
+        from git import GitCommandError
+
+        ref = branch or (
+            self._repo.active_branch.name
+            if self._repo.head.is_valid()
+            else "main"
+        )
+        flag = {
+            "ff_only": "--ff-only",
+            "merge": "--no-rebase",
+            "rebase": "--rebase",
+        }[strategy]
+        try:
+            self._repo.git.pull(flag, remote, ref)
+        except GitCommandError as exc:
+            raise DesignMonorepoError(
+                f"Pull from {remote}/{ref} ({strategy}) failed: {exc}",
+            ) from exc
+        return self._repo.head.commit.hexsha
+
+    # -- Tag ops ---------------------------------------------------------
+
+    def create_tag(self, name: str, *, message: str = "") -> str:
+        """Create an annotated tag at the current HEAD.
+
+        Refuses the ``checkpoint/`` prefix — those go through
+        :meth:`tag_checkpoint` so the convention stays a single-writer
+        thing."""
+
+        _validate_user_ref_name(name, kind="tag")
+        from git import GitCommandError
+
+        try:
+            if message:
+                self._repo.create_tag(name, message=message)
+            else:
+                self._repo.create_tag(name)
+        except (GitCommandError, Exception) as exc:  # noqa: BLE001
+            raise DesignMonorepoError(
+                f"Failed to create tag {name!r}: {exc}",
+            ) from exc
+        return name
+
+    def delete_tag(self, name: str) -> None:
+        _validate_user_ref_name(name, kind="tag")
+        from git import GitCommandError
+
+        try:
+            self._repo.delete_tag(name)
+        except (GitCommandError, Exception) as exc:  # noqa: BLE001
+            raise DesignMonorepoError(
+                f"Failed to delete tag {name!r}: {exc}",
+            ) from exc
+
+
+def _validate_user_ref_name(name: str, *, kind: str) -> None:
+    """Refuse empty names + framework-reserved prefixes.
+
+    ``kind`` is ``"branch"`` / ``"tag"`` — purely for the error
+    message. Used by every user-driven branch/tag-mutating client
+    method so the framework's namespace conventions
+    (:data:`_USER_REF_RESERVED_PREFIXES`) stay enforced.
+    """
+
+    if not name:
+        raise DesignMonorepoError(f"{kind} name must be non-empty")
+    for prefix in _USER_REF_RESERVED_PREFIXES:
+        if name.startswith(prefix):
+            raise DesignMonorepoError(
+                f"{kind} name {name!r} starts with reserved prefix "
+                f"{prefix!r}; use the framework helper instead "
+                f"(tag_checkpoint / fork / etc.)",
+            )
 
 
 __all__ = (

@@ -370,11 +370,11 @@ class BootstrapResult(BaseModel):
     )
 
 
-#: Single source of truth for the seven L1-F action kinds. Used by both
+#: Single source of truth for the L1-F action kinds. Used by both
 #: ``ProjectArtifactAuthoredPayload.action_kind``'s ``Literal`` AND by
 #: the :class:`ProjectAuthoringCapability` method dispatch. The
 #: ``Literal`` annotation below must enumerate the same strings — a
-#: test asserts the two stay in sync, so adding an eighth action without
+#: test asserts the two stay in sync, so adding a new action without
 #: updating both fails loudly.
 PROJECT_ACTION_KINDS: tuple[str, ...] = (
     "write_file",
@@ -384,6 +384,10 @@ PROJECT_ACTION_KINDS: tuple[str, ...] = (
     "insert_lines",
     "delete_lines",
     "replace_lines",
+    "make_directory",
+    "remove_directory",
+    "copy_file",
+    "set_file_executable",
 )
 
 
@@ -438,6 +442,10 @@ class ProjectArtifactAuthoredPayload(BaseModel):
         "insert_lines",
         "delete_lines",
         "replace_lines",
+        "make_directory",
+        "remove_directory",
+        "copy_file",
+        "set_file_executable",
     ] = Field(description="Which L1-F method produced this commit.")
     affected_paths: tuple[str, ...] = Field(
         description=(
@@ -542,6 +550,138 @@ class ExtensionAuthoredPayload(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class CommitInfo(BaseModel):
+    """One row in a ``git log`` query — :meth:`DesignMonorepoClient.log`.
+
+    ``paths_changed`` is the list of repo-root-relative paths touched
+    by the commit, capped at 100 entries so a single sweeping commit
+    doesn't blow the planner's token budget.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    sha: str
+    author: str
+    committed_at: datetime
+    message: str
+    paths_changed: tuple[str, ...] = Field(default_factory=tuple)
+    paths_changed_truncated: bool = False
+
+
+class WorkingTreeStatus(BaseModel):
+    """Snapshot of uncommitted state — :meth:`DesignMonorepoClient.status`.
+
+    Mirrors ``git status --porcelain`` split into three buckets so the
+    planner can branch on each cleanly. All paths are repo-root-relative
+    forward-slash strings.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    staged: tuple[str, ...] = Field(default_factory=tuple)
+    unstaged: tuple[str, ...] = Field(default_factory=tuple)
+    untracked: tuple[str, ...] = Field(default_factory=tuple)
+
+    @property
+    def is_clean(self) -> bool:
+        return not (self.staged or self.unstaged or self.untracked)
+
+
+class StashEntry(BaseModel):
+    """One entry in the git stash stack —
+    :meth:`DesignMonorepoClient.list_stashes`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    index: int
+    """0-based index — ``0`` is the most recent stash (``stash@{0}``)."""
+
+    message: str
+    branch: str = Field(
+        default="",
+        description="Branch the stash was created on (when git records it).",
+    )
+
+
+class FileEntry(BaseModel):
+    """One item in a :meth:`list_directory` result."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    """Repo-root-relative forward-slash path."""
+
+    is_dir: bool
+    size_bytes: int = 0
+    """0 for directories."""
+
+
+class FileStat(BaseModel):
+    """One file's metadata — :meth:`stat_path` result."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    exists: bool
+    is_file: bool = False
+    is_dir: bool = False
+    size_bytes: int = 0
+    mtime: datetime | None = None
+
+
+class FileContent(BaseModel):
+    """Result of :meth:`read_file` — bounded full-file read."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    content: str
+    truncated: bool = False
+    """``True`` when the file exceeded ``max_bytes`` and ``content`` is
+    the prefix only."""
+
+    total_bytes: int = 0
+
+
+class LineRangeContent(BaseModel):
+    """Result of :meth:`read_lines` — bounded line-range read."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    content: str
+    start_line: int
+    """1-indexed line number of the first line in ``content``."""
+
+    end_line: int
+    """1-indexed line number of the last line in ``content``."""
+
+    total_lines: int
+    truncated: bool = False
+    """``True`` when ``end_line < total_lines`` for the requested window."""
+
+
+class GrepMatch(BaseModel):
+    """One hit in a :meth:`grep_content` result."""
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    line_no: int
+    line: str
+
+
+class GrepResult(BaseModel):
+    """Aggregated :meth:`grep_content` result."""
+
+    model_config = ConfigDict(frozen=True)
+
+    matches: tuple[GrepMatch, ...] = Field(default_factory=tuple)
+    truncated: bool = False
+    """``True`` when ``max_matches`` was hit before the search finished."""
+
+
 class PageChangeEvent(BaseModel):
     """One page-graph mutation event.
 
@@ -584,4 +724,13 @@ __all__ = (
     "RepoBootstrapSpec",
     "BootstrapResult",
     "PageChangeEvent",
+    "CommitInfo",
+    "WorkingTreeStatus",
+    "StashEntry",
+    "FileEntry",
+    "FileStat",
+    "FileContent",
+    "LineRangeContent",
+    "GrepMatch",
+    "GrepResult",
 )

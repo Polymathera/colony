@@ -81,12 +81,17 @@ def test_payload_literal_matches_project_action_kinds() -> None:
     assert set(get_args(annotation)) == set(PROJECT_ACTION_KINDS)
 
 
-def test_seven_action_kinds() -> None:
-    assert len(PROJECT_ACTION_KINDS) == 7
-    # Spot-check the kinds the alignment plan calls out.
+def test_l1f_action_kinds_present() -> None:
+    # The seven original L1-F kinds, plus the four FS-write additions
+    # from PR 2 (make_directory / remove_directory / copy_file /
+    # set_file_executable). New entries land here and in the payload
+    # Literal; the ``test_payload_literal_matches_project_action_kinds``
+    # cross-check enforces both stay in sync.
     for required in (
         "write_file", "edit_file", "delete_file", "move_file",
         "insert_lines", "delete_lines", "replace_lines",
+        "make_directory", "remove_directory", "copy_file",
+        "set_file_executable",
     ):
         assert required in PROJECT_ACTION_KINDS
 
