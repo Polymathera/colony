@@ -9,12 +9,11 @@ ingest content end-to-end without colony-specific glue, and surfaces
 the review queue to whatever consumer (the SessionAgent's `/review`
 command, an ops dashboard, a backfill script) wants to drain it.
 
-When a Phase C5 design monorepo is configured, the curator can also
-mirror ingested literature into the monorepo's ``corpora/`` (master
-§6.6.1). The mirror path is opt-in: the constructor takes a
-``DesignMonorepoClient`` (or any object with ``commit_with_identity``
-+ ``working_dir``); when absent the mirror methods return a typed
-"not configured" result instead of failing.
+Corpus persistence into the design monorepo flows through the
+unified ``.colony/repo_map.yaml`` schema +
+:meth:`RepoStateProvider.ingest_repo_map_literature` — not this
+capability. The curator stays focused on free-form ingestion +
+review queue + KG maintenance.
 
 When a Phase C4 convergence runtime is configured, every successful
 ingestion fires a ``PageChangeEvent`` so subscribers re-fire on the
@@ -24,12 +23,10 @@ optional — tests pass a list-collecting fake.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from overrides import override
@@ -87,25 +84,6 @@ non-capability deployments, directly to
 ``ConvergenceRuntimeDeployment.feed_page_event``) by the deployment."""
 
 
-class _DesignMonorepoMirror:
-    """Adapter shape the curator expects when mirroring corpora into
-    a design monorepo. Defined as a Protocol-style typed shim rather
-    than importing ``DesignMonorepoClient`` directly so the knowledge
-    layer doesn't depend on ``polymathera.colony.design_monorepo``."""
-
-    working_dir: Path
-
-    def commit_with_identity(
-        self,
-        identity: Any,
-        message: str,
-        *,
-        paths: Sequence[Path] | None = None,
-        all_changes: bool = False,
-    ) -> str:
-        ...
-
-
 # ---------------------------------------------------------------------------
 # KnowledgeCuratorCapability
 # ---------------------------------------------------------------------------
@@ -122,7 +100,6 @@ class KnowledgeCuratorCapability(AgentCapability):
       they share the same ``Ingestor`` reference),
     - the in-memory review queue (events for the SessionAgent are
       published when an item is queued or resolved),
-    - the optional design-monorepo mirror,
     - the optional page-event emitter.
     """
 
@@ -135,15 +112,12 @@ class KnowledgeCuratorCapability(AgentCapability):
         *,
         ingestor: Ingestor | Blueprint,
         page_event_emitter: PageEventEmitter | None = None,
-        design_monorepo: _DesignMonorepoMirror | None = None,
-        design_monorepo_identity: Any | None = None,
         capability_key: str | None = None,
         app_name: str | None = None,
     ) -> None:
         # ``ingestor`` accepts either a real :class:`Ingestor` (tests
         # / in-process) or a :class:`Blueprint` for it (cross-Ray
-        # construction via ``default_ingestor_blueprint()``); same
-        # pattern as ``BulkAcquisitionCapability``.
+        # construction via ``default_ingestor_blueprint()``).
         super().__init__(
             agent=agent,
             scope_id=scope_id,
@@ -155,8 +129,6 @@ class KnowledgeCuratorCapability(AgentCapability):
             ingestor.local_instance() if isinstance(ingestor, Blueprint) else ingestor
         )
         self._page_event_emitter = page_event_emitter
-        self._design_monorepo = design_monorepo
-        self._design_monorepo_identity = design_monorepo_identity
         self._review_queue: dict[str, ReviewItem] = {}
 
         # The ingestor's review-queue callback writes into the
@@ -249,52 +221,6 @@ class KnowledgeCuratorCapability(AgentCapability):
         item.resolved_by = resolved_by
         item.resolved_at = datetime.now(timezone.utc)
         return item
-
-    # ---- Design-monorepo mirror (master §6.6.1) -----------------------
-
-    @action_executor(
-        planning_summary=(
-            "Mirror an ingested source into the design monorepo's corpora/. "
-            "Returns the commit SHA, or a typed 'not configured' result."
-        ),
-    )
-    async def mirror_to_design_monorepo(
-        self,
-        source_path: str,
-        *,
-        sub_path: str = "papers",
-        message: str | None = None,
-    ) -> dict[str, Any]:
-        if self._design_monorepo is None or self._design_monorepo_identity is None:
-            return {
-                "ok": False,
-                "reason": "no design_monorepo configured for this capability",
-            }
-        src = Path(source_path)
-        if not src.is_file():
-            return {"ok": False, "reason": f"source file does not exist: {src}"}
-        target_dir = (
-            self._design_monorepo.working_dir
-            / "corpora"
-            / sub_path
-        )
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / src.name
-        try:
-            target.write_bytes(src.read_bytes())
-        except OSError as exc:
-            return {"ok": False, "reason": f"copy failed: {exc}"}
-        commit_message = message or f"corpora: add {src.name}"
-        try:
-            sha = await asyncio.to_thread(
-                self._design_monorepo.commit_with_identity,
-                self._design_monorepo_identity,
-                commit_message,
-                paths=[target.relative_to(self._design_monorepo.working_dir)],
-            )
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "reason": f"commit failed: {exc}"}
-        return {"ok": True, "sha": sha, "path": str(target)}
 
     # ---- Suspension hooks ----------------------------------------------
 

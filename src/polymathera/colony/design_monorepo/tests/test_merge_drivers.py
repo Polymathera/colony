@@ -14,7 +14,6 @@ import pytest
 
 from polymathera.colony.design_monorepo.git_merge import (
     budget_merge,
-    corpus_merge,
     decisions_merge,
     kg_merge,
     page_graph_merge,
@@ -135,40 +134,6 @@ def test_kg_deletion_propagates(tmp_path: Path) -> None:
     merged = json.loads(ours.read_text("utf-8"))
     triples = [tuple(t) for t in merged["triples"]]
     assert ("a", "p", "x") not in triples
-
-
-# ---------- corpus-merge ----------------------------------------------------
-
-
-def test_corpus_appends_new_papers(tmp_path: Path) -> None:
-    base = tmp_path / "b.json"
-    ours = tmp_path / "o.json"
-    theirs = tmp_path / "t.json"
-    _write(base, json.dumps({"papers": [{"doi": "x", "version": "1", "title": "T"}]}))
-    _write(ours, json.dumps({"papers": [
-        {"doi": "x", "version": "1", "title": "T"},
-        {"doi": "y", "version": "1", "title": "Y"},
-    ]}))
-    _write(theirs, json.dumps({"papers": [
-        {"doi": "x", "version": "1", "title": "T"},
-        {"doi": "z", "version": "1", "title": "Z"},
-    ]}))
-    rc = _drive(corpus_merge, ours, base, theirs, "metadata.json")
-    assert rc == 0
-    out = json.loads(ours.read_text("utf-8"))
-    dois = {p["doi"] for p in out["papers"]}
-    assert dois == {"x", "y", "z"}
-
-
-def test_corpus_disagreement_conflicts(tmp_path: Path) -> None:
-    base = tmp_path / "b.json"
-    ours = tmp_path / "o.json"
-    theirs = tmp_path / "t.json"
-    _write(base, json.dumps({"papers": [{"doi": "x", "version": "1", "title": "T0"}]}))
-    _write(ours, json.dumps({"papers": [{"doi": "x", "version": "1", "title": "TO"}]}))
-    _write(theirs, json.dumps({"papers": [{"doi": "x", "version": "1", "title": "TT"}]}))
-    rc = _drive(corpus_merge, ours, base, theirs, "metadata.json")
-    assert rc != 0
 
 
 # ---------- budget-merge ----------------------------------------------------

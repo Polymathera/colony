@@ -4,8 +4,11 @@ This is the operation invoked when a user creates a new program (master
 §3.1.6, "Create new program" wizard). It produces a freshly-initialised
 git repository with:
 
-- The framework's directory layout (``design/``, ``tools/``, ``corpora/``,
-  ``agents/``, ``runs/``, ``.colony/``).
+- The framework's directory layout (``design/``, ``tools/``,
+  ``agents/``, ``runs/``, ``.colony/``). Literature buckets are NOT
+  scaffolded — operators declare ``knowledge_sources`` rows in
+  ``.colony/repo_map.yaml`` pointing wherever they choose to organise
+  papers / standards / books.
 - ``.gitattributes`` registering the merge drivers (master §8.4) and
   the LFS filters (master §8.6).
 - ``.gitignore`` excluding the runtime-only state.
@@ -38,7 +41,11 @@ from . import registry as registry_module
 
 
 # Directories that ship with a fresh monorepo. ``.gitkeep`` files keep
-# them tracked even when otherwise empty.
+# them tracked even when otherwise empty. The framework does not
+# prescribe where literature lives — operators declare paths /
+# acquirer destinations in ``.colony/repo_map.yaml`` and organise the
+# tree however they like (``kb/literature/``, ``papers/``, anywhere
+# under the repo root).
 SCAFFOLD_DIRS: tuple[str, ...] = (
     "design/requirements",
     "design/decisions",
@@ -47,11 +54,6 @@ SCAFFOLD_DIRS: tuple[str, ...] = (
     "design/reports",
     "design/per-subsystem",
     "tools",
-    "corpora/papers",
-    "corpora/standards",
-    "corpora/books",
-    "corpora/regulations",
-    "corpora/datasets",
     "agents/policies",
     "agents/memories",
     "agents/traces",
@@ -83,11 +85,7 @@ _LFS_PATTERNS: tuple[str, ...] = (
     "*.igs",
     "*.dwg",
     "*.dxf",
-    "corpora/papers/**/*.pdf",
-    "corpora/books/**/*.pdf",
-    "corpora/standards/**/*.pdf",
-    "corpora/regulations/**/*.pdf",
-    "corpora/datasets/**/*",
+    "*.pdf",
     "agents/**/*.gz",
     "runs/**/*.h5",
     "runs/**/*.bin",
@@ -155,10 +153,12 @@ discipline this monorepo follows. In short:
 
 - `design/` is what's being designed.
 - `tools/` is what the program built to design it.
-- `corpora/` is the literature the design rests on.
 - `agents/` is suspended agent state at quiescence boundaries.
 - `runs/` is the run logs and simulation outputs we want to retain.
-- `.colony/` is the framework's own metadata; do not hand-edit.
+- `.colony/` is the framework's own metadata; do not hand-edit. The
+  literature the design rests on is declared in
+  `.colony/repo_map.yaml` `knowledge_sources:` rows — operators
+  choose where it physically lives (e.g., `kb/literature/`).
 
 Checkpoints are tags of the form `checkpoint/<iso8601>-<short_sha>`.
 Forks are branches of the form `fork/<label>`. Both are produced and

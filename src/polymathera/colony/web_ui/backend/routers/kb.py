@@ -565,7 +565,6 @@ async def _run_ingest_repo_map(
         )
         from polymathera.colony.distributed import get_polymathera
         from polymathera.colony.distributed.ray_utils import serving
-        from polymathera.colony.knowledge.models import IngestionStatus
 
         polymathera = get_polymathera()
         storage = await polymathera.get_storage()
@@ -581,21 +580,25 @@ async def _run_ingest_repo_map(
         enabled_list = await list_enabled_knowledge_sources(colony_id)
         enabled = set(enabled_list) if enabled_list is not None else None
         op["message"] = "Ingesting matching files..."
-        records = await materialize_knowledge_sources(
+        report = await materialize_knowledge_sources(
             repo_map=repo_map,
             repo_root=repo_root,
             enabled_sources=enabled,
         )
-        ingested = sum(
-            1 for r in records if r.status == IngestionStatus.COMPLETED
-        )
-        failed = sum(
-            1 for r in records if r.status == IngestionStatus.FAILED
-        )
+        # NOTE: the dashboard direct path doesn't commit — its clone
+        # is a colony-level cache, not an agent's working tree. The
+        # KB index is populated (the entire reason for this button)
+        # but the acquired files + sidecars stay uncommitted on this
+        # shared clone. The agent's ``ingest_repo_map_literature``
+        # action does commit, since it operates on the per-agent
+        # clone with an identity. Aligning these is a follow-up.
         op["status"] = "completed"
-        op["ingested"] = ingested
-        op["failed"] = failed
-        op["message"] = f"{ingested} ingested, {failed} failed"
+        op["ingested"] = report.ingested_count
+        op["failed"] = report.failed_count
+        op["message"] = (
+            f"{report.ingested_count} ingested, "
+            f"{report.failed_count} failed"
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception("kb_ingest_repo_map op %s failed", op_id)
         op["status"] = "error"

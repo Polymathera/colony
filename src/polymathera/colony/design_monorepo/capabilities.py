@@ -82,7 +82,7 @@ from . import registry as registry_module
 from . import scaffolds as scaffolds_module
 
 if TYPE_CHECKING:
-    pass
+    from .materialize import KnowledgeMaterialisationReport
 
 
 logger = logging.getLogger(__name__)
@@ -105,6 +105,34 @@ def _commit_paths(
     return client.commit_with_identity(
         identity, message, paths=paths, all_changes=all_changes,
     )
+
+
+def _build_ingest_commit_message(report: "KnowledgeMaterialisationReport") -> str:
+    """Compose the one-line commit summary + per-section detail for a
+    ``materialize_knowledge_sources`` batch.
+
+    Lines: ``ingest knowledge_sources: N ingested, M skipped, K failed``
+    followed by a per-acquirer outcome list (one line per row) so
+    ``git log`` plus the sidecar manifests give a complete audit trail
+    of what landed in the corpus and where it came from."""
+
+    headline = (
+        f"ingest knowledge_sources: {report.ingested_count} ingested, "
+        f"{report.skipped_count} skipped, {report.failed_count} failed"
+    )
+    if not report.acquisitions:
+        return headline
+    lines = [headline, ""]
+    for acq in report.acquisitions:
+        if acq.outcome in {"acquired", "cached"}:
+            lines.append(
+                f"- {acq.name} [{acq.method}] -> {acq.outcome}: {acq.local_path}",
+            )
+        else:
+            lines.append(
+                f"- {acq.name} [{acq.method}] -> {acq.outcome}: {acq.error}",
+            )
+    return "\n".join(lines)
 
 
 #: Top-level path segments that are NOT project substance — both
@@ -637,11 +665,12 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
         repo_map = await asyncio.to_thread(RepoMap.load, repo_root)
         colony_id = serving.get_colony_id() or ""
         enabled_list = await list_enabled_knowledge_sources(colony_id)
-        records = await materialize_knowledge_sources(
+        report = await materialize_knowledge_sources(
             repo_map=repo_map,
             repo_root=repo_root,
             enabled_sources=set(enabled_list) if enabled_list is not None else None,
         )
+        records = report.records
 
         ingested: list[str] = []
         skipped: list[str] = []
@@ -662,6 +691,32 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
                     {"source_uri": str(rec.source_uri), "error": rec.error or ""},
                 )
 
+        # One batch commit per invocation — sidecars + any acquired
+        # files land in the design monorepo together so re-ingest is
+        # cheap and the operator can inspect / edit the extracted
+        # markdown via normal git workflow.
+        commit_sha = ""
+        if records or report.acquisitions:
+            client = await self._client_async()
+            commit_sha = await asyncio.to_thread(
+                _commit_all,
+                client,
+                self._identity(),
+                _build_ingest_commit_message(report),
+            )
+
+        acquisitions_payload = [
+            {
+                "name": a.name,
+                "method": a.method,
+                "outcome": a.outcome,
+                "local_path": a.local_path,
+                "fetched_bytes": a.fetched_bytes,
+                "error": a.error,
+            }
+            for a in report.acquisitions
+        ]
+
         from polymathera.colony.distributed.config import get_component_or_default
         from polymathera.colony.knowledge.cluster_config import KnowledgeConfig
 
@@ -673,6 +728,8 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
             "failed": failed,
             "count": len(records),
             "by_status": by_status,
+            "acquisitions": acquisitions_payload,
+            "commit_sha": commit_sha,
             "backend": {
                 "vector_store": type(deps.vector_store).__name__,
                 "qdrant_url": qdrant_cfg.url or None,

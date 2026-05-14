@@ -16,7 +16,7 @@
 #
 # Full schema reference: docs/architecture/repo-map.md.
 
-schema_version: 1
+schema_version: 2
 
 # ---------- VCM mapping ----------------------------------------------
 vcm_sources:
@@ -50,16 +50,39 @@ vcm_sources:
   #   pinned: true
 
 # ---------- KB ingestion ---------------------------------------------
-# Independent from ``vcm_sources``. Each row is a named glob bundle
-# the materialiser ingests via ``Ingestor``. ``profile`` becomes the
-# ``data_type`` label on resulting chunks.
+# Independent from ``vcm_sources``. Each row is one of two shapes:
+#
+#   - ``paths``: glob bundle of files the materialiser already has on
+#     disk (e.g., literature you copied into the repo by hand). Walked
+#     and ingested as-is.
+#   - ``acquirer`` + ``destination``: a remote-source fetcher (arXiv,
+#     DOI, HTTP) — the materialiser runs it, writes the file into
+#     ``<destination>/`` inside the repo, and ingests it. Acquired
+#     files + extraction sidecars are committed in one batch per
+#     ingest invocation.
+#
+# In both cases the PDF extractor's markdown + per-source manifest are
+# persisted in a ``.ingested/<stem>/`` sidecar next to each source so
+# re-ingest skips the extractor when the PDF is unchanged. ``profile``
+# becomes the ``data_type`` label on resulting chunks; ``tier`` flows
+# through to the chunks' :class:`CorpusTier` for retrieval weighting.
 knowledge_sources: []
   # Examples — uncomment and adapt to your literature layout:
   #
   # - name: literature
-  #   paths: ["literature/curated/**/*.pdf"]
+  #   paths: ["kb/literature/**/*.pdf"]
   #   profile: scientific_paper
+  #   tier: tier_3_research
   #
   # - name: standards
-  #   paths: ["standards/**/*.pdf"]
+  #   paths: ["kb/standards/**/*.pdf"]
   #   profile: standard_clause
+  #   tier: tier_2_standards
+  #
+  # - name: allred_2002
+  #   acquirer:
+  #     method: arxiv_id
+  #     args: { arxiv_id: "physics/0205063" }
+  #   destination: kb/literature/atomic-physics/
+  #   profile: scientific_paper
+  #   tier: tier_3_research

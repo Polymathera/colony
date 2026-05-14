@@ -89,7 +89,6 @@ MERGE_DRIVER_PATTERNS: tuple[tuple[str, str], ...] = (
     ("**/budgets/*.yml", "budget-merge"),
     ("**/page_graph.parquet", "page-graph-merge"),
     ("**/requirements/*.reqif", "reqif-merge"),
-    ("corpora/papers/**/metadata.json", "corpus-merge"),
 )
 
 # Drivers are invoked as `python -m polymathera.colony.design_monorepo.git_merge.<name> %A %O %B %P`
@@ -101,7 +100,6 @@ MERGE_DRIVER_ENTRY_POINTS: tuple[tuple[str, str], ...] = (
     ("budget-merge", "budget_merge"),
     ("page-graph-merge", "page_graph_merge"),
     ("reqif-merge", "reqif_merge"),
-    ("corpus-merge", "corpus_merge"),
 )
 
 

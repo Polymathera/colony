@@ -71,25 +71,23 @@ from .formats import (
     detect_format,
     language_for_source_code,
 )
-from .bulk_acquisition import (
+from .acquirers import (
     AcquiredSource,
+    AcquirerRegistry,
     AcquirerStrategy,
-    AcquisitionEntry,
-    BulkAcquisitionCapability,
-    BulkAcquisitionError,
-    BulkAcquisitionReport,
-    CorpusManifest,
-    LocalPathAcquirer,
-    ManifestEntry,
+    default_registry as default_acquirer_registry,
     _TODO_ArxivAcquirer,
     _TODO_DoiAcquirer,
     _TODO_HttpAcquirer,
     _TODO_IeeeXploreAcquirer,
-    _TODO_NeuroImageAcquirer,
     _TODO_SaeMobilusAcquirer,
     _TODO_SemanticScholarAcquirer,
 )
 from .ingestion import HumanReviewQueueCallback, Ingestor
+from .monorepo_persisted_ingestor import (
+    MonorepoPersistedIngestor,
+    SidecarManifest,
+)
 from .models import (
     Chunk,
     CitationSpan,
@@ -243,24 +241,20 @@ __all__ = (
     "ImageStoreError",
     "InMemoryImageStore",
     "LocalFsImageStore",
-    # Ingestor
+    # Ingestor + monorepo-persisted wrapper
     "Ingestor",
     "HumanReviewQueueCallback",
-    # Bulk acquisition (master §6.6)
+    "MonorepoPersistedIngestor",
+    "SidecarManifest",
+    # Acquirers (remote-source fetch strategies for repo_map.yaml)
     "AcquirerStrategy",
     "AcquiredSource",
-    "AcquisitionEntry",
-    "BulkAcquisitionCapability",
-    "BulkAcquisitionError",
-    "BulkAcquisitionReport",
-    "CorpusManifest",
-    "LocalPathAcquirer",
-    "ManifestEntry",
+    "AcquirerRegistry",
+    "default_acquirer_registry",
     "_TODO_ArxivAcquirer",
     "_TODO_DoiAcquirer",
     "_TODO_HttpAcquirer",
     "_TODO_IeeeXploreAcquirer",
-    "_TODO_NeuroImageAcquirer",
     "_TODO_SaeMobilusAcquirer",
     "_TODO_SemanticScholarAcquirer",
     # Retrieval

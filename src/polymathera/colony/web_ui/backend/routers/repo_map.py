@@ -75,7 +75,9 @@ class RepoMapResponse(BaseModel):
         default_factory=list,
         description=(
             "Parsed ``knowledge_sources`` rows. Each carries ``name``, "
-            "``paths``, optional ``profile``."
+            "either ``paths`` (local glob bundle) or ``acquirer`` + "
+            "``destination`` (remote source), and optional ``profile`` "
+            "/ ``tier``."
         ),
     )
 

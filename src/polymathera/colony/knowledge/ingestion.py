@@ -134,6 +134,14 @@ class Ingestor:
         round-trip a URI emitted during ingest."""
         return self._image_store
 
+    @property
+    def readers(self) -> ReaderRegistry:
+        """Read-only accessor for the active reader registry. Wrappers
+        (e.g. :class:`MonorepoPersistedIngestor`) reuse this so the
+        sidecar-persisted extraction comes from the same backend the
+        ingestor would have run itself."""
+        return self._readers
+
     # ---- Public API ----------------------------------------------------
 
     async def ingest_file(

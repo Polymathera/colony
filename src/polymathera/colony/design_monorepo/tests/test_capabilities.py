@@ -122,7 +122,7 @@ async def test_ingest_repo_map_literature_walks_knowledge_sources(
         # skips ``git fetch`` so this works in the bootstrapped-repo
         # fixture which has no remote.
         (repo_root / ".colony" / "repo_map.yaml").write_text(
-            "schema_version: 1\n"
+            "schema_version: 2\n"
             "vcm_sources:\n"
             "  - { name: default, type: git_repo }\n"
             "knowledge_sources:\n"
@@ -673,7 +673,7 @@ async def test_initialize_repo_map_is_idempotent(
     await checkpointer.initialize_repo_map()
     target = bootstrapped_repo.working_dir / REPO_MAP_DIR / REPO_MAP_FILENAME
     target.write_text(
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "sources:\n"
         "  - name: operator-edited\n"
         "    type: git_repo\n",

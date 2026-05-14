@@ -25,13 +25,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from ..knowledge.models import CorpusTier
 
 
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 REPO_MAP_FILENAME = "repo_map.yaml"
 REPO_MAP_DIR = ".colony"
@@ -179,9 +181,38 @@ class VcmSource(BaseModel):
         return kwargs
 
 
+class AcquirerSpec(BaseModel):
+    """Remote-source acquirer reference inside a ``knowledge_sources:``
+    row. ``method`` selects an :class:`AcquirerStrategy` from the
+    registry; ``args`` is the per-method payload the strategy consumes
+    (e.g., ``{"arxiv_id": "2407.12345"}``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: str = Field(
+        description=(
+            "Registry key — must match a strategy's ``method`` "
+            "(e.g., ``arxiv_id``, ``doi``, ``http_url``)."
+        ),
+    )
+    args: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Per-method arguments forwarded to the acquirer.",
+    )
+
+
 class KnowledgeSource(BaseModel):
-    """One row of ``knowledge_sources:`` — a single named glob bundle
-    that the KB materialiser ingests via :class:`Ingestor`.
+    """One row of ``knowledge_sources:`` — a named KB ingestion target.
+
+    Each row is one of two shapes:
+
+    - **Local** (``paths`` set, ``acquirer`` unset): a glob bundle the
+      materialiser walks and ingests directly.
+    - **Remote** (``acquirer`` + ``destination`` set, ``paths`` unset):
+      the materialiser runs the acquirer (which writes a file into
+      ``<repo_root>/<destination>/``) and ingests that file. The
+      written file is committed alongside the sidecar so re-ingest
+      avoids the download.
 
     Independent from ``vcm_sources:``: presence here means "ingest
     these files into the KB"; absence (or unchecking in the dashboard)
@@ -199,9 +230,26 @@ class KnowledgeSource(BaseModel):
             "``materialize_knowledge_sources(enabled_sources=...)``."
         ),
     )
-    paths: list[str] = Field(
+    paths: list[str] | None = Field(
+        default=None,
         description=(
-            "Gitignore-style glob patterns relative to the repo root."
+            "Gitignore-style glob patterns relative to the repo root. "
+            "Mutually exclusive with ``acquirer``."
+        ),
+    )
+    acquirer: AcquirerSpec | None = Field(
+        default=None,
+        description=(
+            "Remote-source fetcher. Mutually exclusive with ``paths``. "
+            "When set, ``destination`` is required."
+        ),
+    )
+    destination: str | None = Field(
+        default=None,
+        description=(
+            "Repo-root-relative directory the acquirer writes its "
+            "fetched file into. Required when ``acquirer`` is set, "
+            "forbidden otherwise."
         ),
     )
     profile: str | None = Field(
@@ -212,12 +260,51 @@ class KnowledgeSource(BaseModel):
             "``Ingestor.ingest_file(data_type_override=...)``."
         ),
     )
+    tier: CorpusTier = Field(
+        default=CorpusTier.UNTIERED,
+        description=(
+            "Corpus tier propagated to chunks. Lets ``UPGRADE_TIER`` "
+            "policy decide whether to re-rank existing chunks when "
+            "the same source is declared at a higher tier later."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_shape(self) -> "KnowledgeSource":
+        has_paths = self.paths is not None and len(self.paths) > 0
+        has_acquirer = self.acquirer is not None
+        if has_paths == has_acquirer:
+            raise ValueError(
+                f"KnowledgeSource[{self.name}]: exactly one of "
+                f"'paths' or 'acquirer' must be set.",
+            )
+        if has_acquirer and not self.destination:
+            raise ValueError(
+                f"KnowledgeSource[{self.name}]: 'destination' is "
+                f"required when 'acquirer' is set.",
+            )
+        if not has_acquirer and self.destination:
+            raise ValueError(
+                f"KnowledgeSource[{self.name}]: 'destination' is only "
+                f"valid alongside 'acquirer'.",
+            )
+        if self.destination is not None and Path(self.destination).is_absolute():
+            raise ValueError(
+                f"KnowledgeSource[{self.name}]: 'destination' must be "
+                f"a repo-root-relative path, got {self.destination!r}.",
+            )
+        return self
 
     def matches(self, rel_path: str) -> bool:
         """Return ``True`` when ``rel_path`` matches any of this row's
         ``paths`` patterns. Caller passes a forward-slash relative
         path; we delegate to :class:`pathspec.PathSpec` so pattern
-        semantics match every other glob in the framework."""
+        semantics match every other glob in the framework.
+
+        Returns ``False`` for acquirer-shaped rows (no globs to match)."""
+
+        if not self.paths:
+            return False
 
         from pathspec import PathSpec
         from pathspec.patterns import GitWildMatchPattern
@@ -333,6 +420,7 @@ def _resolve_submodule(repo_root: Path, submodule_path: str) -> _ResolvedSubmodu
 
 
 __all__ = (
+    "AcquirerSpec",
     "KnowledgeSource",
     "REPO_MAP_DIR",
     "REPO_MAP_FILENAME",

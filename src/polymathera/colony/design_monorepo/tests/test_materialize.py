@@ -19,9 +19,15 @@ from polymathera.colony.design_monorepo.materialize import (
     materialize_vcm_sources,
 )
 from polymathera.colony.design_monorepo.repo_map import (
+    AcquirerSpec,
     KnowledgeSource,
     RepoMap,
     VcmSource,
+)
+from polymathera.colony.knowledge.acquirers import (
+    AcquiredSource,
+    AcquirerRegistry,
+    AcquirerStrategy,
 )
 from polymathera.colony.knowledge.deps import (
     get_default_ingestor,
@@ -70,12 +76,13 @@ async def test_knowledge_sources_ingest_matching_files(tmp_path: Path) -> None:
             ),
         ],
     )
-    records = await materialize_knowledge_sources(
+    report = await materialize_knowledge_sources(
         repo_map=repo_map, repo_root=repo_root,
     )
-    sources = sorted(r.source_uri for r in records)
-    assert len(records) == 2
+    sources = sorted(r.source_uri for r in report.records)
+    assert len(report.records) == 2
     assert all("literature/curated" in s for s in sources)
+    assert report.acquisitions == ()
 
 
 @pytest.mark.asyncio
@@ -93,11 +100,11 @@ async def test_enabled_sources_filters_knowledge_rows(tmp_path: Path) -> None:
             KnowledgeSource(name="b", paths=["literature/curated/b.txt"]),
         ],
     )
-    records = await materialize_knowledge_sources(
+    report = await materialize_knowledge_sources(
         repo_map=repo_map, repo_root=repo_root, enabled_sources={"a"},
     )
-    sources = [r.source_uri for r in records]
-    assert len(records) == 1
+    sources = [r.source_uri for r in report.records]
+    assert len(report.records) == 1
     assert any("a.txt" in s for s in sources)
 
 
@@ -134,7 +141,7 @@ async def test_enabled_sources_filters_rows_in_repo_map(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     (repo_root / ".colony").mkdir(parents=True)
     (repo_root / ".colony" / "repo_map.yaml").write_text(
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "vcm_sources:\n"
         "  - { name: a, type: git_repo }\n"
         "  - { name: b, type: git_repo }\n"
@@ -177,7 +184,7 @@ async def test_per_source_paging_overrides_layer_onto_base_config(
     repo_root = tmp_path / "r"
     (repo_root / ".colony").mkdir(parents=True)
     (repo_root / ".colony" / "repo_map.yaml").write_text(
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "vcm_sources:\n"
         "  - { name: bare, type: git_repo }\n"
         "  - name: tuned\n"
@@ -219,8 +226,150 @@ async def test_empty_knowledge_sources_is_a_noop(tmp_path: Path) -> None:
         vcm_sources=[VcmSource(name="default", type="git_repo")],
         knowledge_sources=[],
     )
-    records = await materialize_knowledge_sources(
+    report = await materialize_knowledge_sources(
         repo_map=repo_map, repo_root=repo_root,
     )
-    assert records == []
+    assert report.records == ()
+    assert report.acquisitions == ()
     _ = get_default_ingestor  # silence unused-import in some linters
+
+
+# ---- Acquirer-shaped rows + sidecar interaction ----------------------
+
+
+class _FixturePathAcquirer(AcquirerStrategy):
+    """Acquirer that writes a fixed payload into ``destination_dir``.
+
+    Stands in for the eventual arXiv / DOI / HTTP acquirers — exercises
+    the materialiser's acquire → ingest path without external network
+    or a TODO stub's ``NotImplementedError``."""
+
+    METHOD = "fixture_path"
+
+    def __init__(self, payload: bytes, basename: str) -> None:
+        self._payload = payload
+        self._basename = basename
+        self.calls = 0
+
+    @property
+    def method(self) -> str:
+        return self.METHOD
+
+    async def acquire(
+        self, *, args, destination_dir,
+    ) -> AcquiredSource:
+        self.calls += 1
+        target = destination_dir / self._basename
+        target.write_bytes(self._payload)
+        return AcquiredSource(
+            local_path=target,
+            cached=False,
+            fetched_bytes=len(self._payload),
+            metadata={"source_uri": args.get("source_uri", "")},
+        )
+
+
+def _registry_for_acquirer(strategy: AcquirerStrategy) -> AcquirerRegistry:
+    registry = AcquirerRegistry()
+    registry.register(strategy)
+    return registry
+
+
+@pytest.mark.asyncio
+async def test_acquirer_row_writes_to_destination_and_ingests(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "r"
+    repo_root.mkdir()
+    strategy = _FixturePathAcquirer(
+        payload=b"# Title\n\nHello.\n", basename="paper.md",
+    )
+
+    repo_map = RepoMap(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        knowledge_sources=[
+            KnowledgeSource(
+                name="fixture",
+                acquirer=AcquirerSpec(
+                    method=_FixturePathAcquirer.METHOD,
+                    args={"source_uri": "fixture:paper"},
+                ),
+                destination="kb/literature/",
+            ),
+        ],
+    )
+    report = await materialize_knowledge_sources(
+        repo_map=repo_map,
+        repo_root=repo_root,
+        acquirer_registry=_registry_for_acquirer(strategy),
+    )
+
+    assert strategy.calls == 1
+    assert (repo_root / "kb" / "literature" / "paper.md").is_file()
+    assert len(report.records) == 1
+    assert len(report.acquisitions) == 1
+    assert report.acquisitions[0].outcome == "acquired"
+    assert report.acquisitions[0].name == "fixture"
+    assert report.records[0].source_uri == "fixture:paper"
+
+
+@pytest.mark.asyncio
+async def test_acquirer_unknown_method_lands_in_acquisitions(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "r"
+    repo_root.mkdir()
+
+    repo_map = RepoMap(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        knowledge_sources=[
+            KnowledgeSource(
+                name="phantom",
+                acquirer=AcquirerSpec(method="not_registered", args={}),
+                destination="elsewhere/",
+            ),
+        ],
+    )
+    report = await materialize_knowledge_sources(
+        repo_map=repo_map,
+        repo_root=repo_root,
+        acquirer_registry=AcquirerRegistry(),  # empty
+    )
+    assert report.records == ()
+    assert len(report.acquisitions) == 1
+    assert report.acquisitions[0].outcome == "unsupported_method"
+
+
+@pytest.mark.asyncio
+async def test_paths_walk_skips_sidecar_subtree(tmp_path: Path) -> None:
+    """A previous ingestion's ``.ingested/`` outputs must NOT match a
+    ``paths`` glob — otherwise extracted markdown would be re-ingested
+    as primary content alongside the source it came from."""
+
+    repo_root = tmp_path / "r"
+    (repo_root / "lit").mkdir(parents=True)
+    (repo_root / "lit" / "real.txt").write_text(
+        "Real source content.\n", encoding="utf-8",
+    )
+    # Pre-seed a sidecar from a hypothetical previous run.
+    sidecar = repo_root / "lit" / ".ingested" / "real"
+    sidecar.mkdir(parents=True)
+    (sidecar / "extracted.md").write_text(
+        "Stale cached extraction.\n", encoding="utf-8",
+    )
+
+    repo_map = RepoMap(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        knowledge_sources=[
+            KnowledgeSource(
+                name="all", paths=["lit/**/*"], profile="paper_section",
+            ),
+        ],
+    )
+    report = await materialize_knowledge_sources(
+        repo_map=repo_map, repo_root=repo_root,
+    )
+    sources = [r.source_uri for r in report.records]
+    assert len(report.records) == 1
+    assert "real.txt" in sources[0]
+    assert all(".ingested" not in s for s in sources)

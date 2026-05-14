@@ -62,7 +62,6 @@ def test_bootstrap_registers_merge_drivers(
         "budget-merge",
         "page-graph-merge",
         "reqif-merge",
-        "corpus-merge",
     ):
         assert f'[merge "{driver}"]' in cw_str, driver
 
@@ -71,7 +70,7 @@ def test_bootstrap_gitattributes_lists_merge_drivers(
     bootstrapped_repo: DesignMonorepoClient,
 ) -> None:
     text = (bootstrapped_repo.working_dir / ".gitattributes").read_text("utf-8")
-    for driver in ("kg-merge", "decisions-merge", "budget-merge", "page-graph-merge", "reqif-merge", "corpus-merge"):
+    for driver in ("kg-merge", "decisions-merge", "budget-merge", "page-graph-merge", "reqif-merge"):
         assert f"merge={driver}" in text, driver
     assert "filter=lfs" in text
 

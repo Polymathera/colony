@@ -1,6 +1,6 @@
 """Process-singleton factory for the knowledge trio's shared backends.
 
-The :class:`Ingestor`, :class:`BulkAcquisitionCapability`, and
+The :class:`Ingestor`, :class:`KnowledgeCuratorCapability`, and
 :class:`KnowledgeRetrievalCapability` all need the same triple of
 ``embedder + vector_store + (optional) graph_store`` — bound the same
 way so curation and retrieval share an embedding space and a
@@ -324,8 +324,8 @@ def default_ingestor_blueprint() -> Blueprint:
     share the same embedder + vector-store + image-store recipe so
     curation and retrieval land in the same collection and reference
     the same image bytes. Pass this into
-    :meth:`BulkAcquisitionCapability.bind` and
-    :meth:`KnowledgeCuratorCapability.bind`.
+    :meth:`KnowledgeCuratorCapability.bind` and any other write-side
+    capability that owns an ingestor.
     """
 
     embedder = InMemoryEmbedder()

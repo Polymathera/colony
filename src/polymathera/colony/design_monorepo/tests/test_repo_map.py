@@ -15,12 +15,14 @@ import git
 import pytest
 
 from polymathera.colony.design_monorepo.repo_map import (
+    AcquirerSpec,
     KnowledgeSource,
     REPO_MAP_DIR,
     REPO_MAP_FILENAME,
     RepoMap,
     VcmSource,
 )
+from polymathera.colony.knowledge.models import CorpusTier
 
 
 def _init_repo(root: Path) -> git.Repo:
@@ -59,7 +61,7 @@ def test_load_parses_a_real_repo_map(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     (repo_root / REPO_MAP_DIR).mkdir(parents=True)
     (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "vcm_sources:\n"
         "  - name: code\n"
         "    type: git_repo\n"
@@ -176,7 +178,7 @@ def test_load_parses_knowledge_sources_block(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     (repo_root / REPO_MAP_DIR).mkdir(parents=True)
     (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "vcm_sources:\n"
         "  - name: code\n"
         "    type: git_repo\n"
@@ -201,7 +203,7 @@ def test_knowledge_source_requires_name(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     (repo_root / REPO_MAP_DIR).mkdir(parents=True)
     (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "vcm_sources: []\n"
         "knowledge_sources:\n"
         "  - paths: ['x/*']\n",  # missing required ``name``
@@ -242,7 +244,7 @@ def test_load_parses_per_source_paging_block(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     (repo_root / REPO_MAP_DIR).mkdir(parents=True)
     (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "vcm_sources:\n"
         "  - name: code\n"
         "    type: git_repo\n"
@@ -263,3 +265,84 @@ def test_knowledge_source_matches_glob() -> None:
     assert src.matches("lit/curated/a.pdf")
     assert src.matches("lit/promoted/sub/b.pdf")
     assert not src.matches("standards/x.pdf")
+
+
+# ---- Schema v2: acquirer-shaped knowledge_sources -------------------
+
+
+def test_knowledge_source_paths_xor_acquirer() -> None:
+    """Exactly one of ``paths`` / ``acquirer`` must be set."""
+
+    with pytest.raises(ValueError, match="exactly one"):
+        KnowledgeSource(name="bad-neither")
+
+    with pytest.raises(ValueError, match="exactly one"):
+        KnowledgeSource(
+            name="bad-both",
+            paths=["x/*"],
+            acquirer=AcquirerSpec(method="doi", args={}),
+            destination="x/",
+        )
+
+
+def test_knowledge_source_acquirer_requires_destination() -> None:
+    with pytest.raises(ValueError, match="destination"):
+        KnowledgeSource(
+            name="bad",
+            acquirer=AcquirerSpec(method="doi", args={"doi": "x"}),
+        )
+
+
+def test_knowledge_source_destination_forbidden_without_acquirer() -> None:
+    with pytest.raises(ValueError, match="destination"):
+        KnowledgeSource(
+            name="bad", paths=["x/*"], destination="elsewhere/",
+        )
+
+
+def test_knowledge_source_destination_must_be_relative() -> None:
+    with pytest.raises(ValueError, match="relative"):
+        KnowledgeSource(
+            name="bad",
+            acquirer=AcquirerSpec(method="doi", args={}),
+            destination="/abs/path",
+        )
+
+
+def test_load_parses_acquirer_row(tmp_path: Path) -> None:
+    repo_root = tmp_path / "r"
+    (repo_root / REPO_MAP_DIR).mkdir(parents=True)
+    (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
+        "schema_version: 2\n"
+        "vcm_sources: []\n"
+        "knowledge_sources:\n"
+        "  - name: allred_2002\n"
+        "    acquirer:\n"
+        "      method: arxiv_id\n"
+        "      args:\n"
+        "        arxiv_id: 'physics/0205063'\n"
+        "    destination: kb/literature/atomic-physics/\n"
+        "    profile: scientific_paper\n"
+        "    tier: tier_3_research\n",
+        encoding="utf-8",
+    )
+    rm = RepoMap.load(repo_root)
+    row = rm.knowledge_sources[0]
+    assert row.acquirer is not None
+    assert row.acquirer.method == "arxiv_id"
+    assert row.acquirer.args == {"arxiv_id": "physics/0205063"}
+    assert row.destination == "kb/literature/atomic-physics/"
+    assert row.tier is CorpusTier.TIER_3_RESEARCH
+    assert row.paths is None
+
+
+def test_load_rejects_v1_schema(tmp_path: Path) -> None:
+    """Per user answer A — no backward compatibility for v1."""
+
+    repo_root = tmp_path / "r"
+    (repo_root / REPO_MAP_DIR).mkdir(parents=True)
+    (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
+        "schema_version: 1\nvcm_sources: []\n", encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="schema_version"):
+        RepoMap.load(repo_root)

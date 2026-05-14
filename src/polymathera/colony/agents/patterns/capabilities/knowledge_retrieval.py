@@ -1,10 +1,11 @@
 """Agent-facing read surface over the master §6.4 retrieval modes.
 
-Curation lives in :class:`KnowledgeCuratorCapability`; acquisition in
-:class:`BulkAcquisitionCapability`. This file is the third leg of the
-agent-driven knowledge trio — *retrieval*, exposed as plain
-``@action_executor`` methods so any agent can ground a chat answer in
-the corpus.
+Curation lives in :class:`KnowledgeCuratorCapability`; acquisition
+runs through :meth:`RepoStateProvider.ingest_repo_map_literature`
+against the design monorepo's unified ``.colony/repo_map.yaml``. This
+file is the third leg of the agent-driven knowledge trio —
+*retrieval*, exposed as plain ``@action_executor`` methods so any
+agent can ground a chat answer in the corpus.
 
 The capability holds **zero** retrieval state. It owns a per-mode
 adapter cache; the adapters themselves (``ScopedRetrievalAdapter`` &
@@ -72,7 +73,7 @@ class KnowledgeRetrievalCapability(AgentCapability):
         # ``deps`` accepts either a real :class:`RetrievalDeps` (tests
         # / in-process) or a :class:`Blueprint` for it (cross-Ray
         # construction via ``default_retrieval_deps_blueprint()``);
-        # same shape as ``BulkAcquisitionCapability(ingestor=…)``.
+        # same shape as ``KnowledgeCuratorCapability(ingestor=…)``.
         super().__init__(
             agent=agent,
             scope_id=get_scope_prefix(scope, agent, namespace=namespace),
@@ -90,11 +91,12 @@ class KnowledgeRetrievalCapability(AgentCapability):
         return (
             "Knowledge retrieval — search the colony's knowledge base "
             "(curated corpora ingested by KnowledgeCuratorCapability "
-            "and BulkAcquisitionCapability). Five modes are available "
-            "via the ``mode`` argument: ``scoped`` (single-source), "
-            "``grounded`` (with citations), ``graph`` (knowledge "
-            "graph), ``budgeted`` (token-bounded), ``standards`` "
-            "(time-versioned regulatory). Default is "
+            "and the design-monorepo ingest_repo_map_literature "
+            "action). Five modes are available via the ``mode`` "
+            "argument: ``scoped`` (single-source), ``grounded`` (with "
+            "citations), ``graph`` (knowledge graph), ``budgeted`` "
+            "(token-bounded), ``standards`` (time-versioned "
+            "regulatory). Default is "
             f"``{self._default_adapter_name}``."
         )
 

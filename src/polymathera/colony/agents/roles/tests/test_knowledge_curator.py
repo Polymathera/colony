@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
-from typing import Any
-
 import pytest
 
 from polymathera.colony.agents.roles import KnowledgeCuratorCapability
@@ -108,51 +104,3 @@ async def test_resolve_unknown_item_raises(
 ) -> None:
     with pytest.raises(KeyError):
         await curator.resolve_review_item("nope", "approved")
-
-
-async def test_mirror_to_design_monorepo_no_config(
-    curator: KnowledgeCuratorCapability,
-) -> None:
-    res = await curator.mirror_to_design_monorepo("/tmp/no.txt")
-    assert res["ok"] is False
-    assert "no design_monorepo configured" in res["reason"]
-
-
-async def test_mirror_to_design_monorepo_real(tmp_path: Path) -> None:
-    # Build a real DesignMonorepoClient and verify the corpora/ commit
-    # path lands.
-    from polymathera.colony.design_monorepo import (
-        AgentIdentity,
-        DesignMonorepoManifest,
-        bootstrap_design_monorepo,
-    )
-
-    manifest = DesignMonorepoManifest(
-        tenant="t", colony="c", program="p", target_system="x",
-        design_repo_url="file:///nope",
-    )
-    identity = AgentIdentity(agent_id="b", role="b", colony_id="c")
-    client = bootstrap_design_monorepo(
-        manifest, tmp_path / "repo", identity=identity,
-    )
-    src = tmp_path / "paper.txt"
-    src.write_text("paper content", encoding="utf-8")
-
-    ing = Ingestor(
-        embedder=InMemoryEmbedder(),
-        vector_store=InMemoryVectorStore(),
-        review_sample_rate=0.0,
-    )
-    cap = KnowledgeCuratorCapability(
-        agent=None, scope_id="curator",
-        ingestor=ing,
-        design_monorepo=client,
-        design_monorepo_identity=identity,
-    )
-    res = await cap.mirror_to_design_monorepo(str(src), sub_path="papers")
-    assert res["ok"] is True
-    target = (
-        client.working_dir / "corpora" / "papers" / "paper.txt"
-    )
-    assert target.is_file()
-    assert target.read_text("utf-8") == "paper content"

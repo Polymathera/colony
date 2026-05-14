@@ -284,9 +284,6 @@ async def create_session(
             from polymathera.colony.agents.roles.knowledge_curator import (
                 KnowledgeCuratorCapability,
             )
-            from polymathera.colony.knowledge.bulk_acquisition import (
-                BulkAcquisitionCapability,
-            )
             from polymathera.colony.knowledge.deps import (
                 default_ingestor_blueprint,
             )
@@ -573,10 +570,10 @@ async def create_session(
                     *design_monorepo_capability_blueprints(
                         auto_checkpoint_on_quiescence=False,
                     ),
-                    # Knowledge trio — chat-driven acquisition / curation
-                    # / retrieval. The dashboard ships *blueprints*, not
-                    # live instances: the Ingestor + RetrievalDeps wrap
-                    # an ``AsyncQdrantClient`` (RLock) and an
+                    # Knowledge curation — chat-driven write side. The
+                    # dashboard ships *blueprints*, not live instances:
+                    # the Ingestor + RetrievalDeps wrap an
+                    # ``AsyncQdrantClient`` (RLock) and an
                     # ``InMemoryEmbedder`` (local closure), neither of
                     # which survives cloudpickle. The blueprint chain
                     # (Ingestor.bind → InMemoryEmbedder.bind +
@@ -589,11 +586,13 @@ async def create_session(
                     #
                     # ``KnowledgeRetrievalCapability`` is auto-injected
                     # for every agent in ``Agent._create_action_policy``
-                    # (Phase 1c) so we only bind the two write-side
-                    # capabilities here.
-                    BulkAcquisitionCapability.bind(
-                        ingestor=default_ingestor_blueprint(),
-                    ),
+                    # (Phase 1c). Bulk acquisition / corpus ingestion
+                    # runs through
+                    # :meth:`RepoStateProvider.ingest_repo_map_literature`
+                    # (bound above via ``design_monorepo_capability_blueprints``);
+                    # the unified ``.colony/repo_map.yaml`` schema is the
+                    # single source of truth for which sources land in
+                    # the KB.
                     KnowledgeCuratorCapability.bind(
                         ingestor=default_ingestor_blueprint(),
                     ),
