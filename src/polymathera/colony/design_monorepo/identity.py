@@ -34,12 +34,11 @@ of a single commit.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from git import Actor, Repo
+    from git import Actor
 
 
 _ROLE_DEFAULT = "agent"
@@ -210,53 +209,6 @@ class AgentIdentity:
         )
 
 
-@contextmanager
-def signing_enabled(repo: "Repo", identity: AgentIdentity) -> Iterator[None]:
-    """Transactionally enable commit signing for the duration of a block.
-
-    The git config keys ``commit.gpgsign`` and ``user.signingkey`` are
-    set on the repo's local config at entry and reverted on exit, so
-    the signing key is never written to a shared config that another
-    agent could pick up.
-
-    No-op when ``identity.signing_key`` is None.
-    """
-
-    if identity.signing_key is None:
-        yield
-        return
-
-    cw = repo.config_writer(config_level="repository")
-    prev_gpgsign = None
-    prev_signingkey = None
-    try:
-        try:
-            prev_gpgsign = cw.get_value("commit", "gpgsign")
-        except Exception:  # noqa: BLE001 - GitPython raises subclasses
-            prev_gpgsign = None
-        try:
-            prev_signingkey = cw.get_value("user", "signingkey")
-        except Exception:  # noqa: BLE001
-            prev_signingkey = None
-        cw.set_value("commit", "gpgsign", "true")
-        cw.set_value("user", "signingkey", identity.signing_key)
-        cw.release()
-        yield
-    finally:
-        cw = repo.config_writer(config_level="repository")
-        try:
-            if prev_gpgsign is None:
-                cw.remove_option("commit", "gpgsign")
-            else:
-                cw.set_value("commit", "gpgsign", prev_gpgsign)
-            if prev_signingkey is None:
-                cw.remove_option("user", "signingkey")
-            else:
-                cw.set_value("user", "signingkey", prev_signingkey)
-        finally:
-            cw.release()
-
-
 def append_co_author_trailer(
     message: str, co_author: CommitIdentity | None,
 ) -> str:
@@ -285,5 +237,4 @@ __all__ = (
     "PRINCIPAL_USER",
     "append_co_author_trailer",
     "resolve_commit_identity",
-    "signing_enabled",
 )

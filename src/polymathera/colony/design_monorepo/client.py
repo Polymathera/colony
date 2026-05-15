@@ -30,12 +30,13 @@ import logging
 import re
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .identity import AgentIdentity, signing_enabled
+from .identity import AgentIdentity, CommitIdentity
 from .manifest import DesignMonorepoManifest, MANIFEST_RELATIVE_PATH
 from .models import (
     BranchNode,
@@ -60,6 +61,21 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+# A commit / tag / merge / cherry-pick / fork can be authored under
+# either shape:
+# - ``AgentIdentity`` — the per-agent transactional identity used by
+#   framework-internal paths (``bootstrap_design_monorepo``, recovery
+#   branches, tests).
+# - ``CommitIdentity`` — produced by
+#   ``_DesignMonorepoCapabilityBase._commit_attribution`` so the
+#   colony's UI-configured ``commit_principal`` (colony / user /
+#   agent / agent-type label) lands as author/committer.
+# Both classes expose ``.actor()`` and ``.signing_key``, so every
+# commit-producing client method that takes ``Identity`` reads only
+# those two attributes — duck-typed across both shapes.
+Identity = AgentIdentity | CommitIdentity
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +164,71 @@ class UncommittedChangesError(DesignMonorepoError):
 class BranchExistsError(DesignMonorepoError):
     """Raised when ``fork(label)`` / ``restore_checkpoint(mode='fork')`` would
     overwrite an existing branch."""
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _per_repo_identity(
+    repo: "Repo", identity: Identity,
+) -> "Iterator[None]":
+    """Temporarily set the per-repo git config a commit-producing op
+    needs from ``identity``, and revert on exit.
+
+    Sets:
+
+    - ``user.name`` / ``user.email`` — read by ``git tag -m``,
+      ``git merge``, ``git cherry-pick``, and by GitPython's
+      ``commit-tree`` invocation when signing a ``Repo.index.commit``.
+      Always set.
+    - ``commit.gpgsign`` = ``true`` and ``user.signingkey`` —
+      only when ``identity.signing_key`` is non-None. Lets the
+      framework sign tags / merges / cherry-picks under the same
+      identity-config wrap as ordinary commits.
+
+    Prior values are restored on exit; entries that didn't exist
+    before are unset, so the wrap leaves no residue across calls.
+    """
+
+    actor = identity.actor()
+    signing_key = getattr(identity, "signing_key", None)
+
+    def _get_prev(section: str, key: str) -> str | None:
+        return repo.git.config(
+            f"{section}.{key}", with_exceptions=False, get=True,
+        ) or None
+
+    def _restore(section: str, key: str, prev: str | None) -> None:
+        if prev is not None:
+            repo.git.config(f"{section}.{key}", prev)
+        else:
+            repo.git.config(
+                "--unset", f"{section}.{key}", with_exceptions=False,
+            )
+
+    prev_name = _get_prev("user", "name")
+    prev_email = _get_prev("user", "email")
+    prev_gpgsign: str | None = None
+    prev_signingkey: str | None = None
+
+    repo.git.config("user.name", actor.name)
+    repo.git.config("user.email", actor.email)
+    if signing_key is not None:
+        prev_gpgsign = _get_prev("commit", "gpgsign")
+        prev_signingkey = _get_prev("user", "signingkey")
+        repo.git.config("commit.gpgsign", "true")
+        repo.git.config("user.signingkey", signing_key)
+    try:
+        yield
+    finally:
+        _restore("user", "name", prev_name)
+        _restore("user", "email", prev_email)
+        if signing_key is not None:
+            _restore("commit", "gpgsign", prev_gpgsign)
+            _restore("user", "signingkey", prev_signingkey)
 
 
 # ---------------------------------------------------------------------------
@@ -648,7 +729,7 @@ class DesignMonorepoClient:
 
     def register_tool(
         self,
-        identity: AgentIdentity,
+        identity: Identity,
         entry: ToolEntry,
         *,
         commit_message: str | None = None,
@@ -667,7 +748,7 @@ class DesignMonorepoClient:
 
     def commit_with_identity(
         self,
-        identity: AgentIdentity,
+        identity: Identity,
         message: str,
         *,
         paths: Sequence[Path] | None = None,
@@ -696,7 +777,7 @@ class DesignMonorepoClient:
             return repo.head.commit.hexsha
 
         actor = identity.actor()
-        with signing_enabled(repo, identity):
+        with _per_repo_identity(repo, identity):
             commit = repo.index.commit(
                 message,
                 author=actor,
@@ -706,7 +787,7 @@ class DesignMonorepoClient:
 
     def tag_checkpoint(
         self,
-        identity: AgentIdentity,
+        identity: Identity,
         label: str,
         rationale: str = "",
         *,
@@ -737,21 +818,8 @@ class DesignMonorepoClient:
 
         # Per-commit identity for the tagger as well.
         actor = identity.actor()
-        prev_name = repo.git.config("user.name", with_exceptions=False, get=True) or None
-        prev_email = repo.git.config("user.email", with_exceptions=False, get=True) or None
-        repo.git.config("user.name", actor.name)
-        repo.git.config("user.email", actor.email)
-        try:
+        with _per_repo_identity(repo, identity):
             tag = repo.create_tag(tag_name, ref=target_sha, message=annotation)
-        finally:
-            if prev_name is not None:
-                repo.git.config("user.name", prev_name)
-            else:
-                repo.git.config("--unset", "user.name", with_exceptions=False)
-            if prev_email is not None:
-                repo.git.config("user.email", prev_email)
-            else:
-                repo.git.config("--unset", "user.email", with_exceptions=False)
 
         # Append to the human-readable checkpoint log.
         log_path = self.working_dir / ".colony" / "checkpoints.log"
@@ -789,7 +857,7 @@ class DesignMonorepoClient:
 
     def fork(
         self,
-        identity: AgentIdentity,
+        identity: Identity,
         label: str,
         *,
         from_sha: str | None = None,
@@ -817,7 +885,7 @@ class DesignMonorepoClient:
 
     def restore_checkpoint(
         self,
-        identity: AgentIdentity,
+        identity: Identity,
         checkpoint_id: str,
         *,
         mode: str = "replace",
@@ -865,7 +933,7 @@ class DesignMonorepoClient:
         repo.git.checkout(checkpoint_id)
         return checkpoint_id
 
-    def _auto_stash_recovery(self, identity: AgentIdentity) -> str:
+    def _auto_stash_recovery(self, identity: Identity) -> str:
         repo = self._repo
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         branch_name = f"recovery/{timestamp}"
@@ -885,7 +953,7 @@ class DesignMonorepoClient:
 
     def merge_full(
         self,
-        identity: AgentIdentity,
+        identity: Identity,
         source_branch: str,
         *,
         target_branch: str | None = None,
@@ -905,35 +973,21 @@ class DesignMonorepoClient:
         target = target_branch or repo.active_branch.name
         if target != repo.active_branch.name:
             repo.git.checkout(target)
-        actor = identity.actor()
-        prev_name = repo.git.config("user.name", with_exceptions=False, get=True) or None
-        prev_email = repo.git.config("user.email", with_exceptions=False, get=True) or None
-        repo.git.config("user.name", actor.name)
-        repo.git.config("user.email", actor.email)
-        try:
-            args = ["--no-ff"]
-            if message is not None:
-                args.extend(["-m", message])
+        args = ["--no-ff"]
+        if message is not None:
+            args.extend(["-m", message])
+        with _per_repo_identity(repo, identity):
             try:
                 repo.git.merge(source_branch, *args)
             except GitCommandError as exc:
                 raise DesignMonorepoError(
                     f"Merge of {source_branch} into {target} failed: {exc}",
                 ) from exc
-        finally:
-            if prev_name is not None:
-                repo.git.config("user.name", prev_name)
-            else:
-                repo.git.config("--unset", "user.name", with_exceptions=False)
-            if prev_email is not None:
-                repo.git.config("user.email", prev_email)
-            else:
-                repo.git.config("--unset", "user.email", with_exceptions=False)
         return repo.head.commit.hexsha
 
     def cherry_pick(
         self,
-        identity: AgentIdentity,
+        identity: Identity,
         commit_shas: Sequence[str],
         *,
         target_branch: str | None = None,
@@ -950,13 +1004,8 @@ class DesignMonorepoClient:
         repo = self._repo
         if target_branch and target_branch != repo.active_branch.name:
             repo.git.checkout(target_branch)
-        actor = identity.actor()
-        prev_name = repo.git.config("user.name", with_exceptions=False, get=True) or None
-        prev_email = repo.git.config("user.email", with_exceptions=False, get=True) or None
-        repo.git.config("user.name", actor.name)
-        repo.git.config("user.email", actor.email)
         new_shas: list[str] = []
-        try:
+        with _per_repo_identity(repo, identity):
             for sha in commit_shas:
                 try:
                     repo.git.cherry_pick(sha)
@@ -965,15 +1014,6 @@ class DesignMonorepoClient:
                         f"cherry-pick {sha} failed: {exc}",
                     ) from exc
                 new_shas.append(repo.head.commit.hexsha)
-        finally:
-            if prev_name is not None:
-                repo.git.config("user.name", prev_name)
-            else:
-                repo.git.config("--unset", "user.name", with_exceptions=False)
-            if prev_email is not None:
-                repo.git.config("user.email", prev_email)
-            else:
-                repo.git.config("--unset", "user.email", with_exceptions=False)
         return tuple(new_shas)
 
     # -- Diffs -----------------------------------------------------------
@@ -1439,21 +1479,33 @@ class DesignMonorepoClient:
 
     # -- Tag ops ---------------------------------------------------------
 
-    def create_tag(self, name: str, *, message: str = "") -> str:
-        """Create an annotated tag at the current HEAD.
+    def create_tag(
+        self,
+        identity: Identity,
+        name: str,
+        *,
+        message: str = "",
+    ) -> str:
+        """Create a tag at the current HEAD.
 
+        ``git tag -m`` (annotated tag) reads the committer from
+        per-repo git config — wrapped in :func:`_per_repo_identity`
+        for the same reason :meth:`tag_checkpoint`,
+        :meth:`merge_full`, and :meth:`cherry_pick` are wrapped.
         Refuses the ``checkpoint/`` prefix — those go through
-        :meth:`tag_checkpoint` so the convention stays a single-writer
-        thing."""
+        :meth:`tag_checkpoint` so the convention stays a
+        single-writer thing.
+        """
 
         _validate_user_ref_name(name, kind="tag")
         from git import GitCommandError
 
         try:
-            if message:
-                self._repo.create_tag(name, message=message)
-            else:
-                self._repo.create_tag(name)
+            with _per_repo_identity(self._repo, identity):
+                if message:
+                    self._repo.create_tag(name, message=message)
+                else:
+                    self._repo.create_tag(name)
         except (GitCommandError, Exception) as exc:  # noqa: BLE001
             raise DesignMonorepoError(
                 f"Failed to create tag {name!r}: {exc}",

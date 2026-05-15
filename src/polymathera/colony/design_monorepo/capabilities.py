@@ -105,16 +105,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _commit_all(client: "DesignMonorepoClient", identity: AgentIdentity, message: str) -> str:
+def _commit_all(
+    client: "DesignMonorepoClient",
+    identity: "AgentIdentity | CommitIdentity",
+    message: str,
+) -> str:
     """Worker for ``asyncio.to_thread`` — keyword-only kwargs aren't
-    compatible with ``run_in_executor``'s positional-only call shape."""
+    compatible with ``run_in_executor``'s positional-only call shape.
+
+    ``identity`` accepts either shape — production callers thread a
+    :class:`CommitIdentity` resolved by
+    :meth:`_DesignMonorepoCapabilityBase._commit_attribution`;
+    framework-internal paths (tests, bootstrap) thread an
+    :class:`AgentIdentity`."""
 
     return client.commit_with_identity(identity, message, all_changes=True)
 
 
 def _commit_paths(
     client: "DesignMonorepoClient",
-    identity: AgentIdentity,
+    identity: "AgentIdentity | CommitIdentity",
     message: str,
     paths: list[Path] | None,
     all_changes: bool,
@@ -329,7 +339,17 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
         return self._client_sync().manifest
 
     def _identity(self) -> AgentIdentity:
-        """Derive the per-call commit identity from the owning agent."""
+        """Per-agent transactional identity — for **non-commit** uses
+        only.
+
+        Identifies the agent performing an operation regardless of how
+        commits are attributed: blackboard ``created_by`` fields, log
+        lines, framework branch labels (``agent/<id>/...``). For
+        anything that produces a git commit / tag, use
+        :meth:`_commit_attribution` instead so the colony's
+        UI-configured ``commit_principal`` / ``commit_co_author``
+        attribution lands on the commit.
+        """
 
         if self.is_detached:
             return AgentIdentity(
@@ -353,6 +373,134 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
             colony_id=colony_id,
             agent_email_domain=self._manifest().agent_email_domain,
         )
+
+    # ---- UI-configured commit attribution -----------------------------
+    #
+    # Every commit / tag / merge the framework produces flows through
+    # :meth:`_commit_attribution`. The resolver reads the colony's
+    # ``commit_principal`` / ``commit_co_author`` config (set via the
+    # landing-page UI, plumbed onto agent metadata at session creation)
+    # and returns a (principal, message-with-trailer) tuple the action
+    # passes to the client. The principal becomes git author + committer;
+    # the co-author lands as a ``Co-Authored-By:`` trailer.
+    #
+    # Defaults are ``principal=colony, co_author=user``.
+
+    _GIT_ATTRIBUTION_KEY = "git_attribution"
+
+    def _resolve_attribution(
+        self, *, agent_email_domain: str | None = None,
+    ) -> tuple[CommitIdentity, CommitIdentity | None]:
+        """Read the colony's commit-attribution config from agent
+        metadata and resolve principal + co-author into concrete
+        :class:`CommitIdentity` pairs.
+
+        Returns ``(principal, co_author_or_None)``. Falls back to the
+        framework defaults — ``principal=colony, co_author=user`` —
+        when metadata is absent (detached / test contexts) and to
+        ``principal=colony`` (no co-author) when ``user`` was selected
+        but no name/email is configured (rather than failing the
+        commit; we'd rather lose the trailer than block the operation).
+
+        ``agent_email_domain`` is the manifest's ``agent_email_domain``;
+        when omitted, resolved from the active manifest. The explicit
+        param exists for callers (``ToolBuilder.initialize_repo_map``)
+        that run before the client / manifest is fully open and have
+        to thread the value through themselves.
+        """
+
+        if agent_email_domain is None:
+            agent_email_domain = self._manifest().agent_email_domain
+
+        params: dict[str, Any] = {}
+        if self._agent is not None:
+            params = getattr(self._agent.metadata, "parameters", None) or {}
+        cfg = params.get(self._GIT_ATTRIBUTION_KEY) or {}
+        principal_label = cfg.get("commit_principal") or "colony"
+        co_author_label = cfg.get("commit_co_author")
+        user_name = cfg.get("git_user_name")
+        user_email = cfg.get("git_user_email")
+
+        agent_id: str | None = None
+        role: str | None = None
+        colony_id: str = "default"
+        if self._agent is not None:
+            agent_id = getattr(self._agent, "agent_id", None)
+            colony_id = getattr(self._agent, "colony_id", "default") or "default"
+            try:
+                md = getattr(self._agent, "metadata", None)
+                if md is not None and getattr(md, "role", None):
+                    role = str(md.role)
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _safe_resolve(label: str | None) -> CommitIdentity | None:
+            if not label:
+                return None
+            try:
+                return resolve_commit_identity(
+                    label,
+                    colony_id=colony_id,
+                    agent_id=agent_id,
+                    role=role,
+                    user_name=user_name,
+                    user_email=user_email,
+                    agent_email_domain=agent_email_domain,
+                )
+            except ValueError:
+                # 'user' picked but name/email missing, or 'agent'
+                # picked in detached mode. Skip the trailer rather
+                # than blocking the commit — operator can fix the
+                # config and re-run.
+                logger.warning(
+                    "Skipping attribution for label %r: "
+                    "name/email or agent context missing.", label,
+                )
+                return None
+
+        principal = _safe_resolve(principal_label)
+        if principal is None:
+            # Last-resort fallback: synthesise a colony identity so
+            # the commit always succeeds. Without a principal we
+            # can't author at all.
+            principal = resolve_commit_identity(
+                "colony",
+                colony_id=colony_id,
+                agent_email_domain=agent_email_domain,
+            )
+        co_author = _safe_resolve(co_author_label)
+        return principal, co_author
+
+    def _commit_attribution(
+        self, message: str,
+    ) -> tuple[CommitIdentity, str]:
+        """Single entry point for commit-producing actions that own
+        their commit message.
+
+        Returns ``(principal, message_with_co_author_trailer)``.
+        Pass ``principal`` as the ``identity`` argument to client
+        commit / tag / merge methods so the UI-configured principal
+        ends up as author/committer; pass the decorated ``message``
+        so the operator's Co-Authored-By: trailer lands in the
+        commit body."""
+
+        principal, co_author = self._resolve_attribution()
+        return principal, append_co_author_trailer(message, co_author)
+
+    def _commit_principal(self) -> CommitIdentity:
+        """Resolve the UI-configured commit principal **only** — for
+        actions that do not construct their own message
+        (:meth:`DesignCheckpointer.cherry_pick_decisions` replays
+        existing commit messages; :meth:`fork_design` creates only a
+        branch; :meth:`restore_checkpoint` moves a ref).
+
+        The recovery-branch commit produced by these paths uses the
+        principal as committer but inherits the framework's
+        auto-generated commit message — no Co-Authored-By: trailer
+        because there is no caller-owned message to decorate."""
+
+        principal, _ = self._resolve_attribution()
+        return principal
 
     # Live page-change events for the working tree flow through
     # ``GitRepoContextPageSource.watch()`` once the working tree
@@ -745,11 +893,11 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
         commit_sha = ""
         if records or report.acquisitions:
             client = await self._client_async()
-            commit_sha = await asyncio.to_thread(
-                _commit_all,
-                client,
-                self._identity(),
+            principal, decorated = self._commit_attribution(
                 _build_ingest_commit_message(report),
+            )
+            commit_sha = await asyncio.to_thread(
+                _commit_all, client, principal, decorated,
             )
 
         acquisitions_payload = [
@@ -1417,16 +1565,22 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         """
 
         client = await self._client_async()
-        identity = self._identity()
+        principal, decorated = self._commit_attribution(
+            f"checkpoint: {label}",
+        )
         if all_changes:
             await asyncio.to_thread(
-                _commit_all,
-                client,
-                identity,
-                f"checkpoint: {label}",
+                _commit_all, client, principal, decorated,
             )
+        # No co-author trailer on the tag annotation —
+        # :meth:`DesignMonorepoClient.list_checkpoints` parses the
+        # ``label\n\nrationale`` annotation structure on read, and a
+        # trailing trailer block would shift the rationale boundary.
+        # Principal attribution lands via ``actor=principal`` inside
+        # ``tag_checkpoint``; the commit that precedes the tag carries
+        # the trailer.
         return await asyncio.to_thread(
-            client.tag_checkpoint, identity, label, rationale,
+            client.tag_checkpoint, principal, label, rationale,
         )
 
     @action_executor(
@@ -1447,10 +1601,10 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         """
 
         client = await self._client_async()
-        identity = self._identity()
+        principal = self._commit_principal()
         return await asyncio.to_thread(
             client.restore_checkpoint,
-            identity,
+            principal,
             checkpoint_id,
             mode=mode,
             recovery_label=recovery_label,
@@ -1467,9 +1621,9 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         checkout: bool = True,
     ) -> ForkBranch:
         client = await self._client_async()
-        identity = self._identity()
+        principal = self._commit_principal()
         return await asyncio.to_thread(
-            client.fork, identity, label, from_sha=from_sha, checkout=checkout,
+            client.fork, principal, label, from_sha=from_sha, checkout=checkout,
         )
 
     @action_executor(
@@ -1497,19 +1651,25 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         """
 
         client = await self._client_async()
-        identity = self._identity()
-
         effective_target = target_branch or await asyncio.to_thread(
             self._current_branch_name,
         )
 
+        # ``merge_full`` builds a default message when ``message`` is
+        # None; we can only decorate a message the caller supplied.
+        # Principal attribution applies in either case.
+        principal, decorated_message = self._commit_attribution(
+            message if message is not None else "",
+        )
+        effective_message = decorated_message if message is not None else None
+
         async def _execute() -> str:
             return await asyncio.to_thread(
                 client.merge_full,
-                identity,
+                principal,
                 source_branch,
                 target_branch=target_branch,
-                message=message,
+                message=effective_message,
             )
 
         return await self._run_or_gate(
@@ -1543,10 +1703,13 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         """
 
         client = await self._client_async()
-        identity = self._identity()
+        # Cherry-pick replays existing commit messages — there's no
+        # caller-owned message to decorate, so co-author trailers
+        # don't apply. Principal still flows through as committer.
+        principal = self._commit_principal()
         result = await asyncio.to_thread(
             client.cherry_pick,
-            identity,
+            principal,
             commit_shas,
             target_branch=target_branch,
         )
@@ -1577,7 +1740,7 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         """
 
         client = await self._client_async()
-        identity = self._identity()
+        principal, decorated = self._commit_attribution(message)
         path_objs: list[Path] | None = None
         if paths is not None:
             path_objs = [Path(p) for p in paths]
@@ -1586,8 +1749,8 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
             return await asyncio.to_thread(
                 _commit_paths,
                 client,
-                identity,
-                message,
+                principal,
+                decorated,
                 path_objs,
                 all_changes,
             )
@@ -1618,9 +1781,12 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         sha: str | None = None,
     ) -> Checkpoint:
         client = await self._client_async()
-        identity = self._identity()
+        # No co-author trailer on the tag annotation —
+        # ``list_checkpoints`` parses ``label\n\nrationale`` on read.
+        # Principal attribution still lands as tagger.
+        principal = self._commit_principal()
         return await asyncio.to_thread(
-            client.tag_checkpoint, identity, label, rationale, sha=sha,
+            client.tag_checkpoint, principal, label, rationale, sha=sha,
         )
 
     @action_executor(planning_summary="List all checkpoint tags in the monorepo.")
@@ -1898,11 +2064,13 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         ),
     )
     async def create_tag(self, name: str, *, message: str = "") -> str:
-        """Create ``name`` at the current HEAD. Returns the tag
-        name."""
+        """Create ``name`` at the current HEAD. Returns the tag name."""
         client = await self._client_async()
+        # User-driven tags: principal attribution applies. No
+        # co-author trailer — tag annotations don't carry one.
+        principal = self._commit_principal()
         return await asyncio.to_thread(
-            client.create_tag, name, message=message,
+            client.create_tag, principal, name, message=message,
         )
 
     @action_executor(planning_summary="Delete a tag.")
@@ -2333,82 +2501,6 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
             agent_email_domain=agent_email_domain,
         )
 
-    _GIT_ATTRIBUTION_KEY = "git_attribution"
-
-    def _resolve_attribution(
-        self, *, agent_email_domain: str,
-    ) -> tuple[CommitIdentity, CommitIdentity | None]:
-        """Read the colony's commit-attribution config from agent
-        metadata and resolve principal + co-author into concrete
-        :class:`CommitIdentity` pairs.
-
-        Returns ``(principal, co_author_or_None)``. Falls back to the
-        framework defaults — ``principal=colony, co_author=user`` —
-        when metadata is absent (detached / test contexts) and to
-        ``principal=colony`` (no co-author) when ``user`` was selected
-        but no name/email is configured (rather than failing the
-        commit; we'd rather lose the trailer than block the operation).
-        """
-
-        params: dict[str, Any] = {}
-        if self._agent is not None:
-            params = getattr(self._agent.metadata, "parameters", None) or {}
-        cfg = params.get(self._GIT_ATTRIBUTION_KEY) or {}
-        principal_label = cfg.get("commit_principal") or "colony"
-        co_author_label = cfg.get("commit_co_author")
-        user_name = cfg.get("git_user_name")
-        user_email = cfg.get("git_user_email")
-
-        agent_id: str | None = None
-        role: str | None = None
-        colony_id: str = "default"
-        if self._agent is not None:
-            agent_id = getattr(self._agent, "agent_id", None)
-            colony_id = getattr(self._agent, "colony_id", "default") or "default"
-            try:
-                md = getattr(self._agent, "metadata", None)
-                if md is not None and getattr(md, "role", None):
-                    role = str(md.role)
-            except Exception:  # noqa: BLE001
-                pass
-
-        def _safe_resolve(label: str | None) -> CommitIdentity | None:
-            if not label:
-                return None
-            try:
-                return resolve_commit_identity(
-                    label,
-                    colony_id=colony_id,
-                    agent_id=agent_id,
-                    role=role,
-                    user_name=user_name,
-                    user_email=user_email,
-                    agent_email_domain=agent_email_domain,
-                )
-            except ValueError:
-                # 'user' picked but name/email missing, or 'agent'
-                # picked in detached mode. Skip the trailer rather
-                # than blocking the commit — operator can fix the
-                # config and re-run.
-                logger.warning(
-                    "Skipping attribution for label %r: "
-                    "name/email or agent context missing.", label,
-                )
-                return None
-
-        principal = _safe_resolve(principal_label)
-        if principal is None:
-            # Last-resort fallback: synthesise a colony identity so
-            # the commit always succeeds. Without a principal we
-            # can't author at all.
-            principal = resolve_commit_identity(
-                "colony",
-                colony_id=colony_id,
-                agent_email_domain=agent_email_domain,
-            )
-        co_author = _safe_resolve(co_author_label)
-        return principal, co_author
-
     # ---- Auto-checkpoint on convergence quiescence -------------------
 
     @event_handler(pattern=ConvergenceQuiescenceProtocol.quiescence_pattern())
@@ -2449,17 +2541,18 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
             return None
         if not dirty:
             return None
-        identity = self._identity()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         label = self.AUTO_CHECKPOINT_LABEL_FMT.format(timestamp=timestamp)
         rationale = f"convergence quiescence (episode {episode_id})"
+        principal, decorated = self._commit_attribution(
+            f"checkpoint: {label}",
+        )
         try:
             await asyncio.to_thread(
-                _commit_all, client, identity,
-                f"checkpoint: {label}",
+                _commit_all, client, principal, decorated,
             )
             checkpoint = await asyncio.to_thread(
-                client.tag_checkpoint, identity, label, rationale,
+                client.tag_checkpoint, principal, label, rationale,
             )
         except Exception:  # noqa: BLE001
             logger.exception(
@@ -2740,12 +2833,16 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
             )
         try:
             client = await self._client_async()
-            identity = self._identity()
+            # Resolve UI-configured attribution at *execute* time
+            # (after approval), not at request time — so a colony
+            # whose ``commit_principal`` changes between the request
+            # and the operator's response sees the latest value.
+            principal = self._commit_principal()
             sha = await self._dispatch_protected_op(
                 op_kind=pending.op_kind,
                 args=dict(pending.args),
                 client=client,
-                identity=identity,
+                identity=principal,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -2776,20 +2873,28 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         op_kind: str,
         args: dict[str, Any],
         client: DesignMonorepoClient,
-        identity: AgentIdentity,
+        identity: CommitIdentity,
     ) -> str:
         """Per-op-kind execution branch — mirrors the unprotected path
         each action takes but unwraps the args back out of the
-        pending record."""
+        pending record. ``identity`` is the UI-configured principal
+        resolved at execute time by the caller."""
 
         if op_kind == "commit_state":
             paths = args.get("paths")
             path_objs = [Path(p) for p in paths] if paths else None
+            # Decorate message with the Co-Authored-By: trailer at
+            # execute time — same shape as the inline path. The
+            # co-author may have changed since the request was
+            # posted; we honour the latest UI config.
+            _, decorated = self._commit_attribution(
+                str(args.get("message", "")),
+            )
             return await asyncio.to_thread(
                 _commit_paths,
                 client,
                 identity,
-                str(args.get("message", "")),
+                decorated,
                 path_objs,
                 bool(args.get("all_changes", False)),
             )
@@ -2806,12 +2911,15 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
                 lambda: client._repo.head.commit.hexsha,
             )
         if op_kind == "merge_design":
+            raw_message = args.get("message")
+            if raw_message is not None:
+                _, raw_message = self._commit_attribution(str(raw_message))
             return await asyncio.to_thread(
                 client.merge_full,
                 identity,
                 str(args.get("source_branch", "")),
                 target_branch=args.get("target_branch"),
-                message=args.get("message"),
+                message=raw_message,
             )
         if op_kind == "pull_remote":
             return await asyncio.to_thread(
@@ -2922,14 +3030,14 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
         )
 
         client = self._client_sync()
-        identity = self._identity()
-        commit_message = (
-            f"bootstrap tool {spec.purpose}/{spec.name} (template={spec.template})"
+        principal, decorated = self._commit_attribution(
+            f"bootstrap tool {spec.purpose}/{spec.name} "
+            f"(template={spec.template})"
         )
         rel_paths = [Path(rel_path) / f for f in files_created]
         sha = client.commit_with_identity(
-            identity,
-            commit_message,
+            principal,
+            decorated,
             paths=rel_paths,
         )
 
@@ -2945,7 +3053,17 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
                 "bootstrapped_at_sha": sha,
             },
         )
-        registry_sha = client.register_tool(identity, tool_entry)
+        # The registry commit is a tiny one-file commit; decorate the
+        # default message ``register_tool`` builds. Use the same
+        # principal so both commits look like they came from the
+        # same actor.
+        _, register_msg = self._commit_attribution(
+            f"register tool {spec.purpose}/{spec.name} "
+            f"({spec.capability})"
+        )
+        registry_sha = client.register_tool(
+            principal, tool_entry, commit_message=register_msg,
+        )
 
         return BootstrapResult(
             target=spec.target,
@@ -3037,13 +3155,12 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
                 )
 
         rel_to_root = written.relative_to(self._working_dir)
-        identity = self._identity()
         scaffold_label = scaffold if scaffold is not None else f"blank_{surface}"
-        commit_message = (
+        principal, decorated = self._commit_attribution(
             f"bootstrap {surface}/{name} (L1-E, scaffold={scaffold_label})"
         )
         sha = client.commit_with_identity(
-            identity, commit_message, paths=[rel_to_root],
+            principal, decorated, paths=[rel_to_root],
         )
 
         # For ``plugins``, the rendered file is ``<name>/SKILL.md`` —
@@ -3607,13 +3724,17 @@ class ProjectAuthoringCapability(_DesignMonorepoCapabilityBase):
             )
 
         # 5) Commit + emit. Pass paths relative to the working tree —
-        # ``commit_with_identity`` ``git add``s them.
-        identity = self._identity()
+        # ``commit_with_identity`` ``git add``s them. Attribution
+        # flows through ``_commit_attribution`` so every L1-F write
+        # honours the colony's UI-configured commit_principal /
+        # commit_co_author.
         rel_commit_paths = [p.relative_to(self._working_dir) for p in commit_paths]
         primary_rel = primary_path.relative_to(self._working_dir).as_posix()
-        message = f"L1-F {action_kind}: {primary_rel}"
+        principal, decorated = self._commit_attribution(
+            f"L1-F {action_kind}: {primary_rel}"
+        )
         sha = client.commit_with_identity(
-            identity, message, paths=rel_commit_paths,
+            principal, decorated, paths=rel_commit_paths,
         )
         return ProjectArtifactAuthoredPayload(
             action_kind=action_kind,  # type: ignore[arg-type]

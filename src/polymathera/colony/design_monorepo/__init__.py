@@ -52,7 +52,7 @@ from .client import (
     TOOL_BRANCH_PREFIX,
     UncommittedChangesError,
 )
-from .identity import AgentIdentity, signing_enabled
+from .identity import AgentIdentity
 from .manifest import (
     DEFAULT_SURFACE_DIRS,
     DesignMonorepoManifest,
@@ -126,7 +126,6 @@ __all__ = (
     "SurfaceConfig",
     # Identity
     "AgentIdentity",
-    "signing_enabled",
     # Registry
     "REGISTRY_RELATIVE_PATH",
     "REGISTRY_SCHEMA_VERSION",
