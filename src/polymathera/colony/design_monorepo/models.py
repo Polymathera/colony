@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -682,6 +682,118 @@ class GrepResult(BaseModel):
     """``True`` when ``max_matches`` was hit before the search finished."""
 
 
+class PendingProtectedOp(BaseModel):
+    """Persisted record of a `DesignCheckpointer` action that paused on a
+    :class:`HumanApprovalRequest` because its target branch is in the
+    manifest's `protected_branches` list.
+
+    Stored on the session blackboard under
+    `DesignMonorepoEventProtocol.protected_op_pending_key(request_id)`.
+    The :class:`DesignCheckpointer` event handler for the matching
+    `human_approval:response:<request_id>` reads this record, dispatches
+    by `op_kind`, and writes the outcome.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    request_id: str
+    """Matches the `HumanApprovalRequest.request_id` posted alongside."""
+
+    op_kind: Literal[
+        "commit_state",
+        "push_remote",
+        "merge_design",
+        "pull_remote",
+        "rebase_onto",
+    ]
+
+    target_branch: str
+    """The branch the operation will land on / push to / merge into."""
+
+    args: Mapping[str, Any] = Field(default_factory=dict)
+    """Per-op argument dict — must be JSON-serialisable so the pending
+    record round-trips through the blackboard."""
+
+    summary: str = Field(
+        default="",
+        description=(
+            "Human-readable one-line summary the UI renders alongside "
+            "the approval prompt."
+        ),
+    )
+
+    requester_agent_id: str = ""
+    requester_capability_scope_id: str = ""
+    """Capability ``scope_id`` of the requesting :class:`DesignCheckpointer`.
+    Used by the response handler to ignore approvals for ops issued by a
+    different capability instance (multi-agent session)."""
+
+    submitted_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ProtectedOpOutcome(BaseModel):
+    """The result of executing (or skipping) a :class:`PendingProtectedOp`
+    once the operator has responded.
+
+    Written under
+    `DesignMonorepoEventProtocol.protected_op_outcome_key(request_id)` so
+    a downstream subscriber (the planner observing context, or a status
+    panel) can see what happened without polling git.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    request_id: str
+    op_kind: str
+    status: Literal["executed", "rejected", "failed"]
+    target_branch: str = ""
+    sha: str = ""
+    """New commit / HEAD SHA when the executed op produced one. Empty
+    for ops that don't carry a SHA (``rebase_onto`` on no-op, etc.) or
+    when ``status`` is ``rejected`` / ``failed``."""
+
+    error: str = ""
+    decided_by: str = ""
+    decided_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ProtectedOpResult(BaseModel):
+    """Return type for every `DesignCheckpointer` action that may gate
+    on a protected branch.
+
+    Two shapes:
+
+    - `status="executed"` — action ran inline; `sha` carries the SHA the
+      caller would have received before PR 3. Use on every non-protected
+      branch invocation.
+    - `status="pending_approval"` — action is parked behind a
+      :class:`HumanApprovalRequest`. The caller (planner) should keep
+      iterating; the outcome will surface as a typed
+      :class:`ProtectedOpOutcome` event keyed by `request_id`.
+
+    Wrapping a possibly-async outcome in one typed return saves every
+    gated action from a `str | dict` union and gives the planner a
+    single field to branch on.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    status: Literal["executed", "pending_approval"]
+    op_kind: str
+    target_branch: str = ""
+    sha: str = ""
+    """Populated when ``status=executed``; empty for ``pending_approval``
+    or ops that don't produce a SHA."""
+
+    request_id: str = ""
+    """Populated when ``status=pending_approval`` — correlates the
+    eventual :class:`ProtectedOpOutcome`."""
+
+
 class PageChangeEvent(BaseModel):
     """One page-graph mutation event.
 
@@ -733,4 +845,7 @@ __all__ = (
     "LineRangeContent",
     "GrepMatch",
     "GrepResult",
+    "PendingProtectedOp",
+    "ProtectedOpOutcome",
+    "ProtectedOpResult",
 )

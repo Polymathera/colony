@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -32,7 +32,12 @@ from ..agents.base import Agent, AgentCapability
 from ..agents.blackboard import BlackboardEvent, ConvergenceQuiescenceProtocol
 from ..agents.blackboard.protocol import (
     DesignMonorepoEventProtocol,
+    HumanApprovalProtocol,
     VCMEventProtocol,
+)
+from ..agents.patterns.capabilities.human_approval import (
+    HumanApprovalRequest,
+    HumanApprovalResponse,
 )
 from ..agents.models import AgentSuspensionState
 from ..agents.patterns.actions import action_executor
@@ -77,8 +82,11 @@ from .models import (
     GrepMatch,
     GrepResult,
     LineRangeContent,
+    PendingProtectedOp,
     ProjectArtifactAuthoredPayload,
     ProjectArtifactValidationResult,
+    ProtectedOpOutcome,
+    ProtectedOpResult,
     RepoBootstrapSpec,
     RepoState,
     StashEntry,
@@ -353,6 +361,36 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
     # convergence runtime). Capabilities here do not register a
     # separate watcher — that produced duplicate events and a
     # duplicate code path.
+
+    # -- Protected-branch helpers (master §3.1 access-control) -----------
+
+    def _is_branch_protected(self, branch_name: str) -> bool:
+        """Return ``True`` when the manifest's
+        :attr:`DesignMonorepoManifest.protected_branches` patterns
+        match ``branch_name``.
+
+        Falls back to ``False`` when the manifest is unreachable —
+        bootstrap-time invocations on a freshly-cloned repo run
+        without protection until the manifest commits land. Real
+        sessions hit the manifest path and the protection is in
+        effect.
+        """
+
+        try:
+            manifest = self._manifest()
+        except Exception:  # noqa: BLE001
+            return False
+        return manifest.is_branch_protected(branch_name)
+
+    def _current_branch_name(self) -> str:
+        """Return the current branch name, or ``""`` for detached
+        HEAD / errors. Sync — callers wrap in ``asyncio.to_thread``
+        when they need to bridge to async."""
+
+        try:
+            return self._client_sync().active_branch
+        except Exception:  # noqa: BLE001
+            return ""
 
     # -- Suspension hooks --
     # The design monorepo's state is already durable on disk; the
@@ -1324,17 +1362,27 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         # ``DesignCheckpointer`` writes checkpoint commits / tags / new
         # branches, so ``read_only`` is hard-wired to ``False``.
         #
-        # When auto-checkpoint is disabled, also opt out of the
-        # quiescence subscription. Otherwise the action policy's event
-        # queue receives a wake-up on every episode boundary, which —
-        # in ``reactive_only`` agents like SessionAgent — would trigger
-        # a full LLM plan_step → action → settles → new quiescence
-        # loop. The remote-change handler stays subscribed; it only
-        # fires on actual upstream changes.
+        # Subscription set:
+        #
+        # - ``HumanApprovalProtocol.response_pattern()`` is always on
+        #   — the protected-branch gate requires this capability to
+        #   react to operator responses for the requests it issued.
+        # - ``ConvergenceQuiescenceProtocol.quiescence_pattern()`` is
+        #   added by ``@event_handler`` auto-inference when
+        #   ``auto_checkpoint_on_quiescence`` is True. When disabled,
+        #   omit it so reactive-only agents (SessionAgent) don't fire
+        #   a full LLM plan_step on every episode boundary.
+        # - ``VCMEventProtocol.reindexed_pattern()`` is always on for
+        #   the remote-change handler — it only fires on real upstream
+        #   changes, not on every quiescence tick.
+        approval_pattern = HumanApprovalProtocol.response_pattern()
         if auto_checkpoint_on_quiescence:
             input_patterns: list[str] | None = None  # auto-infer
         else:
-            input_patterns = [VCMEventProtocol.reindexed_pattern()]
+            input_patterns = [
+                VCMEventProtocol.reindexed_pattern(),
+                approval_pattern,
+            ]
         super().__init__(
             agent=agent,
             scope_id=scope_id,
@@ -1425,30 +1473,58 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         )
 
     @action_executor(
-        planning_summary="Merge a source branch into the current branch.",
+        planning_summary=(
+            "Merge a source branch into the current (or named) target "
+            "branch. Gates through human approval when the target is "
+            "protected."
+        ),
     )
     async def merge_design(
         self,
         source_branch: str,
         target_branch: str | None = None,
         message: str | None = None,
-    ) -> str:
+    ) -> ProtectedOpResult:
         """Merge ``source_branch`` into ``target_branch`` (default: current).
 
-        Returns the new merge-commit SHA. Conflicts surface as
-        ``DesignMonorepoError``; the caller resolves and commits.
+        Returns ``ProtectedOpResult{status=executed, sha=<merge-commit>}``
+        on a non-protected target. On a protected target, returns
+        ``ProtectedOpResult{status=pending_approval, request_id=...}``.
+        Conflicts surface as ``DesignMonorepoError``; the caller
+        resolves and commits.
         Selective merge ("take *these* decisions from fork/A") goes
         through ``cherry_pick_decisions`` instead.
         """
 
         client = await self._client_async()
         identity = self._identity()
-        return await asyncio.to_thread(
-            client.merge_full,
-            identity,
-            source_branch,
-            target_branch=target_branch,
-            message=message,
+
+        effective_target = target_branch or await asyncio.to_thread(
+            self._current_branch_name,
+        )
+
+        async def _execute() -> str:
+            return await asyncio.to_thread(
+                client.merge_full,
+                identity,
+                source_branch,
+                target_branch=target_branch,
+                message=message,
+            )
+
+        return await self._run_or_gate(
+            op_kind="merge_design",
+            target_branch=effective_target,
+            summary=(
+                f"Merge {source_branch!r} into protected branch "
+                f"{effective_target!r}"
+            ),
+            args={
+                "source_branch": source_branch,
+                "target_branch": target_branch,
+                "message": message,
+            },
+            executor=_execute,
         )
 
     @action_executor(
@@ -1477,19 +1553,27 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         return list(result)
 
     @action_executor(
-        planning_summary="Commit specific paths under the agent's identity.",
+        planning_summary=(
+            "Commit specific paths under the agent's identity. Gates "
+            "through human approval when the current branch is "
+            "protected (returns ``pending_approval`` until the "
+            "operator responds)."
+        ),
     )
     async def commit_state(
         self,
         message: str,
         paths: list[str] | None = None,
         all_changes: bool = False,
-    ) -> str:
+    ) -> ProtectedOpResult:
         """Stage ``paths`` (or everything if ``all_changes``) and commit.
 
-        Returns the new commit's SHA, or HEAD's SHA when nothing was
-        staged. The commit is authored under the agent's transactional
-        identity; the global git config is not mutated.
+        Returns ``ProtectedOpResult{status=executed, sha=<commit>}`` on
+        a non-protected branch (or when nothing was staged — ``sha`` is
+        the current HEAD). On a protected branch, returns
+        ``ProtectedOpResult{status=pending_approval, request_id=...}``
+        and the eventual outcome lands as a typed
+        :class:`ProtectedOpOutcome` event the planner observes.
         """
 
         client = await self._client_async()
@@ -1497,13 +1581,31 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         path_objs: list[Path] | None = None
         if paths is not None:
             path_objs = [Path(p) for p in paths]
-        return await asyncio.to_thread(
-            _commit_paths,
-            client,
-            identity,
-            message,
-            path_objs,
-            all_changes,
+
+        async def _execute() -> str:
+            return await asyncio.to_thread(
+                _commit_paths,
+                client,
+                identity,
+                message,
+                path_objs,
+                all_changes,
+            )
+
+        current_branch = await asyncio.to_thread(self._current_branch_name)
+        return await self._run_or_gate(
+            op_kind="commit_state",
+            target_branch=current_branch,
+            summary=(
+                f"Commit to protected branch {current_branch!r}: "
+                f"{message[:120]}"
+            ),
+            args={
+                "message": message,
+                "paths": list(paths) if paths is not None else None,
+                "all_changes": all_changes,
+            },
+            executor=_execute,
         )
 
     @action_executor(
@@ -1556,7 +1658,10 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         planning_summary=(
             "Pull from a remote into the current branch. "
             "``strategy``: ``ff_only`` (default) / ``merge`` / "
-            "``rebase``. Refuses to run with uncommitted changes."
+            "``rebase``. Refuses to run with uncommitted changes. "
+            "Gates ``merge`` / ``rebase`` strategies on a protected "
+            "branch (``ff_only`` lands inline since it cannot rewrite "
+            "history)."
         ),
     )
     async def pull_remote(
@@ -1565,16 +1670,102 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         remote: str = "origin",
         branch: str | None = None,
         strategy: str = "ff_only",
-    ) -> str:
-        """Fetch + integrate. Returns the new HEAD SHA. Defaults to
-        ``ff_only`` so a divergent remote surfaces as an error
-        instead of silently merging."""
+    ) -> ProtectedOpResult:
+        """Fetch + integrate.
+
+        ``ff_only`` is never gated — it cannot rewrite or merge any
+        existing commit, so landing it on a protected branch is
+        equivalent to the framework's own ``branch_changed`` reaction.
+        ``merge`` and ``rebase`` are gated on protected branches: a
+        merge writes a new commit; a rebase rewrites history.
+        Returns ``ProtectedOpResult`` with ``sha`` set to the new HEAD
+        on ``status=executed``."""
         client = await self._client_async()
-        return await asyncio.to_thread(
-            client.pull,
-            remote=remote,
-            branch=branch,
-            strategy=strategy,
+        effective_branch = branch or await asyncio.to_thread(
+            self._current_branch_name,
+        )
+
+        async def _execute() -> str:
+            return await asyncio.to_thread(
+                client.pull,
+                remote=remote,
+                branch=branch,
+                strategy=strategy,
+            )
+
+        if strategy == "ff_only":
+            sha = await _execute()
+            return ProtectedOpResult(
+                status="executed",
+                op_kind="pull_remote",
+                target_branch=effective_branch,
+                sha=sha or "",
+            )
+        return await self._run_or_gate(
+            op_kind="pull_remote",
+            target_branch=effective_branch,
+            summary=(
+                f"Pull (strategy={strategy}) from {remote}/{effective_branch}"
+                f" onto protected branch {effective_branch!r}"
+            ),
+            args={
+                "remote": remote,
+                "branch": branch,
+                "strategy": strategy,
+            },
+            executor=_execute,
+        )
+
+    @action_executor(
+        planning_summary=(
+            "Push the current (or named) branch to a remote. Always "
+            "gated on protected branches; pushes from a non-protected "
+            "branch run inline."
+        ),
+    )
+    async def push_remote(
+        self,
+        *,
+        remote: str = "origin",
+        branch: str | None = None,
+        with_tags: bool = False,
+    ) -> ProtectedOpResult:
+        """Push ``branch`` (default: current) to ``remote``.
+
+        Network-visible — gated through the operator's approval when
+        the branch being pushed is in the manifest's
+        ``protected_branches`` list. Returns ``ProtectedOpResult`` whose
+        ``sha`` carries the current HEAD when ``status=executed``."""
+        client = await self._client_async()
+        effective_branch = branch or await asyncio.to_thread(
+            self._current_branch_name,
+        )
+
+        async def _execute() -> str:
+            await asyncio.to_thread(
+                client.push,
+                branch=branch,
+                remote=remote,
+                with_tags=with_tags,
+            )
+            return await asyncio.to_thread(
+                lambda: client._repo.head.commit.hexsha,
+            )
+
+        return await self._run_or_gate(
+            op_kind="push_remote",
+            target_branch=effective_branch,
+            summary=(
+                f"Push protected branch {effective_branch!r} to "
+                f"{remote}"
+                + (" (with tags)" if with_tags else "")
+            ),
+            args={
+                "remote": remote,
+                "branch": branch,
+                "with_tags": with_tags,
+            },
+            executor=_execute,
         )
 
     # ---- User-driven branch ops ------------------------------------
@@ -1667,13 +1858,36 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
         planning_summary=(
             "Non-interactive ``git rebase`` onto ``target_ref``. "
             "Refuses with uncommitted changes; conflict mid-rebase "
-            "leaves the repo in the standard git rebasing state."
+            "leaves the repo in the standard git rebasing state. "
+            "Gates on a protected current branch (rebase rewrites "
+            "history)."
         ),
     )
-    async def rebase_onto(self, target_ref: str) -> None:
-        """Replay the current branch on top of ``target_ref``."""
+    async def rebase_onto(self, target_ref: str) -> ProtectedOpResult:
+        """Replay the current branch on top of ``target_ref``.
+
+        Rebase rewrites the current branch's history — gated on a
+        protected current branch. Returns ``ProtectedOpResult`` whose
+        ``sha`` carries the new HEAD on ``status=executed``."""
         client = await self._client_async()
-        await asyncio.to_thread(client.rebase_onto, target_ref)
+        current_branch = await asyncio.to_thread(self._current_branch_name)
+
+        async def _execute() -> str:
+            await asyncio.to_thread(client.rebase_onto, target_ref)
+            return await asyncio.to_thread(
+                lambda: client._repo.head.commit.hexsha,
+            )
+
+        return await self._run_or_gate(
+            op_kind="rebase_onto",
+            target_branch=current_branch,
+            summary=(
+                f"Rebase protected branch {current_branch!r} onto "
+                f"{target_ref!r}"
+            ),
+            args={"target_ref": target_ref},
+            executor=_execute,
+        )
 
     # ---- User-driven tag ops --------------------------------------
 
@@ -2295,6 +2509,326 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
                 "scope_id": scope_id,
                 "source_event_key": event.key,
             },
+        )
+
+    # ---- Protected-branch approval gate (master §3.1 access-control) ----
+    #
+    # The five mutating actions that can land on / touch a protected
+    # branch — ``commit_state``, ``push_remote``, ``merge_design``,
+    # ``pull_remote`` (when ``strategy in {"merge", "rebase"}``),
+    # ``rebase_onto`` — funnel through ``_run_or_gate``.
+    #
+    # When the targeted branch is **not** protected, the action runs
+    # inline and returns ``ProtectedOpResult(status="executed", sha=…)``.
+    # When it **is** protected, the action posts a typed
+    # :class:`HumanApprovalRequest` to the session blackboard plus a
+    # :class:`PendingProtectedOp` record keyed by the same
+    # ``request_id``, then returns
+    # ``ProtectedOpResult(status="pending_approval", request_id=…)``.
+    # The action policy keeps iterating — no blocking.
+    #
+    # When the operator answers, :meth:`_on_protected_approval_response`
+    # fires, looks up the pending op, dispatches by ``op_kind``, runs
+    # the git operation, and writes a :class:`ProtectedOpOutcome` event
+    # the planner sees on its next turn.
+
+    async def _run_or_gate(
+        self,
+        *,
+        op_kind: str,
+        target_branch: str,
+        summary: str,
+        args: dict[str, Any],
+        executor: Callable[[], Awaitable[str]],
+    ) -> ProtectedOpResult:
+        """Inline shape for every gated action. ``executor`` is the
+        coroutine factory that performs the actual git op when the
+        branch is unprotected (returns the resulting SHA or empty
+        string when there is none)."""
+
+        if not self._is_branch_protected(target_branch):
+            sha = await executor()
+            return ProtectedOpResult(
+                status="executed",
+                op_kind=op_kind,
+                target_branch=target_branch,
+                sha=sha or "",
+            )
+        return await self._post_protected_approval(
+            op_kind=op_kind,
+            target_branch=target_branch,
+            summary=summary,
+            args=args,
+        )
+
+    async def _post_protected_approval(
+        self,
+        *,
+        op_kind: str,
+        target_branch: str,
+        summary: str,
+        args: dict[str, Any],
+    ) -> ProtectedOpResult:
+        """Write the paired ``HumanApprovalRequest`` +
+        ``PendingProtectedOp`` records to the session blackboard.
+
+        The request is keyed under
+        ``HumanApprovalProtocol.request_key(request_id)`` so the
+        SessionAgent's :class:`HumanApprovalCapability` surfaces it to
+        the chat UI without bespoke wiring. The pending op record is
+        keyed under
+        ``DesignMonorepoEventProtocol.protected_op_pending_key(request_id)``
+        so :meth:`_on_protected_approval_response` can dispatch when
+        the operator answers.
+        """
+
+        from uuid import uuid4
+
+        request_id = f"appr_{uuid4().hex[:12]}"
+        requester_agent_id = (
+            self._agent.agent_id if self._agent is not None else ""
+        )
+        approval_request = HumanApprovalRequest(
+            request_id=request_id,
+            question=summary,
+            options=("approve", "reject"),
+            requester_agent_id=requester_agent_id or None,
+            extra={
+                "op_kind": op_kind,
+                "target_branch": target_branch,
+                "scope_id": self.scope_id,
+            },
+        )
+        pending = PendingProtectedOp(
+            request_id=request_id,
+            op_kind=op_kind,
+            target_branch=target_branch,
+            args=dict(args),
+            summary=summary,
+            requester_agent_id=requester_agent_id,
+            requester_capability_scope_id=self.scope_id,
+        )
+        bb = await self.get_blackboard()
+        await bb.write(
+            HumanApprovalProtocol.request_key(request_id),
+            approval_request.model_dump(mode="json"),
+            tags={"human_approval", "request", "protected_op"},
+            metadata={
+                "request_id": request_id,
+                "op_kind": op_kind,
+                "target_branch": target_branch,
+            },
+        )
+        await bb.write(
+            DesignMonorepoEventProtocol.protected_op_pending_key(request_id),
+            pending.model_dump(mode="json"),
+            tags={"protected_op", "pending"},
+            metadata={
+                "request_id": request_id,
+                "op_kind": op_kind,
+                "target_branch": target_branch,
+            },
+        )
+        logger.info(
+            "DesignCheckpointer: gated %s on protected branch %r "
+            "(request_id=%s)",
+            op_kind, target_branch, request_id,
+        )
+        return ProtectedOpResult(
+            status="pending_approval",
+            op_kind=op_kind,
+            target_branch=target_branch,
+            request_id=request_id,
+        )
+
+    @event_handler(pattern=HumanApprovalProtocol.response_pattern())
+    async def _on_protected_approval_response(
+        self,
+        event: BlackboardEvent,
+        repl: Any,
+    ) -> EventProcessingResult | None:
+        """Pick up the operator's response, dispatch the pending op,
+        record a :class:`ProtectedOpOutcome`.
+
+        Silently ignores responses to requests we didn't issue — the
+        same session may carry approval requests from other capabilities
+        (validation queue, dossier sign-off, etc.). We only act on
+        requests whose pending-op record matches our ``scope_id``."""
+
+        try:
+            request_id = HumanApprovalProtocol.parse_response_key(event.key)
+        except ValueError:
+            return None
+        if not isinstance(event.value, dict):
+            return None
+        try:
+            response = HumanApprovalResponse.model_validate(event.value)
+        except Exception:  # noqa: BLE001
+            return None
+
+        bb = await self.get_blackboard()
+        pending_key = DesignMonorepoEventProtocol.protected_op_pending_key(
+            request_id,
+        )
+        pending_raw = await bb.read(pending_key)
+        if pending_raw is None or not isinstance(pending_raw, dict):
+            return None
+        try:
+            pending = PendingProtectedOp.model_validate(pending_raw)
+        except Exception:  # noqa: BLE001
+            return None
+        if pending.requester_capability_scope_id != self.scope_id:
+            # Another capability instance owns this pending op.
+            return None
+
+        outcome = await self._execute_pending_protected_op(
+            pending=pending, response=response,
+        )
+        # Best-effort cleanup of the pending marker so a re-run on the
+        # same request_id can't double-execute.
+        try:
+            await bb.delete(pending_key)
+        except Exception:  # noqa: BLE001
+            pass
+        outcome_key = DesignMonorepoEventProtocol.protected_op_outcome_key(
+            request_id,
+        )
+        try:
+            await bb.write(
+                outcome_key,
+                outcome.model_dump(mode="json"),
+                tags={"protected_op", "outcome"},
+                metadata={
+                    "request_id": request_id,
+                    "op_kind": outcome.op_kind,
+                    "target_branch": outcome.target_branch,
+                    "status": outcome.status,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "DesignCheckpointer: failed to record protected_op outcome "
+                "for %s",
+                request_id,
+            )
+        return EventProcessingResult(
+            context_key=outcome_key,
+            context=outcome.model_dump(mode="json"),
+        )
+
+    async def _execute_pending_protected_op(
+        self,
+        *,
+        pending: PendingProtectedOp,
+        response: HumanApprovalResponse,
+    ) -> ProtectedOpOutcome:
+        """Dispatch on ``pending.op_kind`` and produce a typed outcome."""
+
+        if response.choice != "approve":
+            logger.info(
+                "DesignCheckpointer: operator rejected %s on %r "
+                "(request_id=%s)",
+                pending.op_kind, pending.target_branch, pending.request_id,
+            )
+            return ProtectedOpOutcome(
+                request_id=pending.request_id,
+                op_kind=pending.op_kind,
+                status="rejected",
+                target_branch=pending.target_branch,
+                decided_by=response.decided_by,
+                error=response.note,
+            )
+        try:
+            client = await self._client_async()
+            identity = self._identity()
+            sha = await self._dispatch_protected_op(
+                op_kind=pending.op_kind,
+                args=dict(pending.args),
+                client=client,
+                identity=identity,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "DesignCheckpointer: protected op %s failed on approval "
+                "(request_id=%s)",
+                pending.op_kind, pending.request_id,
+            )
+            return ProtectedOpOutcome(
+                request_id=pending.request_id,
+                op_kind=pending.op_kind,
+                status="failed",
+                target_branch=pending.target_branch,
+                decided_by=response.decided_by,
+                error=str(exc),
+            )
+        return ProtectedOpOutcome(
+            request_id=pending.request_id,
+            op_kind=pending.op_kind,
+            status="executed",
+            target_branch=pending.target_branch,
+            sha=sha or "",
+            decided_by=response.decided_by,
+        )
+
+    async def _dispatch_protected_op(
+        self,
+        *,
+        op_kind: str,
+        args: dict[str, Any],
+        client: DesignMonorepoClient,
+        identity: AgentIdentity,
+    ) -> str:
+        """Per-op-kind execution branch — mirrors the unprotected path
+        each action takes but unwraps the args back out of the
+        pending record."""
+
+        if op_kind == "commit_state":
+            paths = args.get("paths")
+            path_objs = [Path(p) for p in paths] if paths else None
+            return await asyncio.to_thread(
+                _commit_paths,
+                client,
+                identity,
+                str(args.get("message", "")),
+                path_objs,
+                bool(args.get("all_changes", False)),
+            )
+        if op_kind == "push_remote":
+            await asyncio.to_thread(
+                client.push,
+                branch=args.get("branch"),
+                remote=str(args.get("remote", "origin")),
+                with_tags=bool(args.get("with_tags", False)),
+            )
+            # ``client.push`` returns no SHA; surface current HEAD for
+            # parity with the inline path.
+            return await asyncio.to_thread(
+                lambda: client._repo.head.commit.hexsha,
+            )
+        if op_kind == "merge_design":
+            return await asyncio.to_thread(
+                client.merge_full,
+                identity,
+                str(args.get("source_branch", "")),
+                target_branch=args.get("target_branch"),
+                message=args.get("message"),
+            )
+        if op_kind == "pull_remote":
+            return await asyncio.to_thread(
+                client.pull,
+                remote=str(args.get("remote", "origin")),
+                branch=args.get("branch"),
+                strategy=str(args.get("strategy", "ff_only")),
+            )
+        if op_kind == "rebase_onto":
+            await asyncio.to_thread(
+                client.rebase_onto, str(args.get("target_ref", "")),
+            )
+            return await asyncio.to_thread(
+                lambda: client._repo.head.commit.hexsha,
+            )
+        raise DesignMonorepoError(
+            f"DesignCheckpointer: unsupported protected op_kind {op_kind!r}",
         )
 
 
@@ -3021,6 +3555,21 @@ class ProjectAuthoringCapability(_DesignMonorepoCapabilityBase):
         primary_path: Path,
         apply_mutation: Callable[[], None],
     ) -> ProjectArtifactAuthoredPayload:
+        # 0) Refuse to author on a protected branch. L1-F's auto-commit
+        # loop is a tight one — gating every write through the HITL
+        # approval channel would freeze the agent. The discipline
+        # instead is: branch off first, work, ``merge_design`` back
+        # (the merge gates through ``DesignCheckpointer``).
+        current_branch = self._current_branch_name()
+        if self._is_branch_protected(current_branch):
+            raise DesignMonorepoError(
+                f"L1-F {action_kind}: refusing to author on protected "
+                f"branch {current_branch!r}. ``create_branch`` + "
+                f"``checkout_branch`` to a non-protected branch first; "
+                f"merge back via ``merge_design`` when done (which "
+                f"gates through human approval).",
+            )
+
         # 1) Snapshot. ``None`` means "did not exist before".
         snapshots: dict[Path, bytes | None] = {}
         for abs_p in snapshot_paths:

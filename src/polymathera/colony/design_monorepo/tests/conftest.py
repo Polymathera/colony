@@ -69,6 +69,11 @@ def manifest() -> DesignMonorepoManifest:
         target_system="test_system",
         topology="external",
         design_repo_url="file:///tmp/never-cloned-from",
+        # Tests default to "no protected branches" so existing tests
+        # that commit / merge / push on ``main`` keep running inline.
+        # PR-3 tests that exercise the gate override this with an
+        # explicit ``("main", ...)`` list per-test.
+        protected_branches=(),
     )
 
 

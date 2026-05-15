@@ -1647,6 +1647,8 @@ class DesignMonorepoEventProtocol(BlackboardProtocol):
     _CHECKPOINT_EMITTED_PREFIX: ClassVar[str] = "checkpoint_emitted:"
     _EXTENSION_AUTHORED_PREFIX: ClassVar[str] = "extension_authored:"
     _PROJECT_ARTIFACT_AUTHORED_PREFIX: ClassVar[str] = "project_artifact_authored:"
+    _PROTECTED_OP_PENDING_PREFIX: ClassVar[str] = "protected_op:pending:"
+    _PROTECTED_OP_OUTCOME_PREFIX: ClassVar[str] = "protected_op:outcome:"
 
     @staticmethod
     def branch_changed_key(scope_id: str) -> str:
@@ -1746,6 +1748,55 @@ class DesignMonorepoEventProtocol(BlackboardProtocol):
             )
         kind, path = tail.split(":", 1)
         return kind, path
+
+    # ---- Protected-branch gating (master §3.1 access-control) -----------
+
+    @staticmethod
+    def protected_op_pending_key(request_id: str) -> str:
+        """Key for the persisted :class:`PendingProtectedOp` record an
+        agent writes when a `DesignCheckpointer` action pauses on a
+        human-approval gate. The ``request_id`` matches the paired
+        :class:`HumanApprovalRequest`."""
+        return (
+            f"{DesignMonorepoEventProtocol._PROTECTED_OP_PENDING_PREFIX}"
+            f"{request_id}"
+        )
+
+    @staticmethod
+    def protected_op_pending_pattern() -> str:
+        return f"{DesignMonorepoEventProtocol._PROTECTED_OP_PENDING_PREFIX}*"
+
+    @staticmethod
+    def parse_protected_op_pending_key(key: str) -> str:
+        prefix = DesignMonorepoEventProtocol._PROTECTED_OP_PENDING_PREFIX
+        if not key.startswith(prefix):
+            raise ValueError(
+                f"Not a DesignMonorepoEventProtocol protected_op pending key: {key!r}",
+            )
+        return key[len(prefix):]
+
+    @staticmethod
+    def protected_op_outcome_key(request_id: str) -> str:
+        """Key for the :class:`ProtectedOpOutcome` written once the
+        operator's response has been processed (approve → executed,
+        reject → rejected, runtime failure → failed)."""
+        return (
+            f"{DesignMonorepoEventProtocol._PROTECTED_OP_OUTCOME_PREFIX}"
+            f"{request_id}"
+        )
+
+    @staticmethod
+    def protected_op_outcome_pattern() -> str:
+        return f"{DesignMonorepoEventProtocol._PROTECTED_OP_OUTCOME_PREFIX}*"
+
+    @staticmethod
+    def parse_protected_op_outcome_key(key: str) -> str:
+        prefix = DesignMonorepoEventProtocol._PROTECTED_OP_OUTCOME_PREFIX
+        if not key.startswith(prefix):
+            raise ValueError(
+                f"Not a DesignMonorepoEventProtocol protected_op outcome key: {key!r}",
+            )
+        return key[len(prefix):]
 
 
 class GitHubEventProtocol(BlackboardProtocol):

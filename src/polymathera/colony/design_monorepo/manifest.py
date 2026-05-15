@@ -204,6 +204,43 @@ class DesignMonorepoManifest(BaseModel):
         ),
     )
 
+    # Protected branches — operator-visible meta-policy. Glob patterns
+    # against which ``DesignCheckpointer``'s mutating actions
+    # (``commit_state``, ``push_remote``, ``merge_design``,
+    # ``pull_remote(strategy=merge|rebase)``, ``rebase_onto``) gate
+    # through the session's :class:`HumanApprovalCapability` before
+    # touching the working tree. L1-F write actions
+    # (``ProjectAuthoringCapability``) refuse outright on a protected
+    # branch — the agent must ``create_branch`` + ``checkout_branch``
+    # to a non-protected branch first.
+    protected_branches: tuple[str, ...] = Field(
+        default=("main",),
+        description=(
+            "Glob patterns identifying branches that need operator "
+            "approval before destructive / network-visible operations "
+            "can land. Matched with ``fnmatch.fnmatch``."
+        ),
+    )
+
+    def is_branch_protected(self, branch_name: str) -> bool:
+        """Return ``True`` when ``branch_name`` matches any pattern in
+        :attr:`protected_branches`. Empty / falsy names are treated as
+        not protected (e.g. detached HEAD shows as ``""``).
+
+        Matching uses :func:`fnmatch.fnmatch`, so glob patterns like
+        ``release/*`` and ``stable-*`` work as the operator would
+        expect.
+        """
+
+        if not branch_name:
+            return False
+        from fnmatch import fnmatch
+
+        return any(
+            fnmatch(branch_name, pattern)
+            for pattern in self.protected_branches
+        )
+
     # ---- IO ------------------------------------------------------------
 
     @classmethod
