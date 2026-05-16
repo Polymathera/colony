@@ -385,7 +385,11 @@ class UserPluginCapability(AgentCapability):
                 ),
             }
         skills: list[dict[str, Any]] = []
-        for sk in self._discovery.skills.values():
+        seen: set[str] = set()
+        # Iterate upstream first; L4 entries with the same
+        # qualified_name shadow upstream (last-write-wins matches the
+        # plugin / mission convention — L4 / project-specific wins).
+        for sk in list(self._discovery.skills.values()) + self._l4_skill_specs():
             if source == "plugin":
                 if sk.plugin_name is None:
                     continue
@@ -394,6 +398,9 @@ class UserPluginCapability(AgentCapability):
                     continue
                 if sk.plugin_name is not None:
                     continue
+            if sk.qualified_name in seen:
+                continue
+            seen.add(sk.qualified_name)
             skills.append(sk.to_summary())
         skills.sort(key=lambda s: s["qualified_name"])
         return {
@@ -431,7 +438,11 @@ class UserPluginCapability(AgentCapability):
         if not q:
             return {"skills": [], "count": 0, "message": "empty query"}
         scored: list[tuple[int, SkillSpec]] = []
-        for sk in self._discovery.skills.values():
+        seen: set[str] = set()
+        for sk in list(self._discovery.skills.values()) + self._l4_skill_specs():
+            if sk.qualified_name in seen:
+                continue
+            seen.add(sk.qualified_name)
             if sk.disable_model_invocation and not self._allow_model_invocation_override:
                 continue
             haystack = " ".join((
@@ -588,14 +599,43 @@ class UserPluginCapability(AgentCapability):
     def _resolve_skill(self, name: str) -> SkillSpec | None:
         if name in self._discovery.skills:
             return self._discovery.skills[name]
-        # Bare-name lookup — unambiguous only.
+        for sk in self._l4_skill_specs():
+            if sk.qualified_name == name:
+                return sk
+        # Bare-name lookup — unambiguous only. Union over upstream +
+        # L4 so an L4 skill with a unique bare name resolves
+        # identically to an upstream one.
         matches = [
             sk for sk in self._discovery.skills.values()
             if sk.name == name
         ]
+        for sk in self._l4_skill_specs():
+            if sk.name == name and sk not in matches:
+                matches.append(sk)
         if len(matches) == 1:
             return matches[0]
         return None
+
+    def _l4_skill_specs(self) -> list[SkillSpec]:
+        """Return the L4-discovered :class:`SkillSpec` list for the
+        current agent — pulled live off
+        :class:`RepoStateProvider.discovered_extensions.plugins` via
+        the shared :func:`get_l4_extensions` helper.
+
+        Returns an empty list when no L4 monorepo is mounted /
+        materialised on this capability's agent. The underlying
+        cache is mtime-fingerprinted, so a per-call invocation is
+        cheap on the warm path and picks up new plugins added
+        mid-session via L1-E.
+        """
+        if self._agent is None:
+            return []
+        from ....design_monorepo.extensions import get_l4_extensions
+
+        snapshot = get_l4_extensions(self._agent)
+        if snapshot is None:
+            return []
+        return list(snapshot.plugins)
 
     @staticmethod
     def _run_error(name: str, message: str) -> dict[str, Any]:

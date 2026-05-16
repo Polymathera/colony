@@ -283,12 +283,17 @@ async def spawn_agent(
 
     try:
         from polymathera.colony.agents import AgentMetadata, AgentHandle
-        from polymathera.colony.cli.polymath import _resolve_class
+        # Canonical string-to-class resolver, shared with the chat /
+        # CLI / jobs spawn paths. Same NOTE on L4 scope as in
+        # ``jobs.py:_run_job``: this REST endpoint has no parent agent
+        # in scope, so L4 (.colony/agents/) classes are out of reach
+        # — chat is the path for those.
+        from polymathera.colony.agents.class_resolver import resolve_class
 
         # Build capability blueprints
         cap_blueprints = []
         for cap_path in request.capabilities:
-            cap_cls = _resolve_class(cap_path)
+            cap_cls = resolve_class(cap_path)
             cap_blueprints.append(cap_cls.bind())
 
         # Build metadata
@@ -298,7 +303,7 @@ async def spawn_agent(
         )
 
         # Build and spawn
-        agent_cls = _resolve_class(request.agent_type)
+        agent_cls = resolve_class(request.agent_type)
         bp = agent_cls.bind(
             agent_type=request.agent_type,
             metadata=metadata,

@@ -268,6 +268,47 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
 
     _DESIGN_MONOREPO_URL_KEY = "design_monorepo_url"
 
+    @property
+    def has_design_monorepo_url(self) -> bool:
+        """True iff this capability has an L4 design-monorepo URL
+        configured on its agent's metadata.
+
+        The URL is what :meth:`_lazy_clone_from_agent_metadata` reads
+        to materialise the per-agent clone on first
+        :meth:`_client_sync`. Detached-mode capabilities (no agent)
+        and agents whose metadata does not carry the parameter both
+        return ``False``.
+        """
+        if self._agent is None:
+            return False
+        params = getattr(self._agent.metadata, "parameters", None) or {}
+        return bool(params.get(self._DESIGN_MONOREPO_URL_KEY))
+
+    def ensure_materialized(self) -> bool:
+        """Trigger the lazy clone if the per-agent working tree has
+        not been materialised yet. Returns ``True`` iff the clone is
+        now available on disk (a real git checkout under
+        :attr:`working_dir`), ``False`` otherwise (no URL configured,
+        detached mode, read-only mode with an empty working_dir, or a
+        clone failure that surfaced).
+        """
+
+        if (self._working_dir / ".git").exists():
+            return True
+        if not self.has_design_monorepo_url:
+            return False
+        try:
+            self._client_sync()
+        except Exception:  # noqa: BLE001 — clone failures land here uniformly
+            logger.warning(
+                "ensure_materialized: failed to materialise design "
+                "monorepo at %s; consumers will see no L4 extensions "
+                "until the URL / auth is fixed",
+                self._working_dir, exc_info=True,
+            )
+            return False
+        return (self._working_dir / ".git").exists()
+
     def _client_sync(self) -> DesignMonorepoClient:
         if self._client is None:
             # Lazy-clone: if the per-agent ``working_dir`` does not yet

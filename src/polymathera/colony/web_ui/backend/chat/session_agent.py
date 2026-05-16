@@ -107,11 +107,33 @@ class SessionOrchestratorCapability(AgentCapability):
         The task is cancelled on ``shutdown``. Failures inside the
         loop are logged but never propagated — the chat UI is a
         downstream consumer; its absence must not break the agent.
+
+        Also performs the first refresh of the dynamic L4 mission /
+        agent registry the LLM planner reads from
+        ``metadata.parameters["available_missions"]`` — see
+        :meth:`_refresh_available_missions`. Subsequent refreshes
+        fire on each user-message arrival so missions authored
+        mid-session via L1-E become visible immediately.
         """
         await super().initialize()
         if self._agent is None:
             # Detached mode: no agent blackboard to subscribe to.
             return
+        # First refresh of available_missions against the L4 design
+        # monorepo's ``.colony/missions/`` (if any). Runs in a thread
+        # because the underlying lazy clone of the design monorepo is
+        # blocking IO; we don't want to stall the event loop on a
+        # multi-second git clone.
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._refresh_available_missions,
+            )
+        except Exception:  # noqa: BLE001 — refresh must not block init
+            logger.exception(
+                "SessionOrchestratorCapability: initial "
+                "available_missions refresh failed; planner will see "
+                "the static snapshot until the next user message",
+            )
         self._lifecycle_relay_task = asyncio.create_task(
             self._relay_policy_lifecycle_to_chat(),
             name=f"policy_lifecycle_relay:{self._agent.agent_id}",
@@ -146,6 +168,77 @@ class SessionOrchestratorCapability(AgentCapability):
                     "human-approval blackboard",
                 )
             self._human_approval_blackboard = None
+
+    def _refresh_available_missions(self) -> None:
+        """Rebuild ``self.agent.metadata.parameters["available_missions"]``
+        as the union of:
+
+        - colony-builtin missions + ``polymathera.mission_types``
+          entry-point group (via :func:`get_mission_registry`), AND
+        - L4 missions discovered under the parent agent's per-agent
+          design-monorepo clone (via :func:`get_l4_extensions`, the
+          shared L4 lookup helper).
+
+        L4 entries shadow builtins on key collision (last-write-wins),
+        mirroring the convention in
+        :func:`get_mission_registry` (plugin entry-points shadow
+        colony-builtins).
+
+        The output dict matches the shape
+        :func:`polymathera.colony.web_ui.backend.routers.sessions.create_session`
+        produces at session-create time — single source of truth for
+        the four planner-visible fields per mission
+        (``label`` / ``description`` / ``coordinator_class`` /
+        ``worker_class``).
+
+        Falls back to the entry-points-only registry when L4 is not
+        available (no monorepo URL, no provider mounted, clone
+        failure). Failure modes are logged inside
+        :func:`get_l4_extensions` so the operator sees the cause in
+        container logs rather than a silently-empty mission list.
+
+        Synchronous because the underlying cache
+        (``RepoStateProvider.discovered_extensions``) is sync; callers
+        run this inside ``loop.run_in_executor`` when blocking on
+        the lazy clone is undesirable.
+        """
+
+        if self._agent is None:
+            return
+        from polymathera.colony.agents.mission_registry import (
+            get_mission_registry,
+        )
+        from polymathera.colony.design_monorepo.extensions import (
+            get_l4_extensions,
+        )
+
+        merged = dict(get_mission_registry())
+
+        snapshot = get_l4_extensions(self._agent)
+        if snapshot is not None:
+            for key, entry in snapshot.missions.items():
+                if key in merged:
+                    logger.warning(
+                        "SessionOrchestratorCapability: L4 mission %r "
+                        "shadows a colony-builtin / entry-point mission",
+                        key,
+                    )
+                merged[key] = entry
+
+        # Project to the four-field shape the planner reads. Mirrors
+        # ``sessions.py:create_session``'s comprehension verbatim — if
+        # that shape changes there, change here too (single source of
+        # truth audit).
+        available = {
+            atype: {
+                "label": reg["label"],
+                "description": reg.get("description", ""),
+                "coordinator_class": reg.get("coordinator_v2", ""),
+                "worker_class": reg.get("worker", ""),
+            }
+            for atype, reg in merged.items()
+        }
+        self._agent.metadata.parameters["available_missions"] = available
 
     async def _relay_policy_lifecycle_to_chat(self) -> None:
         """Subscribe to policy lifecycle events on the agent's primary
@@ -518,6 +611,162 @@ class SessionOrchestratorCapability(AgentCapability):
         return out
 
     @action_executor()
+    async def spawn_mission(
+        self,
+        *,
+        mission_type: str,
+        mission_params: dict[str, Any] | None = None,
+        max_iterations: int = 20,
+    ) -> dict[str, Any]:
+        """Spawn a mission coordinator for ``mission_type`` — the
+        recommended way to start a mission task from chat.
+
+        Why this exists (rather than the LLM calling ``create_agent``
+        directly): the LLM only needs to pick a ``mission_type`` key
+        from ``available_missions``; this action does the
+        coordinator-class lookup, metadata construction, and dispatch
+        to :meth:`AgentPoolCapability.create_agent`. No inference
+        chain "extract coordinator_class from a dict literal, then
+        pass it as agent_type" — which is brittle for any LLM and
+        broken for weaker ones.
+
+        Pipeline:
+
+        1. Look up ``mission_type`` in the LIVE merged mission
+           registry (``get_mission_registry()`` ∪
+           ``get_l4_extensions(agent).missions``). This is the same
+           source the static snapshot in
+           ``metadata.parameters["available_missions"]`` mirrors;
+           re-reading live ensures mid-session L1-E mission additions
+           are reachable.
+        2. Build :class:`AgentMetadata` populated from the registry
+           entry's ``self_concept`` and any caller-supplied
+           ``mission_params`` (e.g. OPM-MEG's
+           ``noise_floor_target_fT_rt_hz``).
+        3. Dispatch to :meth:`AgentPoolCapability.create_agent` with
+           the registry's ``coordinator_v2`` class path.
+           ``create_agent`` handles L4 class resolution via its
+           discovered-agents fallback, so L4 coordinators authored
+           under ``<monorepo>/.colony/agents/`` work transparently.
+
+        Args:
+            mission_type: A key from ``available_missions`` (rendered
+                in this agent's system prompt). Must match a
+                registered mission; mismatch raises ``ValueError``.
+            mission_params: Optional domain-specific parameters
+                threaded into the coordinator's
+                ``metadata.parameters``. Use this for mission-
+                declared ``extra_metadata_keys``.
+            max_iterations: Reasoning-loop cap for the coordinator
+                (default 20).
+
+        Returns:
+            ``{"agent_id", "mission_type", "coordinator_class",
+            "created", "label"}``. On failure: ``created=False`` plus
+            an ``error`` field.
+        """
+
+        from polymathera.colony.agents.mission_registry import (
+            get_mission_registry,
+        )
+        from polymathera.colony.design_monorepo.extensions import (
+            get_l4_extensions,
+        )
+        from polymathera.colony.agents.patterns.capabilities.agent_pool import (
+            AgentPoolCapability,
+        )
+        from polymathera.colony.agents.models import AgentMetadata
+        from polymathera.colony.agents.self_concept import AgentSelfConcept
+
+        # 1) Look up the mission in the LIVE registry — the chat-side
+        # static snapshot can lag if a mission was added since the
+        # last refresh.
+        registry = dict(get_mission_registry())
+        if self._agent is not None:
+            snapshot = get_l4_extensions(self._agent)
+            if snapshot is not None:
+                registry.update(snapshot.missions)
+        if mission_type not in registry:
+            available = sorted(registry.keys())
+            return {
+                "agent_id": None,
+                "mission_type": mission_type,
+                "coordinator_class": "",
+                "created": False,
+                "label": "",
+                "error": (
+                    f"Unknown mission type {mission_type!r}. "
+                    f"Available: {available}"
+                ),
+            }
+        reg = registry[mission_type]
+        coord_class = reg.get("coordinator_v2") or reg.get("coordinator_v1") or ""
+        if not coord_class:
+            return {
+                "agent_id": None,
+                "mission_type": mission_type,
+                "coordinator_class": "",
+                "created": False,
+                "label": reg.get("label", ""),
+                "error": (
+                    f"Mission {mission_type!r} has no coordinator_v2 "
+                    f"or coordinator_v1 in its registry entry."
+                ),
+            }
+
+        # 2) Build the coordinator's metadata. self_concept comes
+        # from the mission registry; mission_params are forwarded
+        # verbatim into ``metadata.parameters`` so the coordinator's
+        # planner sees them.
+        self_concept_config = reg.get("self_concept") or {}
+        params = dict(mission_params or {})
+        params.setdefault("mission_type", mission_type)
+        coord_metadata = AgentMetadata(
+            role=f"{reg.get('label', mission_type)} coordinator",
+            session_id=self.agent.metadata.session_id,
+            goals=[f"Run {reg.get('label', mission_type)} mission"],
+            max_iterations=max_iterations,
+            self_concept=(
+                AgentSelfConcept(**self_concept_config)
+                if self_concept_config else None
+            ),
+            parameters=params,
+        )
+
+        # 3) Dispatch to AgentPoolCapability.create_agent. The pool
+        # capability is mounted on this same agent (every
+        # chat-spawned SessionAgent gets AgentPoolCapability.bind()
+        # at session-create time), so the lookup is safe.
+        pool = self.agent.get_capability_by_type(AgentPoolCapability)
+        if pool is None:
+            return {
+                "agent_id": None,
+                "mission_type": mission_type,
+                "coordinator_class": coord_class,
+                "created": False,
+                "label": reg.get("label", ""),
+                "error": (
+                    "AgentPoolCapability is not mounted on this agent; "
+                    "spawn_mission requires it for dispatch."
+                ),
+            }
+        result = await pool.create_agent(
+            agent_type=coord_class,
+            metadata=coord_metadata,
+        )
+        # ``create_agent`` returns ``{"agent_id", "label", "created",
+        # ["error"]}``. Re-shape to the spawn_mission contract so the
+        # LLM can branch on a stable schema.
+        return {
+            "agent_id": result.get("agent_id"),
+            "mission_type": mission_type,
+            "coordinator_class": coord_class,
+            "created": bool(result.get("created")),
+            "label": reg.get("label", ""),
+            **({"error": result["error"]} if result.get("error") else {}),
+        }
+
+    @action_executor()
     async def respond_to_user(
         self,
         content: str,
@@ -527,8 +776,8 @@ class SessionOrchestratorCapability(AgentCapability):
         """Send a text response to the user in the chat.
 
         Use this action to respond to user questions, provide status updates,
-        or acknowledge requests. For mission tasks, use AgentPoolCapability's
-        create_agent instead.
+        or acknowledge requests. For mission tasks, use ``spawn_mission``
+        (NOT ``create_agent`` directly).
 
         Args:
             content: The message text to send to the user (supports markdown).
@@ -685,6 +934,23 @@ class SessionOrchestratorCapability(AgentCapability):
         if at_mentions:
             await self._handle_at_mention(content, at_mentions, controls)
             return PROCESSED
+
+        # Refresh the dynamic L4 mission / agent registry the LLM
+        # planner reads from ``metadata.parameters["available_missions"]``
+        # right before the planner runs. Cheap when nothing changed
+        # (mtime fingerprint hit on the cached
+        # ``RepoStateProvider.discovered_extensions``); picks up
+        # mid-session L1-E mission additions on the next stat tick.
+        # Failure here must NOT block the user's message — a refresh
+        # error logs and the planner sees the previous snapshot.
+        try:
+            self._refresh_available_missions()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "SessionOrchestratorCapability: per-message "
+                "available_missions refresh failed; planner will see "
+                "the previous snapshot",
+            )
 
         # Plain message — provide context to the LLM planner so it can decide
         # what action to take (respond_to_user, create_agent, etc.)

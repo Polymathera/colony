@@ -155,11 +155,23 @@ class MissionType(str, Enum):
     BASIC = "basic"  # General code structure analysis
 
 
-# Source of truth for mission specs lives in
-# ``polymathera.colony.agents.configs:_BUILTIN_MISSIONS``. Re-exported here
-# under the historical ``MISSION_REGISTRY`` name so existing call sites and
-# the ``polymathera.cli.polymath.MISSION_REGISTRY`` import path keep working.
-from polymathera.colony.agents.configs import MISSION_REGISTRY  # noqa: E402, F401
+# Source of truth for the LIVE mission registry is
+# :func:`polymathera.colony.agents.mission_registry.get_mission_registry`,
+# which returns the union of colony built-ins (from
+# ``polymathera.colony.agents.configs:_BUILTIN_MISSIONS``) and any
+# missions registered via the ``polymathera.mission_types``
+# entry-point group (CPS coordinators, third-party packages). Every
+# CLI lookup below goes through ``get_mission_registry()`` so a
+# ``polymath cluster run-mission`` invocation sees the same set the
+# chat-driven ``SessionAgent`` does.
+#
+# The hardcoded ``MISSION_REGISTRY`` dict is re-exported under the
+# historical name purely for backwards-compatibility with downstream
+# imports (e.g. ``web_ui.backend.routers.jobs``); new code should
+# import :func:`get_mission_registry` instead.
+from polymathera.colony.agents.mission_registry import (  # noqa: E402
+    get_mission_registry,
+)
 
 
 # Capabilities that can be attached to any agent for cross-cutting concerns.
@@ -483,12 +495,13 @@ def load_config_from_yaml(path: str) -> TestConfig:
     paging = PagingConfig(**raw.get("paging", {}))
 
     missions = []
+    registry = get_mission_registry()
     for a in raw.get("missions", []):
         params = {}
         # Extract mission-specific keys into parameters
         mission_type = a.get("type", "basic")
-        if mission_type in MISSION_REGISTRY:
-            for key in MISSION_REGISTRY[mission_type].get("extra_metadata_keys", []):
+        if mission_type in registry:
+            for key in registry[mission_type].get("extra_metadata_keys", []):
                 if key in a:
                     params[key] = a.pop(key)
         # Standard fields
@@ -861,8 +874,9 @@ def build_mission_tree(config: TestConfig) -> Tree:
     # Agent hierarchy
     agents_node = tree.add("[bold green]Agent Hierarchy[/bold green]")
 
+    registry = get_mission_registry()
     for i, mission in enumerate(config.missions):
-        reg = MISSION_REGISTRY.get(mission.type)
+        reg = registry.get(mission.type)
         if not reg:
             continue
 
@@ -995,12 +1009,21 @@ def display_results_table(results: list[dict[str, Any]]) -> None:
 # Core integration test logic
 # ===========================================================================
 
-def _resolve_class(fqn: str) -> type:
-    """Resolve a fully qualified class name to the actual class."""
-    import importlib
-    module_path, class_name = fqn.rsplit(".", 1)
-    module = importlib.import_module(module_path)
-    return getattr(module, class_name)
+def _resolve_class(
+    fqn: str,
+    *,
+    fallback_registry: dict[str, type] | None = None,
+) -> type:
+    """Resolve a fully qualified class name to the actual class.
+
+    Thin delegate over :func:`polymathera.colony.agents.class_resolver.resolve_class`
+    — the canonical resolver every spawn path shares. Kept under this
+    name (and exported through this module) so existing import paths
+    in ``web_ui.backend.routers.{jobs,agents}`` and the per-mission
+    CLI driver below continue to work.
+    """
+    from polymathera.colony.agents.class_resolver import resolve_class
+    return resolve_class(fqn, fallback_registry=fallback_registry)
 
 
 def _build_cluster_config(
@@ -1443,8 +1466,9 @@ async def run_integration_test(
 
     coordinator_handles: list[tuple[MissionConfig, AgentHandle]] = []
 
+    registry = get_mission_registry()
     for mission in config.missions:
-        reg = MISSION_REGISTRY.get(mission.type)
+        reg = registry.get(mission.type)
         if not reg:
             console.print(f"  [yellow]SKIP[/yellow] Unknown mission type: {mission.type}")
             results.append({
@@ -1598,7 +1622,7 @@ async def run_integration_test(
         Sends the mission task to the coordinator and streams events
         until completion, error, or timeout.
         """
-        reg = MISSION_REGISTRY[mission_cfg.type]
+        reg = get_mission_registry()[mission_cfg.type]
         start = time.time()
         event_count = 0
         last_event_type = "unknown"
@@ -1752,9 +1776,10 @@ async def run_integration_test(
                             pass
                     # Add budget_exceeded entries for cancelled missions
                     completed_ids = {r["coordinator_id"] for r in results}
+                    cancelled_registry = get_mission_registry()
                     for mission_cfg, handle in coordinator_handles:
                         if handle.agent_id not in completed_ids:
-                            reg = MISSION_REGISTRY[mission_cfg.type]
+                            reg = cancelled_registry[mission_cfg.type]
                             results.append({
                                 "mission_type": reg["label"],
                                 "coordinator_id": handle.agent_id,
@@ -2206,7 +2231,7 @@ def list_missions() -> None:
     table.add_column("Description", min_width=40)
     table.add_column("Coordinator Capabilities", style="dim", min_width=30)
 
-    for atype, reg in MISSION_REGISTRY.items():
+    for atype, reg in get_mission_registry().items():
         caps = ", ".join(reg.get("coordinator_capabilities", []))
         table.add_row(atype, reg["label"], reg["description"], caps)
 
@@ -2226,7 +2251,7 @@ def list_agents() -> None:
     table.add_column("Class Path", style="dim")
     table.add_column("Version", min_width=8)
 
-    for atype, reg in MISSION_REGISTRY.items():
+    for atype, reg in get_mission_registry().items():
         for version in ("v1", "v2"):
             coord_key = f"coordinator_{version}"
             if coord_key in reg:
@@ -2307,10 +2332,11 @@ def describe(
     Displays the full agent hierarchy, capabilities, game protocols,
     and merge policies used by the mission.
     """
-    reg = MISSION_REGISTRY.get(mission_type)
+    registry = get_mission_registry()
+    reg = registry.get(mission_type)
     if not reg:
         console.print(f"[red]Unknown mission type: {mission_type}[/red]")
-        console.print(f"[dim]Available: {', '.join(MISSION_REGISTRY.keys())}[/dim]")
+        console.print(f"[dim]Available: {', '.join(registry.keys())}[/dim]")
         raise typer.Exit(1)
 
     # Title panel

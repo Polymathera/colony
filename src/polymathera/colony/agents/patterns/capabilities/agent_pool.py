@@ -116,17 +116,45 @@ class AgentPoolCapability(AgentCapability):
         pass
 
     @staticmethod
-    def _resolve_class(fully_qualified_name: str) -> type:
-        """Resolve a class from its fully qualified name (e.g., 'pkg.module.ClassName')."""
-        import importlib
-        if not isinstance(fully_qualified_name, str) or "." not in fully_qualified_name:
-            raise ValueError(
-                f"Expected fully qualified class name (e.g., 'pkg.module.Class'), "
-                f"got: {fully_qualified_name!r}"
-            )
-        module_path, class_name = fully_qualified_name.rsplit(".", 1)
-        module = importlib.import_module(module_path)
-        return getattr(module, class_name)
+    def _resolve_class(
+        fully_qualified_name: str,
+        *,
+        fallback_registry: dict[str, type] | None = None,
+    ) -> type:
+        """Thin delegate over :func:`polymathera.colony.agents.class_resolver.resolve_class`
+        — the canonical resolver every spawn path shares (REST endpoints,
+        CLI driver, capability action surfaces). See the
+        :mod:`polymathera.colony.agents.class_resolver` module docstring
+        for the dual-path lookup rationale.
+
+        Kept as a staticmethod on this class for backwards compatibility
+        with tests / callers that already reach for it via this name;
+        new call sites should import the free function directly.
+        """
+        from ...class_resolver import resolve_class
+        return resolve_class(
+            fully_qualified_name, fallback_registry=fallback_registry,
+        )
+
+    def _l4_agent_registry(self) -> dict[str, type]:
+        """Return the parent agent's L4-discovered agent classes, keyed
+        by class short-name. Empty dict when no L4 monorepo is mounted
+        / materialised on this capability's agent — pip-installed
+        classes are still resolvable through :meth:`_resolve_class`'s
+        primary import path; only L4 ``.colony/agents/`` classes need
+        this fallback.
+
+        Delegates to :func:`get_l4_extensions` (the shared L4 lookup
+        helper) so every consumer of L4 extensions reads from the
+        same code path — single source of truth for "where does the
+        L4 view come from".
+        """
+        from ....design_monorepo.extensions import get_l4_extensions
+
+        snapshot = get_l4_extensions(self.agent)
+        if snapshot is None:
+            return {}
+        return dict(snapshot.agents)
 
     # === Action Executors ===
 
@@ -188,8 +216,19 @@ class AgentPoolCapability(AgentCapability):
                 )
             elif isinstance(metadata, dict):
                 metadata = AgentMetadata(**metadata)
-            # Resolve agent class from fully qualified path
-            agent_cls = self._resolve_class(agent_type)
+            # Resolve agent class from fully qualified path. Fall back
+            # to the L1-A discovered-agent registry when importlib
+            # cannot find the module — that's the path L4 coordinator
+            # classes authored under ``<monorepo>/.colony/agents/``
+            # take, since L1-A's loader deliberately keeps them out of
+            # ``sys.modules``. Capability resolution stays import-only:
+            # L4 coordinators that need L4-local capability classes
+            # auto-mount them in their own ``initialize()`` (the
+            # OPMMEGCoordinator pattern), so callers pass FQ paths to
+            # installed capabilities OR omit the list entirely.
+            agent_cls = self._resolve_class(
+                agent_type, fallback_registry=self._l4_agent_registry(),
+            )
 
             # Resolve capability class names to blueprints
             capability_blueprints = []

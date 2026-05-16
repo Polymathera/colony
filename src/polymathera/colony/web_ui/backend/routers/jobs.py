@@ -213,8 +213,29 @@ async def _run_job(
             from polymathera.colony.agents import AgentMetadata, AgentHandle
             from polymathera.colony.agents import AgentSelfConcept
 
-            # Import the mission registry from polymath.py
-            from polymathera.colony.cli.polymath import MISSION_REGISTRY, EXTRA_CAPABILITIES_REGISTRY, _resolve_class
+            # Use the merged mission registry — builtins + the
+            # ``polymathera.mission_types`` entry-point group — so a
+            # REST job submission can target a CPS-shipped mission
+            # (e.g. an OPM-MEG coordinator) the same way the chat
+            # path does. The hardcoded ``MISSION_REGISTRY`` dict
+            # alone would miss every entry-point mission.
+            #
+            # NOTE on L4 scope: ``/api/jobs/submit`` is a REST endpoint
+            # with no parent agent in scope, so it cannot reach L4
+            # missions / classes that live only under a design
+            # monorepo's ``.colony/``. Those route through the chat
+            # path (SessionAgent + ``AgentPoolCapability.create_agent``)
+            # which threads ``RepoStateProvider.discovered_extensions``
+            # into ``resolve_class`` automatically. Headless L4
+            # discovery for REST is a follow-up.
+            from polymathera.colony.agents.mission_registry import (
+                get_mission_registry,
+            )
+            from polymathera.colony.agents.class_resolver import resolve_class
+            from polymathera.colony.cli.polymath import (
+                EXTRA_CAPABILITIES_REGISTRY,
+            )
+            registry = get_mission_registry()
 
             run_id = f"run_{uuid.uuid4().hex[:8]}"
 
@@ -230,7 +251,7 @@ async def _run_job(
             coordinator_handles: list[tuple[MissionSpec, AgentHandle]] = []
 
             for mission in request.missions:
-                reg = MISSION_REGISTRY.get(mission.type)
+                reg = registry.get(mission.type)
                 if not reg:
                     logger.warning("Unknown mission type: %s", mission.type)
                     continue
@@ -270,8 +291,8 @@ async def _run_job(
                     if cap in EXTRA_CAPABILITIES_REGISTRY
                 ]
 
-                agent_cls = _resolve_class(coord_class)
-                cap_blueprints = [_resolve_class(path).bind() for path in capability_paths]
+                agent_cls = resolve_class(coord_class)
+                cap_blueprints = [resolve_class(path).bind() for path in capability_paths]
                 bp = agent_cls.bind(
                     agent_type=coord_class,
                     metadata=metadata,

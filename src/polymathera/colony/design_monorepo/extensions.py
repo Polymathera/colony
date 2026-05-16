@@ -387,6 +387,71 @@ def discover_all(
     )
 
 
+# ---------------------------------------------------------------------------
+# Runtime accessor — every consumer of L4 extensions in production
+# (AgentPoolCapability for L4 agents, ToolCapability for L4 tools,
+# UserPluginCapability for L4 plugins, SessionOrchestratorCapability
+# for L4 missions) reads the live snapshot off the agent's
+# ``RepoStateProvider``. Hoist the lookup here so every consumer
+# delegates to one canonical helper rather than re-implementing the
+# (find_capability + materialise + handle empty / failure) chain.
+# ---------------------------------------------------------------------------
+
+
+def get_l4_extensions(agent: Agent | None) -> "DiscoveredExtensions | None":
+    """Return the L4 :class:`DiscoveredExtensions` snapshot visible to
+    ``agent`` right now, or ``None`` when L4 discovery is not available
+    on this agent.
+
+    Returns ``None`` (rather than an empty
+    :class:`DiscoveredExtensions`) so consumers can distinguish "no
+    L4 monorepo mounted" from "L4 monorepo mounted but its surface is
+    empty" — the former should fall back to the upstream default
+    registry, the latter has already been considered.
+
+    Materialisation of the per-agent clone is delegated to
+    :meth:`RepoStateProvider.ensure_materialized` — explicit-intent
+    public method, no private-attribute reach. A clone failure
+    (URL unreachable, auth failure, etc.) is logged inside that
+    method and surfaced here as a ``None`` return.
+
+    Synchronous; the underlying
+    :attr:`RepoStateProvider.discovered_extensions` cache is sync and
+    cheap on the warm-cache path (one stat per resolved surface dir).
+    The first call may block on ``git clone``; consumers that cannot
+    tolerate that (e.g. session-create initialise) wrap this in
+    ``loop.run_in_executor``.
+    """
+
+    if agent is None:
+        return None
+
+    # Deferred import: ``capabilities.py`` already imports from this
+    # module at module-import time, so the reverse import has to land
+    # inside a function body to avoid a circular import.
+    from .capabilities import RepoStateProvider
+
+    provider: RepoStateProvider | None = agent.get_capability_by_type(RepoStateProvider)
+    if provider is None:
+        return None
+
+    # Materialise the clone if a URL is configured. When no URL is
+    # set, ``ensure_materialized`` returns False — we still read
+    # ``discovered_extensions`` because a working_dir that happens
+    # to already contain a checkout (e.g. operator pre-seeded, or a
+    # prior session left it) is authoritative.
+    provider.ensure_materialized()
+
+    try:
+        return provider.discovered_extensions
+    except Exception:  # noqa: BLE001 — discovery must not poison the caller
+        logger.exception(
+            "get_l4_extensions: discovered_extensions raised; treating "
+            "as no-L4-extensions for this access",
+        )
+        return None
+
+
 __all__ = (
     "DiscoveredExtensions",
     "discover_agents",
@@ -396,5 +461,6 @@ __all__ = (
     "discover_plugins",
     "discover_profiles",
     "discover_tools",
+    "get_l4_extensions",
     "resolve_surface_dirs",
 )

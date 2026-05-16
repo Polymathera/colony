@@ -298,25 +298,19 @@ async def create_session(
                 ActionKeySubstringFilter,
                 SuccessfulActionFilter,
             )
-            from polymathera.colony.agents.mission_registry import get_mission_registry
             from polymathera.colony.distributed.ray_utils.serving.context import get_tenant_id, get_colony_id
 
-            # Build the available mission types info for the LLM planner.
-            # ``get_mission_registry()`` returns the union of colony-builtin
-            # entries and any registered via the
-            # ``polymathera.mission_types`` entry-point group (master plan
-            # §12.3 — domain packages like polymathera-cps register their
-            # coordinator missions there so they show up in chat without
-            # colony having to import them).
-            available_missions = {
-                atype: {
-                    "label": reg["label"],
-                    "description": reg.get("description", ""),
-                    "coordinator_class": reg.get("coordinator_v2", ""),
-                    "worker_class": reg.get("worker", ""),
-                }
-                for atype, reg in get_mission_registry().items()
-            }
+            # ``available_missions`` is populated dynamically by
+            # :meth:`SessionOrchestratorCapability._refresh_available_missions`
+            # on agent ``initialize()`` (and on every subsequent user
+            # message), unioning :func:`get_mission_registry` (colony
+            # builtins + ``polymathera.mission_types`` entry-points)
+            # with L4 missions discovered under the per-agent design
+            # monorepo clone via L1-A. We seed an empty dict here so
+            # the planner-prompt rendering does not stumble on a
+            # missing key during the brief window between agent
+            # construction and ``initialize()``'s refresh — the value
+            # is overwritten on first refresh.
 
             agent_metadata = AgentMetadata(
                 role="session_orchestrator",
@@ -340,9 +334,39 @@ async def create_session(
                         "You are the primary interface between the user and the Colony's "
                         "multi-agent system. You have access to an agent pool for spawning "
                         "coordinator agents (one per mission type), and you can respond "
-                        "directly to user questions. When the user requests a mission, "
-                        "use create_agent to spawn the appropriate coordinator. When the "
-                        "user asks a question or needs information, use respond_to_user.\n\n"
+                        "directly to user questions.\n\n"
+                        "MISSION SPAWN PROTOCOL — how to start a mission task:\n"
+                        "  When the user describes a task that matches one of the\n"
+                        "  ``available_missions`` entries (match by ``label`` or\n"
+                        "  ``description`` semantics — the user will use natural\n"
+                        "  language, you map it to the right key), call:\n"
+                        "    r = await run(\n"
+                        "        \"spawn_mission\",\n"
+                        "        mission_type=<the matching key from available_missions>,\n"
+                        "        mission_params={...optional domain params...},\n"
+                        "    )\n"
+                        "  Then branch on ``r.success`` and ``r.output[\"created\"]``;\n"
+                        "  the coordinator's agent_id is on ``r.output[\"agent_id\"]``.\n"
+                        "  ``spawn_mission`` does the coordinator-class lookup\n"
+                        "  internally — you do NOT extract ``coordinator_class`` from\n"
+                        "  ``available_missions`` and you do NOT call ``create_agent``\n"
+                        "  directly for missions. (``create_agent`` is the low-level\n"
+                        "  generic spawn; ``spawn_mission`` is the mission-aware wrapper\n"
+                        "  that knows how to read the registry.)\n\n"
+                        "  Example — user says \"run a noise-floor analysis on the OPM-MEG design\":\n"
+                        "    Iteration 1:\n"
+                        "      await run(\"respond_to_user\", content=\"Starting OPM-MEG noise-floor analysis…\")\n"
+                        "      r = await run(\"spawn_mission\", mission_type=\"opm_meg\")\n"
+                        "      results[\"r\"] = r\n"
+                        "    Iteration 2:\n"
+                        "      r = results[\"r\"]\n"
+                        "      if not r.success or not r.output.get(\"created\"):\n"
+                        "          await run(\"respond_to_user\", content=f\"Spawn failed: {r.error or r.output.get('error')}\")\n"
+                        "      else:\n"
+                        "          await run(\"respond_to_user\",\n"
+                        "              content=f\"Coordinator {r.output['agent_id'][:8]} is running. I'll relay updates as it works.\")\n\n"
+                        "  When the user asks a question or needs information (no mission\n"
+                        "  spawn), use respond_to_user directly.\n\n"
                         "DESIGN-MONOREPO BOOTSTRAP:\n"
                         "  When the user asks to initialize / bootstrap / scaffold the "
                         "  design monorepo (or asks 'how do I set up repo_map.yaml'), "
@@ -493,7 +517,7 @@ async def create_session(
                     ),
                 ),
                 parameters={
-                    "available_missions": available_missions,
+                    "available_missions": {},
                     "session_id": session_id,
                     "repl_guidance_override": (
                         "## REPL\n\n"

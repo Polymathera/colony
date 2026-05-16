@@ -87,3 +87,172 @@ async def test_create_agent_passes_through_typed_metadata_unchanged(
 
     forwarded = cap._resolve_class.return_value.bind.call_args.kwargs["metadata"]
     assert forwarded is original
+
+
+# ---------------------------------------------------------------------------
+# _resolve_class fallback to L1-A discovered agent registry
+#
+# Stage A (cps/STAGE_A_L1A_DYNAMIC_DISCOVERY_PLAN.md): L4 coordinator
+# classes authored under <monorepo>/.colony/agents/<file>.py are loaded
+# by L1-A's discover_agents into a dict keyed by class short-name, but
+# the loader keeps them out of sys.modules — so the canonical
+# ``importlib.import_module`` path in _resolve_class cannot find them.
+# create_agent threads the parent agent's discovered_extensions.agents
+# through _resolve_class as ``fallback_registry``; these tests pin the
+# resolution semantics so the L4-via-chat path stays working.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_class_imports_pip_installed_class() -> None:
+    """The primary path: a fully-qualified path to a pip-installed
+    class resolves via ``importlib.import_module`` regardless of any
+    fallback registry."""
+
+    cls = AgentPoolCapability._resolve_class(
+        "polymathera.colony.agents.models.AgentMetadata",
+    )
+    assert cls is AgentMetadata
+
+
+def test_resolve_class_falls_back_to_registry_on_import_failure() -> None:
+    """When ``importlib.import_module`` raises ``ImportError`` (the
+    L4 case — module is not in sys.modules), _resolve_class looks up
+    the class short-name in ``fallback_registry`` and returns the
+    matching class."""
+
+    class _SyntheticL4Coordinator:
+        """Stand-in for an L4 Agent subclass discovered via L1-A."""
+
+    cls = AgentPoolCapability._resolve_class(
+        "synthetic_l4_coordinator.SyntheticL4Coordinator",
+        fallback_registry={
+            "SyntheticL4Coordinator": _SyntheticL4Coordinator,
+        },
+    )
+    assert cls is _SyntheticL4Coordinator
+
+
+def test_resolve_class_reraises_when_fallback_misses() -> None:
+    """If both the importlib path and the fallback registry miss, the
+    original ImportError surfaces — the caller must see why resolution
+    failed (typo, missing extension, etc.) rather than a silently
+    cleared error."""
+
+    with pytest.raises((ImportError, AttributeError)):
+        AgentPoolCapability._resolve_class(
+            "definitely.not.a.module.NoSuchClass",
+            fallback_registry={
+                "DifferentClass": object,
+            },
+        )
+
+
+def test_resolve_class_no_fallback_kwarg_is_backwards_compatible() -> None:
+    """Pre-Stage-A callers (and the integration test pre-update) pass
+    only the FQ path. The new optional kwarg defaults to None and the
+    behaviour matches the pre-Stage-A static method."""
+
+    with pytest.raises((ImportError, AttributeError)):
+        AgentPoolCapability._resolve_class(
+            "definitely.not.a.module.NoSuchClass",
+        )
+
+
+def test_resolve_class_importlib_wins_over_fallback() -> None:
+    """If a name resolves via importlib AND is in the fallback
+    registry, the importlib result wins — pip-installed classes are
+    canonical; the fallback exists only to handle the gap, not to
+    override it."""
+
+    class _Decoy:
+        pass
+
+    cls = AgentPoolCapability._resolve_class(
+        "polymathera.colony.agents.models.AgentMetadata",
+        fallback_registry={"AgentMetadata": _Decoy},
+    )
+    assert cls is AgentMetadata
+    assert cls is not _Decoy
+
+
+@pytest.mark.asyncio
+async def test_create_agent_uses_l4_fallback_for_l4_coordinator(
+    monkeypatch,
+) -> None:
+    """End-to-end at the create_agent boundary: when the parent agent
+    has a RepoStateProvider whose discovered_extensions.agents contains
+    a class matching the requested agent_type's short-name, the spawn
+    path resolves to that class — even though the fully-qualified
+    module is not importable."""
+
+    class _SyntheticOPMMEGCoordinator:
+        @staticmethod
+        def bind(**kwargs):
+            return MagicMock(metadata=kwargs.get("metadata"))
+
+    discovered = MagicMock()
+    discovered.agents = {
+        "SyntheticOPMMEGCoordinator": _SyntheticOPMMEGCoordinator,
+    }
+
+    fake_provider = MagicMock()
+    fake_provider.discovered_extensions = discovered
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        agent = MagicMock()
+        agent.agent_id = "parent"
+        agent.syscontext = MagicMock()
+        agent.spawn_child_agents = AsyncMock(return_value=[
+            MagicMock(child_agent_id="child_xyz"),
+        ])
+        # Mimic Agent.get_capability_by_type by returning the fake
+        # provider for any RepoStateProvider lookup, None otherwise.
+        from polymathera.colony.design_monorepo import RepoStateProvider
+
+        def _gcbt(t):
+            return fake_provider if t is RepoStateProvider else None
+
+        agent.get_capability_by_type = _gcbt
+
+        cap = AgentPoolCapability(agent=agent)
+        result = await cap.create_agent(
+            agent_type=(
+                "synthetic_opm_meg_coordinator.SyntheticOPMMEGCoordinator"
+            ),
+            # Explicit metadata sidesteps the default-construction
+            # path that would try to validate ``self.agent.syscontext``
+            # (a MagicMock) into a real ExecutionContext.
+            metadata={"tenant_id": "t", "parent_agent_id": "parent"},
+        )
+
+    assert result["agent_id"] == "child_xyz"
+    assert result["created"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_agent_works_without_repo_state_provider(
+) -> None:
+    """No RepoStateProvider mounted (detached / non-monorepo agent) →
+    fallback registry is empty; pip-installed agent_type still
+    resolves via importlib unchanged."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        agent = MagicMock()
+        agent.agent_id = "parent"
+        agent.syscontext = MagicMock()
+        agent.spawn_child_agents = AsyncMock(return_value=[
+            MagicMock(child_agent_id="child_xyz"),
+        ])
+        agent.get_capability_by_type = lambda _t: None
+
+        cap = AgentPoolCapability(agent=agent)
+        result = await cap.create_agent(
+            agent_type="polymathera.colony.agents.base.Agent",
+            metadata={"tenant_id": "t", "parent_agent_id": "parent"},
+        )
+
+    assert result["created"] is True
