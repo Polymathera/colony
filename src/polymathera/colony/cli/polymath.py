@@ -165,10 +165,6 @@ class MissionType(str, Enum):
 # ``polymath cluster run-mission`` invocation sees the same set the
 # chat-driven ``SessionAgent`` does.
 #
-# The hardcoded ``MISSION_REGISTRY`` dict is re-exported under the
-# historical name purely for backwards-compatibility with downstream
-# imports (e.g. ``web_ui.backend.routers.jobs``); new code should
-# import :func:`get_mission_registry` instead.
 from polymathera.colony.agents.mission_registry import (  # noqa: E402
     get_mission_registry,
 )

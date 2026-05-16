@@ -141,3 +141,68 @@ def test_cli_polymath_resolve_class_delegates_to_canonical_resolver() -> None:
         fallback_registry={"SyntheticAgent": _SyntheticAgent},
     )
     assert cls is _SyntheticAgent
+
+
+# ---------------------------------------------------------------------------
+# Import-isolation regression. CI hit this on 2026-05-16 when an editor
+# stripped a since-it-was-no-longer-used ``MISSION_REGISTRY`` re-export
+# from ``cli.polymath`` — and ``mission_registry.get_mission_registry``
+# (which lazy-imported it through that re-export) started failing only
+# under cold-start. Local subset sweeps masked the bug because some
+# earlier test had populated the cli.polymath module namespace.
+#
+# The fix moved the import in ``mission_registry`` to the source-of-
+# truth module (``agents.configs``). This regression test runs the
+# whole chain in a fresh subprocess so import-order masking can't hide
+# a repeat.
+# ---------------------------------------------------------------------------
+
+
+def test_get_mission_registry_works_from_cold_start() -> None:
+    """Spawn a fresh Python and call :func:`get_mission_registry`
+    with no other imports having run first. The chain must be self-
+    contained — no dependency on any sibling module's load state."""
+    import subprocess
+    import sys
+
+    script = (
+        "from polymathera.colony.agents.mission_registry import "
+        "get_mission_registry; "
+        "reg = get_mission_registry(); "
+        "assert isinstance(reg, dict) and reg, "
+        "f'empty / wrong type: {type(reg).__name__}={reg!r}'; "
+        "print('OK', len(reg))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"cold-start get_mission_registry() failed:\n"
+        f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    )
+
+
+def test_resolve_class_works_from_cold_start() -> None:
+    """Same import-isolation check for :func:`resolve_class`. Spawning
+    a real spawn from a REST endpoint or the CLI starts cold; we have
+    to guarantee the chain is well-formed without relying on any
+    other module having been loaded."""
+    import subprocess
+    import sys
+
+    script = (
+        "from polymathera.colony.agents.class_resolver import resolve_class; "
+        "from polymathera.colony.agents.models import AgentMetadata; "
+        "cls = resolve_class('polymathera.colony.agents.models.AgentMetadata'); "
+        "assert cls is AgentMetadata, f'wrong class: {cls}'; "
+        "print('OK')"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"cold-start resolve_class() failed:\n"
+        f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    )

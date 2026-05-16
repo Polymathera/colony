@@ -79,11 +79,7 @@ def get_mission_registry() -> dict[str, dict[str, Any]]:
     plugin doesn't poison the whole registry.
     """
 
-    # Lazy import to avoid the cli/polymath <-> agents circular
-    # import (cli/polymath itself imports from polymathera.colony.agents
-    # at module top, so the agents subpackage cannot top-level import
-    # cli/polymath).
-    from polymathera.colony.cli.polymath import MISSION_REGISTRY
+    from polymathera.colony.agents.configs import MISSION_REGISTRY
 
     merged: dict[str, dict[str, Any]] = {
         key: dict(value) for key, value in MISSION_REGISTRY.items()
