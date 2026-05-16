@@ -704,8 +704,8 @@ Defer until Phase 1+2 ship and we have throughput data.
 
 ## 11. Open questions
 
-1. ~~**Marker license**.~~ **Resolved 2026-05-08 (decision #6).** Marker stays behind a `knowledge_marker` poetry extra; not in the default `colony:local` image. Docling (MIT) and MinerU (AGPL-3.0) ship by default.
-2. ~~**Chunker boundary preservation for markdown**.~~ **Direction locked 2026-05-08 (decision #7).** Subclass `ProseChunker` into a `MarkdownChunker` that treats fenced code, GFM tables, and `$...$` math as atomic units. Implementation deferred to iteration 2 — Mistral OCR emits one section per page so markdown blocks stay within section boundaries today, and the paragraph-aware ProseChunker is sufficient for the iteration-1 smoke test (verified by `test_chunker_figures.py::test_prose_chunker_propagates_figure_ids_per_chunk`).
+1. **Marker license**. **Resolved 2026-05-08 (decision #6).** Marker stays behind a `knowledge_marker` poetry extra; not in the default `colony:local` image. Docling (MIT) and MinerU (AGPL-3.0) ship by default.
+2. **Chunker boundary preservation for markdown**. **Direction locked 2026-05-08 (decision #7).** Subclass `ProseChunker` into a `MarkdownChunker` that treats fenced code, GFM tables, and `$...$` math as atomic units. Implementation deferred to iteration 2 — Mistral OCR emits one section per page so markdown blocks stay within section boundaries today, and the paragraph-aware ProseChunker is sufficient for the iteration-1 smoke test (verified by `test_chunker_figures.py::test_prose_chunker_propagates_figure_ids_per_chunk`).
 3. **Mistral OCR rate limits**. The cookbook claims ~2,000 pages/min
    but the public tier has unspecified rate caps. Phase 1 stays
    sequential per-doc and parallel across docs; revisit if

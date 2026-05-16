@@ -15,9 +15,12 @@ behaviour.
 ## Schema
 
 ```yaml
-schema_version: 1
+schema_version: 2
 
-sources:
+# VCM mapping — declares what the framework pages into the Virtual
+# Context Manager. One row per source; each becomes an
+# ``mmap_application_scope`` call.
+vcm_sources:
   # 1) Code subtree, with build artifacts excluded. Override the
   #    deployment's MmapConfig defaults for this row only — finer-
   #    grained pages keep semantic search precise on hot code.
@@ -30,10 +33,13 @@ sources:
     flush_threshold: 8        # smaller groups → smaller pages
     flush_token_budget: 2048
 
-  # 2) Literature directory — PDFs go through the chunker.
-  - name: literature
+  # 2) Literature directory — PDFs go through the chunker. Note:
+  #    being in vcm_sources only paginates these into VCM; KB
+  #    ingestion is a separate concern handled by knowledge_sources
+  #    below.
+  - name: literature-paged
     type: literature
-    start_dir: literature/
+    start_dir: literature/promoted/
     chunk_target_tokens: 800
 
   # 3) Frozen external dependency, declared as a submodule. Pinned
@@ -46,28 +52,47 @@ sources:
     static: true
     pinned: true
 
-# Each row carries an explicit destination via ``ingest_to``.
-# ``knowledge_base`` (default) ingests via the process-singleton
-# Ingestor; ``vcm`` is documentation-only — it records that this
-# path has been promoted to VCM by a sources: row above and must
-# not be KB-ingested.
-knowledge_routing:
-  - paths: ["literature/curated/**/*.pdf"]
-    ingest_to: knowledge_base    # default; explicit for clarity
+# KB ingestion — declares what the framework feeds through the
+# process-singleton Ingestor into the knowledge base. Independent of
+# vcm_sources: presence here means "ingest these files into the KB";
+# absence means "don't." A single path may appear in both lists; VCM
+# mapping and KB ingestion are orthogonal.
+#
+# Each named row is one of two shapes:
+#   - LOCAL  (paths set, acquirer unset): glob bundle on disk
+#   - REMOTE (acquirer + destination set, paths unset): fetcher
+#       writes a file into destination/, materialiser ingests it
+knowledge_sources:
+  # LOCAL bundle — files already committed under literature/curated/.
+  - name: curated-papers
+    paths: ["literature/curated/**/*.pdf"]
     profile: scientific_paper
+    tier: research_paper
 
-  - paths: ["standards/**/*.pdf"]
-    # ingest_to omitted ⇒ knowledge_base
+  # LOCAL bundle — standards docs.
+  - name: standards
+    paths: ["standards/**/*.pdf"]
+    profile: standard_clause
+    tier: standard
 
-  - paths: ["literature/promoted/**/*.pdf"]
-    ingest_to: vcm               # promoted — KB materialiser skips it
+  # REMOTE bundle — arXiv fetch. ``destination`` is the repo-root-
+  # relative directory the acquirer writes the fetched PDF into; the
+  # written file is committed alongside the sidecar so a re-run
+  # avoids the download.
+  - name: foundational-paper
+    acquirer:
+      method: arxiv_id
+      args: {arxiv_id: "2407.12345"}
+    destination: literature/acquired/
+    profile: scientific_paper
+    tier: research_paper
 ```
 
-`schema_version` is required and currently `1`. Unknown values fail
-loud at load time. Extra fields on a source row are rejected
+`schema_version` is required and currently `2`. Unknown values fail
+loud at load time. Extra fields on any row are rejected
 (`extra: forbid`) so a typo is reported instead of silently ignored.
 
-## Source rows
+## VCM source rows (`vcm_sources:`)
 
 Every row produces one `mmap_application_scope` call. The kwargs are:
 
@@ -137,93 +162,58 @@ else.
 Rows that omit any of these three knobs inherit the deployment's
 base `MmapConfig` for those fields.
 
-## Knowledge routing rows
+## Knowledge source rows (`knowledge_sources:`)
+
+Each row is a **named bundle** of either local files (`paths`) or a remote acquirer (`acquirer` + `destination`). One row → one ingestion target the operator can enable / disable from the dashboard's checkbox list.
 
 | Field | Required | Notes |
 |---|---|---|
-| `paths` | yes | List of gitignore-style globs, evaluated relative to the repo root. |
-| `ingest_to` | no | `"knowledge_base"` (default) or `"vcm"`. See "How `ingest_to` works" below. |
-| `profile` | no | Forwarded to `Ingestor.ingest_file(data_type_override=...)` so the chunks land with a meaningful `data_type` (e.g., `scientific_paper`). Ignored when `ingest_to: vcm`. |
+| `name` | yes | Human-readable label. Surfaces as a checkbox in the Design Monorepo tab; also the filter key for `materialize_knowledge_sources(enabled_sources=[…])`. |
+| `paths` | one of `paths` / `acquirer` | List of gitignore-style globs, evaluated relative to the repo root. Mutually exclusive with `acquirer`. |
+| `acquirer` | one of `paths` / `acquirer` | Remote-source fetcher. Mutually exclusive with `paths`. Shape: `{method: <strategy_key>, args: {…}}`. Strategy keys come from the `AcquirerStrategy` registry (e.g. `arxiv_id`, `doi`, `http_url`). |
+| `destination` | required when `acquirer` is set | Repo-root-relative directory the acquirer writes its fetched file into. Forbidden when `acquirer` is unset. |
+| `profile` | no | `data_type` label propagated to ingested chunks (e.g., `scientific_paper`, `standard_clause`, `component_datasheet`). Forwarded to `Ingestor.ingest_file(data_type_override=...)`. |
+| `tier` | no | Corpus tier label (`research_paper`, `standard`, `datasheet`, `patent`, `textbook`, `untiered`). Used by tiered retrieval profiles. |
 
-`knowledge_routing` is **the user's seed** for the knowledge base —
-it ingests files already committed to the monorepo. It does not
-overlap with chat-driven acquisition (`BulkAcquisitionCapability`),
-which adds *new external* sources at the agent's request.
+`knowledge_sources` is **the user's seed** for the knowledge base — it ingests files already in the monorepo (LOCAL) or pulls new files in (REMOTE). It is independent of `vcm_sources`: a file can appear in both lists (VCM gets cache-aware chunks for runtime planning, KB gets retrievable chunks for retrieval) or neither.
 
 ### Triggering ingestion from chat
 
-`RepoStateProvider.ingest_repo_map_literature` is the chat-callable
-wrapper. The `SessionAgent` picks it when the user says "ingest
-literature from `repo_map.yaml`" / "process the design monorepo". The
-action `git fetch origin && git reset --hard origin/<branch>` on
-the per-agent clone (so operator edits pushed from the host land
-before ingestion runs), then walks `knowledge_routing:` rows whose
-`ingest_to` is `knowledge_base`. `vcm`-routed rows are silently
-skipped per the materialiser's contract. Returns `{"ingested":
-[<source_uri>, …], "count": N}`.
+`RepoStateProvider.ingest_repo_map_literature` is the chat-callable wrapper. The `SessionAgent` picks it when the user says "ingest literature from `repo_map.yaml`" / "process the design monorepo". The action:
 
-Bulk acquisition of *external* sources (URLs / arXiv / DOI) is a
-separate flow via `BulkAcquisitionCapability.acquire_manifest(path)`
-which takes an operator-authored `CorpusManifest` YAML at any path.
-A reasonable convention for operators who want manifests inside the
-design monorepo is `.colony/corpora/<name>.manifest.yaml` (multiple
-manifests per repo allowed; each carries its own `domain` label).
-The framework does not enforce this layout — the action takes the
-path explicitly.
+1. Refreshes the per-agent clone against `origin` (so operator edits pushed from the host land before ingestion runs).
+2. Reads the **enabled subset** of `knowledge_sources:` rows — operators tick rows via the Design Monorepo tab's checkbox list, persisted server-side per colony.
+3. For each enabled LOCAL row: walks `paths` globs, ingests every match through the process-singleton `Ingestor`.
+4. For each enabled REMOTE row: runs the acquirer (writes the fetched file into `destination/`, commits the file + an `.ingested/<stem>/` sidecar so re-runs avoid the download), then ingests the written file.
 
-### How `ingest_to` works
+Returns `{"ingested": [<source_uri>, …], "count": N, "errors": [...]}`.
 
-`ingest_to` is the single declarative field that names where a glob
-of literature paths should land. There are two values:
+`BulkAcquisitionCapability` — the separate "fetch this URL into the KB" surface that used to take a standalone `CorpusManifest` YAML — has been **folded into this schema** (commit `7e54ebb1`). The same `knowledge_sources:` list carries both LOCAL bundles AND REMOTE acquirer bundles; one source of truth, one materialiser, one dashboard checkbox list. No separate manifest file.
 
-- **`knowledge_base`** (default for new literature). The materialiser
-  walks every matching file and feeds it through the process-singleton
-  `Ingestor` — the same backend curation and retrieval share, so the
-  ingested chunks are immediately available to the `SessionAgent`'s
-  retrieval surface in the next chat turn.
+## Separation: VCM mapping vs. KB ingestion
 
-- **`vcm`**. The materialiser **skips** these rows on the KB side. The
-  row exists in `knowledge_routing` only so that a single human-readable
-  list of literature paths is the source of truth for routing
-  decisions. The actual VCM mapping for those paths still comes from a
-  `LiteratureContextPageSource` (or other) row under `sources:` —
-  `knowledge_routing` and `sources:` answer different questions:
-  *what does the KB ingest?* vs. *what does VCM map?*.
+The schema split is intentional. `vcm_sources` and `knowledge_sources` answer different questions:
 
-#### Why a row can stay in `knowledge_routing` after promotion
+| | `vcm_sources` | `knowledge_sources` |
+|---|---|---|
+| **Question** | What does VCM page into its cache for runtime planning? | What does the Ingestor add to the searchable knowledge base? |
+| **Consumer** | `mmap_application_scope` → VCM page graph → agent's working set | `Ingestor` → vector store → `KnowledgeRetrievalCapability` |
+| **Cost shape** | Page faults, KV cache slots | Embedding tokens, vector store size |
+| **Triggered by** | `materialize_repo_map` (CLI / dashboard "Map Repo") | `ingest_repo_map_literature` (chat-driven, per the enabled checkbox list) |
 
-A `vcm` row records intent, not action. The dashboard's "Design
-Monorepo" tab promotes a file from KB → VCM in two co-ordinated edits:
-
-1. Flip the row's `ingest_to` from `knowledge_base` to `vcm`.
-2. Add the path (or its enclosing directory) to a literature
-   `sources:` row so VCM actually maps it.
-
-Both edits are committed as one commit to the design monorepo, so a
-reviewer reading the YAML alone can see the routing for every
-literature path — there is no implicit-by-list-membership decision
-hidden between the two lists.
-
-A file can simultaneously be `ingest_to: knowledge_base` *and* live
-under a literature `sources:` row — VCM gets the cache-aware chunks,
-KB gets the retrievable chunks, and both share the same
-`ProseChunker` boundaries via the
-[knowledge deps singleton](knowledge-capabilities.md#process-singleton-deps).
+A file can appear in either list, both, or neither — the framework does not infer one from the other. Putting a literature directory in `vcm_sources` paginates it for runtime planning; adding the same paths under `knowledge_sources` ingests them for retrieval; doing both gets you both at the same `ProseChunker` boundaries (the [knowledge deps singleton](knowledge-capabilities.md#process-singleton-deps) shares them).
 
 ## Default fallback (no map file)
 
 ```yaml
-schema_version: 1
-sources:
+schema_version: 2
+vcm_sources:
   - name: default
     type: git_repo
+knowledge_sources: []
 ```
 
-This is what `RepoMap.default_for_unmapped_repo()` returns. The
-single source uses the caller-supplied `origin_url`, `branch`,
-`commit`, and `scope_id` directly — i.e., the mapping is identical
-to the historical single-`mmap_application_scope` behaviour, so
-existing call sites do not change.
+This is what `RepoMap.default_for_unmapped_repo()` returns. The single `vcm_sources` row uses the caller-supplied `origin_url`, `branch`, `commit`, and `scope_id` directly — i.e., the mapping is identical to the historical single-`mmap_application_scope` behaviour, so existing call sites do not change. `knowledge_sources` defaults to empty so existing repos without an explicit map do not silently start ingesting.
 
 ## End-to-end flow
 
@@ -232,47 +222,42 @@ CLI / dashboard
    └─► materialize_repo_map(vcm_handle, origin_url, branch, commit, base_scope_id, mmap_config)
          ├─► clone_or_retrieve_repository(origin_url, branch, commit)
          ├─► RepoMap.load(repo_root)        # parses .colony/repo_map.yaml or returns default
-         ├─► for spec, scope_id in zip(repo_map.sources, scope_ids):
+         ├─► for spec, scope_id in zip(repo_map.vcm_sources, scope_ids):
          │     await vcm_handle.mmap_application_scope(**spec.to_mmap_kwargs(...))
-         ├─► materialize_knowledge_routing(repo_map, repo_root)
-         │     # ingest matching files via the process-singleton Ingestor
          └─► returns one MmapResult per source
+
+chat (SessionAgent calls RepoStateProvider.ingest_repo_map_literature)
+   └─► materialize_knowledge_sources(repo_map, repo_root, enabled_sources=[…])
+         ├─► for each enabled knowledge_sources row:
+         │     - LOCAL  → walk paths globs, ingest each match through Ingestor
+         │     - REMOTE → run acquirer (writes to destination/), ingest the file
+         └─► returns {"ingested": [...], "count": N, "errors": [...]}
 ```
 
-A failure on a single source is logged and skipped — the rest still
-materialise — so a typo in one row does not block the whole map.
+A failure on a single source is logged and skipped — the rest still materialise / ingest — so a typo in one row does not block the whole map.
 
 ## Where it plugs in
 
-- **CLI** (`polymath.py:run_integration_test`) — replaces a single
-  `mmap_application_scope` call with `materialize_repo_map`.
+- **CLI** (`polymath.py:run_integration_test`) — replaces a single `mmap_application_scope` call with `materialize_repo_map`.
 - **Dashboard** (`/api/v1/vcm/map-repo`) — same.
+- **Chat-driven ingestion** (`SessionAgent` → `RepoStateProvider.ingest_repo_map_literature`) — calls `materialize_knowledge_sources` with the user-toggled enabled-sources subset.
 
-Other callers of `mmap_application_scope` (e.g., custom CLI tools)
-can adopt the materialiser by importing
-`polymathera.colony.design_monorepo.materialize.materialize_repo_map`.
+Other callers of `mmap_application_scope` (e.g., custom CLI tools) can adopt the materialiser by importing `polymathera.colony.design_monorepo.materialize.materialize_repo_map`.
 
 ## Two ingestion paths into the KB
 
+Both write through the same process-singleton `Ingestor`, so chunks from either path coexist in one KB:
+
 | Path | Trigger | Source |
 |---|---|---|
-| `knowledge_routing` rules in `repo_map.yaml` | Materialiser runs (CLI / dashboard `Map Repo`) | Files **already committed** to the design monorepo. Used to seed the KB with literature the user wants the `SessionAgent` to be able to retrieve from day one. |
-| `BulkAcquisitionCapability.acquire_manifest` / `KnowledgeCuratorCapability.ingest_raw` | Agent action triggered from chat | **New external** sources — papers the `SessionAgent` decides to acquire while answering a question. |
+| `knowledge_sources:` LOCAL row | `ingest_repo_map_literature` (chat) or `materialize_knowledge_sources` (programmatic) | Files **already committed** to the design monorepo. Used to seed the KB with literature the user wants the `SessionAgent` to be able to retrieve from day one. |
+| `knowledge_sources:` REMOTE row (`acquirer` + `destination`) | same | **New external** sources — papers / standards / datasheets pulled in via an `AcquirerStrategy` (`arxiv_id`, `doi`, `http_url`, …). The fetched file is written into `destination/`, committed alongside the `.ingested/<stem>/` sidecar so re-runs avoid the download. |
 
-Both write through the same process-singleton `Ingestor`, so chunks
-from the two paths coexist in one KB.
+What used to be a separate `BulkAcquisitionCapability.acquire_manifest(<CorpusManifest>)` surface is now folded into the same `knowledge_sources:` list (commit `7e54ebb1`) — one schema, one materialiser, one dashboard checkbox list.
 
-## Promoting a file from KB → VCM
+## Promoting a file from KB-only to KB + VCM
 
-The "Design Monorepo" tab edits a single field — `ingest_to` — to
-mark a `knowledge_routing` row as `vcm`, and at the same time adds
-the path to a literature `sources:` row so the next materialisation
-run produces VCM chunks instead of KB chunks. The KB chunks already
-ingested under the previous `knowledge_base` route stay until they
-are re-ingested or deleted; the dashboard surfaces a per-row
-"clear KB chunks" action when the user wants the old chunks gone.
-(PUT-and-commit is deferred — see the "Design Monorepo" tab
-section below.)
+To take a file the KB already retrieves and also paginate it into VCM for runtime planning: keep its existing `knowledge_sources:` row AND add a `vcm_sources:` row whose `start_dir` / `paths` covers the file. The two rows are independent — neither edit removes the other's effect. The next `materialize_repo_map` run paginates the file into VCM; the next `ingest_repo_map_literature` run leaves the KB chunks untouched. A `data_type` mismatch between the two paths cannot happen because each list carries its own `profile` field.
 
 ## Git LFS
 
@@ -386,7 +371,7 @@ The tab and the landing page together call six endpoints:
 | `GET /api/v1/repo-map` | tab | Parsed `repo_map.yaml` (or default fallback) + raw YAML text. |
 | `GET /api/v1/repo-map/tree` | tab | Bounded directory tree (skips `.git/`, capped by `max_depth` + `max_nodes`). |
 | `POST /api/v1/repo-map/preview` | tab | Dry-run the materialiser — returns the exact `mmap_application_scope` kwargs the cluster would issue, without executing them. |
-| `POST /api/v1/vcm/map` | tab | Trigger the actual mapping in the background. The request body carries `enabled_sources` — a subset of `sources:` rows the user ticked. Paging knobs come from `repo_map.yaml`, not the request. |
+| `POST /api/v1/vcm/map` | tab | Trigger the actual mapping in the background. The request body carries `enabled_sources` — a subset of `vcm_sources:` rows the user ticked. Paging knobs come from `repo_map.yaml`, not the request. |
 
 In-tab workflow (after a session is active):
 
@@ -394,11 +379,13 @@ In-tab workflow (after a session is active):
 2. Click **Load** to clone (idempotent — same `GitFileStorage` path
    the page sources use) and render:
    - left: the file tree (collapsible);
-   - right top: per-source checkboxes (every `sources:` row from the
+   - right top: per-source checkboxes (every `vcm_sources:` row from the
      parsed `repo_map.yaml`, ticked by default) plus the raw YAML for
      reference. Each checkbox shows the row's type, `start_dir`, and
      any per-source paging knobs (`flush_threshold`, `flush_token_budget`,
-     `pinned`, or `chunk_target_tokens` for literature).
+     `pinned`, or `chunk_target_tokens` for literature). A separate
+     `knowledge_sources:` checkbox list (LOCAL + REMOTE rows) governs
+     chat-driven KB ingestion via `ingest_repo_map_literature`.
    - right bottom: the dry-run preview after **Preview mmap calls**.
 3. Untick any source the user does NOT want mapped right now.
 4. Click **Preview mmap calls** to see the per-source `scope_id` +

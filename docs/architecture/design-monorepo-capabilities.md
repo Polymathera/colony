@@ -52,11 +52,20 @@ PUT  /api/v1/colonies/{colony_id}/design-monorepo
 
 ## The three capabilities
 
-| Class | Role | Example actions |
+| Class | Role | Actions |
 |---|---|---|
-| `RepoStateProvider` | Read-only query surface | `get_repo_state`, `find_existing_tool`, `list_recent_decisions`, `diff_against_checkpoint`, `get_branch_topology` |
-| `DesignCheckpointer` | Write side: branches, checkpoints, merges | `checkpoint_state`, `restore_checkpoint`, `fork_design`, `merge_design`, `cherry_pick_decisions`, `commit_state`, `tag_checkpoint`, `list_checkpoints`, `list_forks`, `diff_design` |
-| `ToolBuilder` | Scaffold a new tool into `tools/<purpose>/<name>/` | `bootstrap_repo` |
+| `RepoStateProvider` | Read-only query + bootstrap surface | `get_repo_state`, `find_existing_tool`, `list_recent_decisions`, `diff_against_checkpoint`, `get_branch_topology`, `list_packages`, `list_design_artifacts`, `summarize_project_layout`, `read_file`, `read_lines`, `list_directory`, `stat_path`, `grep_content`, `git_log`, `git_status`, `diff_working_tree`, `ingest_repo_map_literature`, `initialize_repo_map` |
+| `DesignCheckpointer` | Write side: branches, checkpoints, merges, tags, remote ops | `checkpoint_state`, `restore_checkpoint`, `fork_design`, `merge_design`, `cherry_pick_decisions`, `commit_state`, `tag_checkpoint`, `list_checkpoints`, `list_forks`, `diff_design`, `create_branch`, `delete_branch`, `checkout_branch`, `stash_save`, `stash_pop`, `list_stashes`, `rebase_onto`, `create_tag`, `delete_tag`, `fetch_remote`, `pull_remote`, `push_remote` |
+| `ToolBuilder` | Scaffold extensions under `.colony/` and tool repos under `tools/<purpose>/<name>/` | `bootstrap_repo`, `bootstrap_plugin`, `bootstrap_agent`, `bootstrap_deployment`, `bootstrap_tool_adapter`, `bootstrap_profile` |
+
+Notes:
+
+- The `read_*` / `list_*` / `git_*` / `diff_*` ops on `RepoStateProvider` are pure reads; they do not commit and do not respect protected-branch gating. They're the primary way an agent inspects the working tree before deciding what to write.
+- `initialize_repo_map` is the write-side bootstrap for an empty design monorepo — seeds `.colony/repo_map.yaml` from the canonical template and commits it through the standard attribution chain. Idempotent: never overwrites an operator-edited file.
+- `ingest_repo_map_literature` walks the `knowledge_sources` rows declared in `repo_map.yaml` and ingests every matching file into the knowledge base — chat-driven bulk acquisition (see [`architecture/repo-map.md`](repo-map.md)).
+- Five of the `DesignCheckpointer` actions gate through human approval when targeting a protected branch (`merge_design`, `push_remote`, `pull_remote` with rewriting strategies, `cherry_pick_decisions`, `rebase_onto`). They return a typed [`ProtectedOpResult`](../../src/polymathera/colony/design_monorepo/models.py) — see [`guides/protected-branches.md`](../guides/protected-branches.md).
+- Every commit-producing action threads through `_commit_attribution` → `commit_with_identity`, so the colony's configured `commit_principal` / `commit_co_author` (see [`guides/git-attribution.md`](../guides/git-attribution.md)) lands on every commit uniformly.
+- The `ToolBuilder.bootstrap_<surface>` actions take an optional `scaffold=<id>` + `template_vars=...` to dispatch to a CPS-shaped registered scaffold instead of the blank stub — see [`design-monorepo-authoring.md`](design-monorepo-authoring.md).
 
 `DesignCheckpointer` is also event-driven: it auto-tags an
 `auto_quiescence_<iso8601>` checkpoint when the convergence runtime

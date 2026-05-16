@@ -100,7 +100,12 @@ nav:
     - 'Capability — User Plugins': architecture/user-plugin-capability.md
     - 'Capability — GitHub': architecture/github-capability.md
     - 'Capability — Design Monorepo': architecture/design-monorepo-capabilities.md
+    - 'Design Monorepo — L1-E Extension Authoring': architecture/design-monorepo-authoring.md
+    - 'Design Monorepo — L1-A Extension Discovery': architecture/design-monorepo-extensions.md
+    - 'Design Monorepo — L1-F Project Substance Authoring': architecture/project-substance-authoring.md
     - 'Capability — Knowledge': architecture/knowledge-capabilities.md
+    - Multimodal PDF Ingestion: architecture/multimodal-pdf-ingestion.md
+    - 'Runtime — Image Extensions': architecture/image-extensions.md
     - Blackboard Pattern: architecture/blackboard.md
     - Hook System: architecture/hook-system.md
     - Game Patterns: architecture/game-engine.md
@@ -119,6 +124,8 @@ nav:
     - Web Dashboard: guides/web-dashboard.md
     - Capability Operator Setup: guides/capability-setup.md
     - Registering a Mission: guides/registering-a-mission.md
+    - Git Commit Attribution: guides/git-attribution.md
+    - Protected Branches & Approval: guides/protected-branches.md
     - Publishing & CI/CD: guides/publishing.md
   - API Reference:
     - reference/index.md

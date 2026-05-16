@@ -31,6 +31,10 @@ Action kinds come from [`PROJECT_ACTION_KINDS`](../../src/polymathera/colony/des
 | `insert_lines(path, after_line, content)` | Insert (`after_line=0` for prepend, `=N` for append) | resulting file |
 | `delete_lines(path, start_line, end_line)` | Drop inclusive 1-indexed range | resulting file |
 | `replace_lines(path, start_line, end_line, content)` | Replace inclusive 1-indexed range | resulting file |
+| `make_directory(path)` | Create a directory + `.gitkeep` placeholder so an empty dir round-trips through git | none (placeholder is empty) |
+| `remove_directory(path)` | Recursively remove a directory | none (everything is gone) |
+| `copy_file(src, dst)` | Copy a file (`dst` must not exist) | resulting file (`dst`) |
+| `set_file_executable(path, executable)` | Toggle the POSIX executable bit on a file (e.g. for scripts under `tools/`); pure metadata change, no content edit | none (chmod-only) |
 
 **Guiding principle** ([`CPS_ALIGNMENT_PLAN.md`](../../../cps/CPS_ALIGNMENT_PLAN.md)): a finite, validatable set of low-level operations beats either (a) shell access or (b) a sprawling catalog of high-level / language-specific ops. Higher-level outcomes — "add a Python module with tests and a dossier section" — are *sequences* of these emitted by the planner; CPS-shaped planner prompts live in L2-G (PR 6).
 

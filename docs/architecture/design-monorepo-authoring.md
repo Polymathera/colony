@@ -95,6 +95,69 @@ state.discovered_extensions.agents          # {"Planner": <class>} — cache aut
 
 Templates live under [`scaffolds/monorepo_extensions/`](../../src/polymathera/colony/design_monorepo/scaffolds/monorepo_extensions/) and use `string.Template` `$variable` substitution (matching the existing `render_template` convention — Jinja was the alignment plan's wording, but consistency with the existing renderer wins). They are deliberately minimal: agents and CPS-shaped L2-F overrides fill in real bodies via `ProjectAuthoringCapability` (L1-F, PR 3) once the file is on disk.
 
+## Plugging domain-shaped scaffolds in — `ExtensionScaffold` registry
+
+The blank `bootstrap_*` templates above are intentionally generic — they produce empty stubs. A domain package (`polymathera-cps`, future `polymathera-racer`, third-party extension distributions) registers richer scaffolds — an FDA-regulatory `RegulatoryAgent` subclass instead of a blank `Agent`, a CalculiX tool-adapter instead of a blank `ToolAdapter` stub — through one registry. The caller selects them by id at the same `bootstrap_*` call.
+
+### Registering a scaffold
+
+[`colony.design_monorepo.scaffolds.registry`](../../src/polymathera/colony/design_monorepo/scaffolds/registry.py) holds the process-singleton registry. A domain package registers each of its scaffolds at startup from its [`polymathera.config_components`](../../src/polymathera/colony/distributed/config/extensions.py) entry-point hook:
+
+```python
+# polymathera-cps's register_components() hook
+from polymathera.colony.design_monorepo.scaffolds import (
+    ExtensionScaffold,
+    register_extension_scaffold,
+)
+
+
+def register_cps_scaffolds() -> None:
+    register_extension_scaffold(
+        ExtensionScaffold(
+            scaffold_id="agent_regulatory",
+            surface="agents",
+            template_path=PKG_TEMPLATES / "agent_regulatory.py.tmpl",
+            required_vars=frozenset(
+                {"class_name", "framework_id", "engine_class"},
+            ),
+        ),
+    )
+    # ...register_extension_scaffold(...) per scaffold
+```
+
+`ExtensionScaffold` is a frozen dataclass:
+
+| Field | Meaning |
+|---|---|
+| `scaffold_id` | Caller-facing id (e.g. `"agent_regulatory"`). Single source of truth — referenced by tests, planner guidance, the `bootstrap_*` `scaffold=` kwarg. |
+| `surface` | The L1-E surface this scaffold targets (`agents`, `plugins`, `deployments`, `tools`, `profiles`). The bootstrap action validates that `scaffold.surface == <action's surface>` and refuses on mismatch. |
+| `template_path` | On-disk path to the template file. `string.Template` `$variable` substitution. |
+| `required_vars` | The `template_vars` keys the caller must supply (in addition to the renderer's defaults: `name`, `name_snake`, `name_dash`). Validated before any IO at render time. |
+
+Registration is validated at registration time: duplicate `scaffold_id`, missing template file, or unknown `surface` raises [`ExtensionScaffoldRegistryError`](../../src/polymathera/colony/design_monorepo/scaffolds/registry.py). A startup error beats a render-time error.
+
+### Calling a scaffold
+
+Every `bootstrap_*` action on `ToolBuilder` accepts an optional `scaffold=<id>` plus a `template_vars=<dict>` for the scaffold's `required_vars`. `scaffold=None` (the default) renders the blank L1-E template. With a scaffold id:
+
+```python
+await builder.bootstrap_agent(
+    "opm_meg_regulatory",
+    scaffold="agent_regulatory",
+    template_vars={
+        "class_name": "OPMMEGRegulatoryAgent",
+        "framework_id": "fda_510k",
+        "engine_class": "FDA510KFrameworkEngine",
+    },
+)
+```
+
+[`render_extension_scaffold`](../../src/polymathera/colony/design_monorepo/scaffolds/renderer.py) substitutes the variables and writes the result to the same `<surface>/<name>.<ext>` path the blank template would. Everything downstream is identical: same AST allow-list, same `commit_with_identity` attribution, same blackboard event, same L1-A discovery picks it up via `discovered_extensions.<surface>`.
+
+### Where the registration hook fires
+
+Domain packages (`polymathera-cps` and successors) declare a `polymathera.config_components` entry-point pointing at a `register_components()` callable. Colony's `ConfigurationManager.initialize()` walks the entry-point group at startup and calls each registered hook. CPS's hook calls `register_cps_scaffolds()` (and any other domain-specific registration); the scaffolds become available everywhere the package is pip-installed — same distribution mechanism as missions ([`registering-a-mission.md`](../guides/registering-a-mission.md)) and config components. No `polymathera-colony` change is required to add a new scaffold; the operator just installs the domain package (via the L1-G `cluster.extensions.packages` YAML knob in [`architecture/image-extensions.md`](image-extensions.md) or by adding it to the runtime image).
+
 ## Trust model
 
 L1-E writes are agent-authored. The AST allow-list is the write-time gate; the sandbox is the run-time gate; the `DesignCheckpointer`-style commit attribution is the audit gate. All three apply uniformly to agent and human authorship — discovery (L1-A) cannot tell them apart, so the write side must reject disallowed surfaces regardless of provenance. PR 3 extends the same pipeline to L1-F (`src/`/`tests/`); PR 5 will route CPS-shaped scaffolds through L1-E's `bootstrap_*` actions via [L2-F](../../../cps/CPS_ALIGNMENT_PLAN.md).
