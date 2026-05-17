@@ -97,7 +97,7 @@ def test_list_modes_returns_default_and_all_options(cap) -> None:
 
 
 def test_search_default_scoped_requires_source_prefix(cap) -> None:
-    # ScopedRetrievalAdapter declines a query with no source_prefix —
+    # ScopedRetrievalCapability declines a query with no source_prefix —
     # the capability must surface that as a normal RetrievalResult
     # (zero hits, reason in extra), not raise.
     result = _run(cap.search_knowledge(query="auth"))

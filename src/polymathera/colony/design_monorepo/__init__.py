@@ -92,6 +92,10 @@ from .registry import (
     upsert_tool,
     write_registry,
 )
+from .manifest_migrate import (
+    MigrationResult,
+    migrate_manifest,
+)
 
 
 __all__ = (
@@ -133,6 +137,9 @@ __all__ = (
     "load_registry",
     "upsert_tool",
     "write_registry",
+    # Manifest migration
+    "MigrationResult",
+    "migrate_manifest",
     # Client + bootstrap
     "DesignMonorepoClient",
     "DesignMonorepoError",

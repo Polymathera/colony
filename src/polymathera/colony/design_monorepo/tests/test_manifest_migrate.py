@@ -29,7 +29,7 @@ from polymathera.colony.design_monorepo.manifest import (
     DesignMonorepoManifest,
     ExtensionsConfig,
 )
-from polymathera.colony.tools.manifest_migrate import (
+from polymathera.colony.design_monorepo.manifest_migrate import (
     MigrationResult,
     migrate_manifest,
 )

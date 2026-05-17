@@ -1,4 +1,4 @@
-"""``GraphRetrievalAdapter`` — knowledge-graph query mode.
+"""``GraphRetrievalCapability`` — knowledge-graph query mode.
 
 Master §6.4 mode 3: cross-phase consistency-check / "tell me what
 depends on the lithium choice"-style queries. Runs a Cypher-like
@@ -22,10 +22,10 @@ from ...tools import (
 )
 from ..models import RetrievalHit, RetrievalQuery, RetrievalResult
 from ..stores.graph import GraphQueryResult, _node_id_for
-from .base import RetrievalAdapter
+from .base import RetrievalCapability
 
 
-class GraphRetrievalAdapter(RetrievalAdapter):
+class GraphRetrievalCapability(RetrievalCapability):
     mode = "graph"
     spec = ToolSpec(
         name="retrieve_graph",
@@ -103,4 +103,4 @@ def _result_from_graph(
     )
 
 
-__all__ = ("GraphRetrievalAdapter",)
+__all__ = ("GraphRetrievalCapability")

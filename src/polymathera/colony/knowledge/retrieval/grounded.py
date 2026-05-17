@@ -1,4 +1,4 @@
-"""``GroundedRetrievalAdapter`` — Tier 1–3 retrieval with enforced citations.
+"""``GroundedRetrievalCapability`` — Tier 1–3 retrieval with enforced citations.
 
 Master §6.4 mode 2: every hit must carry a verified ``CitationSpan``
 (non-empty ``source_uri`` + character span). The adapter forces
@@ -20,10 +20,10 @@ from ...tools import (
     ToolSpec,
 )
 from ..models import CorpusTier, RetrievalQuery, RetrievalResult
-from .base import RetrievalAdapter
+from .base import RetrievalCapability
 
 
-class GroundedRetrievalAdapter(RetrievalAdapter):
+class GroundedRetrievalCapability(RetrievalCapability):
     mode = "grounded"
     spec = ToolSpec(
         name="retrieve_grounded",
@@ -77,4 +77,4 @@ class GroundedRetrievalAdapter(RetrievalAdapter):
         )
 
 
-__all__ = ("GroundedRetrievalAdapter",)
+__all__ = ("GroundedRetrievalCapability")

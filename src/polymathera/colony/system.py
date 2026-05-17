@@ -345,12 +345,6 @@ async def get_llm_cluster(app_name: str | None = None) -> serving.DeploymentHand
     return await _get_deployment_by_name("llm_cluster", app_name, deployment_class=LLMCluster)
 
 
-async def get_tool_manager(app_name: str | None = None) -> serving.DeploymentHandle:
-    """Get tool manager deployment via serving."""
-    from .agents.tools import ToolManagerDeployment
-    return await _get_deployment_by_name("tool_manager", app_name, deployment_class=ToolManagerDeployment)
-
-
 async def get_vcm(app_name: str | None = None) -> serving.DeploymentHandle:
     """Get VCM deployment via serving."""
     from .vcm.manager import VirtualContextManager

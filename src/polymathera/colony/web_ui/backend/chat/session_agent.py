@@ -119,8 +119,8 @@ class SessionOrchestratorCapability(AgentCapability):
         if self._agent is None:
             # Detached mode: no agent blackboard to subscribe to.
             return
-        # First refresh of available_missions against the L4 design
-        # monorepo's ``.colony/missions/`` (if any). Runs in a thread
+        # First refresh of available_missions + available_tools against
+        # the L4 design monorepo's ``.colony/`` (if any). Runs in a thread
         # because the underlying lazy clone of the design monorepo is
         # blocking IO; we don't want to stall the event loop on a
         # multi-second git clone.
@@ -133,6 +133,16 @@ class SessionOrchestratorCapability(AgentCapability):
                 "SessionOrchestratorCapability: initial "
                 "available_missions refresh failed; planner will see "
                 "the static snapshot until the next user message",
+            )
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._refresh_available_tools,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "SessionOrchestratorCapability: initial "
+                "available_tools refresh failed; planner will see "
+                "no L4 tools until the next user message",
             )
         self._lifecycle_relay_task = asyncio.create_task(
             self._relay_policy_lifecycle_to_chat(),
@@ -239,6 +249,47 @@ class SessionOrchestratorCapability(AgentCapability):
             for atype, reg in merged.items()
         }
         self._agent.metadata.parameters["available_missions"] = available
+
+    def _refresh_available_tools(self) -> None:
+        """Rebuild ``self.agent.metadata.parameters["available_tools"]``
+        from the L4 design monorepo's
+        :func:`polymathera.colony.design_monorepo.registry.load_registry`
+        catalog.
+
+        The LLM planner reads this dict to know which tool capabilities
+        the agent CAN mount in a freshly-spawned worker
+        (``AgentPoolCapability.create_agent`` resolves the FQN via the
+        canonical ``class_resolver`` fallback registry). Entries with
+        empty ``capability_fqn`` are catalog-only stubs and are
+        omitted from the planner-visible dict — the planner cannot
+        mount what doesn't exist yet — but the same stub stays
+        discoverable to the ``BuildVsBuyCapability`` advisor through
+        ``RepoStateProvider.find_existing_tool``.
+
+        Synchronous + thread-safe for the same reasons as
+        :meth:`_refresh_available_missions`. Callers run this inside
+        ``loop.run_in_executor`` to avoid blocking the event loop on
+        the first lazy clone.
+        """
+        if self._agent is None:
+            return
+        from polymathera.colony.design_monorepo.extensions import (
+            get_l4_extensions,
+        )
+
+        snapshot = get_l4_extensions(self._agent)
+        available: dict[str, dict[str, str]] = {}
+        if snapshot is not None:
+            for name, entry in snapshot.tools.items():
+                if not entry.capability_fqn:
+                    continue
+                available[name] = {
+                    "purpose": entry.purpose,
+                    "location": entry.location,
+                    "capability": entry.capability,
+                    "capability_fqn": entry.capability_fqn,
+                }
+        self._agent.metadata.parameters["available_tools"] = available
 
     async def _relay_policy_lifecycle_to_chat(self) -> None:
         """Subscribe to policy lifecycle events on the agent's primary
@@ -949,6 +1000,14 @@ class SessionOrchestratorCapability(AgentCapability):
             logger.exception(
                 "SessionOrchestratorCapability: per-message "
                 "available_missions refresh failed; planner will see "
+                "the previous snapshot",
+            )
+        try:
+            self._refresh_available_tools()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "SessionOrchestratorCapability: per-message "
+                "available_tools refresh failed; planner will see "
                 "the previous snapshot",
             )
 

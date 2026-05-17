@@ -104,7 +104,7 @@ Every commit-producing capability action goes through the same `_commit_attribut
 | `DesignCheckpointer` | `tag_checkpoint`, `merge_design` (fast-forward + non-FF), `cherry_pick_decisions`, `commit_state`, `create_tag` |
 | `RepoStateProvider` | `initialize_repo_map` (commits the seeded `repo_map.yaml`) |
 | `ProjectAuthoringCapability` (L1-F) | `write_file`, `edit_file`, `delete_file`, `move_file`, `insert_lines`, `delete_lines`, `replace_lines`, `make_directory`, `remove_directory`, `copy_file`, `set_file_executable`, plus the four L2-G `scaffold_*` actions |
-| `ToolBuilder` (L1-E) | `bootstrap_plugin`, `bootstrap_agent`, `bootstrap_deployment`, `bootstrap_tool_adapter`, `bootstrap_profile` |
+| `ToolBuilder` (L1-E) | `bootstrap_plugin`, `bootstrap_agent`, `bootstrap_deployment`, `bootstrap_tool_capability`, `bootstrap_profile` |
 
 The framework guarantee: if any of these actions produces a commit, the principal / co-author are the colony's configured pair. There is no agent-side override hatch — the resolver reads the setting and the message decorator runs unconditionally.
 

@@ -692,7 +692,7 @@ Defer until Phase 1+2 ship and we have throughput data.
 | 5.1 | Decision: only proceed if caption-first measurably underperforms on visually-dense subcorpora (define a small eval set). | ⬜ |
 | 5.2 | Second `VectorStore` collection in Qdrant multi-vector mode. | ⬜ |
 | 5.3 | `ColPaliEmbedder` wraps a hosted endpoint (or vLLM-served ColQwen2.5 in production). | ⬜ |
-| 5.4 | `RetrievalAdapter` fuses caption-first text scores with page-level ColPali scores via reciprocal rank fusion. | ⬜ |
+| 5.4 | `RetrievalCapability` fuses caption-first text scores with page-level ColPali scores via reciprocal rank fusion. | ⬜ |
 
 ### Phase 6 — Multimodal at synthesis (separate workstream)
 

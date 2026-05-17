@@ -65,13 +65,7 @@ class AgentSystemConfig(ConfigComponent):
                 name="agent_system"
             )
 
-        from .tools import ToolManagerDeployment
         from .standalone import StandaloneAgentDeployment
-
-        app.add_deployment(
-            ToolManagerDeployment.bind(),
-            name="tool_manager"
-        )
 
         app.add_deployment(
             StandaloneAgentDeployment.bind(),

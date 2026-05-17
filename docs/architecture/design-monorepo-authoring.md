@@ -12,7 +12,7 @@ builder = ToolBuilder(agent=..., working_dir=repo_root)
 await builder.bootstrap_plugin("serf_simulator", description="Toy SERF.")
 await builder.bootstrap_agent("opm_meg_planner")
 await builder.bootstrap_deployment("scoring_service", deployment_kwargs="num_replicas=2")
-await builder.bootstrap_tool_adapter("quspin_adapter")
+await builder.bootstrap_tool_capability("quspin_adapter")
 await builder.bootstrap_profile("fda_510k", tags=["regulatory", "510k"])
 ```
 
@@ -27,7 +27,7 @@ Surface names come from [`DEFAULT_SURFACE_DIRS`](../../src/polymathera/colony/de
 | `bootstrap_plugin(name, description)` | `plugins` | `<name>/SKILL.md` | `SkillSpec` via L1-A `discover_plugins` |
 | `bootstrap_agent(name, base_class, base_module, class_name, description)` | `agents` | `<name>.py` | `Agent` subclass via `discover_agents` |
 | `bootstrap_deployment(name, deployment_kwargs, class_name, description)` | `deployments` | `<name>.py` | class with `__deployment_config__` via `discover_deployments` |
-| `bootstrap_tool_adapter(name, tool_spec_var)` | `tools` | `<name>.py` | invokes `register(registry)` via `discover_tools` |
+| `bootstrap_tool_adapter(name, tool_spec_var, scaffold, template_vars)` | `tools` | `<name>.py` | renders a `ToolCapability` skeleton + appends a stub `ToolEntry` to `.colony/tool-registry.json` (surfaced via `discover_tools` → `dict[str, ToolEntry]`) |
 | `bootstrap_profile(name, tags, embedding_strategy, description)` | `profiles` | `<name>.yaml` | parsed mapping via `discover_profiles` |
 
 `class_name` (agents, deployments) defaults to a PascalCased form of `name` — `my_agent` → `MyAgent`.

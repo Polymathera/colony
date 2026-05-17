@@ -8,7 +8,7 @@ file is the third leg of the agent-driven knowledge trio —
 agent can ground a chat answer in the corpus.
 
 The capability holds **zero** retrieval state. It owns a per-mode
-adapter cache; the adapters themselves (``ScopedRetrievalAdapter`` &
+retriever cache; the retrievers themselves (``ScopedRetrievalCapability`` &
 co.) live in :mod:`polymathera.colony.knowledge.retrieval` and do all
 the actual work.
 """
@@ -29,20 +29,20 @@ from ..actions import action_executor
 
 if TYPE_CHECKING:
     from ...base import Agent
-    from ....knowledge.retrieval import RetrievalAdapter, RetrievalDeps
+    from ....knowledge.retrieval import RetrievalCapability, RetrievalDeps
 
 
 logger = logging.getLogger(__name__)
 
 
-_AdapterName = Literal["scoped", "grounded", "graph", "budgeted", "standards"]
+_RetrieverName = Literal["scoped", "grounded", "graph", "budgeted", "standards"]
 
 
 class KnowledgeRetrievalCapability(AgentCapability):
     """Agent capability: search the knowledge base.
 
     Five action methods, one per retrieval mode (master §6.4). Each is
-    a thin wrapper around the corresponding ``RetrievalAdapter``.
+    a thin wrapper around the corresponding ``RetrievalCapability``.
 
     Args:
         agent: Owning agent. Required (the capability is not useful
@@ -52,7 +52,7 @@ class KnowledgeRetrievalCapability(AgentCapability):
             graph store). The caller is responsible for construction —
             typically the same bundle the colony's ``Ingestor`` uses,
             so curation and retrieval share an embedding space.
-        default_adapter_name: Mode used by ``search_knowledge`` when
+        default_retriever_name: Mode used by ``search_knowledge`` when
             the caller does not pick one. ``"scoped"`` is a safe
             default for tool-use agents.
         capability_key: Action-policy dispatch key.
@@ -66,7 +66,7 @@ class KnowledgeRetrievalCapability(AgentCapability):
         namespace: str = "knowledge_retrieval",
         *,
         deps: "RetrievalDeps | Blueprint",
-        default_adapter_name: _AdapterName = "scoped",
+        default_retriever_name: _RetrieverName = "scoped",
         capability_key: str = "knowledge_retrieval",
         app_name: str | None = None,
     ):
@@ -81,11 +81,11 @@ class KnowledgeRetrievalCapability(AgentCapability):
             app_name=app_name,
         )
         self._deps = deps.local_instance() if isinstance(deps, Blueprint) else deps
-        self._default_adapter_name: _AdapterName = default_adapter_name
-        # Lazy adapter cache — instantiated only for modes the agent
+        self._default_retriever_name: _RetrieverName = default_retriever_name
+        # Lazy retriever cache — instantiated only for modes the agent
         # actually calls. Keeps the import surface small for agents
         # that only use ``search_knowledge``.
-        self._adapters: dict[str, "RetrievalAdapter"] = {}
+        self._retrievers: dict[str, "RetrievalCapability"] = {}
 
     def get_action_group_description(self) -> str:
         return (
@@ -97,7 +97,7 @@ class KnowledgeRetrievalCapability(AgentCapability):
             "citations), ``graph`` (knowledge graph), ``budgeted`` "
             "(token-bounded), ``standards`` (time-versioned "
             "regulatory). Default is "
-            f"``{self._default_adapter_name}``."
+            f"``{self._default_retriever_name}``."
         )
 
     def get_capability_tags(self) -> frozenset[str]:
@@ -117,32 +117,42 @@ class KnowledgeRetrievalCapability(AgentCapability):
 
     # -------- internal --------------------------------------------------
 
-    def _get_adapter(self, name: str) -> "RetrievalAdapter":
-        if name in self._adapters:
-            return self._adapters[name]
+    def _get_retriever(self, name: str) -> "RetrievalCapability":
+        if name in self._retrievers:
+            return self._retrievers[name]
         from ....knowledge.retrieval import (
-            BudgetedRetrievalAdapter,
-            GraphRetrievalAdapter,
-            GroundedRetrievalAdapter,
-            ScopedRetrievalAdapter,
-            StandardsRetrievalAdapter,
+            BudgetedRetrievalCapability,
+            GraphRetrievalCapability,
+            GroundedRetrievalCapability,
+            ScopedRetrievalCapability,
+            StandardsRetrievalCapability,
         )
-        registry: dict[str, type] = {
-            "scoped": ScopedRetrievalAdapter,
-            "grounded": GroundedRetrievalAdapter,
-            "graph": GraphRetrievalAdapter,
-            "budgeted": BudgetedRetrievalAdapter,
-            "standards": StandardsRetrievalAdapter,
+        registry: dict[str, type[AgentCapability]] = {
+            "scoped": ScopedRetrievalCapability,
+            "grounded": GroundedRetrievalCapability,
+            "graph": GraphRetrievalCapability,
+            "budgeted": BudgetedRetrievalCapability,
+            "standards": StandardsRetrievalCapability,
         }
         cls = registry.get(name)
         if cls is None:
             raise ValueError(
-                f"unknown retrieval adapter {name!r}; choose one of "
+                f"unknown retrieval retriever {name!r}; choose one of "
                 f"{sorted(registry)}",
             )
-        adapter = cls(deps=self._deps)
-        self._adapters[name] = adapter
-        return adapter
+        # The per-mode capabilities are plumbing for this aggregator —
+        # they share its scope_id so they don't need their own scope
+        # resolution (which would require an active execution_context
+        # at construction time even when this aggregator is being used
+        # detached, e.g. in tests).
+        retriever = cls(
+            agent=self._agent,
+            deps=self._deps,
+            scope_id=f"{self.scope_id}:{name}",
+            capability_key=f"{self.capability_key}:{name}",
+        )
+        self._retrievers[name] = retriever
+        return retriever
 
     @staticmethod
     def _build_query(
@@ -173,7 +183,7 @@ class KnowledgeRetrievalCapability(AgentCapability):
         self,
         *,
         query: str,
-        mode: _AdapterName | None = None,
+        mode: _RetrieverName | None = None,
         source_prefix: str | None = None,
         data_types: list[str] | None = None,
         top_k: int = 8,
@@ -184,7 +194,7 @@ class KnowledgeRetrievalCapability(AgentCapability):
         """Search the knowledge base.
 
         ``mode`` selects the master §6.4 retrieval mode. Defaults to
-        the ``default_adapter_name`` set at construction time
+        the ``default_retriever_name`` set at construction time
         (``"scoped"`` unless overridden).
 
         Returns the typed ``RetrievalResult`` JSON-serialised — a dict
@@ -192,8 +202,8 @@ class KnowledgeRetrievalCapability(AgentCapability):
         ``score``, ``rank``, ``explanation``) and ``total_candidates``.
         """
 
-        adapter_name = mode or self._default_adapter_name
-        adapter = self._get_adapter(adapter_name)
+        retriever_name = mode or self._default_retriever_name
+        retriever = self._get_retriever(retriever_name)
         retrieval_query = self._build_query(
             text=query,
             graph_query=graph_query,
@@ -203,7 +213,7 @@ class KnowledgeRetrievalCapability(AgentCapability):
             max_tokens=max_tokens,
             require_citations=require_citations,
         )
-        result = await adapter.run(retrieval_query)
+        result = await retriever.run(retrieval_query)
         return result.model_dump(mode="json")
 
     @action_executor()
@@ -211,7 +221,7 @@ class KnowledgeRetrievalCapability(AgentCapability):
         """List the retrieval modes this agent can call."""
         return {
             "modes": ["scoped", "grounded", "graph", "budgeted", "standards"],
-            "default": self._default_adapter_name,
+            "default": self._default_retriever_name,
         }
 
 

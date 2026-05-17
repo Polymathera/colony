@@ -181,9 +181,9 @@ def test_register_tool_round_trip(
     entry = ToolEntry(
         name="laptime",
         purpose="racer/laptime",
-        capability="simulate_laptime",
         location="subdir:tools/racer/laptime",
-        license="MIT",
+        capability="simulate_laptime",
+        extra={"license": "MIT"},
     )
     sha = bootstrapped_repo.register_tool(identity, entry)
     assert isinstance(sha, str) and len(sha) == 40

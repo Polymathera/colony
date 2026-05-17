@@ -1,4 +1,4 @@
-"""``StandardsRetrievalAdapter`` — Tier-2 retrieval with rulemaking-state filter.
+"""``StandardsRetrievalCapability`` — Tier-2 retrieval with rulemaking-state filter.
 
 Master §6.4 mode 5: "Tier 2 with **rulemaking-state filter** (only
 return clauses whose effective regulatory state matches the query
@@ -30,10 +30,10 @@ from ...tools import (
     ToolSpec,
 )
 from ..models import CorpusTier, RetrievalHit, RetrievalQuery, RetrievalResult
-from .base import RetrievalAdapter
+from .base import RetrievalCapability
 
 
-class StandardsRetrievalAdapter(RetrievalAdapter):
+class StandardsRetrievalCapability(RetrievalCapability):
     mode = "standards"
     spec = ToolSpec(
         name="retrieve_standards",
@@ -132,4 +132,4 @@ class StandardsRetrievalAdapter(RetrievalAdapter):
         )
 
 
-__all__ = ("StandardsRetrievalAdapter",)
+__all__ = ("StandardsRetrievalCapability")

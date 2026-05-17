@@ -458,29 +458,6 @@ async def get_sandbox_images_config() -> SandboxImagesConfig:
 
 
 # ---------------------------------------------------------------------------
-# Per-task Docker images
-# ---------------------------------------------------------------------------
-
-
-@register_polymathera_config(path="task_images")
-class TaskImagesConfig(ConfigComponent):
-    """Per-task-kind Docker image overrides.
-
-    Empty by default. Extensions (e.g. CPS) populate the mapping via
-    operator YAML or via ``polymathera.config_components`` registration.
-    """
-
-    images: dict[str, str] = Field(
-        default_factory=dict,
-        json_schema_extra=tier_metadata(
-            tier=Tier.L1_OPERATOR,
-            ownership=Ownership.EXTENSION,
-            mutability=Mutability.RELOADABLE,
-        ),
-    )
-
-
-# ---------------------------------------------------------------------------
 # Capability secrets (env-bound)
 # ---------------------------------------------------------------------------
 
@@ -563,7 +540,6 @@ __all__ = (
     "SandboxImage",
     "SandboxImageScript",
     "SandboxImagesConfig",
-    "TaskImagesConfig",
     "WebSearchConfig",
     "get_chroma_config",
     "get_github_auth_config",

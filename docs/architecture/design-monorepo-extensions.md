@@ -32,10 +32,10 @@ A surface directory that doesn't exist on disk is equivalent to an empty one —
 | `plugins` | `<dir>/<skill-name>/SKILL.md` (Claude-style skills; `plugin.json` optional) | `list[SkillSpec]` — same shape `UserPluginCapability` consumes |
 | `agents` | `<dir>/<file>.py`, each declaring `Agent` subclasses | `dict[str, type[Agent]]` keyed by class name |
 | `deployments` | `<dir>/<file>.py`, each declaring classes wrapped with `@serving.deployment(...)` | `dict[str, type]` keyed by class name (detection: `__deployment_config__` attribute) |
-| `tools` | `<dir>/<file>.py`, each exposing a top-level `register(registry: ToolRegistry) -> None` callable | `ToolRegistry` populated with `ToolAdapter`s |
+| `tools` | `.colony/tool-registry.json` — typed [`ToolEntry`](../../src/polymathera/colony/design_monorepo/models.py) records pointing at `ToolCapability` subclasses via `capability_fqn` | `dict[str, ToolEntry]` keyed by entry name |
 | `profiles` | `<dir>/<file>.yaml`, top-level mapping | `dict[str, dict]` keyed by filename stem |
 
-The `tools` convention is intentionally different from `agents` / `deployments`: tool adapters carry construction state (DB sessions, HTTP clients, Docker handles) so the file controls its own instantiation via `register(registry)`. Agents and deployments declare classes only — the framework instantiates them later, at agent-spawn / deployment-deploy time.
+The `tools` surface is JSON-catalog-driven rather than file-walk-driven (the discovery convention all other surfaces use). A tool's Python source lives wherever the project's importable package puts it; the on-disk catalog records the FQN and discovery returns the typed records without importing the classes. See [`tool-capabilities.md`](tool-capabilities.md) for the full `ToolCapability` mounting flow — the spec-vs-cache validator on `upsert_tool` is what keeps the catalog index honest.
 
 ## Public surface
 
@@ -44,7 +44,7 @@ The `tools` convention is intentionally different from `agents` / `deployments`:
 - `discover_plugins(repo_root, manifest=None) -> list[SkillSpec]`
 - `discover_agents(repo_root, manifest=None) -> dict[str, type[Agent]]`
 - `discover_deployments(repo_root, manifest=None) -> dict[str, type]`
-- `discover_tools(repo_root, manifest=None) -> ToolRegistry`
+- `discover_tools(repo_root, manifest=None) -> dict[str, ToolEntry]`
 - `discover_profiles(repo_root, manifest=None) -> dict[str, dict]`
 - `discover_all(repo_root, manifest=None) -> DiscoveredExtensions` — convenience bundle of all five.
 
@@ -74,7 +74,7 @@ The one mutation pattern the fingerprint cannot catch is editing an *existing* f
 
 ## Migration: v1 → v2
 
-[`polymathera.colony.tools.manifest_migrate.migrate_manifest`](../../src/polymathera/colony/tools/manifest_migrate.py) rewrites a v1 manifest in place with `schema_version: 2` and a default `extensions` block. Idempotent — re-running on a v2+ manifest returns `MigrationResult(was_migrated=False)` and makes no disk writes.
+[`polymathera.colony.design_monorepo.manifest_migrate.migrate_manifest`](../../src/polymathera/colony/design_monorepo/manifest_migrate.py) rewrites a v1 manifest in place with `schema_version: 2` and a default `extensions` block. Idempotent — re-running on a v2+ manifest returns `MigrationResult(was_migrated=False)` and makes no disk writes.
 
 ```python
 from polymathera.colony.tools.manifest_migrate import migrate_manifest

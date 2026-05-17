@@ -1,8 +1,8 @@
-"""``BudgetedRetrievalAdapter`` — token-budget-aware retrieval.
+"""``BudgetedRetrievalCapability`` — token-budget-aware retrieval.
 
 Master §6.4 mode 4: "Fits results into a token budget and prioritizes
 high-relevance / high-recency items." Same retrieval as
-``ScopedRetrievalAdapter`` / ``GroundedRetrievalAdapter`` for the
+``ScopedRetrievalCapability`` / ``GroundedRetrievalCapability`` for the
 ranking, but the result set is truncated by accumulated token count
 rather than a fixed ``max_results``.
 
@@ -23,10 +23,10 @@ from ...tools import (
     ToolSpec,
 )
 from ..models import RetrievalHit, RetrievalQuery, RetrievalResult
-from .base import RetrievalAdapter
+from .base import RetrievalCapability
 
 
-class BudgetedRetrievalAdapter(RetrievalAdapter):
+class BudgetedRetrievalCapability(RetrievalCapability):
     mode = "budgeted"
     spec = ToolSpec(
         name="retrieve_budgeted",
@@ -106,4 +106,4 @@ def _recency_key(hit) -> float:
     return eff.timestamp()
 
 
-__all__ = ("BudgetedRetrievalAdapter",)
+__all__ = ("BudgetedRetrievalCapability")

@@ -6,16 +6,18 @@ from typing import Any
 
 import pytest
 
-from polymathera.colony.tools import (
+from polymathera.colony.agents.patterns.capabilities.build_vs_buy_engine import (
     BuildVsBuyAdvisor,
     BuildVsBuyContext,
     BuildVsBuyDecision,
+    INNER_LOOP_FREQUENCY_THRESHOLD,
+    TeamTrackRecord,
+)
+from polymathera.colony.tools import (
     Determinism,
     HITLFrequency,
     HeadlessReadiness,
-    INNER_LOOP_FREQUENCY_THRESHOLD,
     Licensing,
-    TeamTrackRecord,
     ToolSpec,
 )
 

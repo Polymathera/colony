@@ -1,65 +1,50 @@
-"""Tests for the five retrieval modes (registered as ToolAdapters)."""
+"""Tests for the five retrieval modes (exposed as ``LocalToolCapability`` subclasses).
+
+The retrieval capabilities are agent-mountable. Tests construct each
+in detached mode (``agent=None``) inside an execution_context and
+invoke the public ``retrieve()`` action directly.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
+from polymathera.colony.distributed.ray_utils.serving.context import (
+    Ring,
+    execution_context,
+)
 from polymathera.colony.knowledge import (
-    BudgetedRetrievalAdapter,
+    BudgetedRetrievalCapability,
     Chunk,
     CitationSpan,
     Claim,
     CorpusTier,
     EmbeddedChunk,
-    GraphRetrievalAdapter,
-    GroundedRetrievalAdapter,
+    GraphRetrievalCapability,
+    GroundedRetrievalCapability,
     InMemoryEmbedder,
     InMemoryGraphStore,
     InMemoryVectorStore,
     RetrievalDeps,
-    RetrievalQuery,
-    ScopedRetrievalAdapter,
-    StandardsRetrievalAdapter,
+    ScopedRetrievalCapability,
+    StandardsRetrievalCapability,
 )
-from polymathera.colony.tools import ToolCall, ToolRegistry
 
 
 pytestmark = pytest.mark.asyncio
 
 
-def _embedded(
-    *,
-    text: str,
-    source: str = "src:a",
-    data_type: str = "paper_section",
-    tier: CorpusTier = CorpusTier.UNTIERED,
-    section_path: str = "1",
-    effective_at: datetime | None = None,
-    token_count: int = 50,
-    citation_uri: str | None = None,
-) -> EmbeddedChunk:
-    chunk = Chunk(
-        text=text,
-        token_count=token_count,
-        section_path=section_path,
-        citation=CitationSpan(
-            source_uri=citation_uri if citation_uri is not None else source,
-            section_path=section_path,
-        ),
-        data_type=data_type,
-        source=source,
-        tier=tier,
-        effective_at=effective_at,
-    )
-    embedder = InMemoryEmbedder()
-    import asyncio
-
-    vec = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
-        embedder.embed([text])
-    )[0]
-    return EmbeddedChunk(chunk=chunk, vector=tuple(vec), embedder="inmem")
+@pytest.fixture(autouse=True)
+def _exec_ctx():
+    """The SESSION-scoped capabilities resolve their scope from the
+    execution context's session_id."""
+    with execution_context(
+        ring=Ring.USER, tenant_id="t1", colony_id="c1",
+        session_id="s1", origin="test",
+    ) as ctx:
+        yield ctx
 
 
 @pytest.fixture
@@ -96,37 +81,28 @@ async def populated_deps() -> RetrievalDeps:
     return RetrievalDeps(embedder=embedder, vector_store=vstore, graph_store=gstore)
 
 
-# ---- ScopedRetrievalAdapter ----------------------------------------------
+# ---- ScopedRetrievalCapability ------------------------------------------
 
 
 async def test_scoped_filters_by_source(populated_deps: RetrievalDeps) -> None:
-    adapter = ScopedRetrievalAdapter(deps=populated_deps)
-    call = ToolCall(
-        capability="retrieve_scoped",
-        parameters={"text": "alpha", "source_prefix": "src:tool_a"},
-    )
-    result = await adapter.invoke(call)
-    assert result.success
-    assert result.value["mode"] == "scoped"
-    sources = {h["chunk"]["source"] for h in result.value["hits"]}
+    cap = ScopedRetrievalCapability(deps=populated_deps)
+    result = await cap.retrieve(text="alpha", source_prefix="src:tool_a")
+    assert result["mode"] == "scoped"
+    sources = {h["chunk"]["source"] for h in result["hits"]}
     assert sources == {"src:tool_a"}
 
 
 async def test_scoped_requires_source_prefix(populated_deps: RetrievalDeps) -> None:
-    adapter = ScopedRetrievalAdapter(deps=populated_deps)
-    call = ToolCall(capability="retrieve_scoped", parameters={"text": "alpha"})
-    result = await adapter.invoke(call)
-    assert result.success
-    assert result.value["hits"] == []
-    assert "source_prefix" in result.value["extra"]["reason"]
+    cap = ScopedRetrievalCapability(deps=populated_deps)
+    result = await cap.retrieve(text="alpha")
+    assert result["hits"] == []
+    assert "source_prefix" in result["extra"]["reason"]
 
 
-# ---- GroundedRetrievalAdapter --------------------------------------------
+# ---- GroundedRetrievalCapability ----------------------------------------
 
 
 async def test_grounded_drops_uncited(populated_deps: RetrievalDeps) -> None:
-    # Insert one chunk with empty source_uri citation; the grounded
-    # mode must drop it.
     bad_chunk = Chunk(
         text="uncited content",
         token_count=2,
@@ -143,33 +119,22 @@ async def test_grounded_drops_uncited(populated_deps: RetrievalDeps) -> None:
     )
     await populated_deps.vector_store.upsert([bad])
 
-    adapter = GroundedRetrievalAdapter(deps=populated_deps)
-    call = ToolCall(
-        capability="retrieve_grounded",
-        parameters={"text": "physics"},
-    )
-    result = await adapter.invoke(call)
-    assert result.success
-    for hit in result.value["hits"]:
+    cap = GroundedRetrievalCapability(deps=populated_deps)
+    result = await cap.retrieve(text="physics")
+    for hit in result["hits"]:
         assert hit["chunk"]["citation"]["source_uri"]
 
 
 async def test_grounded_restricts_to_tiers_1_to_3(
     populated_deps: RetrievalDeps,
 ) -> None:
-    adapter = GroundedRetrievalAdapter(deps=populated_deps)
-    call = ToolCall(
-        capability="retrieve_grounded",
-        parameters={"text": "alpha"},
-    )
-    result = await adapter.invoke(call)
-    assert result.success
-    tiers = {h["chunk"]["tier"] for h in result.value["hits"]}
-    # Tier-4 entries must not surface.
+    cap = GroundedRetrievalCapability(deps=populated_deps)
+    result = await cap.retrieve(text="alpha")
+    tiers = {h["chunk"]["tier"] for h in result["hits"]}
     assert "tier_4_software_docs" not in tiers
 
 
-# ---- GraphRetrievalAdapter -----------------------------------------------
+# ---- GraphRetrievalCapability -------------------------------------------
 
 
 async def test_graph_query_via_text_seed(populated_deps: RetrievalDeps) -> None:
@@ -186,12 +151,9 @@ async def test_graph_query_via_text_seed(populated_deps: RetrievalDeps) -> None:
             citation=CitationSpan(source_uri="book:x", section_path="1"),
         ),
     )
-    adapter = GraphRetrievalAdapter(deps=populated_deps)
-    result = await adapter.invoke(
-        ToolCall(capability="retrieve_graph", parameters={"text": "JET", "extra": {"depth": 2}}),
-    )
-    assert result.success
-    node_ids = set(result.value["extra"]["node_ids"])
+    cap = GraphRetrievalCapability(deps=populated_deps)
+    result = await cap.retrieve(text="JET", extra={"depth": 2})
+    node_ids = set(result["extra"]["node_ids"])
     assert {"jet", "dt_fuel", "tritium"} <= node_ids
 
 
@@ -203,30 +165,21 @@ async def test_graph_query_dsl(populated_deps: RetrievalDeps) -> None:
             citation=CitationSpan(source_uri="x", section_path="1"),
         ),
     )
-    adapter = GraphRetrievalAdapter(deps=populated_deps)
-    result = await adapter.invoke(
-        ToolCall(
-            capability="retrieve_graph",
-            parameters={"graph_query": "MATCH (s)-[r:is_a]->(o)"},
-        ),
-    )
-    assert result.success
-    assert any(e["predicate"] == "is_a" for e in result.value["extra"]["edges"])
+    cap = GraphRetrievalCapability(deps=populated_deps)
+    result = await cap.retrieve(graph_query="MATCH (s)-[r:is_a]->(o)")
+    assert any(e["predicate"] == "is_a" for e in result["extra"]["edges"])
 
 
 async def test_graph_no_store_returns_empty() -> None:
     embedder = InMemoryEmbedder()
     vstore = InMemoryVectorStore()
     deps = RetrievalDeps(embedder=embedder, vector_store=vstore, graph_store=None)
-    adapter = GraphRetrievalAdapter(deps=deps)
-    result = await adapter.invoke(
-        ToolCall(capability="retrieve_graph", parameters={"text": "x"}),
-    )
-    assert result.success
-    assert result.value["extra"]["reason"]
+    cap = GraphRetrievalCapability(deps=deps)
+    result = await cap.retrieve(text="x")
+    assert result["extra"]["reason"]
 
 
-# ---- BudgetedRetrievalAdapter --------------------------------------------
+# ---- BudgetedRetrievalCapability ----------------------------------------
 
 
 async def test_budgeted_truncates_at_token_budget() -> None:
@@ -248,20 +201,18 @@ async def test_budgeted_truncates_at_token_budget() -> None:
         )
     await vstore.upsert(items)
     deps = RetrievalDeps(embedder=embedder, vector_store=vstore)
-    adapter = BudgetedRetrievalAdapter(deps=deps)
-    result = await adapter.invoke(
-        ToolCall(
-            capability="retrieve_budgeted",
-            parameters={"text": "chunk number 0", "max_tokens": 250, "max_results": 50},
-        ),
+    cap = BudgetedRetrievalCapability(deps=deps)
+    result = await cap.retrieve(
+        text="chunk number 0",
+        max_tokens=250,
+        extra={"max_results": 50},
     )
-    assert result.success
     # Each chunk is 100 tokens; budget 250 fits at most 2.
-    assert len(result.value["hits"]) <= 2
-    assert result.value["used_tokens"] <= 250 + 100  # +100 = single-oversized-hit slack
+    assert len(result["hits"]) <= 2
+    assert result["used_tokens"] <= 250 + 100  # +100 = single-oversized-hit slack
 
 
-# ---- StandardsRetrievalAdapter -------------------------------------------
+# ---- StandardsRetrievalCapability ---------------------------------------
 
 
 async def test_standards_filters_by_effective_at() -> None:
@@ -287,24 +238,16 @@ async def test_standards_filters_by_effective_at() -> None:
         )
     await vstore.upsert(items)
     deps = RetrievalDeps(embedder=embedder, vector_store=vstore)
-    adapter = StandardsRetrievalAdapter(deps=deps)
+    cap = StandardsRetrievalCapability(deps=deps)
 
     as_of = datetime(2022, 6, 1, tzinfo=timezone.utc)
-    result = await adapter.invoke(
-        ToolCall(
-            capability="retrieve_standards",
-            parameters={
-                "text": "Clause",
-                "effective_at": as_of.isoformat(),
-                "max_results": 10,
-            },
-        ),
+    result = await cap.retrieve(
+        text="Clause",
+        effective_at=as_of.isoformat(),
+        extra={"max_results": 10},
     )
-    assert result.success
-    sections = {h["chunk"]["section_path"] for h in result.value["hits"]}
-    # Clause 1 (effective 2024) must be excluded; Clause 0 (2020) and
-    # Clause 2 (no effective_at) survive.
-    assert "3.1" not in sections
+    sections = {h["chunk"]["section_path"] for h in result["hits"]}
+    assert "3.1" not in sections  # Clause effective 2024 — out of force as of 2022
     assert "3.0" in sections
 
 
@@ -339,45 +282,40 @@ async def test_standards_supersedes_within_clause() -> None:
     ]
     await vstore.upsert(items)
     deps = RetrievalDeps(embedder=embedder, vector_store=vstore)
-    adapter = StandardsRetrievalAdapter(deps=deps)
+    cap = StandardsRetrievalCapability(deps=deps)
 
-    # As of 2024 — only the newer revision survives.
-    result = await adapter.invoke(
-        ToolCall(
-            capability="retrieve_standards",
-            parameters={
-                "text": "Clause",
-                "effective_at": datetime(2024, 6, 1, tzinfo=timezone.utc).isoformat(),
-            },
-        ),
+    result = await cap.retrieve(
+        text="Clause",
+        effective_at=datetime(2024, 6, 1, tzinfo=timezone.utc).isoformat(),
     )
-    assert result.success
-    assert len(result.value["hits"]) == 1
-    assert "revised" in result.value["hits"][0]["chunk"]["text"]
+    assert len(result["hits"]) == 1
+    assert "revised" in result["hits"][0]["chunk"]["text"]
 
 
-# ---- Registration sanity check -------------------------------------------
+# ---- Capability shape sanity ---------------------------------------------
 
 
-async def test_all_five_register_under_distinct_capabilities() -> None:
+async def test_all_five_expose_tool_and_retrieval_tags() -> None:
+    """Every retrieval capability is a tool whose tags include the
+    canonical ``"tool"`` + ``"retrieval"`` keys so the LLM planner can
+    enumerate them via ``include_tags={"tool"}`` / ``{"retrieval"}``.
+    """
     embedder = InMemoryEmbedder()
     vstore = InMemoryVectorStore()
-    gstore = InMemoryGraphStore()
-    deps = RetrievalDeps(embedder=embedder, vector_store=vstore, graph_store=gstore)
-    reg = ToolRegistry()
-    for cls in (
-        ScopedRetrievalAdapter,
-        GroundedRetrievalAdapter,
-        GraphRetrievalAdapter,
-        BudgetedRetrievalAdapter,
-        StandardsRetrievalAdapter,
-    ):
-        reg.register(cls(deps=deps))
-    caps = set(reg.list_capabilities())
-    assert {
-        "retrieve_scoped",
-        "retrieve_grounded",
-        "retrieve_graph",
-        "retrieve_budgeted",
-        "retrieve_standards",
-    } <= caps
+    deps = RetrievalDeps(embedder=embedder, vector_store=vstore)
+    expected = {
+        ScopedRetrievalCapability: "retrieve_scoped",
+        GroundedRetrievalCapability: "retrieve_grounded",
+        GraphRetrievalCapability: "retrieve_graph",
+        BudgetedRetrievalCapability: "retrieve_budgeted",
+        StandardsRetrievalCapability: "retrieve_standards",
+    }
+    for cls, capability_name in expected.items():
+        cap = cls(deps=deps)
+        tags = cap.get_capability_tags()
+        assert "tool" in tags
+        assert "knowledge" in tags
+        assert "retrieval" in tags
+        assert cap.spec.name == capability_name
+        assert capability_name in cap.spec.capabilities
+

@@ -1,22 +1,76 @@
-"""Tool adapter ``${name}`` — authored via L1-E ``bootstrap_tool_adapter``.
+"""Tool capability ``${name}`` — authored via L1-E ``bootstrap_tool_adapter``.
 
-Lives at ``.colony/tools/${name}.py``. L1-A's ``discover_tools``
-walks ``.colony/tools/*.py``, looks for a top-level ``register``
-callable, and invokes it so each file controls its own adapter
-construction (adapters' ``__init__`` signatures vary).
+Rendered into ``.colony/tools/${name}.py`` and registered as a stub
+:class:`ToolEntry` in ``.colony/tool-registry.json``. L1-A
+``discover_tools`` surfaces the entry to the planner as a
+catalog-only stub (empty ``capability_fqn``) until the file lands at
+its real importable path and the catalog entry is upgraded with a
+real ``capability_fqn`` via a second ``upsert_tool`` call.
 
-Fill in the ``register`` body with the actual ``ToolAdapter``
-construction and registry calls.
+This is the default template — minimal :class:`LocalToolCapability`
+skeleton suitable for in-process / cli_subprocess tools. CPS L2-F
+overrides this with domain-specific variants (FEM, EM, CFD, …) that
+subclass :class:`SandboxToolCapability` instead; see
+``polymathera.cps.tools.scaffolds`` and
+``colony/docs/architecture/tool-capabilities.md``.
+
+Fill in:
+
+- ``ToolSpec(...)`` fields with the actual cost / resource /
+  licensing profile.
+- The ``@action_executor`` method body with the real Python invocation
+  (call a library, drive a CLI via ``asyncio.create_subprocess_exec``,
+  etc.).
+- Add additional ``@action_executor`` methods named for each
+  capability the tool exposes; the LLM planner sees each method as a
+  first-class action with its own typed signature.
 """
 
 from __future__ import annotations
 
-from polymathera.colony.tools.registry import ToolRegistry
+from typing import Any
+
+from polymathera.colony.agents.patterns.actions import action_executor
+from polymathera.colony.agents.patterns.capabilities.tool import (
+    LocalToolCapability,
+)
+from polymathera.colony.tools import (
+    CostModel,
+    Determinism,
+    ExecutionLocality,
+    HITLFrequency,
+    HeadlessReadiness,
+    Licensing,
+    ResourceRequirements,
+    ToolSpec,
+)
 
 
-def register(registry: ToolRegistry) -> None:
-    """Construct ${name}'s ``ToolAdapter`` and add it to ``registry``."""
-    # Example:
-    #   adapter = MyToolAdapter(spec=${tool_spec_var})
-    #   registry.add(adapter)
-    del registry  # placeholder — replace with the real registration.
+class ${name}Capability(LocalToolCapability):
+    """${name} — L1-E scaffold stub. Fill in the action body."""
+
+    spec = ToolSpec(
+        name="${name}",
+        domain="general",
+        capabilities=("${name}",),
+        backend="in_process",
+        execution_locality=ExecutionLocality.LOCAL,
+        determinism=Determinism.DETERMINISTIC,
+        cost_model=CostModel(cpu_seconds=1.0),
+        resource_requirements=ResourceRequirements(min_vcpus=1, min_memory_gb=1.0),
+        headless=HeadlessReadiness.NATIVE,
+        hitl_frequency=HITLFrequency.AUTONOMOUS,
+        licensing=Licensing.UNKNOWN,
+    )
+
+    @action_executor()
+    async def run(self, **kwargs: Any) -> dict[str, Any]:
+        """Execute ${name}.
+
+        TODO: replace this stub with the real tool invocation. Return
+        a typed dict the LLM planner can reason about.
+        """
+        raise NotImplementedError(
+            "${name}Capability.run is an L1-E scaffold stub; "
+            "fill in the real tool invocation.",
+        )

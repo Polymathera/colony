@@ -30,7 +30,6 @@ import networkx as nx
 
 from ..cluster.models import InferenceRequest, InferenceResponse
 from .models import (
-    ActionStatus,
     AgentState,
     ActionPolicyIterationResult,
     ActionPolicyExecutionState,
@@ -2052,81 +2051,6 @@ class Agent(BaseModel):
         """
         return list(self._capabilities.values())
 
-    # === Tool Usage (Delegated to manager) ===
-
-    async def discover_tools(self, category: str | None = None) -> list[str]:
-        """Discover available tools.
-
-        Args:
-            category: Optional category filter
-
-        Returns:
-            List of tool IDs
-        """
-        if not self._manager:
-            raise RuntimeError(f"Agent {self.agent_id} not attached to manager")
-
-        try:
-            from ..system import get_tool_manager
-
-            # Delegate to manager's tool manager handle
-            tool_manager = await get_tool_manager()
-            if category:
-                tool_ids = await tool_manager.find_tools_by_category(category)
-            else:
-                tool_ids = await tool_manager.list_all_tools()
-
-            return tool_ids
-
-        except Exception as e:
-            raise
-
-    async def use_tool(
-        self, tool_id: str, parameters: dict[str, Any], auth_token: str | None = None
-    ) -> Any:
-        """Execute a tool.
-
-        Args:
-            tool_id: Tool identifier
-            parameters: Tool parameters
-            auth_token: Optional authentication token
-
-        Returns:
-            Tool result
-
-        Raises:
-            RuntimeError: If tool execution fails
-        """
-        if not self._manager:
-            raise RuntimeError(f"Agent {self.agent_id} not attached to manager")
-
-        try:
-            # Create tool call
-            from .models import ToolCall
-            from ..system import get_tool_manager
-
-            tool_call = ToolCall(
-                call_id=f"{self.agent_id}-{tool_id}-{time.time()}",
-                agent_id=self.agent_id,
-                tool_id=tool_id,
-                parameters=parameters,
-                auth_token=auth_token,
-            )
-
-            # Delegate to manager's tool manager handle
-            tool_manager = await get_tool_manager()
-            completed_call = await tool_manager.execute_tool(tool_call)
-
-            # Check if successful
-            if completed_call.status == ActionStatus.COMPLETED:
-                return completed_call.result
-            else:
-                error_msg = completed_call.error or "Unknown error"
-                raise RuntimeError(f"Tool {tool_id} failed: {error_msg}")
-
-        except Exception as e:
-            raise
-
     # === Lifecycle Methods (Override in subclasses) ===
 
     async def _instantiate_capability_blueprints(self, blueprints: list[AgentCapabilityBlueprint]) -> None:
@@ -3467,7 +3391,6 @@ class AgentManagerBase:
         self._vcm_handle: serving.DeploymentHandle | None = None
         self._llm_cluster_handle: serving.DeploymentHandle | None = None
         self._agent_system_handle: serving.DeploymentHandle | None = None
-        self._tool_manager_handle: serving.DeploymentHandle | None = None
         self._blackboard = None
 
     async def initialize(self) -> None:
@@ -3479,11 +3402,9 @@ class AgentManagerBase:
         from ..system import (
             get_agent_system,
             get_llm_cluster,
-            get_tool_manager,
             get_vcm,
         )
         self._agent_system_handle = await get_agent_system()
-        self._tool_manager_handle = await get_tool_manager()
         self._llm_cluster_handle = await get_llm_cluster()
         self._vcm_handle = await get_vcm()
 

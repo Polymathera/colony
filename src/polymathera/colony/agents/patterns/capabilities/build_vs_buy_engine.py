@@ -1,6 +1,10 @@
-"""``BuildVsBuyAdvisor`` — master §4.3 decision policy, formalised.
+"""``BuildVsBuyAdvisor`` engine — master §4.3 decision policy, formalised.
 
-Captures the decision rule the per-domain dossiers' Appendix-D verdicts
+This module is the **pure logic** core. The agent-facing wrapper that
+exposes the engine as a mountable :class:`AgentCapability` lives in
+``build_vs_buy.py`` next to this file.
+
+The decision rule the per-domain dossiers' Appendix-D verdicts
 distilled to:
 
 > **Rebuild if all of the following hold:**
@@ -41,13 +45,12 @@ exactly why a verdict came out the way it did.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .base import HITLFrequency, HeadlessReadiness, Licensing, ToolSpec
+from ....tools import HITLFrequency, HeadlessReadiness, Licensing, ToolSpec
 
 
 logger = logging.getLogger(__name__)
@@ -223,14 +226,9 @@ class BuildVsBuyAdvisor:
     """Apply master §4.3's six-rule policy + C5 augment-vs-build
     refinement.
 
-    The advisor is intentionally a plain class (not an
-    ``AgentCapability``) because its core is pure logic — it can be
-    invoked by any agent's planner, by a tool-building pool's
-    supervisor, or by a unit test, all under the same code path.
-
-    Wiring an ``AgentCapability`` wrapper for ``BuildVsBuyAdvisor``
-    around this is a small follow-up that the SessionAgent / supervisor
-    will pick up in Phase C3.
+    The advisor is pure logic — invoke directly from a unit test, from
+    :class:`BuildVsBuyCapability` (the mountable agent surface, see
+    ``build_vs_buy.py``), or from any future tool-building supervisor.
     """
 
     def __init__(

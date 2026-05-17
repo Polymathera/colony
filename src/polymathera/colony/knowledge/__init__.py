@@ -28,9 +28,9 @@ layer:
   §6.3 pipeline end to end with sampled human-review queueing.
 - **Retrieval** (``retrieval/``): five master §6.4 retrieval modes
   registered as Phase C2 ``ToolAdapter``s
-  (``ScopedRetrievalAdapter``, ``GroundedRetrievalAdapter``,
-  ``GraphRetrievalAdapter``, ``BudgetedRetrievalAdapter``,
-  ``StandardsRetrievalAdapter``).
+  (``ScopedRetrievalCapability``, ``GroundedRetrievalCapability``,
+  ``GraphRetrievalCapability``, ``BudgetedRetrievalCapability``,
+  ``StandardsRetrievalCapability``).
 
 This is C1a — the in-process / mock-friendly framework. C1b lands the
 real Qdrant + Kùzu + GROBID Docker wiring + the corpus-management
@@ -133,13 +133,21 @@ from .readers import (
     default_registry_with_pdf_extractor,
 )
 from .retrieval import (
-    BudgetedRetrievalAdapter,
-    GraphRetrievalAdapter,
-    GroundedRetrievalAdapter,
-    RetrievalAdapter,
+    # New names (canonical):
+    BudgetedRetrievalCapability,
+    GraphRetrievalCapability,
+    GroundedRetrievalCapability,
+    RetrievalCapability,
     RetrievalDeps,
-    ScopedRetrievalAdapter,
-    StandardsRetrievalAdapter,
+    ScopedRetrievalCapability,
+    StandardsRetrievalCapability,
+    # Deprecated aliases (pending removal):
+    BudgetedRetrievalCapability,
+    GraphRetrievalCapability,
+    GroundedRetrievalCapability,
+    RetrievalCapability,
+    ScopedRetrievalCapability,
+    StandardsRetrievalCapability,
 )
 from .stores import (
     GraphEdge,
@@ -257,12 +265,19 @@ __all__ = (
     "_TODO_IeeeXploreAcquirer",
     "_TODO_SaeMobilusAcquirer",
     "_TODO_SemanticScholarAcquirer",
-    # Retrieval
-    "RetrievalAdapter",
+    # Retrieval (current names)
+    "RetrievalCapability",
     "RetrievalDeps",
-    "ScopedRetrievalAdapter",
-    "GroundedRetrievalAdapter",
-    "GraphRetrievalAdapter",
-    "BudgetedRetrievalAdapter",
-    "StandardsRetrievalAdapter",
+    "ScopedRetrievalCapability",
+    "GroundedRetrievalCapability",
+    "GraphRetrievalCapability",
+    "BudgetedRetrievalCapability",
+    "StandardsRetrievalCapability",
+    # Retrieval (deprecated aliases — pending removal)
+    "RetrievalCapability",
+    "ScopedRetrievalCapability",
+    "GroundedRetrievalCapability",
+    "GraphRetrievalCapability",
+    "BudgetedRetrievalCapability",
+    "StandardsRetrievalCapability",
 )

@@ -29,8 +29,8 @@ MANIFEST_SCHEMA_VERSION = 2
 
 v2 adds the optional ``extensions`` block (L1-A). v1 manifests still
 parse cleanly — their ``extensions`` field defaults to ``None``. The
-:mod:`polymathera.colony.tools.manifest_migrate` utility bumps existing
-v1 manifests to v2 in place."""
+:mod:`polymathera.colony.design_monorepo.manifest_migrate` utility bumps
+existing v1 manifests to v2 in place."""
 
 
 MANIFEST_RELATIVE_PATH = ".colony/manifest.json"

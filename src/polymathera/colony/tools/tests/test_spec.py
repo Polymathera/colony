@@ -1,4 +1,4 @@
-"""Tests for ``ToolSpec`` + enums + value records."""
+"""Tests for ``ToolSpec`` + enums + per-call cost / resource shapes."""
 
 from __future__ import annotations
 
@@ -7,11 +7,12 @@ import pytest
 from polymathera.colony.tools import (
     CostModel,
     Determinism,
+    ExecutionLocality,
+    GpuRequirement,
     HITLFrequency,
     HeadlessReadiness,
     Licensing,
-    ToolCall,
-    ToolResult,
+    ResourceRequirements,
     ToolSpec,
 )
 
@@ -75,19 +76,6 @@ def test_costmodel_validates_negative() -> None:
         CostModel(cpu_seconds=-1.0)
 
 
-def test_toolcall_round_trip() -> None:
-    c = ToolCall(capability="x", parameters={"a": 1})
-    assert c.capability == "x"
-    assert c.parameters == {"a": 1}
-    assert c.call_id.startswith("call_")
-
-
-def test_toolresult_round_trip() -> None:
-    r = ToolResult(call_id="cid", adapter_name="ad", success=True, value={"k": "v"})
-    assert r.success
-    assert r.value == {"k": "v"}
-
-
 def test_licensing_enum_strings_stable() -> None:
     # The string values are part of the on-wire contract; surface
     # any rename loudly.
@@ -96,3 +84,57 @@ def test_licensing_enum_strings_stable() -> None:
     assert Licensing.MIT.value == "mit"
     assert Licensing.GPL.value == "gpl"
     assert Determinism.DETERMINISTIC.value == "deterministic"
+
+
+def test_execution_locality_enum_strings_stable() -> None:
+    # On-wire contract for cps.hpc.* config + REST API.
+    assert ExecutionLocality.LOCAL.value == "local"
+    assert ExecutionLocality.HPC.value == "hpc"
+    assert ExecutionLocality.CUSTOMER_SITE.value == "customer_site"
+
+
+def test_toolspec_execution_locality_defaults_local() -> None:
+    spec = ToolSpec(name="x")
+    assert spec.execution_locality == ExecutionLocality.LOCAL
+
+
+def test_toolspec_resource_requirements_defaults() -> None:
+    spec = ToolSpec(name="x")
+    req = spec.resource_requirements
+    assert req.min_vcpus == 1
+    assert req.min_memory_gb == 1.0
+    assert req.gpu is None
+    assert req.expected_wallclock_seconds == 600.0
+
+
+def test_toolspec_dropped_container_image_field_absent() -> None:
+    """v8 retrofit: ``ToolSpec.container_image`` was removed; image
+    routing is the responsibility of ``SandboxToolCapability`` /
+    ``HPCToolCapability`` (Batch JobDefinition), not metadata on the
+    spec."""
+    spec = ToolSpec(name="x")
+    assert not hasattr(spec, "container_image")
+    # Pydantic silently drops unknown kwargs by default (ToolSpec
+    # doesn't set ``extra="forbid"``). The important invariant: a
+    # legacy caller passing ``container_image=...`` doesn't end up
+    # with a populated attribute on the new model.
+    spec2 = ToolSpec(name="x", container_image="img:1")  # type: ignore[call-arg]
+    assert not hasattr(spec2, "container_image")
+
+
+def test_gpu_requirement_defaults() -> None:
+    gpu = GpuRequirement()
+    assert gpu.kind == "any"
+    assert gpu.count == 1
+    assert gpu.memory_gb is None
+
+
+def test_resource_requirements_with_gpu() -> None:
+    req = ResourceRequirements(
+        min_vcpus=16, min_memory_gb=64.0,
+        gpu=GpuRequirement(kind="a100", count=2, memory_gb=40.0),
+        expected_wallclock_seconds=3600.0,
+    )
+    assert req.gpu is not None
+    assert req.gpu.kind == "a100"
+    assert req.gpu.count == 2

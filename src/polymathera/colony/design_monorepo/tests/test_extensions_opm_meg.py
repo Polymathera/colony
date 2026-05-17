@@ -25,7 +25,7 @@ from polymathera.colony.design_monorepo import (
     DesignMonorepoManifest,
 )
 from polymathera.colony.design_monorepo.extensions import discover_all
-from polymathera.colony.tools.manifest_migrate import migrate_manifest
+from polymathera.colony.design_monorepo.manifest_migrate import migrate_manifest
 
 
 def _opm_meg_root() -> Path | None:

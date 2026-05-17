@@ -98,12 +98,13 @@ nav:
     - 'Capability — Web Search': architecture/web-search-capability.md
     - 'Capability — Sandboxed Shell': architecture/sandboxed-shell-capability.md
     - 'Capability — User Plugins': architecture/user-plugin-capability.md
+    - 'Capability — Knowledge': architecture/knowledge-capabilities.md
+    - 'Capability — Tools (ToolCapability)': architecture/tool-capabilities.md
     - 'Capability — GitHub': architecture/github-capability.md
     - 'Capability — Design Monorepo': architecture/design-monorepo-capabilities.md
     - 'Design Monorepo — L1-E Extension Authoring': architecture/design-monorepo-authoring.md
     - 'Design Monorepo — L1-A Extension Discovery': architecture/design-monorepo-extensions.md
     - 'Design Monorepo — L1-F Project Substance Authoring': architecture/project-substance-authoring.md
-    - 'Capability — Knowledge': architecture/knowledge-capabilities.md
     - Multimodal PDF Ingestion: architecture/multimodal-pdf-ingestion.md
     - 'Runtime — Image Extensions': architecture/image-extensions.md
     - Blackboard Pattern: architecture/blackboard.md

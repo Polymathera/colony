@@ -192,10 +192,6 @@ class ColonyConnection:
         """Get LLM cluster handle."""
         return await self._get_handle("llm_cluster")
 
-    async def get_tool_manager(self) -> Any:
-        """Get ToolManager handle."""
-        return await self._get_handle("tool_manager")
-
     def get_deployment_handle(self, app_name: str, deployment_name: str) -> Any:
         """Get a deployment handle by explicit app/deployment name.
 

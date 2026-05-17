@@ -243,7 +243,7 @@ async def test_bootstrap_surface_mismatch_with_scaffold_raises(
     # Caller picks a tools-surface bootstrap with an agents-bound
     # scaffold — the renderer rejects it cleanly.
     with pytest.raises((Exception,)) as exc_info:
-        await tool_builder.bootstrap_tool_adapter(
+        await tool_builder.bootstrap_tool_capability(
             "wrong", scaffold="agent_bound",
         )
     assert "agent_bound" in str(exc_info.value) or "targets surface" in str(

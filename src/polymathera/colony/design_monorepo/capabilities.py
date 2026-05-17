@@ -3082,15 +3082,22 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
             paths=rel_paths,
         )
 
+        # ``capability_fqn`` left empty: the bootstrap commits a
+        # scaffold, not a working ``ToolCapability`` subclass. Whoever
+        # fills in the scaffold (typically the same tool-building agent
+        # in a follow-up step, or a human reviewer) calls
+        # ``upsert_tool`` again with ``capability_fqn`` populated, at
+        # which point the registry validates the spec-vs-cache
+        # invariant.
         tool_entry = ToolEntry(
             name=spec.name,
             purpose=spec.purpose,
             capability=spec.capability,
             location=f"subdir:{rel_path}",
-            license=spec.license,
             extra={
                 "description": spec.description,
                 "template": spec.template,
+                "license": spec.license,
                 "bootstrapped_at_sha": sha,
             },
         )
@@ -3358,9 +3365,9 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
         return payload
 
     @action_executor(
-        planning_summary="Scaffold a new tool adapter under .colony/tools/<name>.py.",
+        planning_summary="Scaffold a new tool capability under .colony/tools/<name>.py.",
     )
-    async def bootstrap_tool_adapter(
+    async def bootstrap_tool_capability(
         self,
         name: str,
         *,
@@ -3368,11 +3375,22 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
         scaffold: str | None = None,
         template_vars: Mapping[str, str] | None = None,
     ) -> ExtensionAuthoredPayload:
-        """Write a ``register(registry)`` stub under the tools surface.
+        """Write a :class:`ToolCapability` skeleton under the tools
+        surface AND append a stub :class:`ToolEntry` to the
+        ``.colony/tool-registry.json`` catalog so L1-A discovery sees it.
 
-        ``scaffold`` selects an L2-F variant (e.g. ``"tool_adapter_fem"``
-        for a CalculiX/Code_Aster-shaped adapter); ``template_vars``
-        supplies its scaffold-specific substitutions.
+        ``scaffold`` selects an L2-F variant (e.g. ``"tool_capability_fem"``
+        for a CalculiX/Code_Aster-shaped capability); ``template_vars``
+        supplies its scaffold-specific substitutions (``kind``,
+        ``class_name``, ``image``, ``description``).
+
+        The catalog entry is registered with an empty ``capability_fqn``
+        — a *catalog-only stub*. Once the agent (or operator) lands the
+        rendered file at its real importable path, a second
+        ``upsert_tool`` call (typically via
+        :meth:`DesignMonorepoClient.register_tool` with the resolved
+        FQN) promotes the stub to a mountable entry; the registry's
+        spec-vs-cache validator then verifies the spec is reachable.
         """
         vars: dict[str, str] = {"tool_spec_var": tool_spec_var}
         if template_vars:
@@ -3380,6 +3398,29 @@ class ToolBuilder(_DesignMonorepoCapabilityBase):
         payload = await self._author_extension(
             "tools", name, vars, scaffold=scaffold,
         )
+
+        # Append the catalog entry alongside the rendered scaffold so
+        # L1-A discovery returns it on the next read. The ``kind``
+        # template var doubles as the entry's ``purpose`` (the
+        # tools/<purpose>/ subdirectory grouping); the rendered
+        # ``ToolSpec.capabilities[0]`` is by convention ``name``, so
+        # we cache that as the searchable capability key (validator
+        # is a no-op until ``capability_fqn`` is set in a follow-up
+        # upsert).
+        purpose = str(vars.get("kind") or "general")
+        entry = ToolEntry(
+            name=name,
+            purpose=purpose,
+            location=f"subdir:{payload.relative_path}",
+            capability=name,
+            capability_fqn="",
+        )
+        principal, register_msg = self._commit_attribution(
+            f"register tool stub {purpose}/{name}",
+        )
+        client = self._client_sync()
+        client.register_tool(principal, entry, commit_message=register_msg)
+
         await self._emit_extension_authored(payload)
         return payload
 

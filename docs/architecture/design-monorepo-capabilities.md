@@ -56,7 +56,7 @@ PUT  /api/v1/colonies/{colony_id}/design-monorepo
 |---|---|---|
 | `RepoStateProvider` | Read-only query + bootstrap surface | `get_repo_state`, `find_existing_tool`, `list_recent_decisions`, `diff_against_checkpoint`, `get_branch_topology`, `list_packages`, `list_design_artifacts`, `summarize_project_layout`, `read_file`, `read_lines`, `list_directory`, `stat_path`, `grep_content`, `git_log`, `git_status`, `diff_working_tree`, `ingest_repo_map_literature`, `initialize_repo_map` |
 | `DesignCheckpointer` | Write side: branches, checkpoints, merges, tags, remote ops | `checkpoint_state`, `restore_checkpoint`, `fork_design`, `merge_design`, `cherry_pick_decisions`, `commit_state`, `tag_checkpoint`, `list_checkpoints`, `list_forks`, `diff_design`, `create_branch`, `delete_branch`, `checkout_branch`, `stash_save`, `stash_pop`, `list_stashes`, `rebase_onto`, `create_tag`, `delete_tag`, `fetch_remote`, `pull_remote`, `push_remote` |
-| `ToolBuilder` | Scaffold extensions under `.colony/` and tool repos under `tools/<purpose>/<name>/` | `bootstrap_repo`, `bootstrap_plugin`, `bootstrap_agent`, `bootstrap_deployment`, `bootstrap_tool_adapter`, `bootstrap_profile` |
+| `ToolBuilder` | Scaffold extensions under `.colony/` and tool repos under `tools/<purpose>/<name>/` | `bootstrap_repo`, `bootstrap_plugin`, `bootstrap_agent`, `bootstrap_deployment`, `bootstrap_tool_capability`, `bootstrap_profile` |
 
 Notes:
 

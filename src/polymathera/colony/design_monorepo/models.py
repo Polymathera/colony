@@ -24,8 +24,6 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..tools.base import HeadlessReadiness
-
 
 # ---------------------------------------------------------------------------
 # Repo state — the snapshot returned by RepoStateProvider.get_repo_state()
@@ -93,6 +91,20 @@ class ToolEntry(BaseModel):
     Tools live at ``tools/<purpose>/<name>/`` in the design monorepo
     (master §9.3) or in an imported tooling-monorepo remote (master
     §9.5). The ``location`` discriminates.
+
+    **Source-of-truth boundary**:
+    ``ToolCapability.spec`` (a class-level ``ToolSpec`` on the
+    ``ToolCapability`` subclass named by ``capability_fqn``) is the
+    authoritative description of the tool — version, licence,
+    headless tier, cost model, resource requirements, container image.
+    ``ToolEntry`` is the *catalog index* for fast on-disk search
+    without importing every capability class; it carries only the
+    fields the search + discovery code needs at lookup time. The
+    ``capability`` field is a denormalised cache of
+    ``ToolCapability.spec.capabilities[0]`` (the tool's primary
+    capability key) — ``upsert_tool`` validates the cache against the
+    live spec when ``capability_fqn`` is set so the index can't drift
+    silently from the source of truth.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -104,10 +116,6 @@ class ToolEntry(BaseModel):
             "'shared/cad'. Determines the tools/<purpose>/ subdirectory."
         ),
     )
-    capability: str = Field(
-        description="Capability key the tool fulfils (queryable in find_existing_tool).",
-    )
-    version: str = Field(default="0.1.0")
     location: str = Field(
         description=(
             "Either 'subdir:tools/<purpose>/<name>' for a tool in this "
@@ -115,12 +123,24 @@ class ToolEntry(BaseModel):
             "tool exposed through an imports_tooling_from remote."
         ),
     )
-    license: str = Field(default="", description="SPDX licence identifier.")
-    container_image: str | None = None
-    headless: HeadlessReadiness = Field(
-        default=HeadlessReadiness.NATIVE,
+    capability: str = Field(
         description=(
-            "Headless-readiness tier (see ``colony.tools.HeadlessReadiness``)."
+            "Primary capability key the tool fulfils (queryable in "
+            "find_existing_tool). Denormalised cache of "
+            "``ToolCapability.spec.capabilities[0]`` when "
+            "``capability_fqn`` is set; the live spec is the source of "
+            "truth and ``upsert_tool`` enforces the equality."
+        ),
+    )
+    capability_fqn: str = Field(
+        default="",
+        description=(
+            "Fully-qualified import path of the ``ToolCapability`` "
+            "subclass that implements this tool, e.g. "
+            "``polymathera.cps.tools.fem.calculix.CalculiXCapability``. "
+            "Required for runtime mounting on an agent; entries with "
+            "an empty value are catalog-only stubs (e.g. build-vs-buy "
+            "candidates surveyed before any implementation exists)."
         ),
     )
     extra: dict[str, object] = Field(default_factory=dict)

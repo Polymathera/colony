@@ -1,4 +1,4 @@
-"""``ScopedRetrievalAdapter`` — single-shard / single-source retrieval.
+"""``ScopedRetrievalCapability`` — single-shard / single-source retrieval.
 
 Master §6.4 mode 1: "Single Tier-4 shard; for tool-use agents." The
 caller passes a ``source_prefix`` (e.g., ``"docs:k_wave:"``) and gets
@@ -20,10 +20,10 @@ from ...tools import (
     ToolSpec,
 )
 from ..models import RetrievalQuery, RetrievalResult
-from .base import RetrievalAdapter
+from .base import RetrievalCapability
 
 
-class ScopedRetrievalAdapter(RetrievalAdapter):
+class ScopedRetrievalCapability(RetrievalCapability):
     mode = "scoped"
     spec = ToolSpec(
         name="retrieve_scoped",
@@ -67,4 +67,4 @@ class ScopedRetrievalAdapter(RetrievalAdapter):
         )
 
 
-__all__ = ("ScopedRetrievalAdapter",)
+__all__ = ("ScopedRetrievalCapability")

@@ -1418,66 +1418,6 @@ class ActionPlan(BaseModel):
 
 
 # ============================================================================
-# Tool Models
-# ============================================================================
-
-
-class ToolParameterSchema(BaseModel):
-    """Schema for a tool parameter."""
-
-    name: str
-    type: str  # "string", "int", "bool", etc.
-    description: str
-    required: bool = False
-    default: Any = None
-
-
-class ToolMetadata(BaseModel):
-    """Metadata about a tool."""
-
-    tool_id: str
-    name: str
-    description: str
-    category: str  # "search", "code_analysis", "execution", etc.
-
-    # Schema
-    input_schema: list[ToolParameterSchema] = Field(default_factory=list)
-    output_schema: dict[str, Any] = Field(default_factory=dict)
-
-    # Usage
-    usage_tips: list[str] = Field(default_factory=list)
-    common_errors: list[str] = Field(default_factory=list)
-
-    # Deployment info
-    deployment_app_name: str
-    deployment_name: str
-
-    # Auth/config
-    requires_auth: bool = False
-    auth_token_key: str | None = None  # Key in auth dict
-    rate_limit: int | None = None  # Calls per minute
-
-
-class ToolCall(BaseModel):
-    """A call to a tool by an agent."""
-
-    call_id: str
-    agent_id: str
-    tool_id: str
-    parameters: dict[str, Any]
-
-    # Authentication
-    auth_token: str | None = None
-
-    status: ActionStatus = ActionStatus.PENDING
-    result: Any = None
-    error: str | None = None
-
-    created_at: float = Field(default_factory=time.time)
-    completed_at: float | None = None
-
-
-# ============================================================================
 # Communication Models
 # ============================================================================
 

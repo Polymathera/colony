@@ -135,46 +135,67 @@ def test_discover_deployments_finds_decorated_classes(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# discover_tools — register(registry) callback
+# discover_tools — reads .colony/tool-registry.json
 # ---------------------------------------------------------------------------
 
 
-def test_discover_tools_calls_register_callback(tmp_path: Path) -> None:
+def test_discover_tools_returns_empty_dict_when_registry_missing(tmp_path: Path) -> None:
+    """Fresh repo: no .colony/tool-registry.json → empty mapping (not an error)."""
+    assert discover_tools(tmp_path) == {}
+
+
+def test_discover_tools_loads_registry_entries(tmp_path: Path) -> None:
+    """Catalog read returns ToolEntry records keyed by name."""
+    import json
+    registry_path = tmp_path / ".colony/tool-registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(json.dumps({
+        "schema_version": 2,
+        "tools": [
+            {
+                "name": "shield",
+                "purpose": "opm_meg/shield",
+                "location": "subdir:tools/opm_meg/shield",
+                "capability": "compute_shielding_factor",
+                "capability_fqn": "polymathera.cps.tools.shield.ShieldCapability",
+                "extra": {},
+            },
+            {
+                "name": "calculix",
+                "purpose": "shared/fem",
+                "location": "subdir:tools/shared/fem/calculix",
+                "capability": "run_fem_static",
+                "capability_fqn": "",
+                "extra": {},
+            },
+        ],
+    }))
+
+    found = discover_tools(tmp_path)
+
+    assert set(found) == {"shield", "calculix"}
+    assert found["shield"].capability == "compute_shielding_factor"
+    assert found["shield"].capability_fqn == "polymathera.cps.tools.shield.ShieldCapability"
+    assert found["calculix"].capability_fqn == ""  # catalog-only stub
+
+
+def test_discover_tools_warns_when_surface_present_but_catalog_empty(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Surface dir has files but the catalog is empty → operator likely
+    forgot to ``register_tool`` after writing the tool source."""
+    import logging
+
     surface = tmp_path / ".colony/tools"
     surface.mkdir(parents=True)
-    (surface / "my_tool.py").write_text(
-        "from typing import ClassVar\n"
-        "from polymathera.colony.tools import (\n"
-        "    ToolAdapter, ToolCall, ToolResult, ToolSpec,\n"
-        "    CostModel, Determinism, HITLFrequency, HeadlessReadiness, Licensing,\n"
-        ")\n"
-        "\n"
-        "class MyAdapter(ToolAdapter):\n"
-        "    spec: ClassVar[ToolSpec] = ToolSpec(\n"
-        "        name='my_tool', capabilities=('solve',),\n"
-        "        headless=HeadlessReadiness.NATIVE,\n"
-        "        hitl_frequency=HITLFrequency.AUTONOMOUS,\n"
-        "        determinism=Determinism.DETERMINISTIC,\n"
-        "        licensing=Licensing.MIT,\n"
-        "        backend='in_process',\n"
-        "        cost_model=CostModel(),\n"
-        "    )\n"
-        "    async def invoke(self, call: ToolCall) -> ToolResult:\n"
-        "        return ToolResult.success(call=call, output={})\n"
-        "\n"
-        "def register(registry):\n"
-        "    registry.register(MyAdapter())\n"
+    (surface / "my_tool.py").write_text("x = 1\n")
+    with caplog.at_level(logging.WARNING):
+        found = discover_tools(tmp_path)
+    assert found == {}
+    assert any(
+        "tools surface" in rec.message and "is empty / missing" in rec.message
+        for rec in caplog.records
     )
-    registry = discover_tools(tmp_path)
-    names = [a.spec.name for a in registry.list_adapters()]
-    assert names == ["my_tool"]
-
-
-def test_discover_tools_skips_file_without_register(tmp_path: Path) -> None:
-    surface = tmp_path / ".colony/tools"
-    surface.mkdir(parents=True)
-    (surface / "no_register.py").write_text("x = 1\n")
-    assert len(discover_tools(tmp_path)) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -367,6 +367,19 @@ async def create_session(
                         "              content=f\"Coordinator {r.output['agent_id'][:8]} is running. I'll relay updates as it works.\")\n\n"
                         "  When the user asks a question or needs information (no mission\n"
                         "  spawn), use respond_to_user directly.\n\n"
+                        "AVAILABLE TOOLS — how to know what compute / retrieval / dispatch\n"
+                        "actions a freshly-spawned coordinator can mount:\n"
+                        "  The dict ``available_tools`` (in this agent's metadata.parameters)\n"
+                        "  lists every L4 tool capability the operator's design monorepo\n"
+                        "  declares via ``.colony/tool-registry.json``. Each entry maps\n"
+                        "  ``<tool_name>`` → ``{purpose, location, capability, capability_fqn}``.\n"
+                        "  The coordinator spawned via ``spawn_mission`` can mount any of these\n"
+                        "  by passing the ``capability_fqn`` string in its ``capabilities=[...]``\n"
+                        "  list at create_agent time. (``spawn_mission`` handles this for you when\n"
+                        "  the mission's worker class declares them in its blueprint.) Tools with\n"
+                        "  ``capability_fqn`` set are mountable; entries with an empty\n"
+                        "  ``capability_fqn`` are catalog-only candidates surveyed by the\n"
+                        "  build-vs-buy advisor — they're for context, not for mounting.\n\n"
                         "DESIGN-MONOREPO BOOTSTRAP:\n"
                         "  When the user asks to initialize / bootstrap / scaffold the "
                         "  design monorepo (or asks 'how do I set up repo_map.yaml'), "
@@ -518,6 +531,14 @@ async def create_session(
                 ),
                 parameters={
                     "available_missions": {},
+                    # ``available_tools`` is populated dynamically by
+                    # :meth:`SessionOrchestratorCapability._refresh_available_tools`
+                    # from the L4 design monorepo's
+                    # ``.colony/tool-registry.json`` catalog. We seed
+                    # an empty dict here so planner-prompt rendering
+                    # works during the brief window between agent
+                    # construction and the first refresh.
+                    "available_tools": {},
                     "session_id": session_id,
                     "repl_guidance_override": (
                         "## REPL\n\n"

@@ -14,12 +14,16 @@ Six surfaces — for each, a single discover function:
                                   surface. Detection is via the
                                   ``__deployment_config__`` attribute the
                                   decorator attaches.
-- :func:`discover_tools`       — each ``*.py`` file under the tools surface
-                                  may expose a top-level
-                                  ``register(registry: ToolRegistry) -> None``
-                                  callback; we call it. Adapters whose
-                                  ``__init__`` takes arguments register
-                                  themselves explicitly inside ``register``.
+- :func:`discover_tools`       — reads ``.colony/tool-registry.json`` via
+                                  :func:`registry.load_registry` and returns
+                                  the typed :class:`ToolEntry` records keyed
+                                  by ``entry.name``. Each entry's
+                                  ``capability_fqn`` resolves to a
+                                  :class:`ToolCapability` subclass at
+                                  agent-mount time via the ``class_resolver``
+                                  fallback registry — discovery itself is a
+                                  lightweight catalog read with no Python
+                                  imports.
 - :func:`discover_profiles`    — ``*.yaml`` files under the profiles surface,
                                   parsed and keyed by filename stem.
 - :func:`discover_missions`    — each ``*.py`` file under the missions surface
@@ -59,8 +63,9 @@ from ..agents.base import Agent
 from ..agents.configs import MissionSpec
 from ..agents.patterns.capabilities._plugin.discovery import discover_skills
 from ..agents.patterns.capabilities._plugin.schema import SkillSource, SkillSpec
-from ..tools.registry import ToolRegistry
 from .manifest import DEFAULT_SURFACE_DIRS, DesignMonorepoManifest
+from .models import ToolEntry
+from .registry import REGISTRY_RELATIVE_PATH, load_registry
 
 
 logger = logging.getLogger(__name__)
@@ -236,30 +241,41 @@ def discover_deployments(
 
 def discover_tools(
     repo_root: Path, manifest: DesignMonorepoManifest | None = None,
-) -> ToolRegistry:
-    """Walk the tools surface. Each ``*.py`` file may expose a top-level
-    ``register(registry: ToolRegistry) -> None`` callable; we invoke it
-    so the file controls its own adapter construction (adapters' ``__init__``
-    signatures vary). Files without ``register`` are silently skipped."""
-    registry = ToolRegistry()
+) -> dict[str, ToolEntry]:
+    """Load the design monorepo's tool catalog.
+
+    Reads ``<repo_root>/.colony/tool-registry.json`` via
+    :func:`polymathera.colony.design_monorepo.registry.load_registry`
+    and returns the entries keyed by ``entry.name``. Catalog-only
+    stubs (entries with an empty ``capability_fqn``) are included —
+    they're useful to the build-vs-buy advisor even when no
+    implementation exists yet. The catalog is the single source of
+    discoverable tool metadata; entries' ``capability_fqn`` strings
+    are resolved (and validated as ``ToolCapability`` subclasses) at
+    mount time by ``AgentPoolCapability.create_agent`` via the
+    ``class_resolver`` fallback registry.
+
+    Returns an empty dict when the registry file is missing — fresh
+    repos have no tools yet and that's not an error.
+
+    Manifest-driven surface overrides (``ExtensionsConfig.tools_dir``)
+    are honoured: when the manifest points the tools surface at a
+    non-default subdirectory we still resolve the catalog file under
+    ``.colony/tool-registry.json`` (the catalog path is fixed by
+    :data:`REGISTRY_RELATIVE_PATH`) but warn if the surface dir is
+    declared yet the catalog is empty — typically a misconfiguration
+    where the operator forgot to ``ToolBuilder.bootstrap_*`` after
+    pointing at the new surface.
+    """
+    entries = load_registry(repo_root)
     surface = _surface_dir(repo_root, "tools", manifest)
-    if not surface.is_dir():
-        return registry
-    for path in sorted(surface.glob("*.py")):
-        module = _load_py_module(path)
-        if module is None:
-            continue
-        register = getattr(module, "register", None)
-        if not callable(register):
-            continue
-        try:
-            register(registry)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "L1-A: %s.register(registry) raised (%s: %s) — skipping",
-                path, type(exc).__name__, exc,
-            )
-    return registry
+    if not entries and surface.is_dir() and any(surface.iterdir()):
+        logger.warning(
+            "L1-A: tools surface %s contains files but %s is empty / missing — "
+            "did you forget to ``register_tool`` after writing the tool source?",
+            surface, repo_root / REGISTRY_RELATIVE_PATH,
+        )
+    return {entry.name: entry for entry in entries}
 
 
 def discover_profiles(
@@ -364,7 +380,7 @@ class DiscoveredExtensions:
     plugins: list[SkillSpec] = field(default_factory=list)
     agents: dict[str, type[Agent]] = field(default_factory=dict)
     deployments: dict[str, type] = field(default_factory=dict)
-    tools: ToolRegistry = field(default_factory=ToolRegistry)
+    tools: dict[str, ToolEntry] = field(default_factory=dict)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     missions: dict[str, dict[str, Any]] = field(default_factory=dict)
 

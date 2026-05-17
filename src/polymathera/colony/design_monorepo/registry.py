@@ -26,7 +26,9 @@ prevents that swap from being a breaking change.
 
 from __future__ import annotations
 
+import importlib
 import json
+import logging
 import re
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -34,12 +36,40 @@ from pathlib import Path
 from .models import ImportedRemote, ToolEntry, ToolMatch
 
 
+logger = logging.getLogger(__name__)
+
+
 REGISTRY_RELATIVE_PATH = ".colony/tool-registry.json"
-REGISTRY_SCHEMA_VERSION = 1
+REGISTRY_SCHEMA_VERSION = 2
+"""On-disk schema version.
+
+- v1 (legacy) carried ``capability``, ``version``, ``license``,
+  ``container_image``, ``headless`` directly on each entry.
+- v2 (current) keeps only catalog-index fields on
+  :class:`ToolEntry`; the ``ToolCapability`` subclass named by
+  ``capability_fqn`` is the source of truth for everything else.
+  See ``ToolEntry`` docstring for the denormalisation contract."""
 
 
 class ToolRegistryError(ValueError):
     """Raised when the registry file is missing or malformed."""
+
+
+class ToolEntrySpecMismatch(ToolRegistryError):
+    """Raised when an entry's ``capability`` field disagrees with the
+    capabilities tuple on the live ``ToolCapability.spec`` named by
+    ``capability_fqn``. Surfaces denormalisation drift at registration
+    time so the on-disk index can't lie about what the implementation
+    actually provides."""
+
+
+_V1_ENTRY_ONLY_FIELDS: frozenset[str] = frozenset({
+    "version", "license", "container_image", "headless",
+})
+"""Fields the v1 ``ToolEntry`` schema carried that v2 dropped (they
+live on ``ToolCapability.spec`` now). Stripped silently when reading
+v1 payloads so legacy on-disk registries upgrade in place on the next
+``write_registry`` call."""
 
 
 def _read(path: Path) -> dict[str, object]:
@@ -61,6 +91,20 @@ def _read(path: Path) -> dict[str, object]:
             f"Tool registry schema_version={version} is newer than this "
             f"colony build understands ({REGISTRY_SCHEMA_VERSION}).",
         )
+    if isinstance(version, int) and version < REGISTRY_SCHEMA_VERSION:
+        # v1 → v2: drop the entry-level fields v2 reads from
+        # ``ToolCapability.spec`` instead. Lossy on purpose — the
+        # source of truth for those fields is the live spec; persisting
+        # them in the catalog risks drift. The upgrade lands on disk
+        # the next time ``write_registry`` runs.
+        raw_tools = payload.get("tools") or []
+        if isinstance(raw_tools, list):
+            payload["tools"] = [
+                {k: v for k, v in entry.items() if k not in _V1_ENTRY_ONLY_FIELDS}
+                if isinstance(entry, dict) else entry
+                for entry in raw_tools
+            ]
+        payload["schema_version"] = REGISTRY_SCHEMA_VERSION
     return payload
 
 
@@ -99,11 +143,26 @@ def write_registry(repo_root: Path, entries: Sequence[ToolEntry]) -> Path:
 def upsert_tool(
     repo_root: Path,
     entry: ToolEntry,
+    *,
+    validate_spec: bool = True,
 ) -> tuple[ToolEntry, ...]:
     """Insert or replace an entry by ``(purpose, name)``.
 
+    When ``entry.capability_fqn`` is set and ``validate_spec`` is True
+    (the default), the registered ``ToolCapability`` subclass is
+    imported and its ``spec.capabilities`` tuple is checked to contain
+    ``entry.capability`` — raising :class:`ToolEntrySpecMismatch` if
+    the on-disk catalog would diverge from the live spec. Pass
+    ``validate_spec=False`` for catalog-only stub entries whose
+    capability class is intentionally absent in the current
+    environment (e.g. build-vs-buy survey entries for tools that have
+    not been implemented yet).
+
     Returns the new full registry tuple.
     """
+
+    if validate_spec and entry.capability_fqn:
+        _validate_capability_against_spec(entry)
 
     existing = list(load_registry(repo_root))
     key = (entry.purpose, entry.name)
@@ -117,6 +176,57 @@ def upsert_tool(
         existing.append(entry)
     write_registry(repo_root, existing)
     return tuple(existing)
+
+
+def _validate_capability_against_spec(entry: ToolEntry) -> None:
+    """Import ``entry.capability_fqn`` and assert
+    ``entry.capability in cls.spec.capabilities``.
+
+    Raises :class:`ToolEntrySpecMismatch` on drift. Raises
+    :class:`ToolRegistryError` on import / attribute failures so the
+    caller can distinguish "not implemented yet" from "implementation
+    drifted from the catalog".
+    """
+
+    fqn = entry.capability_fqn
+    module_path, _, class_name = fqn.rpartition(".")
+    if not module_path or not class_name:
+        raise ToolRegistryError(
+            f"Tool entry {entry.purpose}/{entry.name}: capability_fqn "
+            f"{fqn!r} is not a fully-qualified class path "
+            "(expected 'pkg.module.ClassName').",
+        )
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as exc:
+        raise ToolRegistryError(
+            f"Tool entry {entry.purpose}/{entry.name}: cannot import "
+            f"{module_path!r} (capability_fqn={fqn!r}): {exc}",
+        ) from exc
+    try:
+        cls = getattr(module, class_name)
+    except AttributeError as exc:
+        raise ToolRegistryError(
+            f"Tool entry {entry.purpose}/{entry.name}: module "
+            f"{module_path!r} has no attribute {class_name!r} "
+            f"(capability_fqn={fqn!r}).",
+        ) from exc
+    spec = getattr(cls, "spec", None)
+    if spec is None:
+        raise ToolRegistryError(
+            f"Tool entry {entry.purpose}/{entry.name}: class "
+            f"{fqn!r} has no ``spec`` ClassVar; ToolCapability "
+            "subclasses must declare one.",
+        )
+    capabilities = tuple(getattr(spec, "capabilities", ()) or ())
+    if entry.capability not in capabilities:
+        raise ToolEntrySpecMismatch(
+            f"Tool entry {entry.purpose}/{entry.name}: capability "
+            f"{entry.capability!r} is not in {fqn!r}.spec.capabilities "
+            f"{capabilities!r}. The ToolEntry.capability field is a "
+            "denormalised cache of the primary capability key on the "
+            "live spec; update one side to match the other.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +318,7 @@ __all__ = (
     "REGISTRY_RELATIVE_PATH",
     "REGISTRY_SCHEMA_VERSION",
     "ToolRegistryError",
+    "ToolEntrySpecMismatch",
     "load_registry",
     "write_registry",
     "upsert_tool",

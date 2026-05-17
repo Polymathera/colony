@@ -247,17 +247,24 @@ async def test_bootstrap_deployment_round_trips(
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_tool_adapter_round_trips(
+async def test_bootstrap_tool_capability_round_trips(
     tool_builder: ToolBuilder, bootstrapped_repo: DesignMonorepoClient,
 ) -> None:
-    payload = await tool_builder.bootstrap_tool_adapter("quspin_adapter")
+    payload = await tool_builder.bootstrap_tool_capability("quspin_adapter")
     assert payload.surface == "tools"
     py = bootstrapped_repo.working_dir / ".colony" / "tools" / "quspin_adapter.py"
     assert py.is_file()
-    # ``discover_tools`` invokes the file's ``register()``; our stub
-    # registers nothing, but the file must execute without error.
-    registry = discover_all(bootstrapped_repo.working_dir).tools
-    assert len(registry) == 0
+    # Post-retrofit: bootstrap appends a catalog-only stub
+    # ``ToolEntry`` (empty ``capability_fqn``) so the L1-A discovery
+    # path returns the entry. A follow-up ``upsert_tool`` (typically
+    # by the agent after landing the rendered file at its real
+    # importable path) sets the ``capability_fqn`` and promotes the
+    # stub to a mountable entry.
+    discovered = discover_all(bootstrapped_repo.working_dir).tools
+    assert "quspin_adapter" in discovered
+    entry = discovered["quspin_adapter"]
+    assert entry.capability_fqn == ""  # stub — not yet mountable
+    assert entry.location == "subdir:.colony/tools/quspin_adapter.py"
 
 
 @pytest.mark.asyncio

@@ -21,9 +21,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..design_monorepo.client import DesignMonorepoClient
-from ..design_monorepo.identity import AgentIdentity
-from ..design_monorepo.manifest import (
+from .client import DesignMonorepoClient
+from .identity import AgentIdentity
+from .manifest import (
     MANIFEST_RELATIVE_PATH,
     MANIFEST_SCHEMA_VERSION,
     DesignMonorepoManifest,

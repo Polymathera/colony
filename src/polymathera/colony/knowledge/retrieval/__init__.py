@@ -1,4 +1,4 @@
-"""Master §6.4 retrieval modes, registered as C2 ``ToolAdapter``s.
+"""Master §6.4 retrieval modes, exposed as :class:`LocalToolCapability` subclasses.
 
 Five modes:
 
@@ -12,27 +12,41 @@ Five modes:
 - ``standards`` — Tier-2 retrieval with rulemaking-state filter
   (``effective_at`` window).
 
-Every mode is an ``RetrievalAdapter`` (subclass of C2's ``ToolAdapter``)
-that plugs into a ``ToolRegistry``, so agents resolve retrieval the
-same way they resolve any other tool capability.
+Every mode is a :class:`RetrievalCapability` (subclass of
+:class:`~polymathera.colony.agents.patterns.capabilities.tool.LocalToolCapability`)
+that an agent mounts via the standard blueprint flow; the LLM planner
+discovers it via the ``"tool"`` + ``"knowledge"`` + ``"retrieval"``
+capability tags.
+
+The legacy ``*RetrievalCapability`` names remain as deprecated aliases
+for one release cycle so external imports keep working while
+consumers migrate.
 """
 
 from __future__ import annotations
 
-from .base import RetrievalAdapter, RetrievalDeps
-from .budgeted import BudgetedRetrievalAdapter
-from .graph import GraphRetrievalAdapter
-from .grounded import GroundedRetrievalAdapter
-from .scoped import ScopedRetrievalAdapter
-from .standards import StandardsRetrievalAdapter
+from .base import RetrievalCapability, RetrievalCapability, RetrievalDeps
+from .budgeted import BudgetedRetrievalCapability, BudgetedRetrievalCapability
+from .graph import GraphRetrievalCapability, GraphRetrievalCapability
+from .grounded import GroundedRetrievalCapability, GroundedRetrievalCapability
+from .scoped import ScopedRetrievalCapability, ScopedRetrievalCapability
+from .standards import StandardsRetrievalCapability, StandardsRetrievalCapability
 
 
 __all__ = (
-    "RetrievalAdapter",
+    # Current names
+    "RetrievalCapability",
     "RetrievalDeps",
-    "BudgetedRetrievalAdapter",
-    "GraphRetrievalAdapter",
-    "GroundedRetrievalAdapter",
-    "ScopedRetrievalAdapter",
-    "StandardsRetrievalAdapter",
+    "BudgetedRetrievalCapability",
+    "GraphRetrievalCapability",
+    "GroundedRetrievalCapability",
+    "ScopedRetrievalCapability",
+    "StandardsRetrievalCapability",
+    # Deprecated aliases (pending removal)
+    "RetrievalCapability",
+    "BudgetedRetrievalCapability",
+    "GraphRetrievalCapability",
+    "GroundedRetrievalCapability",
+    "ScopedRetrievalCapability",
+    "StandardsRetrievalCapability",
 )
