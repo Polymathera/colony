@@ -117,11 +117,11 @@ def test_scoped_search_with_source_prefix_returns_hits(cap) -> None:
 
 
 def test_unknown_mode_raises_value_error(cap) -> None:
-    with pytest.raises(ValueError, match="unknown retrieval adapter"):
+    with pytest.raises(ValueError, match="unknown retrieval retriever"):
         _run(cap.search_knowledge(query="x", mode="bogus"))
 
 
-def test_adapter_cache_reuses_instance(cap) -> None:
-    a1 = cap._get_adapter("scoped")
-    a2 = cap._get_adapter("scoped")
+def test_retriever_cache_reuses_instance(cap) -> None:
+    a1 = cap._get_retriever("scoped")
+    a2 = cap._get_retriever("scoped")
     assert a1 is a2

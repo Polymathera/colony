@@ -38,14 +38,38 @@ class DeployConfig:
     redis: RedisDeployConfig = field(default_factory=RedisDeployConfig)
     ray: RayDeployConfig = field(default_factory=RayDeployConfig)
     build: bool = True
+    # Keys ``env.py:load_dotenv`` lifts from ``cli/deploy/.env`` into
+    # ``os.environ`` so docker-compose's ``${VAR:-}`` placeholders
+    # resolve at ``compose up`` time. Keep this list in sync with the
+    # ``environment:`` blocks in ``docker/docker-compose.yml`` — a key
+    # in compose but missing here silently resolves to empty (opaque
+    # 401s downstream); a key here but missing from compose is read
+    # into the operator shell but never reaches container runtime.
     api_key_env_vars: list[str] = field(
         default_factory=lambda: [
+            # LLM providers
             "ANTHROPIC_API_KEY",
             "OPENROUTER_API_KEY",
             "OPENAI_API_KEY",
             "GOOGLE_API_KEY",
+            # PDF-extractor backends (Mistral OCR, LlamaParse) and
+            # HuggingFace-pulled weights / self-hosted backends.
+            "MISTRAL_API_KEY",
+            "LLAMA_CLOUD_API_KEY",
             "HUGGING_FACE_HUB_TOKEN",
+            # Git remote credentials — PAT path.
             "GITHUB_TOKEN",
             "GITLAB_TOKEN",
+            # Git remote credentials — GitHub App path
+            # (``GitHubAuthConfig`` mints a short-lived installation
+            # token from the three together).
+            "GITHUB_APP_ID",
+            "GITHUB_INSTALLATION_ID",
+            "GITHUB_PRIVATE_KEY_PEM",
+            # WebSearchCapability / ColonyDocsCapability — Tavily.
+            "TAVILY_API_KEY",
+            # Slack-relay capability.
+            "SLACK_APP_TOKEN",
+            "SLACK_BOT_TOKEN",
         ]
     )

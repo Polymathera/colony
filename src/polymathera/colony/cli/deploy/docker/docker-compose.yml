@@ -85,6 +85,12 @@ services:
       # backend is actually used at runtime.
       - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
       - LLAMA_CLOUD_API_KEY=${LLAMA_CLOUD_API_KEY:-}
+      # Hugging Face Hub auth — read by the self-hosted PDF backends
+      # (Marker / MinerU / Docling), by any HuggingFace-pulled model
+      # weights, and propagated to Ray actor processes via the
+      # ``HUGGING_FACE_`` prefix in
+      # ``distributed.ray_utils.serving.proxy:RUNTIME_ENV_PREFIXES``.
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
       # WebSearchCapability / ColonyDocsCapability — Tavily backend.
       # The capability stays disabled until this is set; agents see a
       # clean error dict from search_web rather than a crash.
@@ -194,6 +200,11 @@ services:
       # backend is used at runtime.
       - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
       - LLAMA_CLOUD_API_KEY=${LLAMA_CLOUD_API_KEY:-}
+      # Hugging Face Hub auth — read by the self-hosted PDF backends
+      # (Marker / MinerU / Docling) and propagated to Ray actor
+      # processes via the ``HUGGING_FACE_`` prefix in
+      # ``distributed.ray_utils.serving.proxy:RUNTIME_ENV_PREFIXES``.
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
       # WebSearchCapability / ColonyDocsCapability — Tavily backend.
       - TAVILY_API_KEY=${TAVILY_API_KEY:-}
       # GitHubCapability — App credentials. See
@@ -387,6 +398,11 @@ services:
       # backend is used at runtime.
       - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
       - LLAMA_CLOUD_API_KEY=${LLAMA_CLOUD_API_KEY:-}
+      # Hugging Face Hub auth — kept here for parity with ray-head /
+      # ray-worker so dashboard-side PDF previews (Marker / MinerU /
+      # Docling) can authenticate against the Hub if the operator
+      # ever calls the extractor from the dashboard process.
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
       # Slack chat service (optional)
       - SLACK_ENABLED=false
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
