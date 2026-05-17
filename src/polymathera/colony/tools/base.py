@@ -29,7 +29,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from enum import Enum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -125,6 +125,75 @@ class Determinism(str, Enum):
     STOCHASTIC = "stochastic"
     """Outputs vary across runs; bound by a confidence interval
     or distribution."""
+
+
+class ExecutionLocality(str, Enum):
+    """Where the tool is allowed to run.
+
+    Distinct from ``ToolSpec.backend``: ``backend`` describes the
+    *mechanism* (in-process, docker container, REST call), while
+    ``execution_locality`` describes the *physical environment*
+    (in-cluster, remote HPC, customer site). A single backend
+    (``http_api``) is used by both local sidecars and remote HPC
+    dispatchers, so the two axes are orthogonal.
+    """
+
+    LOCAL = "local"
+    """In-cluster: in-process / cli_subprocess / docker / ray_serve on a
+    node that ``colony-env up`` started. The default."""
+
+    HPC = "hpc"
+    """Remote large-resource cluster — for CPS today, AWS Batch via the
+    REST contract in ``cps/deployment/cdk/`` reached through an
+    ``HPCJobAdapter`` subclass."""
+
+    CUSTOMER_SITE = "customer_site"
+    """Operator's on-premise environment. Reserved for forward
+    compatibility; no adapter ships against it today."""
+
+
+class GpuRequirement(BaseModel):
+    """GPU specification for a tool's per-call resource requirements.
+
+    Omit (leave ``ResourceRequirements.gpu`` as None) when the tool
+    runs on CPU only. ``kind`` is a coarse class label, not a vendor
+    SKU — the HPC scheduler maps it to an instance type via the
+    operator's ``cps.hpc.limits.allowed_gpu_kinds``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["a10g", "a100", "h100", "v100", "any"] = "any"
+    count: int = Field(default=1, ge=1)
+    memory_gb: float | None = Field(default=None, gt=0)
+    """Minimum per-GPU memory. None = no specific minimum."""
+
+
+class ResourceRequirements(BaseModel):
+    """Per-call resource requirements declared on ``ToolSpec``.
+
+    Distinct from ``CostModel``: ``CostModel`` is the *expected per-call
+    cost* (used for budgeting + scoring); ``ResourceRequirements`` is
+    the *minimum environment* the tool refuses to run without. A tool
+    can have low cost (``cost_model.cpu_seconds=2``) and large minimums
+    (``min_vcpus=16``) — e.g. a quick parallel CalculiX run.
+
+    The HPC dispatcher (``HPCJobAdapter``) forwards these to AWS Batch
+    as the job's ``resourceRequirements``; the registry resolver uses
+    them with ``Preferences.max_required_*`` to drop tools the runtime
+    can't accommodate.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    min_vcpus: int = Field(default=1, ge=1)
+    min_memory_gb: float = Field(default=1.0, gt=0)
+    gpu: GpuRequirement | None = None
+    expected_wallclock_seconds: float = Field(default=600.0, gt=0)
+    """Wall-clock estimate. The HPC dispatcher uses this for the job's
+    timeout (with a safety factor); the resolver uses it with
+    ``Preferences.max_required_wallclock_seconds`` to drop tools
+    whose runs would exceed the operator's tolerance."""
 
 
 class Licensing(str, Enum):
@@ -237,6 +306,19 @@ class ToolSpec(BaseModel):
     """Docker image tag this adapter requires (master §4.5). When set,
     the dispatcher routes to a host that has the image."""
 
+    execution_locality: ExecutionLocality = ExecutionLocality.LOCAL
+    """Where this tool is allowed to run. See ``ExecutionLocality``."""
+
+    resource_requirements: ResourceRequirements = Field(
+        default_factory=ResourceRequirements,
+    )
+    """Minimum environment the tool refuses to run without. Distinct
+    from ``cost_model`` (which is the expected per-call cost).
+    Single source of truth for both:
+      - the registry's ``max_required_*`` hard-filter, and
+      - the HPC dispatcher's POST body to AWS Batch.
+    """
+
     extra: dict[str, Any] = Field(default_factory=dict)
     """Free-form metadata for tool-class-specific extensions."""
 
@@ -315,10 +397,19 @@ class Preferences(BaseModel):
        - ``required_backend`` (mismatch)
        - ``forbid_licences`` (adapter's licence in set)
        - ``max_cpu_seconds`` / ``max_gpu_seconds`` / ``max_memory_gb``
-         / ``max_dollars`` (adapter's cost above cap)
+         / ``max_dollars`` (adapter's *cost* above cap — distinct from
+         ``max_required_*`` which gate the *resource requirements*)
        - ``require_interruptible`` (adapter's spec doesn't support it)
        - ``allowed_container_images`` (adapter's image not in set,
          when set is non-empty and adapter's image is non-None)
+       - ``allowed_localities`` (adapter's ``execution_locality`` not
+         in set)
+       - ``max_required_vcpus`` / ``max_required_memory_gb`` /
+         ``max_required_gpu_count`` / ``max_required_wallclock_seconds``
+         (adapter's ``resource_requirements.*`` minimum exceeds cap)
+       - ``allowed_required_gpu_kinds`` (adapter's
+         ``resource_requirements.gpu.kind`` not in set, when adapter
+         declares a GPU requirement)
     2. **Score rank** — among survivors, prefer:
        - higher ``headless`` tier
        - lower ``hitl`` tier
@@ -340,9 +431,43 @@ class Preferences(BaseModel):
     max_cpu_seconds: float | None = None
     max_gpu_seconds: float | None = None
     max_memory_gb: float | None = None
+    """Caps the adapter's ``cost_model.memory_gb`` (estimated cost per
+    call). Distinct from ``max_required_memory_gb`` which caps the
+    adapter's ``resource_requirements.min_memory_gb`` (refused-without
+    minimum)."""
+
     max_dollars: float | None = None
     require_interruptible: bool = False
     allowed_container_images: frozenset[str] = Field(default_factory=frozenset)
+
+    # ---- Locality + resource-requirements filters ----
+    allowed_localities: frozenset[ExecutionLocality] | None = None
+    """Restrict adapters by ``ToolSpec.execution_locality``. ``None``
+    (the default) accepts every locality; set explicitly to e.g.
+    ``frozenset({ExecutionLocality.LOCAL})`` to drop HPC adapters when
+    the operator has no HPC endpoint configured."""
+
+    max_required_vcpus: int | None = None
+    """Cap on the adapter's ``resource_requirements.min_vcpus``. Set
+    from the operator's HPC limits + local cluster capacity."""
+
+    max_required_memory_gb: float | None = None
+    """Cap on the adapter's ``resource_requirements.min_memory_gb``."""
+
+    max_required_gpu_count: int | None = None
+    """Cap on the adapter's ``resource_requirements.gpu.count``
+    (when the adapter declares a GPU requirement)."""
+
+    allowed_required_gpu_kinds: frozenset[str] | None = None
+    """Allow-list of adapter GPU kinds (``a10g``, ``a100``, ``h100``,
+    ``v100``, ``any``). Applies only when the adapter declares a GPU
+    requirement; CPU-only adapters always pass this filter."""
+
+    max_required_wallclock_seconds: float | None = None
+    """Cap on the adapter's
+    ``resource_requirements.expected_wallclock_seconds`` — drops jobs
+    longer than the operator's tolerance before any artifact upload."""
+
     prefer_lower_cost: bool = True
     """When True (default), the score-rank tier-breaks by cost
     (cpu+gpu seconds, dollars). When False, cost is ignored."""
@@ -402,6 +527,9 @@ __all__ = (
     "HITLFrequency",
     "Determinism",
     "Licensing",
+    "ExecutionLocality",
+    "GpuRequirement",
+    "ResourceRequirements",
     "CostModel",
     "ToolSpec",
     "ToolCall",

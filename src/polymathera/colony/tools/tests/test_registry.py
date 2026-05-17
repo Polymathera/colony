@@ -8,11 +8,14 @@ from polymathera.colony.tools import (
     CostModel,
     Determinism,
     DuplicateAdapter,
+    ExecutionLocality,
+    GpuRequirement,
     HITLFrequency,
     HeadlessReadiness,
     Licensing,
     NoAdapterAvailable,
     Preferences,
+    ResourceRequirements,
     ToolAdapter,
     ToolCall,
     ToolRegistry,
@@ -34,6 +37,8 @@ def _make_adapter_class(
     container_image: str | None = None,
     cpu_seconds: float = 0.0,
     dollars: float = 0.0,
+    execution_locality: ExecutionLocality = ExecutionLocality.LOCAL,
+    resource_requirements: ResourceRequirements | None = None,
 ) -> type[ToolAdapter]:
     spec_obj = ToolSpec(
         name=name,
@@ -46,6 +51,8 @@ def _make_adapter_class(
         interruptibility=interruptibility,
         container_image=container_image,
         cost_model=CostModel(cpu_seconds=cpu_seconds, dollars=dollars),
+        execution_locality=execution_locality,
+        resource_requirements=resource_requirements or ResourceRequirements(),
     )
 
     class _A(ToolAdapter):
@@ -213,6 +220,155 @@ def test_allowed_container_images() -> None:
         Preferences(allowed_container_images=frozenset({"colony-cad:0.1"})),
     )
     assert type(chosen).spec.name == "b"
+
+
+def test_allowed_localities_drops_hpc_when_local_only() -> None:
+    reg = ToolRegistry()
+    Local = _make_adapter_class(name="local", execution_locality=ExecutionLocality.LOCAL)
+    Hpc = _make_adapter_class(name="hpc", execution_locality=ExecutionLocality.HPC)
+    reg.register(Local())
+    reg.register(Hpc())
+    chosen = reg.resolve(
+        "solve",
+        Preferences(allowed_localities=frozenset({ExecutionLocality.LOCAL})),
+    )
+    assert type(chosen).spec.name == "local"
+
+
+def test_allowed_localities_none_accepts_all() -> None:
+    reg = ToolRegistry()
+    Local = _make_adapter_class(name="local", execution_locality=ExecutionLocality.LOCAL)
+    Hpc = _make_adapter_class(name="hpc", execution_locality=ExecutionLocality.HPC)
+    reg.register(Local())
+    reg.register(Hpc())
+    survivors = reg.resolve_all("solve", Preferences())
+    assert sorted(type(a).spec.name for a in survivors) == ["hpc", "local"]
+
+
+def test_max_required_vcpus_drops_heavy_tool() -> None:
+    reg = ToolRegistry()
+    Light = _make_adapter_class(
+        name="light",
+        resource_requirements=ResourceRequirements(min_vcpus=4),
+    )
+    Heavy = _make_adapter_class(
+        name="heavy",
+        resource_requirements=ResourceRequirements(min_vcpus=64),
+    )
+    reg.register(Light())
+    reg.register(Heavy())
+    chosen = reg.resolve("solve", Preferences(max_required_vcpus=16))
+    assert type(chosen).spec.name == "light"
+
+
+def test_max_required_memory_gb_drops_heavy_tool() -> None:
+    reg = ToolRegistry()
+    Light = _make_adapter_class(
+        name="light",
+        resource_requirements=ResourceRequirements(min_memory_gb=8),
+    )
+    Heavy = _make_adapter_class(
+        name="heavy",
+        resource_requirements=ResourceRequirements(min_memory_gb=256),
+    )
+    reg.register(Light())
+    reg.register(Heavy())
+    chosen = reg.resolve("solve", Preferences(max_required_memory_gb=64))
+    assert type(chosen).spec.name == "light"
+
+
+def test_max_required_wallclock_drops_long_jobs() -> None:
+    reg = ToolRegistry()
+    Quick = _make_adapter_class(
+        name="quick",
+        resource_requirements=ResourceRequirements(expected_wallclock_seconds=60),
+    )
+    Slow = _make_adapter_class(
+        name="slow",
+        resource_requirements=ResourceRequirements(expected_wallclock_seconds=36000),
+    )
+    reg.register(Quick())
+    reg.register(Slow())
+    chosen = reg.resolve("solve", Preferences(max_required_wallclock_seconds=3600))
+    assert type(chosen).spec.name == "quick"
+
+
+def test_allowed_required_gpu_kinds_drops_disallowed() -> None:
+    reg = ToolRegistry()
+    A10g = _make_adapter_class(
+        name="a10g",
+        resource_requirements=ResourceRequirements(
+            gpu=GpuRequirement(kind="a10g", count=1),
+        ),
+    )
+    A100 = _make_adapter_class(
+        name="a100",
+        resource_requirements=ResourceRequirements(
+            gpu=GpuRequirement(kind="a100", count=1),
+        ),
+    )
+    Cpu = _make_adapter_class(name="cpu")  # no gpu — always passes
+    reg.register(A10g())
+    reg.register(A100())
+    reg.register(Cpu())
+    survivors = reg.resolve_all(
+        "solve",
+        Preferences(allowed_required_gpu_kinds=frozenset({"a10g"})),
+    )
+    names = sorted(type(a).spec.name for a in survivors)
+    # A100 dropped; A10g + Cpu (no GPU) survive.
+    assert names == ["a10g", "cpu"]
+
+
+def test_max_required_gpu_count_drops_multi_gpu() -> None:
+    reg = ToolRegistry()
+    Single = _make_adapter_class(
+        name="single",
+        resource_requirements=ResourceRequirements(
+            gpu=GpuRequirement(kind="a100", count=1),
+        ),
+    )
+    Quad = _make_adapter_class(
+        name="quad",
+        resource_requirements=ResourceRequirements(
+            gpu=GpuRequirement(kind="a100", count=4),
+        ),
+    )
+    reg.register(Single())
+    reg.register(Quad())
+    chosen = reg.resolve("solve", Preferences(max_required_gpu_count=2))
+    assert type(chosen).spec.name == "single"
+
+
+def test_resource_requirement_filters_are_independent_of_cost_model() -> None:
+    """Regression: ``max_memory_gb`` (cost) and ``max_required_memory_gb``
+    (requirement) are distinct fields with distinct meanings — a tool
+    can have low estimated cost AND high minimum-required memory."""
+    reg = ToolRegistry()
+    spec_obj = ToolSpec(
+        name="parallel_calculix",
+        capabilities=("solve",),
+        cost_model=CostModel(memory_gb=2.0),  # estimated 2 GB per call
+        resource_requirements=ResourceRequirements(min_memory_gb=64.0),  # but needs 64 GB minimum
+    )
+
+    class _A(ToolAdapter):
+        spec = spec_obj
+
+        async def invoke(self, call: ToolCall) -> ToolResult:
+            return ToolResult(call_id=call.call_id, adapter_name="parallel_calculix", success=True)
+
+    reg.register(_A())
+
+    # max_memory_gb on cost passes (2.0 ≤ 4); max_required_memory_gb drops it.
+    with pytest.raises(NoAdapterAvailable):
+        reg.resolve("solve", Preferences(max_memory_gb=4.0, max_required_memory_gb=32.0))
+    # Same with just max_required_memory_gb.
+    with pytest.raises(NoAdapterAvailable):
+        reg.resolve("solve", Preferences(max_required_memory_gb=32.0))
+    # Lifting the requirement cap lets it through.
+    chosen = reg.resolve("solve", Preferences(max_memory_gb=4.0, max_required_memory_gb=128.0))
+    assert type(chosen).spec.name == "parallel_calculix"
 
 
 def test_list_capabilities() -> None:

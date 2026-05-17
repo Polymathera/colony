@@ -31,10 +31,13 @@ from __future__ import annotations
 from .base import (
     CostModel,
     Determinism,
+    ExecutionLocality,
+    GpuRequirement,
     HITLFrequency,
     HeadlessReadiness,
     Licensing,
     Preferences,
+    ResourceRequirements,
     ToolAdapter,
     ToolCall,
     ToolResult,
@@ -62,12 +65,15 @@ from .registry import (
 __all__ = (
     # Enums
     "Determinism",
+    "ExecutionLocality",
     "HeadlessReadiness",
     "HITLFrequency",
     "Licensing",
     # Models
     "CostModel",
+    "GpuRequirement",
     "Preferences",
+    "ResourceRequirements",
     "ToolSpec",
     "ToolCall",
     "ToolResult",

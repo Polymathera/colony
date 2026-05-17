@@ -232,6 +232,21 @@ def _passes_hard_filter(spec: ToolSpec, prefs: Preferences) -> bool:
         # and it isn't on the allow-list.
         if spec.container_image is not None and spec.container_image not in prefs.allowed_container_images:
             return False
+    if prefs.allowed_localities is not None:
+        if spec.execution_locality not in prefs.allowed_localities:
+            return False
+    req = spec.resource_requirements
+    if prefs.max_required_vcpus is not None and req.min_vcpus > prefs.max_required_vcpus:
+        return False
+    if prefs.max_required_memory_gb is not None and req.min_memory_gb > prefs.max_required_memory_gb:
+        return False
+    if prefs.max_required_wallclock_seconds is not None and req.expected_wallclock_seconds > prefs.max_required_wallclock_seconds:
+        return False
+    if req.gpu is not None:
+        if prefs.max_required_gpu_count is not None and req.gpu.count > prefs.max_required_gpu_count:
+            return False
+        if prefs.allowed_required_gpu_kinds is not None and req.gpu.kind not in prefs.allowed_required_gpu_kinds:
+            return False
     return True
 
 

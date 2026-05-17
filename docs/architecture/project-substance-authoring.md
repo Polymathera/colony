@@ -36,7 +36,8 @@ Action kinds come from [`PROJECT_ACTION_KINDS`](../../src/polymathera/colony/des
 | `copy_file(src, dst)` | Copy a file (`dst` must not exist) | resulting file (`dst`) |
 | `set_file_executable(path, executable)` | Toggle the POSIX executable bit on a file (e.g. for scripts under `tools/`); pure metadata change, no content edit | none (chmod-only) |
 
-**Guiding principle** ([`CPS_ALIGNMENT_PLAN.md`](../../../cps/CPS_ALIGNMENT_PLAN.md)): a finite, validatable set of low-level operations beats either (a) shell access or (b) a sprawling catalog of high-level / language-specific ops. Higher-level outcomes — "add a Python module with tests and a dossier section" — are *sequences* of these emitted by the planner; CPS-shaped planner prompts live in L2-G (PR 6).
+!!! info "**Guiding Principle**"
+    ([`CPS_ALIGNMENT_PLAN.md`](../../../cps/CPS_ALIGNMENT_PLAN.md)) A finite, validatable set of low-level operations beats either (a) shell access or (b) a sprawling catalog of high-level / language-specific ops. Higher-level outcomes — "add a Python module with tests and a dossier section" — are *sequences* of these emitted by the planner; CPS-shaped planner prompts live in L2-G (PR 6).
 
 ## Pipeline (every action)
 
