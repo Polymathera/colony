@@ -3398,8 +3398,18 @@ class AgentManagerBase:
         pass
 
     async def discover_handles(self) -> None:
-        """Discover sibling deployment handles. Call from @on_app_ready."""
-        from ..system import (
+        """Discover sibling deployment handles. Call from @on_app_ready.
+
+        Imports from ``colony._handles`` (a small, no-cycle module),
+        NOT ``colony.system``. Importing from ``system`` here would
+        deadlock: ``system.py`` top-level imports a heavy chain
+        (cluster.config, vcm.config, agents.config, agents.blueprint,
+        knowledge.cluster_config) and the @on_app_ready proxy can fire
+        before that chain settles, yielding ``ImportError: cannot
+        import name '...' from partially initialized module``. The
+        ``_handles`` extraction is the structural fix for that cycle.
+        """
+        from .._handles import (
             get_agent_system,
             get_llm_cluster,
             get_vcm,

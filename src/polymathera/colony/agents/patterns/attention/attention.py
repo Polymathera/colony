@@ -25,7 +25,6 @@ from pydantic import BaseModel, Field
 from overrides import override
 
 from ....distributed.ray_utils import serving
-from ....system import get_llm_cluster
 from ....utils import setup_logger
 from ...models import AttentionContext
 from ....cluster.models import InferenceRequest
@@ -281,6 +280,7 @@ class BatchedLLMAttention(AttentionScoringMechanism):
     async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
+            from ...._handles import get_llm_cluster
             self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 
@@ -444,6 +444,7 @@ class EmbeddingBasedAttention(AttentionScoringMechanism):
     async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
+            from ...._handles import get_llm_cluster
             self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 
@@ -516,6 +517,7 @@ class StructuralKeyGenerator(KeyGenerator):
     async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
+            from ...._handles import get_llm_cluster
             self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 
@@ -587,6 +589,7 @@ class SemanticKeyGenerator(KeyGenerator):
     async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
+            from ...._handles import get_llm_cluster
             self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 
@@ -701,6 +704,7 @@ class LLMQueryGenerator(QueryGenerator):
     async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
+            from ...._handles import get_llm_cluster
             self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 
@@ -918,6 +922,7 @@ class SemanticQueryGenerator(QueryGenerator):
     async def _get_llm_cluster(self) -> serving.DeploymentHandle:
         """Get LLM cluster handle."""
         if self._llm_cluster is None:
+            from ...._handles import get_llm_cluster
             self._llm_cluster = await get_llm_cluster()
         return self._llm_cluster
 

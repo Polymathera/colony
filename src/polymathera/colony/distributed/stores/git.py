@@ -845,6 +845,11 @@ class GitFileStorage:
         # Generate a unique hash based on origin_url, branch, and commit
         replica_id = get_replica_id(origin_url, branch, commit)
 
+        # Guard against an init race: this method can be called
+        # concurrently *before* this store's ``initialize()`` reaches
+        # its own ``await self.get_root_path()`` line.
+        await self.get_root_path()
+
         source_path = self._get_repo_path(origin_url)
         replica_path = Path(f"{source_path}_{replica_id}")
 

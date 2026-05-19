@@ -313,92 +313,23 @@ class PolymatheraCluster:
 
 
 
-async def _get_deployment_by_name(
-    name_attr: str,
-    app_name: str | None = None,
-    deployment_class: Type[Any] | None = None,
-) -> serving.DeploymentHandle:
-    """Get agent system deployment via serving."""
-    try:
-        names = await get_deployment_names()
-        handle = serving.get_deployment(
-            app_name or serving.get_my_app_name(),
-            getattr(names, name_attr),
-            deployment_class=deployment_class,
-        )
-        logger.debug(f"Connected to {name_attr} deployment: {getattr(names, name_attr)}")
-        return handle
-    except Exception as e:
-        logger.error(f"{name_attr} deployment '{getattr(names, name_attr)}' not found: {e}")
-        raise e
-
-
-async def get_agent_system(app_name: str | None = None) -> serving.DeploymentHandle:
-    """Get agent system deployment via serving."""
-    from .agents.system import AgentSystemDeployment
-    return await _get_deployment_by_name("agent_system", app_name, deployment_class=AgentSystemDeployment)
-
-
-async def get_llm_cluster(app_name: str | None = None) -> serving.DeploymentHandle:
-    """Get LLM deployment via serving."""
-    from .cluster.cluster import LLMCluster
-    return await _get_deployment_by_name("llm_cluster", app_name, deployment_class=LLMCluster)
-
-
-async def get_vcm(app_name: str | None = None) -> serving.DeploymentHandle:
-    """Get VCM deployment via serving."""
-    from .vcm.manager import VirtualContextManager
-    return await _get_deployment_by_name("vcm", app_name, deployment_class=VirtualContextManager)
-
-
-async def get_standalone_agents(app_name: str | None = None) -> serving.DeploymentHandle:
-    """Get standalone agents deployment via serving."""
-    from .agents.standalone import StandaloneAgentDeployment
-    return await _get_deployment_by_name("standalone_agents", app_name, deployment_class=StandaloneAgentDeployment)
-
-
-async def get_session_manager(app_name: str | None = None) -> serving.DeploymentHandle:
-    """Get session manager deployment via serving."""
-    from .agents.sessions import SessionManagerDeployment
-    return await _get_deployment_by_name("session_manager", app_name, deployment_class=SessionManagerDeployment)
-
-
-def get_vllm_deployment(deployment_name: str, app_name: str | None = None) -> serving.DeploymentHandle:
-    """Get specific VLLM deployment via serving."""
-    from .cluster.vllm_deployment import VLLMDeployment
-
-    try:
-        handle = serving.get_deployment(
-            app_name or serving.get_my_app_name(),
-            deployment_name,
-            deployment_class=VLLMDeployment,
-        )
-        logger.info(f"Connected to VLLM deployment: {deployment_name}")
-        return handle
-    except Exception as e:
-        logger.error(f"VLLM deployment '{deployment_name}' not found: {e}")
-        raise e
-
-
-def get_remote_llm_deployment(deployment_name: str, app_name: str | None = None) -> serving.DeploymentHandle:
-    """Get specific remote LLM deployment (Anthropic, OpenRouter, etc.) via serving."""
-    from .cluster.remote_deployment import RemoteLLMDeployment
-
-    try:
-        handle = serving.get_deployment(
-            app_name or serving.get_my_app_name(),
-            deployment_name,
-            deployment_class=RemoteLLMDeployment,
-        )
-        logger.info(f"Connected to remote LLM deployment: {deployment_name}")
-        return handle
-    except Exception as e:
-        logger.error(f"Remote LLM deployment '{deployment_name}' not found: {e}")
-        raise e
-
-
-async def get_embedding_deployment(app_name: str | None = None) -> serving.DeploymentHandle:
-    return await _get_deployment_by_name("embedding", app_name)
+# Re-exported from ``colony._handles``. ALL deployment-handle
+# accessors live there now, to break a real circular import cycle
+# with ``agents/base.py``'s ``discover_handles`` — see
+# ``colony/_handles.py`` header for the full incident write-up.
+# Existing callers of ``from colony.system import get_*`` continue
+# to work unchanged.
+from ._handles import (  # noqa: E402, F401
+    _get_deployment_by_name,
+    get_agent_system,
+    get_embedding_deployment,
+    get_llm_cluster,
+    get_remote_llm_deployment,
+    get_session_manager,
+    get_standalone_agents,
+    get_vcm,
+    get_vllm_deployment,
+)
 
 
 

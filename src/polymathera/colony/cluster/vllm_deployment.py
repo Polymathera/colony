@@ -36,7 +36,6 @@ from ..vcm.models import VirtualContextPage, ContextPageId, VirtualPageTableStat
 from ..vcm.events import PageEvent, PageLoadedEvent, PageEvictedEvent, PageLoadFailedEvent
 from .registry import ModelRegistry
 from .tokenization import get_tokenizer_for_model, HuggingFaceTokenizer, TiktokenTokenizer
-from ..system import get_llm_cluster
 
 logger = logging.getLogger(__name__)
 
@@ -911,6 +910,7 @@ class VLLMDeployment(AgentManagerBase):
             )
 
             # Get LLMCluster handle
+            from .._handles import get_llm_cluster
             llm_cluster_handle = await get_llm_cluster()
 
             # Load page in target deployment with specific client targeting
