@@ -30,7 +30,9 @@ from __future__ import annotations
 from .blueprints import design_monorepo_capability_blueprints
 from .bootstrap import SCAFFOLD_DIRS, bootstrap_design_monorepo
 from .capabilities import (
+    BranchScopedCapabilityBase,
     DesignCheckpointer,
+    DesignMonorepoCapabilityBase,
     ProjectAuthoringCapability,
     RepoStateProvider,
     ToolBuilder,
@@ -159,7 +161,9 @@ __all__ = (
     "SCAFFOLD_DIRS",
     # Capabilities
     "RepoStateProvider",
+    "BranchScopedCapabilityBase",
     "DesignCheckpointer",
+    "DesignMonorepoCapabilityBase",
     "ProjectAuthoringCapability",
     "ToolBuilder",
     "design_monorepo_capability_blueprints",

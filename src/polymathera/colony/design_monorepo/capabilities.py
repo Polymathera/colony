@@ -11,7 +11,7 @@ Three capabilities, each a subclass of ``AgentCapability``:
 - ``ToolBuilder`` — ``bootstrap_repo`` (master §9.4). Tool-building pools
   install this on their pool agents.
 
-All three share a small base class (``_DesignMonorepoCapabilityBase``)
+All three share a small base class (``DesignMonorepoCapabilityBase``)
 that resolves the ``DesignMonorepoClient`` lazily, derives a per-call
 ``AgentIdentity`` from the owning agent, and routes git operations
 through ``asyncio.to_thread`` so the event loop is never blocked.
@@ -24,7 +24,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from overrides import override
 
@@ -115,7 +115,7 @@ def _commit_all(
 
     ``identity`` accepts either shape — production callers thread a
     :class:`CommitIdentity` resolved by
-    :meth:`_DesignMonorepoCapabilityBase._commit_attribution`;
+    :meth:`DesignMonorepoCapabilityBase._commit_attribution`;
     framework-internal paths (tests, bootstrap) thread an
     :class:`AgentIdentity`."""
 
@@ -204,8 +204,8 @@ def _lfs_patterns_from_gitattributes(path: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-class _DesignMonorepoCapabilityBase(AgentCapability):
-    """Shared plumbing for the three design-monorepo capabilities.
+class DesignMonorepoCapabilityBase(AgentCapability):
+    """Shared plumbing for design-monorepo capabilities.
 
     Holds a lazy ``DesignMonorepoClient`` keyed by the working_dir. The
     client is opened on first use and reused across calls; if the agent
@@ -601,11 +601,125 @@ class _DesignMonorepoCapabilityBase(AgentCapability):
 
 
 # ---------------------------------------------------------------------------
+# BranchScopedCapabilityBase — for stateful L2 capabilities
+# ---------------------------------------------------------------------------
+
+
+class BranchScopedCapabilityBase(DesignMonorepoCapabilityBase):
+    """Base class for capabilities that key distributed state per-
+    ``(scope, branch)`` and need to work in detached (no-agent,
+    no-clone) unit-test mode.
+
+    Adds two things on top of :class:`DesignMonorepoCapabilityBase`:
+
+    1. **Detached-mode tolerance.** The colony base's
+       ``__init__`` calls
+       :func:`~polymathera.colony.design_monorepo.clones.resolve_clone_path`
+       when ``working_dir`` is omitted, which requires an owning
+       agent (or ``read_only=True``). CPS L2 capabilities like
+       :class:`~polymathera.cps.agents.supply_chain.SupplyChainCapability`
+       are commonly unit-tested with no agent and no clone, so this
+       class catches the ``working_dir=None, agent=None`` case and
+       defers path resolution rather than raising at construction
+       time.
+
+    2. **UNBOUND_BRANCH sentinel.** When the clone has not yet
+       materialised, :attr:`current_branch` returns
+       :attr:`UNBOUND_BRANCH` (default ``"_unbound"``) rather than
+       raising. CPS capabilities use this as the branch component
+       of their distributed-state keys (e.g.
+       ``cps:supply_chain:<scope>:_unbound`` in detached tests), so
+       tier-1 actions remain functional even before a clone exists.
+       Tier-2 (``hydrate_*_from_repo`` / ``checkpoint_*_to_repo``)
+       actions still raise via the inherited :meth:`_client_sync`
+       since they need a real clone.
+
+    Lifted into the framework on 2026-05-20 after six near-identical
+    re-implementations of this shape were caught duplicating in
+    ``cps/agents/`` — see ``feedback-check-for-existing-helpers``
+    memory for the rule that should have caught it earlier.
+    """
+
+    UNBOUND_BRANCH: ClassVar[str] = "_unbound"
+
+    _DETACHED_SENTINEL_PATH: ClassVar[Path] = Path("/dev/null/_branch_scoped_detached")
+    """Marker path used when constructed with ``working_dir=None,
+    agent=None``. Never materialises; ``current_branch`` returns
+    :attr:`UNBOUND_BRANCH` for it and tier-2 actions raise the
+    inherited client-open error."""
+
+    def __init__(
+        self,
+        agent: Agent | None = None,
+        scope_id: str | None = None,
+        *,
+        working_dir: Path | str | None = None,
+        clone_scope_id: str | None = None,
+        read_only: bool = False,
+        input_patterns: list[str] | None = None,
+        capability_key: str | None = None,
+        app_name: str | None = None,
+    ) -> None:
+        if working_dir is None and agent is None and not read_only:
+            # Detached test mode: skip the agent-required
+            # resolve_clone_path call. The sentinel path never
+            # materialises, so tier-2 actions raise the normal
+            # client-open error when invoked; tier-1 actions don't
+            # touch the filesystem and remain functional.
+            working_dir = self._DETACHED_SENTINEL_PATH
+        super().__init__(
+            agent=agent,
+            scope_id=scope_id,
+            working_dir=working_dir,
+            clone_scope_id=clone_scope_id,
+            read_only=read_only,
+            input_patterns=input_patterns,
+            capability_key=capability_key,
+            app_name=app_name,
+        )
+
+    @property
+    def is_clone_materialized(self) -> bool:
+        """``True`` iff :attr:`working_dir` contains a real ``.git``
+        directory. Cheap, no I/O beyond an ``os.path.exists`` call.
+        CPS capabilities use this to gate tier-2 actions and to
+        decide whether to resolve repo-relative paths against the
+        clone."""
+        return (self._working_dir / ".git").exists()
+
+    @property
+    def current_branch(self) -> str:
+        """Active branch when the clone is materialised; otherwise
+        :attr:`UNBOUND_BRANCH`. Overrides the base's strict
+        ``self._client_sync().active_branch`` to let CPS capabilities
+        key per-branch state cleanly in detached / pre-clone modes."""
+        if not self.is_clone_materialized:
+            return self.UNBOUND_BRANCH
+        return self._client_sync().active_branch
+
+    def _client_sync(self) -> DesignMonorepoClient:
+        """Override the base to raise a friendly ``RuntimeError`` when
+        called in detached mode (no real clone). The base's
+        ``DesignMonorepoClient.open`` would raise a low-level
+        ``git.NoSuchPathError`` — useless to the operator. CPS
+        capabilities want a clear "you need a working_dir" message."""
+        if self._working_dir == self._DETACHED_SENTINEL_PATH:
+            raise RuntimeError(
+                f"{type(self).__name__} has no working_dir wired. "
+                "Pass working_dir= at construction (typically the "
+                "agent's per-agent clone path) or set it up in the "
+                "agent's initialize() before invoking tier-2 actions "
+                "that touch the design monorepo.",
+            )
+        return super()._client_sync()
+
+
+# ---------------------------------------------------------------------------
 # RepoStateProvider — read-only
 # ---------------------------------------------------------------------------
 
 
-class RepoStateProvider(_DesignMonorepoCapabilityBase):
+class RepoStateProvider(DesignMonorepoCapabilityBase):
     """Read-only query surface over the design monorepo.
 
     Auto-installable on every agent when the deployment has a design
@@ -1517,7 +1631,7 @@ class RepoStateProvider(_DesignMonorepoCapabilityBase):
 # ---------------------------------------------------------------------------
 
 
-class DesignCheckpointer(_DesignMonorepoCapabilityBase):
+class DesignCheckpointer(DesignMonorepoCapabilityBase):
     """Write-side capabilities over the design monorepo.
 
     Each operation is gated downstream by HITL policy at the dispatcher
@@ -2986,7 +3100,7 @@ class DesignCheckpointer(_DesignMonorepoCapabilityBase):
 # ---------------------------------------------------------------------------
 
 
-class ToolBuilder(_DesignMonorepoCapabilityBase):
+class ToolBuilder(DesignMonorepoCapabilityBase):
     """Scaffold a new tool into the design monorepo's ``tools/``.
 
     Pairs with ``RepoStateProvider.find_existing_tool``: a tool-building
@@ -3662,7 +3776,7 @@ def _resolve_safe_path(working_dir: Path, rel: str | Path) -> Path:
     return resolved
 
 
-class ProjectAuthoringCapability(_DesignMonorepoCapabilityBase):
+class ProjectAuthoringCapability(DesignMonorepoCapabilityBase):
     """L1-F: minimal, language-agnostic, composable file/line operations
     for project substance (``src/``, ``tests/``, ``data/``, ``dossier/``,
     ``docs/``, …).
