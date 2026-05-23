@@ -40,8 +40,10 @@ from ._sandbox import (
     ContainerSpec,
     DockerCLIBackend,
     ExecResult,
+    ExecResultWithAudit,
     DockerImageRegistry,
     NoSuchContainer,
+    SandboxedShellRuntime,
     ScriptSpec,
 )
 from ._sandbox.backend import _safe_name
@@ -64,6 +66,15 @@ _NetworkMode = Literal["bridge", "none", "host"]
 class _ContainerRecord:
     """Per-capability view of one live container.
 
+    Post-F-2a the per-container lifecycle (launch / exec / stop /
+    wall-time killer / workspace) lives on the embedded
+    :class:`SandboxedShellRuntime`; this record carries the
+    multi-container concerns the capability still owns: slot
+    accounting (``cpu_limit`` / ``memory_limit_mb``), ownership
+    (``owner_agent_id`` / ``shared`` / ``attached_agent_ids``),
+    and the image-role tag (used by the action surface for filters
+    + audit).
+
     Ownership semantics:
 
     - ``owner_agent_id`` is the agent that called ``launch_container``.
@@ -72,18 +83,38 @@ class _ContainerRecord:
       ``attached_agent_ids`` for reference counting.
     """
 
-    handle: ContainerHandle
+    runtime: SandboxedShellRuntime
     image_role: str
     launched_at: float
     owner_agent_id: str
     shared: bool
     cpu_limit: float
     memory_limit_mb: int
-    network_mode: _NetworkMode
-    workspace_path: str
-    max_wall_time_seconds: int
-    deadline_task: asyncio.Task | None = None
     attached_agent_ids: set[str] = field(default_factory=set)
+
+    @property
+    def handle(self) -> ContainerHandle:
+        """Forwarded from the runtime; runtime is always launched
+        before the record is added to ``_containers``."""
+        h = self.runtime.handle
+        assert h is not None, (
+            "_ContainerRecord must be constructed post-launch"
+        )
+        return h
+
+    @property
+    def workspace_path(self) -> str:
+        return self.runtime.workspace_path
+
+    @property
+    def network_mode(self) -> _NetworkMode:
+        return self.runtime.network_mode
+
+    @property
+    def deadline_task(self) -> asyncio.Task | None:
+        """Forwarded from the runtime (the killer task lives there
+        post-F-2a). Read-only — the runtime cancels it on stop."""
+        return self.runtime.deadline_task
 
 
 # ---------------------------------------------------------------------------
@@ -212,19 +243,23 @@ class SandboxedShellCapability(AgentCapability):
         return None
 
     async def shutdown(self) -> None:
-        """Stop every container this capability owns. Idempotent."""
+        """Stop every container this capability owns. Idempotent.
+
+        Delegates the per-container stop (incl. killer cancellation)
+        to :meth:`SandboxedShellRuntime.stop`; the capability only
+        cleans up its own ``_containers`` accounting.
+        """
         cids = list(self._containers.keys())
         for cid in cids:
             rec = self._containers.pop(cid, None)
             if rec is None:
                 continue
-            if rec.deadline_task is not None:
-                rec.deadline_task.cancel()
             try:
-                await self._backend.stop(rec.handle, timeout_s=10)
+                await rec.runtime.stop(timeout_s=10)
             except Exception as e:  # pragma: no cover — defensive
                 logger.debug(
-                    "SandboxedShellCapability: stop failed for %s: %s",
+                    "SandboxedShellCapability: runtime.stop failed for "
+                    "%s: %s",
                     cid, e,
                 )
 
@@ -323,38 +358,62 @@ class SandboxedShellCapability(AgentCapability):
                 "SandboxedShellCapability: audit write failed: %s", e,
             )
 
-    async def _arm_wall_time_killer(
-        self, record: _ContainerRecord,
-    ) -> None:
-        """Schedule a background task that stops the container when its
-        wall-time cap is hit. Cancelled if the container stops first.
+    def _build_runtime(
+        self,
+        *,
+        image: str,
+        env: dict[str, str] | None,
+        workdir: str,
+        cpu_limit: float,
+        memory_limit_mb: int,
+        max_wall_time_seconds: int,
+        extra_volumes: list[dict[str, str]] | None,
+        network_mode: _NetworkMode,
+        shared: bool,
+        image_role: str,
+        container_name: str,
+        workspace_path: str,
+    ) -> SandboxedShellRuntime:
+        """Construct a :class:`SandboxedShellRuntime` from action-level
+        kwargs.
+
+        The capability resolves the image-role → image lookup, the
+        per-session workspace path, and the label set BEFORE
+        constructing the runtime (so the runtime closure carries
+        snapshotted values; F-2b's trainable does the same). The
+        wall-time killer arms inside :meth:`runtime.launch` — not
+        here.
         """
-        if record.max_wall_time_seconds <= 0:
-            return
-
-        async def _kill_after():
-            try:
-                await asyncio.sleep(record.max_wall_time_seconds)
-            except asyncio.CancelledError:
-                return
-            cid = record.handle.container_id
-            if cid not in self._containers:
-                return
-            logger.info(
-                "SandboxedShellCapability: container %s reached "
-                "max_wall_time_seconds; stopping",
-                cid,
-            )
-            try:
-                await self._backend.stop(record.handle, timeout_s=5)
-            except Exception as e:  # pragma: no cover — defensive
-                logger.debug(
-                    "SandboxedShellCapability: wall-time stop failed "
-                    "for %s: %s", cid, e,
-                )
-            self._containers.pop(cid, None)
-
-        record.deadline_task = asyncio.create_task(_kill_after())
+        volumes: list[tuple[str, str, str]] = []
+        for v in (extra_volumes or []):
+            src = v.get("src")
+            dst = v.get("dst")
+            mode = v.get("mode", "ro")
+            if not src or not dst:
+                continue
+            volumes.append((str(src), str(dst), str(mode)))
+        labels = self._build_labels(
+            image_role=image_role, shared=shared,
+        )
+        return SandboxedShellRuntime(
+            backend=self._backend,
+            image=image,
+            workspace_path=workspace_path,
+            workdir=workdir,
+            env=dict(env or {}),
+            cpu_limit=cpu_limit,
+            memory_limit_mb=memory_limit_mb,
+            network_mode=network_mode,
+            extra_volumes=tuple(volumes),
+            labels=labels,
+            max_wall_time_seconds=max_wall_time_seconds,
+            capture_max_bytes=self._stream_chunk_bytes * 500,
+            # ↑ capture_max_bytes was previously a per-call kwarg with
+            # default ``1_000_000``. Keep that magnitude — 500 chunks
+            # at the configured chunk size — so non-streaming execs
+            # truncate at roughly the same place they did pre-refactor.
+            container_name=container_name,
+        )
 
     # --- Action executors: lifecycle --------------------------------------
 
@@ -436,30 +495,17 @@ class SandboxedShellCapability(AgentCapability):
             }
 
         workspace = self._session_workspace_path()
-        volumes: list[tuple[str, str, str]] = [
-            (workspace, workdir, "rw"),
-        ]
-        for v in (extra_volumes or []):
-            src = v.get("src")
-            dst = v.get("dst")
-            mode = v.get("mode", "ro")
-            if not src or not dst:
-                continue
-            volumes.append((str(src), str(dst), str(mode)))
-
-        container_spec = ContainerSpec(
-            image=spec.image,
-            name=self._make_container_name(),
-            env=dict(env or {}),
-            workdir=workdir,
-            cpu_limit=cpu_limit,
-            memory_limit_mb=memory_limit_mb,
-            network_mode=nm,
-            volumes=tuple(volumes),
-            labels=self._build_labels(image_role=image_role, shared=shared),
+        runtime = self._build_runtime(
+            image=spec.image, env=env, workdir=workdir,
+            cpu_limit=cpu_limit, memory_limit_mb=memory_limit_mb,
+            max_wall_time_seconds=max_wall_time_seconds,
+            extra_volumes=extra_volumes, network_mode=nm, shared=shared,
+            image_role=image_role,
+            container_name=self._make_container_name(),
+            workspace_path=workspace,
         )
         try:
-            handle = await self._backend.launch(container_spec)
+            handle = await runtime.launch()
         except Exception as e:
             logger.exception(
                 "SandboxedShellCapability.launch_container failed",
@@ -473,19 +519,15 @@ class SandboxedShellCapability(AgentCapability):
             }
 
         record = _ContainerRecord(
-            handle=handle,
+            runtime=runtime,
             image_role=image_role,
             launched_at=time.time(),
             owner_agent_id=self._agent_id(),
             shared=shared,
             cpu_limit=cpu_limit,
             memory_limit_mb=memory_limit_mb,
-            network_mode=nm,
-            workspace_path=workspace,
-            max_wall_time_seconds=max_wall_time_seconds,
         )
         self._containers[handle.container_id] = record
-        await self._arm_wall_time_killer(record)
         return {
             "started": True,
             "container_id": handle.container_id,
@@ -519,27 +561,24 @@ class SandboxedShellCapability(AgentCapability):
                 "container_id": container_id, "stopped": False,
                 "message": "only the owner can stop a container",
             }
-        if record.deadline_task is not None:
-            record.deadline_task.cancel()
         try:
-            await self._backend.stop(record.handle, timeout_s=timeout_s)
-        except NoSuchContainer:
-            self._containers.pop(container_id, None)
-            return {
-                "container_id": container_id, "stopped": True,
-                "message": "container was already gone on the daemon",
-            }
+            await record.runtime.stop(timeout_s=timeout_s)
         except Exception as e:
             logger.exception(
                 "SandboxedShellCapability.stop_container failed",
             )
             return {
                 "container_id": container_id, "stopped": False,
-                "message": f"backend.stop raised: {e}",
+                "message": f"runtime.stop raised: {e}",
             }
+        message = (
+            "container was already gone on the daemon"
+            if record.runtime.stop_already_gone else ""
+        )
         self._containers.pop(container_id, None)
         return {
-            "container_id": container_id, "stopped": True, "message": "",
+            "container_id": container_id, "stopped": True,
+            "message": message,
         }
 
     @action_executor()
@@ -756,33 +795,43 @@ class SandboxedShellCapability(AgentCapability):
             )
         else:
             try:
-                exec_result = await self._backend.exec(
-                    record.handle, cmd_list,
+                exec_with_audit = await record.runtime.exec(
+                    cmd_list,
                     timeout_seconds=timeout_seconds,
                     env=env, workdir=workdir, stdin=stdin,
+                    capture_max_bytes=capture_max_bytes,
                 )
             except Exception as e:
                 logger.exception(
                     "SandboxedShellCapability.execute_command failed",
                 )
                 return self._exec_error(
-                    container_id, f"backend.exec raised: {e}",
+                    container_id, f"runtime.exec raised: {e}",
                 )
-            stdout, trunc_out = self._truncate(exec_result.stdout, capture_max_bytes)
-            stderr, trunc_err = self._truncate(exec_result.stderr, capture_max_bytes)
+            er = exec_with_audit.exec_result
             result = {
                 "container_id": container_id,
                 "exec_id": exec_id,
                 "command": cmd_list,
-                "exit_code": exec_result.exit_code,
-                "stdout": stdout,
-                "stderr": stderr,
-                "wall_time_ms": exec_result.wall_time_ms,
-                "truncated": trunc_out or trunc_err,
+                "exit_code": er.exit_code,
+                "stdout": er.stdout,
+                "stderr": er.stderr,
+                "wall_time_ms": er.wall_time_ms,
+                "truncated": er.truncated,
                 "stream_key": None,
                 "message": "",
             }
+            # The runtime built the audit dict from its labels
+            # snapshot (matches the pre-refactor audit shape); the
+            # capability owns blackboard writes since the runtime is
+            # serializable and can't carry a blackboard reference.
+            for audit in exec_with_audit.audit_records:
+                await self._write_audit(audit)
+            return result
 
+        # Streaming path (capability-owned; runtime does not stream).
+        # The audit record for streaming is built here because the
+        # runtime never saw the exec.
         await self._write_audit({
             "ts": time.time(),
             "tenant_id": self._tenant_id(),
@@ -1307,8 +1356,7 @@ class SandboxedShellCapability(AgentCapability):
                 "message": "not tracked or not permitted",
             }
         try:
-            await self._backend.copy_in(
-                record.handle,
+            await record.runtime.copy_in(
                 src_host_path=src_host_path,
                 dst_container_path=dst_container_path,
             )
@@ -1334,8 +1382,7 @@ class SandboxedShellCapability(AgentCapability):
                 "message": "not tracked or not permitted",
             }
         try:
-            await self._backend.copy_out(
-                record.handle,
+            await record.runtime.copy_out(
                 src_container_path=src_container_path,
                 dst_host_path=dst_host_path,
             )
@@ -1360,10 +1407,10 @@ class SandboxedShellCapability(AgentCapability):
                 "message": "not tracked or not permitted",
             }
         try:
-            exec_result = await self._backend.exec(
-                record.handle,
+            exec_with_audit = await record.runtime.exec(
                 ["bash", "-lc", f"head -c {max_bytes} {path!s}"],
                 timeout_seconds=60,
+                capture_max_bytes=max_bytes,
             )
         except Exception as e:
             return {
@@ -1371,6 +1418,7 @@ class SandboxedShellCapability(AgentCapability):
                 "content": "", "truncated": False,
                 "message": f"read failed: {e}",
             }
+        exec_result = exec_with_audit.exec_result
         if exec_result.exit_code != 0:
             return {
                 "container_id": container_id, "ok": False,
@@ -1403,8 +1451,7 @@ class SandboxedShellCapability(AgentCapability):
                 "message": "not tracked or not permitted",
             }
         try:
-            exec_result = await self._backend.exec(
-                record.handle,
+            exec_with_audit = await record.runtime.exec(
                 ["bash", "-lc", f"tee {path!s} > /dev/null"],
                 timeout_seconds=60,
                 stdin=content,
@@ -1414,6 +1461,7 @@ class SandboxedShellCapability(AgentCapability):
                 "container_id": container_id, "ok": False,
                 "message": f"write failed: {e}",
             }
+        exec_result = exec_with_audit.exec_result
         if exec_result.exit_code != 0:
             return {
                 "container_id": container_id, "ok": False,

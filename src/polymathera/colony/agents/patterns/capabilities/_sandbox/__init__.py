@@ -18,6 +18,10 @@ from .registry import (
     DockerImageSpec,
     ScriptSpec,
 )
+from .runtime import (
+    ExecResultWithAudit,
+    SandboxedShellRuntime,
+)
 
 __all__ = [
     "ContainerBackend",
@@ -25,8 +29,10 @@ __all__ = [
     "ContainerSpec",
     "DockerCLIBackend",
     "ExecResult",
+    "ExecResultWithAudit",
     "NoSuchContainer",
     "DockerImageRegistry",
     "DockerImageSpec",
+    "SandboxedShellRuntime",
     "ScriptSpec",
 ]

@@ -179,9 +179,14 @@ class ToolCapability(AgentCapability, ABC):
                 scope, agent,
                 namespace=namespace or type(self).spec.name,
             )
+        # ``input_patterns=None`` triggers the base class's
+        # auto-inference from ``@event_handler`` decorators on this
+        # capability + its MRO. The handler picks up
+        # ``AgentRunProtocol.request_pattern()`` automatically.
         super().__init__(
             agent=agent,
             scope_id=scope_id,
+            input_patterns=None,
             capability_key=capability_key or type(self).spec.name,
             app_name=app_name,
         )
