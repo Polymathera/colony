@@ -70,9 +70,9 @@ from .configs import (
     MissionSpec,
     GitHubAuthConfig,
     PluginsConfig,
-    SandboxImage,
-    SandboxImageScript,
-    SandboxImagesConfig,
+    DockerImageSpec,
+    ScriptSpec,
+    DockerImageRegistryConfig,
     WebSearchConfig,
 )
 
@@ -156,9 +156,9 @@ __all__ = [
     "MissionSpec",
     "GitHubAuthConfig",
     "PluginsConfig",
-    "SandboxImage",
-    "SandboxImageScript",
-    "SandboxImagesConfig",
+    "DockerImageSpec",
+    "ScriptSpec",
+    "DockerImageRegistryConfig",
     "WebSearchConfig",
     # Blackboard
     "Blackboard",

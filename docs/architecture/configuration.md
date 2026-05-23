@@ -287,5 +287,5 @@ colony/src/polymathera/colony/distributed/config/
 - [`colony/configs/README.md`](https://github.com/polymathera/colony/tree/main/configs/README.md) — full table of registered components and field-by-field reference.
 - [`colony/configs/example.yaml`](https://github.com/polymathera/colony/tree/main/configs/example.yaml) — annotated template ready to copy and edit.
 - [colony-env guide](../guides/colony-env.md) — how `colony-env up --config <file>` plumbs the YAML into the cluster.
-- [Sandboxed Shell capability](sandboxed-shell-capability.md) — `SandboxImagesConfig` is its operator surface.
+- [Sandboxed Shell capability](sandboxed-shell-capability.md) — `DockerImageRegistryConfig` is its operator surface.
 - [User Plugin capability](user-plugin-capability.md) — `PluginsConfig` is its operator surface.

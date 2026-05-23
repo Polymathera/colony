@@ -345,7 +345,7 @@ class SandboxToolCapability(ToolCapability, ABC):
 
     sandbox_image_role: ClassVar[str]
     """Required: the image-role key registered in
-    :class:`~polymathera.colony.agents.configs.SandboxImagesConfig`
+    :class:`~polymathera.colony.agents.configs.DockerImageRegistryConfig`
     that the agent's :class:`SandboxedShellCapability` will launch
     when the tool first runs."""
 
@@ -358,7 +358,7 @@ class SandboxToolCapability(ToolCapability, ABC):
                 f"{cls.__name__} subclasses SandboxToolCapability but "
                 "does not declare ``sandbox_image_role: ClassVar[str]``. "
                 "Set it to the image-role key registered in "
-                "``SandboxImagesConfig``.",
+                "``DockerImageRegistryConfig``.",
             )
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:

@@ -40,7 +40,7 @@ from ._sandbox import (
     ContainerSpec,
     DockerCLIBackend,
     ExecResult,
-    ImageRegistry,
+    DockerImageRegistry,
     NoSuchContainer,
     ScriptSpec,
 )
@@ -137,7 +137,7 @@ class SandboxedShellCapability(AgentCapability):
         scope: BlackboardScope = BlackboardScope.SESSION,
         namespace: str = "shell",
         backend: ContainerBackend | None = None,
-        registry: ImageRegistry | None = None,
+        registry: DockerImageRegistry | None = None,
         registry_path: str = _DEFAULT_REGISTRY_PATH,
         host_workspace_root: str = "/mnt/shared/workspaces",
         default_network_mode: _NetworkMode = "bridge",
@@ -183,17 +183,17 @@ class SandboxedShellCapability(AgentCapability):
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"sandbox", "shell", "docker", "external"})
 
-    async def _get_registry(self) -> ImageRegistry:
+    async def _get_registry(self) -> DockerImageRegistry:
         # Typed config first (operator YAML / runtime overlays); fall back
         # to the legacy on-disk registry mounted at ``registry_path`` so
         # existing Docker deployments keep working unchanged.
         if self._registry is None:
-            from ...configs import get_sandbox_images_config
-            cfg = await get_sandbox_images_config()
+            from ...configs import get_sandbox_image_registry_config
+            cfg = await get_sandbox_image_registry_config()
             if cfg.images:
-                self._registry = ImageRegistry.from_config(cfg)
+                self._registry = DockerImageRegistry.from_config(cfg)
             else:
-                self._registry = ImageRegistry.from_path(self._registry_path)
+                self._registry = DockerImageRegistry.from_path(self._registry_path)
         return self._registry
 
     @override

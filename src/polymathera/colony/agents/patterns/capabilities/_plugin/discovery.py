@@ -7,7 +7,7 @@ enough to parse inline.
 
 Errors on individual skills (malformed YAML, missing fields) are
 logged and skipped so one broken skill doesn't silence the rest — the
-same philosophy applied in ``ImageRegistry``.
+same philosophy applied in ``DockerImageRegistry``.
 """
 
 from __future__ import annotations

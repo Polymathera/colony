@@ -14,8 +14,8 @@ from .backend import (
     NoSuchContainer,
 )
 from .registry import (
-    ImageRegistry,
-    ImageSpec,
+    DockerImageRegistry,
+    DockerImageSpec,
     ScriptSpec,
 )
 
@@ -26,7 +26,7 @@ __all__ = [
     "DockerCLIBackend",
     "ExecResult",
     "NoSuchContainer",
-    "ImageRegistry",
-    "ImageSpec",
+    "DockerImageRegistry",
+    "DockerImageSpec",
     "ScriptSpec",
 ]

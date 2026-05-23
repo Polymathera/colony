@@ -60,8 +60,8 @@ from ._sandbox import (
     ContainerSpec,
     DockerCLIBackend,
     ExecResult,
-    ImageRegistry,
-    ImageSpec,
+    DockerImageRegistry,
+    DockerImageSpec,
     NoSuchContainer,
     ScriptSpec,
 )
@@ -167,8 +167,8 @@ __all__ = [
     "ContainerSpec",
     "DockerCLIBackend",
     "ExecResult",
-    "ImageRegistry",
-    "ImageSpec",
+    "DockerImageRegistry",
+    "DockerImageSpec",
     "NoSuchContainer",
     "ScriptSpec",
     # User plugins

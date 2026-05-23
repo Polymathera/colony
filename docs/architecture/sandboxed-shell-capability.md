@@ -48,7 +48,7 @@ A list `command` is passed verbatim. A string is wrapped in `bash -lc` so shell 
 
 Two equivalent surfaces:
 
-1. The typed `SandboxImagesConfig` (path `sandbox_images`) loaded by
+1. The typed `DockerImageRegistryConfig` (path `sandbox_images`) loaded by
    `ConfigurationManager` from the operator YAML at `--config`. Recommended
    for new deployments — see [Configuration System](configuration.md).
 2. The legacy YAML at `colony/cli/deploy/docker/sandbox-images.yaml`, mounted

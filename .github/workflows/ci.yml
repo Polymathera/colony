@@ -59,6 +59,15 @@ jobs:
         run: pip install poetry==1.7.1
       - name: Configure Poetry
         run: poetry config virtualenvs.create false
+      - name: Pre-install python-louvain (avoid virtualenv-21 sdist-build regression)
+        # python-louvain is sdist-only. Ray's ``serve`` extra pulls
+        # ``virtualenv`` as a transitive with a constraint permitting 21.x,
+        # and virtualenv 21.3.3's ``pip_invoke.py`` imports ``LogCmd`` from
+        # ``virtualenv.util.subprocess`` where the symbol no longer exists —
+        # so Poetry's sdist build path explodes mid-install. Pre-installing
+        # the wheel-pin lets Poetry see "Already installed" and skip the
+        # source build. Mirrors the same workaround in ``Dockerfile.base``.
+        run: pip install --no-cache-dir python-louvain==0.16
       - name: Install dependencies
         # Install every extra whose tests run unignored under ``src/``:
         # ``knowledge`` brings kuzu / qdrant_client / pypdf for the
@@ -97,6 +106,9 @@ jobs:
         run: pip install poetry==1.7.1
       - name: Configure Poetry
         run: poetry config virtualenvs.create false
+      - name: Pre-install python-louvain (avoid virtualenv-21 sdist-build regression)
+        # See the matching step in the ``test`` job for the full rationale.
+        run: pip install --no-cache-dir python-louvain==0.16
       - name: Install dependencies
         run: poetry install --no-interaction --extras "code_analysis cpu dashboard"
       - name: Build docs

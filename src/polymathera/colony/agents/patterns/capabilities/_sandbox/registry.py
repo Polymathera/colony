@@ -35,128 +35,25 @@ placeholders that are filled in at execution time from the caller's
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+# ``DockerImageSpec`` / ``ScriptSpec`` live in ``colony.agents.sandbox_images``
+# — the single source of truth shared with ``DockerImageRegistryConfig``.
+# See ``EXPERIMENTATION_AND_DATA_ANALYTICS_PLAN.md`` Stage E E-3
+# follow-up for the consolidation history.
+from ....sandbox_images import DockerImageSpec, ScriptSpec
+
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Typed records
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class ScriptSpec:
-    """A single registered script.
-
-    ``params`` is kept loose (dict of name → metadata) so it can describe
-    an arbitrary JSON-schema-ish shape without pulling in ``jsonschema``.
-    ``SandboxedShellCapability._validate_script_args`` enforces the
-    ``required`` flag and a small set of type strings.
-    """
-
-    name: str
-    description: str
-    cmd: tuple[str, ...]
-    params: dict[str, dict[str, Any]] = field(default_factory=dict)
-    timeout_seconds: int = 300
-
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "ScriptSpec":
-        return cls(
-            name=str(raw["name"]),
-            description=str(raw.get("description", "")),
-            cmd=tuple(raw.get("cmd", [])),
-            params=dict(raw.get("params") or {}),
-            timeout_seconds=int(raw.get("timeout_seconds", 300)),
-        )
-
-    def to_summary(self) -> dict[str, Any]:
-        """Dict suitable for returning to the LLM via ``list_scripts``."""
-        return {
-            "name": self.name,
-            "description": self.description,
-            "params": dict(self.params),
-            "timeout_seconds": self.timeout_seconds,
-        }
-
-
-@dataclass(frozen=True)
-class ImageSpec:
-    """One role entry in the image registry."""
-
-    role: str
-    image: str
-    description: str
-    scripts: tuple[ScriptSpec, ...] = ()
-    required_env: tuple[str, ...] = ()
-    """Env var names that :meth:`SandboxedShellCapability.run_script`
-    resolves via sibling capabilities' ``resolve_value`` before
-    dispatching a script in this image. If a required name has no
-    resolver (or has multiple conflicting resolvers), ``run_script``
-    raises with the missing / conflicting name."""
-
-    script_template_packages: tuple[str, ...] = ()
-    """Python package import paths whose ``.py`` files are valid
-    ``template_name`` arguments to
-    :meth:`SandboxedShellCapability.run_script(image_role=this_role,
-    template_name=...)`. Read at runtime via
-    :mod:`importlib.resources` so the agent doesn't need a
-    filesystem path."""
-
-    tags: tuple[str, ...] = ()
-    """Free-form classification tags for this image. Used by
-    :meth:`SandboxedShellCapability.list_images(tags=...)` for
-    capability-discovery queries (e.g. ``{"data-analysis",
-    "scientific-python"}``). All-match semantics on filter."""
-
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "ImageSpec":
-        scripts_raw = raw.get("scripts") or []
-        scripts = tuple(
-            ScriptSpec.from_dict(s) for s in scripts_raw
-            if isinstance(s, dict) and "name" in s
-        )
-        return cls(
-            role=str(raw["role"]),
-            image=str(raw["image"]),
-            description=str(raw.get("description", "")),
-            scripts=scripts,
-            required_env=tuple(
-                str(v) for v in (raw.get("required_env") or [])
-            ),
-            script_template_packages=tuple(
-                str(v) for v in (raw.get("script_template_packages") or [])
-            ),
-            tags=tuple(str(v) for v in (raw.get("tags") or [])),
-        )
-
-    def script_by_name(self, name: str) -> ScriptSpec | None:
-        for s in self.scripts:
-            if s.name == name:
-                return s
-        return None
-
-    def to_summary(self) -> dict[str, Any]:
-        return {
-            "role": self.role,
-            "image": self.image,
-            "description": self.description,
-            "scripts": [s.name for s in self.scripts],
-            "required_env": list(self.required_env),
-            "script_template_packages": list(self.script_template_packages),
-            "tags": list(self.tags),
-        }
 
 
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
-class ImageRegistry:
+class DockerImageRegistry:
     """Loaded view of the sandbox image YAML.
 
     Immutable after construction. The capability re-reads the file on
@@ -164,36 +61,36 @@ class ImageRegistry:
     future phase); today, loading happens once at capability init.
     """
 
-    def __init__(self, images: list[ImageSpec]):
-        self._images: dict[str, ImageSpec] = {i.role: i for i in images}
+    def __init__(self, images: list[DockerImageSpec]):
+        self._images: dict[str, DockerImageSpec] = {i.role: i for i in images}
 
     # --- Construction ------------------------------------------------------
 
     @classmethod
-    def from_yaml_text(cls, text: str) -> "ImageRegistry":
+    def from_yaml_text(cls, text: str) -> "DockerImageRegistry":
         data = yaml.safe_load(text) or {}
         raw_images = data.get("images") or []
-        images: list[ImageSpec] = []
+        images: list[DockerImageSpec] = []
         for raw in raw_images:
             if not isinstance(raw, dict) or "role" not in raw or "image" not in raw:
                 logger.warning(
-                    "ImageRegistry: skipping malformed entry: %r", raw,
+                    "DockerImageRegistry: skipping malformed entry: %r", raw,
                 )
                 continue
             try:
-                images.append(ImageSpec.from_dict(raw))
+                images.append(DockerImageSpec.from_dict(raw))
             except Exception as e:
                 logger.warning(
-                    "ImageRegistry: failed to parse %r: %s", raw, e,
+                    "DockerImageRegistry: failed to parse %r: %s", raw, e,
                 )
         return cls(images)
 
     @classmethod
-    def from_path(cls, path: str | Path) -> "ImageRegistry":
+    def from_path(cls, path: str | Path) -> "DockerImageRegistry":
         p = Path(path)
         if not p.exists():
             logger.warning(
-                "ImageRegistry: registry file %s does not exist; "
+                "DockerImageRegistry: registry file %s does not exist; "
                 "starting with an empty registry",
                 p,
             )
@@ -201,24 +98,25 @@ class ImageRegistry:
         return cls.from_yaml_text(p.read_text())
 
     @classmethod
-    def from_config(cls, config: Any) -> "ImageRegistry":
-        """Build the registry from a ``SandboxImagesConfig`` instance.
+    def from_config(cls, config: Any) -> "DockerImageRegistry":
+        """Build the registry from a ``DockerImageRegistryConfig`` instance.
 
-        ``config`` is typed loosely to avoid an import cycle with
-        ``agents.configs``; in practice it is a ``SandboxImagesConfig``.
+        ``config.images`` is already ``list[DockerImageSpec]`` (the shared
+        schema from ``colony.agents.sandbox_images`` — Pydantic-
+        validated at YAML load time). No translation needed; the
+        capability and the config component speak the same type.
+        ``config`` is typed loosely to avoid a top-level import of
+        ``agents.configs`` from this low-level subpackage.
         """
-        images = [
-            ImageSpec.from_dict(img.model_dump()) for img in config.images
-        ]
-        return cls(images)
+        return cls(list(config.images))
 
     @classmethod
-    def empty(cls) -> "ImageRegistry":
+    def empty(cls) -> "DockerImageRegistry":
         return cls([])
 
     # --- Lookup -----------------------------------------------------------
 
-    def get(self, role: str) -> ImageSpec | None:
+    def get(self, role: str) -> DockerImageSpec | None:
         return self._images.get(role)
 
     def roles(self) -> list[str]:
@@ -233,7 +131,7 @@ class ImageRegistry:
 
     def find_script(
         self, script_name: str, *, image_role: str | None = None,
-    ) -> tuple[ImageSpec, ScriptSpec] | None:
+    ) -> tuple[DockerImageSpec, ScriptSpec] | None:
         """Locate a script by name, optionally scoped to one role.
 
         If ``image_role`` is None, searches all roles and returns the

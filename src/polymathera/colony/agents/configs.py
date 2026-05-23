@@ -22,6 +22,7 @@ from ..distributed.config import (
     register_polymathera_config,
     tier_metadata,
 )
+from .sandbox_images import DockerImageSpec, ScriptSpec  # noqa: F401 — re-exported below
 
 
 # ---------------------------------------------------------------------------
@@ -405,59 +406,16 @@ async def get_plugins_config() -> PluginsConfig:
 
 # ---------------------------------------------------------------------------
 # Sandbox image registry
+#
+# ``DockerImageSpec`` / ``ScriptSpec`` are the shared schema —
+# ``colony.agents.sandbox_images`` is the single source of truth used
+# both here (operator-YAML validation) and by
+# ``agents.patterns.capabilities._sandbox.registry.DockerImageRegistry``.
 # ---------------------------------------------------------------------------
 
 
-class SandboxImageScript(BaseModel):
-    """One named script registered against an image role.
-
-    Mirrors the YAML schema consumed by
-    ``agents.patterns.capabilities._sandbox.registry.ScriptSpec``.
-    """
-
-    name: str
-    description: str = ""
-    cmd: list[str] = Field(default_factory=list)
-    params: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    timeout_seconds: int = 300
-
-
-class SandboxImage(BaseModel):
-    """One role entry in the sandbox image registry."""
-
-    role: str
-    image: str
-    description: str = ""
-    scripts: list[SandboxImageScript] = Field(default_factory=list)
-    required_env: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Env var names ``SandboxedShellCapability.run_script`` "
-            "resolves via sibling capabilities' ``resolve_value`` "
-            "before dispatching a script in this image. Missing or "
-            "conflicting resolvers cause ``run_script`` to raise."
-        ),
-    )
-    script_template_packages: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Python package import paths whose ``.py`` files are "
-            "valid ``template_name`` arguments to "
-            "``run_script(image_role=this_role, template_name=...)``. "
-            "Read via importlib.resources."
-        ),
-    )
-    tags: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Free-form classification tags. Queried by "
-            "``list_images(tags=...)`` with all-match semantics."
-        ),
-    )
-
-
 @register_polymathera_config(path="sandbox_images")
-class SandboxImagesConfig(ConfigComponent):
+class DockerImageRegistryConfig(ConfigComponent):
     """Allowed sandbox images, keyed by ``role``.
 
     Default is **empty** — preserving the existing
@@ -469,7 +427,7 @@ class SandboxImagesConfig(ConfigComponent):
     capability's fallback path).
     """
 
-    images: list[SandboxImage] = Field(
+    images: list[DockerImageSpec] = Field(
         default_factory=list,
         json_schema_extra=tier_metadata(
             tier=Tier.L1_OPERATOR, mutability=Mutability.RELOADABLE,
@@ -477,9 +435,9 @@ class SandboxImagesConfig(ConfigComponent):
     )
 
 
-async def get_sandbox_images_config() -> SandboxImagesConfig:
+async def get_sandbox_image_registry_config() -> DockerImageRegistryConfig:
     """Async fetch — see :func:`get_plugins_config`."""
-    return await _get_component_or_default("sandbox_images", SandboxImagesConfig)
+    return await _get_component_or_default("sandbox_images", DockerImageRegistryConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -562,13 +520,13 @@ __all__ = (
     "ChromaConfig",
     "GitHubAuthConfig",
     "PluginsConfig",
-    "SandboxImage",
-    "SandboxImageScript",
-    "SandboxImagesConfig",
+    "DockerImageSpec",
+    "ScriptSpec",
+    "DockerImageRegistryConfig",
     "WebSearchConfig",
     "get_chroma_config",
     "get_github_auth_config",
     "get_plugins_config",
-    "get_sandbox_images_config",
+    "get_sandbox_image_registry_config",
     "get_web_search_config",
 )

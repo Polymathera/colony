@@ -54,7 +54,7 @@ path. Everything goes through this YAML.
 | `llms.inference.cluster.embedding` | `STEmbeddingDeploymentConfig` | `cluster/embedding/st_embedding.py` |
 | `memory.chroma` | `ChromaConfig` | `agents/configs.py` |
 | `plugins` | `PluginsConfig` | `agents/configs.py` |
-| `sandbox_images` | `SandboxImagesConfig` | `agents/configs.py` |
+| `sandbox_images` | `DockerImageRegistryConfig` | `agents/configs.py` |
 | `task_images` | `TaskImagesConfig` | `agents/configs.py` |
 | `web_ui` | `WebUIConfig` | `web_ui/backend/configs.py` |
 

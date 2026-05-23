@@ -187,7 +187,7 @@ knowledge:
 #   extra_plugin_roots: []
 
 # --- Sandbox images registry ----------------------------------------------
-# Source: agents/configs.py:SandboxImagesConfig (replaces the old
+# Source: agents/configs.py:DockerImageRegistryConfig (replaces the old
 # sandbox-images.yaml mounted at /etc/colony/sandbox-images.yaml; both
 # sources work, the typed one wins when populated).
 # sandbox_images:

@@ -20,7 +20,7 @@ from polymathera.colony.agents.patterns.capabilities._sandbox import (
     ContainerHandle,
     ContainerSpec,
     ExecResult,
-    ImageRegistry,
+    DockerImageRegistry,
     NoSuchContainer,
 )
 from polymathera.colony.agents.patterns.capabilities.sandboxed_shell import (
@@ -175,7 +175,7 @@ def _make_cap(
         agent=agent,
         scope=BlackboardScope.SESSION,
         backend=backend or _FakeBackend(),
-        registry=ImageRegistry.from_yaml_text(_REGISTRY_YAML),
+        registry=DockerImageRegistry.from_yaml_text(_REGISTRY_YAML),
         host_workspace_root=workspace or "/tmp/colony_test_ws",
         max_concurrent_containers=max_concurrent,
         max_total_cpu_cores=max_cpu,
@@ -201,7 +201,7 @@ def _with_context():
 # ---------------------------------------------------------------------------
 
 def test_registry_parses_yaml_and_reports_summaries():
-    reg = ImageRegistry.from_yaml_text(_REGISTRY_YAML)
+    reg = DockerImageRegistry.from_yaml_text(_REGISTRY_YAML)
     assert reg.roles() == ["default", "other"]
     assert reg.get("default").image == "python:3.11-slim"
     default_script = reg.get("default").script_by_name("ok")
@@ -219,17 +219,17 @@ images:
   - role: ok
     image: x
 """
-    reg = ImageRegistry.from_yaml_text(bad)
+    reg = DockerImageRegistry.from_yaml_text(bad)
     assert reg.roles() == ["ok"]
 
 
 def test_registry_empty_for_missing_file(tmp_path):
-    reg = ImageRegistry.from_path(tmp_path / "does_not_exist.yaml")
+    reg = DockerImageRegistry.from_path(tmp_path / "does_not_exist.yaml")
     assert len(reg) == 0
 
 
 def test_registry_find_script_respects_role_scope():
-    reg = ImageRegistry.from_yaml_text(_REGISTRY_YAML)
+    reg = DockerImageRegistry.from_yaml_text(_REGISTRY_YAML)
     hit = reg.find_script("ok", image_role="default")
     assert hit is not None and hit[1].name == "ok"
     miss = reg.find_script("ok", image_role="other")

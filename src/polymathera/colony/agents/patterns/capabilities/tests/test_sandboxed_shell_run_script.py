@@ -1,7 +1,7 @@
 """Tests for the E-3 additions to ``SandboxedShellCapability``:
 
 - ``AgentCapability.resolve_value`` default (returns None).
-- ``ImageSpec`` new fields: ``required_env`` /
+- ``DockerImageSpec`` new fields: ``required_env`` /
   ``script_template_packages`` / ``tags`` (parsed + round-tripped
   through ``to_summary``).
 - ``list_images(role_allowlist=..., tags=...)`` filters.
@@ -27,10 +27,10 @@ import pytest
 
 from polymathera.colony.agents.base import AgentCapability
 from polymathera.colony.agents.patterns.capabilities._sandbox import (
-    ContainerBackend, ContainerHandle, ExecResult, ImageRegistry,
+    ContainerBackend, ContainerHandle, ExecResult, DockerImageRegistry,
 )
 from polymathera.colony.agents.patterns.capabilities._sandbox.registry import (
-    ImageSpec,
+    DockerImageSpec,
 )
 from polymathera.colony.agents.patterns.capabilities.sandboxed_shell import (
     SandboxedShellCapability,
@@ -165,7 +165,7 @@ def _make_cap(
         agent=agent,
         scope=BlackboardScope.SESSION,
         backend=backend,
-        registry=ImageRegistry.from_yaml_text(registry_yaml),
+        registry=DockerImageRegistry.from_yaml_text(registry_yaml),
         host_workspace_root="/tmp/cps_test_ws",
     )
     # Wire sibling capabilities into agent._capabilities (the shell
@@ -209,14 +209,14 @@ def test_resolve_value_default_returns_none():
 
 
 # ---------------------------------------------------------------------------
-# ImageSpec new fields
+# DockerImageSpec new fields
 # ---------------------------------------------------------------------------
 
 
 class TestImageSpecExtension:
 
     def test_from_dict_parses_new_fields(self):
-        spec = ImageSpec.from_dict({
+        spec = DockerImageSpec.from_dict({
             "role": "x", "image": "y:1",
             "required_env": ["A", "B"],
             "script_template_packages": ["pkg.a", "pkg.b"],
@@ -227,13 +227,13 @@ class TestImageSpecExtension:
         assert spec.tags == ("t1", "t2")
 
     def test_from_dict_defaults_empty_tuples(self):
-        spec = ImageSpec.from_dict({"role": "x", "image": "y:1"})
+        spec = DockerImageSpec.from_dict({"role": "x", "image": "y:1"})
         assert spec.required_env == ()
         assert spec.script_template_packages == ()
         assert spec.tags == ()
 
     def test_to_summary_round_trips_new_fields(self):
-        spec = ImageSpec.from_dict({
+        spec = DockerImageSpec.from_dict({
             "role": "x", "image": "y:1",
             "required_env": ["A"], "script_template_packages": ["p"],
             "tags": ["t"],

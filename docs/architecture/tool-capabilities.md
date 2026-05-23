@@ -288,7 +288,7 @@ wraps it — every sandboxed tool capability delegates container
 lifecycle through the agent's mounted `SandboxedShellCapability`.
 The shared container is launched lazily on first call, reused, and
 stopped at `shutdown`. There is one image-routing path, owned by
-`SandboxedShellCapability`'s `SandboxImagesConfig`.
+`SandboxedShellCapability`'s `DockerImageRegistryConfig`.
 
 `HPCToolCapability` delegates the equivalent to AWS Batch; the
 JobDefinition image is owned by the [CDK
