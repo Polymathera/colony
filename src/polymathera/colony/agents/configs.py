@@ -429,6 +429,31 @@ class SandboxImage(BaseModel):
     image: str
     description: str = ""
     scripts: list[SandboxImageScript] = Field(default_factory=list)
+    required_env: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Env var names ``SandboxedShellCapability.run_script`` "
+            "resolves via sibling capabilities' ``resolve_value`` "
+            "before dispatching a script in this image. Missing or "
+            "conflicting resolvers cause ``run_script`` to raise."
+        ),
+    )
+    script_template_packages: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Python package import paths whose ``.py`` files are "
+            "valid ``template_name`` arguments to "
+            "``run_script(image_role=this_role, template_name=...)``. "
+            "Read via importlib.resources."
+        ),
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Free-form classification tags. Queried by "
+            "``list_images(tags=...)`` with all-match semantics."
+        ),
+    )
 
 
 @register_polymathera_config(path="sandbox_images")

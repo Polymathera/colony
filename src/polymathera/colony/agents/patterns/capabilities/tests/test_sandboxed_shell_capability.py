@@ -685,7 +685,8 @@ def test_action_executors_are_registered():
         "launch_container", "stop_container", "restart_container",
         "list_containers", "get_container_status",
         "attach_container", "detach_container",
-        "execute_command", "execute_script",
+        "execute_command", "execute_script", "run_script",
         "list_scripts", "list_images",
+        "list_script_templates", "get_script_template",
         "copy_file_in", "copy_file_out", "read_file", "write_file",
     }

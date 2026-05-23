@@ -17,7 +17,9 @@ blueprint — see ``design_SandboxedShellCapability.md``.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import importlib.resources
 import logging
 import os
 import time
@@ -1016,11 +1018,277 @@ class SandboxedShellCapability(AgentCapability):
         return {"scripts": scripts, "count": len(scripts)}
 
     @action_executor()
-    async def list_images(self) -> dict[str, Any]:
-        """List every role currently available in the image registry."""
+    async def list_images(
+        self,
+        *,
+        role_allowlist: tuple[str, ...] | list[str] | None = None,
+        tags: tuple[str, ...] | list[str] | None = None,
+    ) -> dict[str, Any]:
+        """List image roles in the registry, optionally filtered.
+
+        Filters compose by AND:
+
+        - ``role_allowlist`` — keep only images whose ``role`` is in
+          the supplied set (use to surface a curated subset, e.g.
+          CPS's data-analysis catalogue).
+        - ``tags`` — keep only images that have **every** tag in the
+          supplied set (all-match; any-match is obtainable by union
+          of multiple calls).
+
+        Returns the standard summary dict (``role``, ``image``,
+        ``description``, ``scripts``, ``required_env``,
+        ``script_template_packages``, ``tags``) per entry.
+        """
         registry = await self._get_registry()
         images = registry.summaries()
+        if role_allowlist is not None:
+            allow = set(role_allowlist)
+            images = [img for img in images if img["role"] in allow]
+        if tags:
+            tag_set = set(tags)
+            images = [
+                img for img in images
+                if tag_set.issubset(set(img.get("tags") or ()))
+            ]
         return {"images": images, "count": len(images)}
+
+    @action_executor()
+    async def list_script_templates(
+        self, *, image_role: str,
+    ) -> dict[str, Any]:
+        """List script templates compatible with ``image_role``.
+
+        Reads every ``.py`` file from each package in the image's
+        ``script_template_packages`` (skipping names starting with
+        ``_``) via :mod:`importlib.resources`. Each entry carries
+        ``name`` (the template stem — pass to
+        :meth:`get_script_template` / :meth:`run_script`),
+        ``filename``, ``package``, and ``summary`` (the first
+        non-empty line of the template's module docstring).
+
+        Raises ``ValueError`` if ``image_role`` is not registered.
+        """
+        registry = await self._get_registry()
+        spec = registry.get(image_role)
+        if spec is None:
+            raise ValueError(
+                f"list_script_templates: unknown image_role "
+                f"{image_role!r}",
+            )
+        records: list[dict[str, Any]] = []
+        for package in spec.script_template_packages:
+            try:
+                files = importlib.resources.files(package)
+            except (ImportError, ModuleNotFoundError) as exc:
+                logger.warning(
+                    "list_script_templates: package %r not importable: %s",
+                    package, exc,
+                )
+                continue
+            for entry in sorted(files.iterdir(), key=lambda r: r.name):
+                name = entry.name
+                if not name.endswith(".py") or name.startswith("_"):
+                    continue
+                try:
+                    summary = _extract_docstring_summary(entry.read_text())
+                except Exception:  # noqa: BLE001
+                    summary = ""
+                records.append({
+                    "name": name[:-len(".py")],
+                    "filename": name,
+                    "package": package,
+                    "summary": summary,
+                })
+        return {
+            "image_role": image_role,
+            "templates": records,
+            "count": len(records),
+            "packages": list(spec.script_template_packages),
+        }
+
+    @action_executor()
+    async def get_script_template(
+        self, *, image_role: str, name: str,
+    ) -> dict[str, Any]:
+        """Fetch one template's source by name.
+
+        Scans the image's ``script_template_packages`` for a file
+        ``{name}.py``; returns the source. Names with path
+        separators or ``..`` are rejected. Raises
+        :class:`FileNotFoundError` when no template matches.
+        """
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            raise ValueError(
+                f"get_script_template: name must be a single template "
+                f"stem (no path separators or '.' / '..'); got {name!r}",
+            )
+        registry = await self._get_registry()
+        spec = registry.get(image_role)
+        if spec is None:
+            raise ValueError(
+                f"get_script_template: unknown image_role {image_role!r}",
+            )
+        filename = f"{name}.py"
+        for package in spec.script_template_packages:
+            try:
+                files = importlib.resources.files(package)
+            except (ImportError, ModuleNotFoundError):
+                continue
+            target = files / filename
+            if target.is_file():
+                source = target.read_text()
+                return {
+                    "image_role": image_role,
+                    "name": name,
+                    "filename": filename,
+                    "package": package,
+                    "source": source,
+                    "n_lines": source.count("\n") + 1,
+                    "n_chars": len(source),
+                }
+        raise FileNotFoundError(
+            f"get_script_template: no template {name!r} in any of "
+            f"{list(spec.script_template_packages)}",
+        )
+
+    @action_executor(interruptible=True)
+    async def run_script(
+        self,
+        container_id: str,
+        *,
+        template_name: str | None = None,
+        script: str | None = None,
+        template_args: dict[str, Any] | None = None,
+        extra_env: dict[str, str] | None = None,
+        timeout_seconds: int | None = None,
+        stream_to_blackboard: bool = False,
+    ) -> dict[str, Any]:
+        """Run a Python script inside ``container_id``.
+
+        Exactly one of ``template_name`` (resolved against the
+        image's ``script_template_packages``) or ``script`` (literal
+        Python source) must be supplied. ``template_args`` become
+        argparse-style CLI args appended to ``["python", "-"]``.
+
+        Env vars declared by the image's ``required_env`` are
+        auto-populated by sibling capabilities' ``resolve_value``:
+        the framework iterates over every capability on the parent
+        agent, calls ``await cap.resolve_value(name,
+        purpose="script_env", image_role=..., tool_call_id=...)``,
+        and takes the single non-None response per name. Raises:
+
+        - **No resolver**: required name has no resolver on any
+          mounted capability.
+        - **Conflicting resolvers**: two or more capabilities return
+          non-None for the same name. Operator must resolve
+          explicitly (rename / remove a capability).
+
+        ``extra_env`` lets callers add ad-hoc env vars on top of the
+        resolved set (typically empty in production).
+
+        Returns the underlying ``execute_command`` dict
+        (``exit_code`` / ``stdout`` / ``stderr`` / ``wall_time_ms`` /
+        ``truncated``) augmented with ``tool_call_id`` — the fresh
+        uuid the framework generated for this dispatch. Any
+        artifacts the script produced (e.g. via
+        ``polymathera.cps.tools.data_analysis_io.save_tool_result``)
+        live in the registry under this ``tool_call_id`` — the
+        caller queries the registry to fetch them (no stdout
+        parsing).
+        """
+        if (template_name is None) == (script is None):
+            return self._exec_error(
+                container_id,
+                "run_script: pass exactly one of template_name / script",
+            )
+        record = self._containers.get(container_id)
+        if record is None or not self._may_exec(record):
+            return self._exec_error(
+                container_id, "not tracked or not permitted",
+            )
+        registry = await self._get_registry()
+        image_spec = registry.get(record.image_role)
+        if image_spec is None:
+            return self._exec_error(
+                container_id,
+                f"image_role {record.image_role!r} not in registry",
+            )
+
+        # Resolve script source.
+        if template_name is not None:
+            try:
+                fetched = await self.get_script_template(
+                    image_role=record.image_role, name=template_name,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                return self._exec_error(container_id, str(exc))
+            source = fetched["source"]
+        else:
+            source = script
+
+        # Resolve env vars via sibling capabilities' resolve_value.
+        tool_call_id = uuid.uuid4().hex
+        env: dict[str, str] = {}
+        if image_spec.required_env:
+            agent = self._agent
+            siblings: list[AgentCapability] = (
+                list(agent._capabilities.values())
+                if agent is not None else [self]
+            )
+            for name in image_spec.required_env:
+                resolved: list[tuple[str, Any]] = []
+                for cap in siblings:
+                    try:
+                        value = await cap.resolve_value(
+                            name,
+                            purpose="script_env",
+                            image_role=record.image_role,
+                            tool_call_id=tool_call_id,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        return self._exec_error(
+                            container_id,
+                            f"resolve_value({name!r}) raised on "
+                            f"{type(cap).__name__}: {exc}",
+                        )
+                    if value is not None:
+                        resolved.append((type(cap).__name__, value))
+                if not resolved:
+                    return self._exec_error(
+                        container_id,
+                        f"image {record.image_role!r} requires env var "
+                        f"{name!r} but no capability on the agent "
+                        f"resolves it. Mount a capability whose "
+                        f"resolve_value returns a value for {name!r}.",
+                    )
+                if len(resolved) > 1:
+                    return self._exec_error(
+                        container_id,
+                        f"image {record.image_role!r} requires env var "
+                        f"{name!r} but {len(resolved)} capabilities "
+                        f"resolved it: {[r[0] for r in resolved]}. "
+                        "Operators must resolve the conflict "
+                        "explicitly (rename / remove one).",
+                    )
+                env[name] = str(resolved[0][1])
+        if extra_env:
+            env.update(extra_env)
+
+        # Build argv from template_args (argparse-style).
+        cmd: list[str] = ["python", "-"]
+        if template_args:
+            for key, value in template_args.items():
+                cmd.append(f"--{key.replace('_', '-')}")
+                cmd.append(str(value))
+
+        exec_result = await self.execute_command(
+            container_id=container_id, command=cmd, stdin=source,
+            env=env, timeout_seconds=timeout_seconds,
+            stream_to_blackboard=stream_to_blackboard,
+        )
+        if isinstance(exec_result, dict):
+            exec_result = {**exec_result, "tool_call_id": tool_call_id}
+        return exec_result
 
     # --- File transfer ---------------------------------------------------
 
@@ -1154,3 +1422,24 @@ class SandboxedShellCapability(AgentCapability):
                 ),
             }
         return {"container_id": container_id, "ok": True, "message": ""}
+
+
+
+def _extract_docstring_summary(source: str) -> str:
+    """Return the first non-empty line of the module docstring, or
+    ``""`` if the source has no docstring. Used by
+    :meth:`SandboxedShellCapability.list_script_templates` to surface
+    a one-line summary per template without parsing arbitrary script
+    structure."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ""
+    doc = ast.get_docstring(tree)
+    if not doc:
+        return ""
+    for line in doc.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return ""

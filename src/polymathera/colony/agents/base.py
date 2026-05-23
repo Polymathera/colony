@@ -715,6 +715,35 @@ class AgentCapability(ABC):
         """
         self.install_hook_handlers()
 
+    async def resolve_value(
+        self,
+        name: str,
+        **context: Any,
+    ) -> Any | None:
+        """Return a value this capability owns for ``name``, or ``None``.
+
+        Discovery mechanism for sibling capabilities to look up
+        named values without explicit registration. The caller
+        (e.g. :class:`SandboxedShellCapability` building env vars
+        for ``run_script``) iterates over the agent's capabilities,
+        calls each one's ``resolve_value(name, **context)``, and
+        takes the single non-None response per name (raising if
+        multiple capabilities claim the same name — operators must
+        resolve the conflict explicitly).
+
+        ``**context`` is purpose-specific; the caller documents what
+        keys it passes. For ``SandboxedShellCapability``'s
+        script-env dispatch, context includes ``purpose="script_env"``,
+        ``image_role``, ``tool_call_id``.
+
+        Default returns ``None`` (no opinion). Subclasses override
+        to claim ownership of specific names — see e.g. CPS's
+        ``ArtifactRegistryCapability.resolve_value`` which owns
+        ``MLFLOW_TRACKING_URI`` / ``CPS_PARENT_RUN_ID`` /
+        ``CPS_TOOL_CALL_ID`` for the script-env-dispatch purpose.
+        """
+        return None
+
     def install_hook_handlers(self) -> list[str]:
         """Install all @hook_handler decorated methods.
 
