@@ -34,6 +34,9 @@ jobs:
         run: pip install poetry==1.7.1
       - name: Configure Poetry
         run: poetry config virtualenvs.create false
+      - name: Pre-install python-louvain (avoid virtualenv-21 sdist-build regression)
+        # See the matching step in ``ci.yml`` for the full rationale.
+        run: pip install --no-cache-dir python-louvain==0.16
       - name: Install dependencies
         run: poetry install --no-interaction --extras "code_analysis cpu dashboard"
       - name: Build docs
