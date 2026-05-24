@@ -235,10 +235,28 @@ class MethodWrapperActionExecutor(ActionExecutor):
             params = resolved_params if resolved_params is not None else action.parameters
 
             # Validate against input schema if available
+            #
+            # Changed from ``params = validated.model_dump()``
+            # to extracting typed attributes off the validated instance.
+            # The prior behaviour serialised every nested Pydantic field
+            # back to a dict, then called the method with the dict — so
+            # action bodies that did ``param_1.field_1.field_2`` on a
+            # ``param_1: SomeClassType`` kwarg raised ``AttributeError``
+            # when dispatched via the LLM planner (tests calling the
+            # bound method directly passed typed instances + worked).
+            # The fix preserves the typed instance Pydantic validated.
+            # ``model_extra`` carries through fields that landed via the
+            # ``extra="allow"`` path on **kwargs-accepting actions.
             if self.input_schema:
                 try:
                     validated = self.input_schema(**params)
-                    params = validated.model_dump()
+                    params = {
+                        name: getattr(validated, name)
+                        for name in self.input_schema.model_fields
+                    }
+                    extras = getattr(validated, "model_extra", None)
+                    if extras:
+                        params.update(extras)
                 except ValidationError as e:
                     return ActionResult(
                         success=False,
@@ -374,11 +392,20 @@ class FunctionWrapperActionExecutor(ActionExecutor):
         try:
             params = resolved_params if resolved_params is not None else action.parameters
 
-            # Validate against input schema if available
+            # Validate against input schema if available. See the
+            # twin block in ``MethodActionExecutor.execute`` for the
+            # rationale on extracting typed attributes off the
+            # validated instance instead of dumping back to a dict.
             if self.input_schema:
                 try:
                     validated = self.input_schema(**params)
-                    params = validated.model_dump()
+                    params = {
+                        name: getattr(validated, name)
+                        for name in self.input_schema.model_fields
+                    }
+                    extras = getattr(validated, "model_extra", None)
+                    if extras:
+                        params.update(extras)
                 except ValidationError as e:
                     return ActionResult(
                         success=False,
