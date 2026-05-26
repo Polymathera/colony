@@ -1,11 +1,13 @@
 """``SandboxedShellRuntime`` — one container's full lifecycle.
 
-Extracted from :class:`SandboxedShellCapability`. The split exists
-so the polymorphic ``SandboxToolCapability.get_trial_runnable`` can
-construct a fresh, **cloudpickle-serializable** runtime per Ray Tune
-trial — the multi-container capability (`SandboxedShellCapability`)
-can't be serialized because it holds live blackboard handles + an
-in-process ``_containers`` accounting dict.
+Extracted from :class:`SandboxedShellCapability` so the
+**one-container lifecycle** can stand alone as a small,
+**cloudpickle-serialisable** object. The multi-container capability
+(``SandboxedShellCapability``) can't be serialised because it holds
+live blackboard handles + an in-process ``_containers`` accounting
+dict; the runtime is the disposable, use-once primitive downstream
+callers (including external task-orchestration substrates) can
+construct fresh per dispatch.
 
 What lives where (split rationale):
 
@@ -19,19 +21,17 @@ What lives where (split rationale):
   exposed to the LLM planner → stay on
   :class:`SandboxedShellCapability`.
 
-Hard design constraint locked 2026-05-23: **the runtime exposes NO
-streaming surface.** Streaming requires a blackboard reference
-(Redis client + asyncio pubsub tasks) which is not serializable into
-a Ray Tune worker closure. F-2b's trial outputs don't need live
-streaming — they flow through the registry-based ``tool_result.json``
-contract instead. The placeholder :meth:`exec_stream` exists only to
-fail fast if anything accidentally tries to stream through the runtime.
+Hard design constraint: **the runtime exposes NO streaming surface.**
+Streaming requires a blackboard reference (Redis client + asyncio
+pubsub tasks) which is not serialisable into an external worker
+closure. The placeholder :meth:`exec_stream` exists only to fail
+fast if anything accidentally tries to stream through the runtime.
 
-Construction-args contract: every kwarg is plain serializable Python
+Construction-args contract: every kwarg is plain serialisable Python
 (strings, numbers, dicts, tuples of dicts). The single class-typed
 arg is ``backend`` — :class:`DockerCLIBackend` holds only a string
 binary path so it's trivially picklable; future backends must
-preserve the same property if they want to be experimentable.
+preserve the same property.
 
 Audit records: the runtime accumulates per-exec audit dicts (using
 the labels snapshot it was constructed with for ``tenant_id`` /
@@ -105,9 +105,10 @@ class SandboxedShellRuntime:
        ``backend.stop``. Safe to call multiple times; second + later
        are no-ops.
 
-    ``SandboxToolCapability.get_trial_runnable`` constructs
-    the runtime FRESH per trial in a Ray Tune worker, so the
-    use-once contract matches the trial lifecycle.
+    The use-once contract makes the runtime safe to construct fresh
+    in any worker / subprocess that needs an isolated one-shot
+    container without the multi-container accounting plumbing the
+    capability carries.
     """
 
     def __init__(
@@ -298,8 +299,8 @@ class SandboxedShellRuntime:
 
         Streaming output is NOT supported on the runtime — the parent
         capability owns the streaming path because it requires a
-        blackboard reference (which isn't serializable into a Ray
-        Tune worker closure).
+        blackboard reference (which isn't serializable into a fresh
+        worker closure).
         """
         if self._handle is None:
             raise RuntimeError(
@@ -426,9 +427,9 @@ class SandboxedShellRuntime:
         ``tenant_id`` / ``session_id`` / ``agent_id`` come from the
         labels snapshot taken at construction time (matches what
         ``SandboxedShellCapability._build_labels`` already emits). In
-        Ray Tune worker contexts the labels are the only source of
-        agent identity — context-vars don't propagate across the Ray
-        boundary.
+        worker contexts that cross a process boundary the labels are
+        the only source of agent identity — context-vars don't
+        propagate across the worker boundary.
         """
         assert self._handle is not None
         return {

@@ -380,9 +380,8 @@ class SandboxedShellCapability(AgentCapability):
         The capability resolves the image-role → image lookup, the
         per-session workspace path, and the label set BEFORE
         constructing the runtime (so the runtime closure carries
-        snapshotted values; F-2b's trainable does the same). The
-        wall-time killer arms inside :meth:`runtime.launch` — not
-        here.
+        snapshotted values). The wall-time killer arms inside
+        :meth:`runtime.launch` — not here.
         """
         volumes: list[tuple[str, str, str]] = []
         for v in (extra_volumes or []):

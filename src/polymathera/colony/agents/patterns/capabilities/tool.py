@@ -273,9 +273,8 @@ class ToolCapability(AgentCapability, ABC):
         Default implementation returns the spec's
         :class:`~polymathera.colony.tools.ResourceRequirements` and
         :class:`~polymathera.colony.tools.ExecutionLocality` as a dict.
-        Subclasses can extend with environment-side checks (e.g.
-        :class:`~polymathera.cps.tools.hpc.capability.HPCToolCapability`
-        validates against the operator's ``cps.hpc.limits``).
+        Subclasses can extend with environment-side checks
+        (e.g. validating against per-cluster resource limits).
         """
         spec = type(self).spec
         return {
@@ -317,8 +316,7 @@ class LocalToolCapability(ToolCapability, ABC):
     The class exists so tool authors don't have to remember whether
     the in-process case needs any extra wiring (it doesn't), and so
     the type system signals "this tool runs locally" at the class
-    name (sibling to :class:`SandboxToolCapability` and the CPS-side
-    :class:`~polymathera.cps.tools.hpc.capability.HPCToolCapability`).
+    name (sibling to :class:`SandboxToolCapability`).
     """
 
     _TOOL_CAPABILITY_ABSTRACT: ClassVar[bool] = True

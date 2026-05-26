@@ -1,19 +1,19 @@
 """Unit tests for ``SandboxedShellRuntime``.
 
-Pre-refactor behaviour is covered by
-:mod:`test_sandboxed_shell_capability` (full action surface,
-streaming, ownership, slot accounting). These tests target the
-runtime-specific contracts F-2a introduced:
+Multi-container behaviour (full action surface, streaming,
+ownership, slot accounting) is covered by
+:mod:`test_sandboxed_shell_capability`. These tests target the
+runtime-specific contracts:
 
 - ``exec_stream`` raises ``RuntimeError`` unconditionally (locked
-  design — runtime is serializable, streaming requires a blackboard
+  design — runtime is serialisable, streaming requires a blackboard
   handle that isn't).
-- Construction kwargs are cloudpickle-serializable end-to-end, so
-  F-2b can carry a ``runtime_template`` dict through a Ray Tune
-  closure + reconstruct the runtime fresh in a worker.
+- Construction kwargs are cloudpickle-serialisable end-to-end so
+  callers can carry a ``runtime_template`` dict through a worker
+  closure + reconstruct the runtime fresh.
 - ``exec`` returns an ``ExecResultWithAudit`` whose ``audit_records``
   pull tenant/session/agent identity from the labels snapshot
-  (NOT from per-thread contextvars, which don't survive the Ray
+  (NOT from per-thread contextvars, which don't survive a worker
   boundary).
 - The wall-time killer fires + the runtime reports
   ``killed_by_deadline=True``.
@@ -182,15 +182,15 @@ def test_exec_stream_raises_runtime_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cloudpickle (F-2b prerequisite)
+# Cloudpickle (runtime-serialisability contract)
 # ---------------------------------------------------------------------------
 
 
 def test_construction_kwargs_are_picklable(tmp_path) -> None:
-    """F-2b's ``SandboxToolCapability.get_trial_runnable`` captures a
+    """Downstream worker-orchestration callers carry a
     ``runtime_template`` dict (NOT a runtime instance) and
-    reconstructs the runtime fresh in a Ray Tune worker. So we
-    verify the kwargs dict pickles cleanly + reconstructs identically.
+    reconstruct the runtime fresh per worker. Verify the kwargs
+    dict pickles cleanly + reconstructs identically.
     """
     template = {
         "backend": _FakeBackend(),
@@ -237,8 +237,8 @@ def test_runtime_instance_is_picklable_before_launch(tmp_path) -> None:
 def test_exec_returns_audit_record_from_labels(tmp_path) -> None:
     """The audit record's tenant/session/agent identity comes from
     the labels snapshot (NOT from per-thread contextvars). This is
-    the property F-2b's Ray Tune worker relies on — the worker
-    can't read the parent's contextvars."""
+    the property that lets the runtime survive crossing a worker
+    boundary where the parent's contextvars are unreachable."""
     backend = _FakeBackend()
     rt = _build_runtime(backend=backend, workspace_path=str(tmp_path))
     _run(rt.launch())

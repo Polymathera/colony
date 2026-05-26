@@ -60,6 +60,13 @@ from .minimal import (
     create_minimal_action_policy,
 )
 
+from .deferred import (
+    DeferredClosure,
+    deferred,
+    eager_execution,
+    is_eager_execution,
+)
+
 __all__ = [
     # Policies
     "ActionExecutor",
@@ -107,4 +114,9 @@ __all__ = [
     # Minimal
     "MinimalActionPolicy",
     "create_minimal_action_policy",
+    # Deferred-closure extraction primitive
+    "DeferredClosure",
+    "deferred",
+    "eager_execution",
+    "is_eager_execution",
 ]
