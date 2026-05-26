@@ -175,3 +175,116 @@ async def test_deferred_action_must_return_deferred_closure() -> None:
     cap = _Misbehaving(agent=None, scope_id="t")
     with pytest.raises(TypeError, match="must return a DeferredClosure"):
         await cap.apply()
+
+
+# ---------------------------------------------------------------------------
+# compile() machinery
+# ---------------------------------------------------------------------------
+
+
+async def test_decorator_auto_compiles_returned_closure() -> None:
+    """After the @deferred decorator returns the closure (extraction
+    mode), the closure is already compiled — the transient capability
+    reference is cleared and ``is_compiled`` is True."""
+    cap = _ScaleTool(agent=None, scope_id="t")
+    with eager_execution(False):
+        closure = await cap.apply()
+    assert closure.is_compiled is True
+    # Transient capability reference cleared post-compile.
+    assert closure._capability_pre_compile is None
+
+
+async def test_compile_is_idempotent() -> None:
+    """Re-calling compile() on an already-compiled closure is a
+    no-op; doesn't raise; doesn't re-extract."""
+    cap = _ScaleTool(agent=None, scope_id="t")
+    closure = _ScaleClosure(capability=cap, offset=0.1)
+    await closure.compile()
+    assert closure.is_compiled is True
+    # Second + later calls don't raise + don't change state.
+    await closure.compile()
+    await closure.compile()
+    assert closure.is_compiled is True
+    assert closure._capability_pre_compile is None
+
+
+async def test_uncompiled_closure_still_callable_if_manually_compiled() -> None:
+    """Tests that build closures directly (bypassing the decorator)
+    must call ``await closure.compile()`` themselves before invoking."""
+    cap = _ScaleTool(agent=None, scope_id="t")
+    closure = _ScaleClosure(capability=cap, offset=0.1)
+    # Manual compile (what tests do when bypassing the decorator).
+    await closure.compile()
+    result = await closure(x=2.0, scale=3.0)
+    assert result.payload["y"] == pytest.approx(6.1)
+
+
+# ---------------------------------------------------------------------------
+# Composite closures — compile() extracts sub-closures recursively
+# ---------------------------------------------------------------------------
+
+
+class _CompositeClosure(DeferredClosure[dict]):
+    """Composite closure: composes two ``apply`` sub-closures from
+    the same capability. Demonstrates the compile() pattern for
+    sub-closure extraction."""
+
+    def __init__(self, *, capability: Any) -> None:
+        super().__init__(capability)
+
+    async def compile(self) -> None:
+        if self.is_compiled:
+            return
+        cap = self._capability_pre_compile
+        # Extract sub-closure via the capability's @deferred action.
+        # Under ``eager_execution(False)``, the inner @deferred wrapper
+        # returns the closure object (already compiled by the inner
+        # auto-compile) instead of invoking it.
+        with eager_execution(False):
+            self.sub = await cap.apply()
+        # Sub-closures arrive already compiled; we just need to
+        # finalize ourselves.
+        await super().compile()
+
+    async def __call__(self, *, x: float = 0.0, scale: float = 1.0) -> Any:
+        # Awaits the pre-compiled sub-closure.
+        return await self.sub(x=x, scale=scale)
+
+
+class _CompositeTool(_ScaleTool):
+    """Adds a composite @deferred action that wraps ``apply``."""
+
+    spec: ClassVar[ToolSpec] = _ScaleTool.spec.model_copy(
+        update={"name": "composite_tool", "capabilities": ("apply", "compose")},
+    )
+
+    @action_executor()
+    @deferred
+    async def compose(self, *, x: float = 0.0, scale: float = 1.0) -> _CompositeClosure:
+        del x, scale  # composite knows only the closure class
+        return _CompositeClosure(capability=self)
+
+
+async def test_composite_compile_extracts_sub_closure() -> None:
+    """Composite's compile() extracts the sub-closure via the
+    capability's @deferred action — sub-closure arrives compiled."""
+    cap = _CompositeTool(agent=None, scope_id="t")
+    with eager_execution(False):
+        closure = await cap.compose()
+    assert isinstance(closure, _CompositeClosure)
+    assert closure.is_compiled is True
+    # Sub-closure was extracted + auto-compiled by the inner @deferred
+    # call inside compile().
+    assert isinstance(closure.sub, _ScaleClosure)
+    assert closure.sub.is_compiled is True
+    assert closure.sub._capability_pre_compile is None
+
+
+async def test_composite_eager_mode_invokes_recursively() -> None:
+    """Eager mode on a composite: action body builds composite,
+    decorator auto-compiles (extracts sub-closure), then invokes
+    composite's __call__ which awaits the sub-closure."""
+    cap = _CompositeTool(agent=None, scope_id="t")
+    result = await cap.compose(x=2.0, scale=3.0)
+    # offset=0.1 (in sub-closure), x=2.0, scale=3.0 → y = 6.1.
+    assert result.payload["y"] == pytest.approx(6.1)
