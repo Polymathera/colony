@@ -2044,3 +2044,134 @@ class ActionPolicyLifecycleProtocol(BlackboardProtocol):
     @staticmethod
     def is_codegen_failed_key(key: str) -> bool:
         return key.startswith(ActionPolicyLifecycleProtocol._CODEGEN_FAILED)
+
+
+# ---------------------------------------------------------------------------
+# Consciousness-stream cross-agent event protocols
+# (added for the PR-Sub-2b recovery — see
+# ``cps/CONSCIOUSNESS_STREAMS_RECOVERY_AUDIT.md``)
+# ---------------------------------------------------------------------------
+
+
+class VCMPageEventProtocol(BlackboardProtocol):
+    """Protocol for VCM page-graph mutations.
+
+    ``VirtualContextManager._on_page_loaded`` /
+    ``_on_page_evicted`` publish typed page-event records to the
+    colony-scoped blackboard so any agent's stream source can
+    consume them via ``@event_handler(pattern=VCMPageEventProtocol.event_pattern())``.
+
+    Key format::
+
+        vcm_page_event:{mutation_kind}:{page_id}:{millis}
+
+    ``mutation_kind`` is one of ``added`` / ``evicted``.
+    ``millis`` is included so re-emissions of the same page don't
+    collide on the blackboard's key.
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    _PREFIX: ClassVar[str] = "vcm_page_event:"
+
+    # --- Key construction ---
+
+    @staticmethod
+    def event_key(mutation_kind: str, page_id: str, millis: int) -> str:
+        # Sanitise components — page_id may legitimately contain ``:``
+        # in some sources; replace with ``/`` so the key parser sees
+        # exactly four colon-separated fields.
+        safe_page = str(page_id).replace(":", "/")
+        return f"{VCMPageEventProtocol._PREFIX}{mutation_kind}:{safe_page}:{millis}"
+
+    # --- Pattern construction ---
+
+    @staticmethod
+    def event_pattern() -> str:
+        return f"{VCMPageEventProtocol._PREFIX}*"
+
+    @staticmethod
+    def event_pattern_for_kind(mutation_kind: str) -> str:
+        return f"{VCMPageEventProtocol._PREFIX}{mutation_kind}:*"
+
+    # --- Key parsing ---
+
+    @staticmethod
+    def parse_event_key(key: str) -> dict[str, str]:
+        """Return ``{"mutation_kind": ..., "page_id": ..., "millis": ...}``.
+
+        Raises ``ValueError`` for malformed keys."""
+        if not key.startswith(VCMPageEventProtocol._PREFIX):
+            raise ValueError(f"Not a VCMPageEventProtocol key: {key!r}")
+        rest = key[len(VCMPageEventProtocol._PREFIX):]
+        parts = rest.rsplit(":", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Malformed VCMPageEvent key: {key!r}")
+        kind_and_page, millis = parts
+        sub = kind_and_page.split(":", 1)
+        if len(sub) != 2:
+            raise ValueError(f"Malformed VCMPageEvent key: {key!r}")
+        return {
+            "mutation_kind": sub[0],
+            "page_id": sub[1].replace("/", ":"),
+            "millis": millis,
+        }
+
+
+class MonorepoCommitProtocol(BlackboardProtocol):
+    """Protocol for tier-2 design-monorepo commits.
+
+    Every ``BranchScopedCapabilityBase`` subclass's tier-2 action
+    (``checkpoint_*_to_repo``) calls ``await self.fire_post_commit(...)``
+    after a successful ``DesignMonorepoClient.commit_with_identity``.
+    ``fire_post_commit`` publishes a typed commit record to the
+    colony-scoped blackboard so any agent's stream source can
+    consume them via
+    ``@event_handler(pattern=MonorepoCommitProtocol.event_pattern())``.
+
+    Key format::
+
+        monorepo_commit:{branch_safe}:{sha}
+
+    ``branch_safe`` is the branch with ``/`` replaced by ``__`` so
+    branch names like ``fork/experiment`` don't collide with the
+    blackboard's ``:`` key separator semantics.
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    _PREFIX: ClassVar[str] = "monorepo_commit:"
+
+    # --- Key construction ---
+
+    @staticmethod
+    def event_key(branch: str, sha: str) -> str:
+        branch_safe = str(branch).replace("/", "__")
+        return f"{MonorepoCommitProtocol._PREFIX}{branch_safe}:{sha}"
+
+    # --- Pattern construction ---
+
+    @staticmethod
+    def event_pattern() -> str:
+        return f"{MonorepoCommitProtocol._PREFIX}*"
+
+    @staticmethod
+    def event_pattern_for_branch(branch: str) -> str:
+        branch_safe = str(branch).replace("/", "__")
+        return f"{MonorepoCommitProtocol._PREFIX}{branch_safe}:*"
+
+    # --- Key parsing ---
+
+    @staticmethod
+    def parse_event_key(key: str) -> dict[str, str]:
+        """Return ``{"branch": ..., "sha": ...}``."""
+        if not key.startswith(MonorepoCommitProtocol._PREFIX):
+            raise ValueError(f"Not a MonorepoCommit key: {key!r}")
+        rest = key[len(MonorepoCommitProtocol._PREFIX):]
+        parts = rest.rsplit(":", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Malformed MonorepoCommit key: {key!r}")
+        branch_safe, sha = parts
+        return {"branch": branch_safe.replace("__", "/"), "sha": sha}
+
+

@@ -34,10 +34,14 @@ class ConsciousnessStream:
 
     def consider_event(self, contexts: dict[str, Any]) -> None: ...
     def consider_action(self, call: dict[str, Any]) -> None: ...
+    def consider_tool_output(self, payload: dict[str, Any]) -> None: ...
+    def consider_vcm_update(self, payload: dict[str, Any]) -> None: ...
+    def consider_monorepo_commit(self, payload: dict[str, Any]) -> None: ...
+    def consider_domain_state(self, payload: dict[str, Any]) -> None: ...
     def render(self) -> str: ...
 ```
 
-The action policy calls `consider_event` after each round of event-handler broadcast and `consider_action` after each dispatched action, passing the raw data. The stream consults its filters to decide whether to append an entry; old entries are dropped once `max_entries` is exceeded. At prompt-build time, the policy asks each stream to `render` itself and drops the resulting markdown section directly into the planning prompt.
+A stream holds one filter *per entry kind* (`event`, `action`, `tool_output`, `vcm_update`, `monorepo_commit`, `domain_state`); a kind with no filter is silently ignored, so a stream only records the kinds it opts into. The `event` and `action` kinds are fed directly by the policy (after each event-handler round and each dispatched action); the other four kinds are fed by **stream sources** (see [Stream Sources](#stream-sources) below) via `policy.record_stream_entry(kind, payload)`. The stream consults the matching per-kind filter to decide whether to append; old entries are dropped once `max_entries` is exceeded. At prompt-build time, the policy asks each stream to `render` itself and drops the resulting markdown section directly into the planning prompt.
 
 ### Filters
 
@@ -100,6 +104,64 @@ flowchart LR
     S2 -->|render| PC
     PC --> PR[Planning Prompt]
 ```
+
+## Stream Sources
+
+The `event` and `action` kinds are fed by the policy itself, but the richer kinds (`tool_output`, `vcm_update`, `monorepo_commit`, `domain_state`) come from **stream sources**. A source is any object implementing `StreamEventSource` (in `polymathera.colony.agents.patterns.planning.sources`):
+
+```python
+class StreamEventSource(ABC):
+    async def attach(self, policy: "BaseActionPolicy") -> None: ...
+    async def detach(self, policy: "BaseActionPolicy") -> None: ...
+```
+
+`attach(policy)` arranges for the source to call `policy.record_stream_entry(kind, payload)` whenever it has something to feed; `record_stream_entry` fans the payload to every mounted stream's `consider_<kind>` method. The policy keeps a list of attached sources and invokes each source's `attach` from `attach_pending_sources()` (called during `initialize`, and re-callable when an agent registers more sources afterward). The agent never has to know which source feeds which kind — it attaches sources and mounts streams independently.
+
+Sources fall into two families:
+
+### In-process sources (direct feed)
+
+These observe facts that are already local to the agent's own process and feed them synchronously:
+
+| Source | Feeds kind | What it observes |
+|--------|-----------|------------------|
+| `AccumulatedContextSource` | `event` | The policy's existing event-handler accumulated context (sentinel — no new hook). |
+| `ActionCallSource` | `action` | The policy's existing dispatched-action feed (sentinel — no new hook). |
+| `ToolResultSource` | `tool_output` | Installs a post-dispatch hook; when an action returns a typed `ToolResult`-shaped value, builds a `tool_output` payload. |
+
+`attach_colony_standard_sources(policy)` wires these three in one call; `colony_basic_stream()` returns a catch-all stream that accepts every kind, so the pair is a one-line starting point for any Colony agent.
+
+### Cross-process sources (colony blackboard)
+
+Some experience originates in *other* processes — a VCM replica reconciling a page-graph mutation, a peer agent committing to the design monorepo on a shared branch. A process-local listener cannot see those events (it lives in a different Ray actor). So cross-process sources ride the same blackboard-protocol idiom every other cross-process event in the colony uses:
+
+1. **Producers `await blackboard.write(key, value)`** to a **colony-scoped** `BlackboardProtocol`. `VirtualContextManager._publish_page_event` writes `VCMPageEventProtocol`; `BranchScopedCapabilityBase.fire_post_commit` writes `MonorepoCommitProtocol`. The blackboard's Redis-backed pub/sub fans the write to every subscribed agent regardless of process or replica.
+2. **Consumers are `ColonyScopedEventSource` subclasses** — both an `AgentCapability` (so the agent's event-dispatch loop discovers their `@event_handler` method) and a `StreamEventSource` (so they slot into `attach_source`). Their `attach` binds the agent, registers the capability with `add_capability(..., events_only=True)`, and overrides `stream_events_to_queue` to subscribe the protocol's `event_pattern()` on the **colony** scope (not the agent's own scope). The `@event_handler` method translates each blackboard write into a `record_stream_entry(kind, payload)` call.
+
+| Source | Feeds kind | Subscribes to |
+|--------|-----------|---------------|
+| `VCMPageEventSource` | `vcm_update` | `VCMPageEventProtocol` (colony scope) |
+| `MonorepoCommitEventSource` | `monorepo_commit` | `MonorepoCommitProtocol` (colony scope) |
+
+```mermaid
+flowchart LR
+    subgraph proc1[VCM replica / committing agent process]
+        PRD[Producer] -->|blackboard.write| BB[(Colony-scoped<br/>BlackboardProtocol)]
+    end
+    subgraph proc2[Subscribing agent process]
+        BB -->|@event_handler| SRC[ColonyScopedEventSource]
+        SRC -->|record_stream_entry| POL[ActionPolicy]
+        POL -->|consider_*| STR[Stream]
+    end
+```
+
+`ColonyScopedEventSource` is a **public extension point** (exported from the `sources` module). Downstream packages subclass it to surface their own cross-process events — e.g. CPS's `BudgetStateEventSource` feeds `domain_state` from budget-tree transitions published under CPS's `BudgetStateProtocol`. To add a new cross-process kind:
+
+1. Define a colony-scoped `BlackboardProtocol` subclass with an `event_key(...)` / `event_pattern()` pair.
+2. Make the producer `await blackboard.write(...)` after its state change.
+3. Subclass `ColonyScopedEventSource`, set `_PATTERN = MyProtocol.event_pattern()`, and decorate one `@event_handler(pattern=MyProtocol.event_pattern())` method that calls `self._policy.record_stream_entry("<kind>", payload)`.
+
+The colony blackboard handle a source subscribes on is resolved through the inherited `AgentCapability._get_colony_blackboard()`, a small helper on the capability base that calls `get_blackboard(scope_id=ScopeUtils.get_colony_level_scope())` once and buffers the result on the instance. (`get_blackboard` builds a fresh `EnhancedBlackboard` per call — it is not pooled downstream — so the per-instance buffer is what avoids rebuilding on every publish/subscribe.) The same helper backs `BranchScopedCapabilityBase.fire_post_commit` and CPS's budget-state publishing, so all colony-scoped pub/sub shares one resolution path.
 
 ## Example 1 -- Session Agent (Conversation Stream)
 
@@ -246,7 +308,9 @@ On the remote node, `Agent._initialize_action_policy` resolves each blueprint in
 
 ## Further Reading
 
-- Module: `polymathera.colony.agents.patterns.planning.streams`
+- Streams module: `polymathera.colony.agents.patterns.planning.streams`
+- Sources module: `polymathera.colony.agents.patterns.planning.sources` (`StreamEventSource`, `ColonyScopedEventSource`, `VCMPageEventSource`, `MonorepoCommitEventSource`)
+- Cross-process protocols: `polymathera.colony.agents.blackboard.protocol` (`VCMPageEventProtocol`, `MonorepoCommitProtocol`)
 - Used by: `polymathera.colony.agents.patterns.actions.policies.EventDrivenActionPolicy`, `polymathera.colony.agents.patterns.actions.code_generation.CodeGenerationActionPolicy`
 - Rendered by: `polymathera.colony.agents.patterns.planning.context.PlanningContextBuilder`
 - Prompt integration: `polymathera.colony.agents.patterns.actions.code_generation.format_planning_context_for_codegen`

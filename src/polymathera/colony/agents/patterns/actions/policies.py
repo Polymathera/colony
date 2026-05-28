@@ -118,12 +118,27 @@ class BaseActionPolicy(ActionPolicy):
         action_map: list[ActionGroup] | None = None,
         action_providers: list[Any] = [],
         io: ActionPolicyIO | None = None, # Declare I/O contract (override in subclasses)
+        consciousness_streams: list[ConsciousnessStream] | None = None,
     ):
         super().__init__(agent)
         self._action_map = action_map
         self._action_providers = action_providers
         self._action_dispatcher: ActionDispatcher | None = None
         self.io: ActionPolicyIO = io or ActionPolicyIO()
+        self._consciousness_streams: list[ConsciousnessStream] = list(
+            consciousness_streams or []
+        )
+        # Stream event sources (PR-Sub-2a). Sources are registered via
+        # ``attach_source`` (typically by the agent setup that also
+        # built the streams) and attached during ``initialize`` so
+        # ``self._action_dispatcher`` is already constructed for
+        # sources that need it (e.g. ToolResultSource).
+        self._stream_sources: list[Any] = []
+        self._attached_source_ids: set[int] = set()
+        # Tool-result sources subscribe separately so the policy can
+        # fan post-dispatch ``ActionResult.data`` into ``"tool_output"``
+        # entries without invoking the full source ABC each time.
+        self._tool_result_sources: list[Any] = []
 
     @override
     def use_agent_capabilities(self, capabilities: list[str]) -> None:
@@ -151,6 +166,13 @@ class BaseActionPolicy(ActionPolicy):
     async def initialize(self) -> None:
         """Initialize action policy."""
         await super().initialize()
+        # Attach any stream sources the agent / mission setup
+        # registered. Sources whose ``attach`` needs the action
+        # dispatcher get it via ``policy._action_dispatcher`` which is
+        # created lazily on first ``dispatch`` — for sources that
+        # absolutely require it earlier, the agent setup can call
+        # ``policy._create_action_dispatcher`` from its initialize.
+        await self.attach_pending_sources()
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
@@ -176,11 +198,102 @@ class BaseActionPolicy(ActionPolicy):
     def get_consciousness_streams(self) -> list[ConsciousnessStream]:
         """Return the policy's consciousness streams, in render order.
 
-        Returns empty by default. Overridden by policies that maintain
-        streams of recorded experience (events + actions) that should
-        surface in the planning prompt.
+        Streams are mounted via the ``consciousness_streams=`` kwarg
+        passed to ``__init__``. Concrete subclasses inherit this
+        unchanged; the planning context builder calls this to pull the
+        streams it renders into the LLM prompt.
         """
-        return []
+        return list(self._consciousness_streams)
+
+    def _feed_action_to_streams(self, call: dict[str, Any]) -> None:
+        """Fan one action-call entry out to every mounted stream's
+        ``consider_action``.
+
+        Concrete policies call this from wherever they finish
+        dispatching an action; each stream's ``action_filter`` decides
+        independently whether to record. Centralising the loop here
+        means a new policy doesn't have to know about streams to
+        participate — it just calls this hook.
+
+        For the planner-driven loop, each policy emits a ``call`` dict
+        with at least ``action_key`` / ``parameters`` / ``success`` /
+        ``output_preview`` so the stock filters and formatters work
+        uniformly.
+        """
+        for stream in self._consciousness_streams:
+            stream.consider_action(call)
+
+    # ------------------------------------------------------------------
+    # Stream event sources (PR-Sub-2a)
+    # ------------------------------------------------------------------
+
+    def attach_source(self, source: Any) -> None:
+        """Register a :class:`StreamEventSource` with this policy.
+        The source's ``attach(policy)`` runs during
+        :meth:`initialize`; callers may invoke ``attach_source`` either
+        before or after ``initialize`` and the source will be (or has
+        been) attached either way."""
+        self._stream_sources.append(source)
+
+    async def attach_pending_sources(self) -> None:
+        """Walk pending stream sources + invoke each's ``attach`` once.
+        Idempotent — sources already attached are skipped.
+
+        Called once from concrete policies' own ``initialize`` after
+        ``super().initialize()`` runs so ``self._action_dispatcher``
+        (if needed by a source) is created. Agents that register
+        additional sources AFTER ``super().initialize()`` (because
+        the source's construction needs ``self`` or
+        ``self.action_policy``) should call this method explicitly
+        to attach the new ones — re-calling is safe."""
+        for src in self._stream_sources:
+            if id(src) in self._attached_source_ids:
+                continue
+            try:
+                await src.attach(self)
+            except Exception:  # noqa: BLE001 — one bad source must not block others
+                logger.exception(
+                    "Stream source %s failed to attach to %s; skipping",
+                    type(src).__name__,
+                    getattr(self.agent, "agent_id", "<no-agent>"),
+                )
+                continue
+            self._attached_source_ids.add(id(src))
+
+    def register_tool_result_source(self, source: Any) -> None:
+        """Called by :class:`ToolResultSource.attach` so the policy
+        knows to consult it during post-dispatch fanout. Separate from
+        ``attach_source`` because tool-result sources have a specific
+        post-dispatch contract (``source.build_payload``) the policy
+        invokes after every ``dispatch`` returns."""
+        if source not in self._tool_result_sources:
+            self._tool_result_sources.append(source)
+
+    def record_stream_entry(self, kind: str, payload: dict[str, Any]) -> None:
+        """Fan a typed entry out to every mounted stream's matching
+        ``consider_*`` method.
+
+        Sources call this from their hooks; tests can call it
+        directly to seed entries. Unknown kinds are silently dropped
+        (logged at debug) — the stream filter is the source of truth
+        for what gets recorded.
+        """
+        method_name = f"consider_{kind}"
+        for stream in self._consciousness_streams:
+            method = getattr(stream, method_name, None)
+            if method is None:
+                logger.debug(
+                    "Stream %s has no method %s; dropping entry",
+                    stream.name, method_name,
+                )
+                continue
+            try:
+                method(payload)
+            except Exception:  # noqa: BLE001 — one bad stream must not poison others
+                logger.exception(
+                    "Stream %s.%s raised on payload %r; skipping",
+                    stream.name, method_name, payload,
+                )
 
     def get_status_snapshot(self) -> dict[str, Any]:
         """Read-only summary of policy state.
@@ -247,6 +360,27 @@ class BaseActionPolicy(ActionPolicy):
         """
         await self._create_action_dispatcher()
         result = await self._action_dispatcher.dispatch(action)
+        # Post-dispatch: fan typed ToolResult outputs to any mounted
+        # ToolResultSource → consciousness streams' ``consider_tool_output``.
+        # Source-side duck-typing keeps this Colony-pure (ToolResult
+        # lives in CPS). No-op when no tool-result sources are
+        # registered.
+        if self._tool_result_sources:
+            for src in self._tool_result_sources:
+                try:
+                    payload = src.build_payload(
+                        action_key=getattr(action, "action_type", ""),
+                        action_result=result,
+                        policy=self,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "ToolResultSource %s.build_payload raised; skipping",
+                        type(src).__name__,
+                    )
+                    continue
+                if payload is not None:
+                    self.record_stream_entry("tool_output", payload)
         # Do not clear shared data dependencies here because a data
         # dependency may span multiple actions in multiple policy
         # iterations and must only be handled by the appropriate
@@ -517,7 +651,10 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         consciousness_streams: list[ConsciousnessStream] | None = None,
         **kwargs
     ):
-        super().__init__(agent, action_map=action_map, action_providers=action_providers, io=io, **kwargs)
+        super().__init__(
+            agent, action_map=action_map, action_providers=action_providers,
+            io=io, consciousness_streams=consciousness_streams, **kwargs,
+        )
         self._event_queue: asyncio.Queue[BlackboardEvent] = asyncio.Queue()
         # High-priority lane: drained by ``_run_high_priority_loop`` on
         # a dedicated background task that runs concurrently with the
@@ -533,7 +670,10 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         self._subscribed_callbacks: list[Callable] = []
         self._subscribed_providers: set[int] = set()  # Track by identity to prevent duplicate subscriptions
         self._reactive_only = reactive_only
-        self._consciousness_streams: list[ConsciousnessStream] = list(consciousness_streams or [])
+        # NOTE: ``_consciousness_streams`` is stored on the base
+        # (BaseActionPolicy) so every policy gets the same plumbing
+        # uniformly. We accept the kwarg here and forward it to super
+        # so existing call sites keep working unchanged.
 
     @override
     async def initialize(self) -> None:
@@ -730,11 +870,6 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             The next event (never None — blocks until one arrives).
         """
         return await self._event_queue.get()
-
-    @override
-    def get_consciousness_streams(self) -> list[ConsciousnessStream]:
-        """Return the streams this policy feeds (events + actions)."""
-        return list(self._consciousness_streams)
 
     def has_pending_work(self) -> bool:
         """Whether this policy has unfinished work that the next
@@ -1033,6 +1168,7 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
         action_providers: list[Any] = [],
         io: ActionPolicyIO | None = None,
         context_builder: PlanningContextBuilder | None = None,
+        consciousness_streams: list[ConsciousnessStream] | None = None,
     ):
         """Initialize planning agent.
 
@@ -1042,12 +1178,16 @@ class CacheAwareActionPolicy(EventDrivenActionPolicy):
             action_map: List of action groups
             action_providers: Additional action providers
             io: Policy I/O contract (inputs/outputs)
+            consciousness_streams: Filtered views of the agent's
+                experience that surface in the LLM planning prompt;
+                forwarded to ``BaseActionPolicy``.
         """
         super().__init__(
             agent=agent,
             action_map=action_map,
             action_providers=action_providers,
             io=io,
+            consciousness_streams=consciousness_streams,
         )
         self.planner = planner  # TODO: Unify planner with planning strategy.
         self.plan_blackboard: PlanBlackboard | None = None
@@ -1459,6 +1599,7 @@ async def create_cache_aware_action_policy(
     quality_threshold: float = 0.9,
     planning_horizon: int = 5,
     ideal_cache_size: int = 10,
+    consciousness_streams: list[ConsciousnessStream] | None = None,
 ) -> CacheAwareActionPolicy:
     """Create sophisticated action policy with cache-awareness and learning.
 
@@ -1480,7 +1621,8 @@ async def create_cache_aware_action_policy(
         planner=planner,
         action_map=action_map,
         action_providers=action_providers,
-        io=io
+        io=io,
+        consciousness_streams=consciousness_streams,
     )
     await action_policy.initialize()
 

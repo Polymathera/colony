@@ -713,6 +713,75 @@ class BranchScopedCapabilityBase(DesignMonorepoCapabilityBase):
             )
         return super()._client_sync()
 
+    # ------------------------------------------------------------------
+    # Consciousness-stream commit publishing
+    #
+    # Tier-2 capability actions (``checkpoint_*_to_repo``) call
+    # :meth:`fire_post_commit` after :meth:`DesignMonorepoClient.commit_with_identity`
+    # returns. ``fire_post_commit`` publishes a typed record to the
+    # colony-scoped blackboard under :class:`MonorepoCommitProtocol`.
+    # Any agent whose :class:`MonorepoCommitEventSource` capability is
+    # mounted will receive the event via the agent's action-policy
+    # event queue and surface it through
+    # ``record_stream_entry("monorepo_commit", …)`` — including peer
+    # agents in other processes / replicas working on the same branch
+    # but a different sub-path (master plan §5.2).
+    # ------------------------------------------------------------------
+
+    async def fire_post_commit(
+        self,
+        *,
+        sha: str,
+        message: str,
+        paths: list[Any] | None = None,
+    ) -> None:
+        """Publish a successful tier-2 commit to the colony blackboard
+        under :class:`MonorepoCommitProtocol`.
+
+        Failures in the publish path are swallowed + logged so a
+        misbehaving blackboard backend can't poison the agent's commit
+        path.
+        """
+        try:
+            from ..agents.blackboard import MonorepoCommitProtocol
+            payload: dict[str, Any] = {
+                "sha": sha,
+                "branch": self.current_branch,
+                "message": message,
+                "paths": [str(p) for p in (paths or [])],
+                "capability_fqn": (
+                    f"{type(self).__module__}.{type(self).__name__}"
+                ),
+            }
+            bb = await self._get_colony_blackboard()
+            key = MonorepoCommitProtocol.event_key(
+                branch=self.current_branch, sha=sha,
+            )
+            await bb.write(
+                key=key,
+                value=payload,
+                created_by=payload["capability_fqn"],
+                tags={"monorepo_commit", self.current_branch},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "BranchScopedCapabilityBase: failed to publish post-commit "
+                "event for sha=%s; agent commit path continues.",
+                sha,
+            )
+
+    async def commit_with_identity(self, commit_message: str, checkpoint_paths: list[Path] | None = None) -> str:
+        """Commit and then publish to the blackboard in one step."""
+        client_repo = self._client_sync()
+        commit_sha = client_repo.commit_with_identity(
+            self._identity(),
+            commit_message,
+            paths=checkpoint_paths,
+        )
+        await self.fire_post_commit(
+            sha=commit_sha, message=commit_message, paths=checkpoint_paths,
+        )
+        return commit_sha
 
 # ---------------------------------------------------------------------------
 # RepoStateProvider — read-only

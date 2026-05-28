@@ -51,16 +51,18 @@ async def create_default_action_policy(agent: Agent, **kwargs) -> ActionPolicy:
             quality_threshold=kwargs.get("quality_threshold", 0.9),
             planning_horizon=kwargs.get("planning_horizon", 5),
             ideal_cache_size=kwargs.get("ideal_cache_size", 10),
+            consciousness_streams=kwargs.get("consciousness_streams", None),
         )
     elif _DEFAULT_POLICY == "MINIMAL":
 
-        from .policies import create_minimal_action_policy
+        from .minimal import create_minimal_action_policy
 
         return await create_minimal_action_policy(
             agent=agent,
             max_iterations=kwargs.get("max_iterations", 50),
             temperature=kwargs.get("temperature", 0.3),
             max_tokens=kwargs.get("max_tokens", 512),
+            consciousness_streams=kwargs.get("consciousness_streams", None),
         )
     else:
         raise ValueError(f"Invalid default policy: {_DEFAULT_POLICY}")

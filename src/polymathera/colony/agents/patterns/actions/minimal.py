@@ -78,9 +78,14 @@ class MinimalActionPolicy(BaseActionPolicy):
         max_iterations: int = 50,
         temperature: float = 0.3,
         max_tokens: int = 512,
+        consciousness_streams: list | None = None,
         **kwargs,
     ):
-        super().__init__(agent=agent, **kwargs)
+        super().__init__(
+            agent=agent,
+            consciousness_streams=consciousness_streams,
+            **kwargs,
+        )
         self._max_iterations = max_iterations
         self._temperature = temperature
         self._max_tokens = max_tokens
@@ -302,6 +307,7 @@ async def create_minimal_action_policy(
     max_iterations: int = 50,
     temperature: float = 0.3,
     max_tokens: int = 512,
+    consciousness_streams: list | None = None,
 ) -> MinimalActionPolicy:
     """Create a minimal action policy.
 
@@ -310,6 +316,9 @@ async def create_minimal_action_policy(
         max_iterations: Maximum planning iterations.
         temperature: LLM sampling temperature.
         max_tokens: Maximum tokens for LLM response.
+        consciousness_streams: Filtered views of the agent's
+            experience (events + actions) that surface in the LLM
+            planning prompt; forwarded to ``BaseActionPolicy``.
 
     Returns:
         Initialized MinimalActionPolicy.
@@ -319,6 +328,7 @@ async def create_minimal_action_policy(
         max_iterations=max_iterations,
         temperature=temperature,
         max_tokens=max_tokens,
+        consciousness_streams=consciousness_streams,
     )
     await policy.initialize()
     return policy

@@ -156,12 +156,29 @@ class ConsciousnessStream:
         bp.validate_serializable()
         return bp
 
+    # Canonical entry kinds the stream knows how to record. New
+    # kinds land alongside their ``consider_*`` method below; the
+    # set is also used by ``record_kind`` to validate.
+    KINDS: tuple[str, ...] = (
+        "event",
+        "action",
+        "tool_output",
+        "vcm_update",
+        "monorepo_commit",
+        "domain_state",
+    )
+
     def __init__(
         self,
         name: str,
         formatter: ConsciousnessStreamFormatter | Blueprint,
         event_filter: Callable[[dict[str, Any]], bool] | None = None,
         action_filter: Callable[[dict[str, Any]], bool] | None = None,
+        tool_output_filter: Callable[[dict[str, Any]], bool] | None = None,
+        vcm_update_filter: Callable[[dict[str, Any]], bool] | None = None,
+        monorepo_commit_filter: Callable[[dict[str, Any]], bool] | None = None,
+        domain_state_filter: Callable[[dict[str, Any]], bool] | None = None,
+        filters: dict[str, Callable[[dict[str, Any]], bool]] | None = None,
         max_entries: int = 20,
     ):
         """
@@ -174,14 +191,60 @@ class ConsciousnessStream:
                 events are recorded. ``None`` means accept no events.
             action_filter: Predicate on action-dispatcher call trace entries.
                 Accepted actions are recorded. ``None`` means accept no actions.
+            tool_output_filter: Predicate on a ``ToolResult``-bearing dict
+                produced when an action's return value is a ``ToolResult``.
+                ``None`` means accept no tool outputs.
+            vcm_update_filter: Predicate on a VCM page-graph mutation
+                payload (page added / evicted / refreshed). ``None`` =
+                accept none.
+            monorepo_commit_filter: Predicate on a design-monorepo commit
+                payload (sha + branch + commit msg + path summary).
+                ``None`` = accept none.
+            domain_state_filter: Predicate on a domain state-machine
+                transition payload (``state_machine_name`` / ``transition`` /
+                ``payload``). ``None`` = accept none.
+            filters: Unified per-kind filter dict. Overrides any
+                ``<kind>_filter`` kwarg with the same key. Use for
+                programmatic configuration (e.g. when subclassing a
+                shared stream helper that wants to selectively override
+                one kind without re-specifying the others).
             max_entries: Rolling window size before old entries are dropped.
         """
         self.name = name
         self.formatter = formatter.local_instance() if isinstance(formatter, Blueprint) else formatter
-        self._event_filter = event_filter
-        self._action_filter = action_filter
+        # Per-kind filter map — the source of truth. Per-kind kwargs
+        # above are sugar that lifts into this dict; ``filters=`` takes
+        # precedence per-key when both are supplied.
+        kwarg_filters: dict[str, Callable[[dict[str, Any]], bool]] = {}
+        for kind, fn in (
+            ("event", event_filter),
+            ("action", action_filter),
+            ("tool_output", tool_output_filter),
+            ("vcm_update", vcm_update_filter),
+            ("monorepo_commit", monorepo_commit_filter),
+            ("domain_state", domain_state_filter),
+        ):
+            if fn is not None:
+                kwarg_filters[kind] = fn
+        self._filters: dict[str, Callable[[dict[str, Any]], bool]] = {
+            **kwarg_filters, **(filters or {}),
+        }
         self._max_entries = max_entries
         self._entries: list[dict[str, Any]] = []
+
+    # ------------------------------------------------------------------
+    # Backward-compat properties: existing code reads ``_event_filter``
+    # / ``_action_filter`` directly (tests + a few capabilities). Keep
+    # them readable so the migration to per-kind filters is non-breaking.
+    # ------------------------------------------------------------------
+
+    @property
+    def _event_filter(self) -> Callable[[dict[str, Any]], bool] | None:
+        return self._filters.get("event")
+
+    @property
+    def _action_filter(self) -> Callable[[dict[str, Any]], bool] | None:
+        return self._filters.get("action")
 
     def consider_event(self, contexts: dict[str, Any]) -> None:
         """Invoked by the action policy after event handlers run.
@@ -189,9 +252,12 @@ class ConsciousnessStream:
         If the event filter accepts the accumulated contexts, an entry
         is recorded.
         """
-        if not contexts or self._event_filter is None:
+        if not contexts:
             return
-        if self._event_filter(contexts):
+        f = self._filters.get("event")
+        if f is None:
+            return
+        if f(contexts):
             self._append({
                 "kind": "event",
                 "timestamp": time.time(),
@@ -203,13 +269,93 @@ class ConsciousnessStream:
 
         If the action filter accepts the call, an entry is recorded.
         """
-        if self._action_filter is None:
+        f = self._filters.get("action")
+        if f is None:
             return
-        if self._action_filter(call):
+        if f(call):
             self._append({
                 "kind": "action",
                 "timestamp": time.time(),
                 "call": call,
+            })
+
+    def consider_tool_output(self, payload: dict[str, Any]) -> None:
+        """Invoked by the action dispatcher's post-action path when an
+        action's return value is a typed :class:`ToolResult`.
+
+        Payload shape (built by
+        :class:`ToolResultSource`): ``{"action_key": str,
+        "tool_result": dict_form_of_ToolResult, "success": bool,
+        "agent_id": str}``.
+        """
+        f = self._filters.get("tool_output")
+        if f is None:
+            return
+        if f(payload):
+            self._append({
+                "kind": "tool_output",
+                "timestamp": time.time(),
+                "payload": payload,
+            })
+
+    def consider_vcm_update(self, payload: dict[str, Any]) -> None:
+        """Invoked by :class:`VCMPageEventSource` on a VCM page-graph
+        mutation visible to the agent's bound scope.
+
+        Payload shape: ``{"kind": "added"|"evicted", "page_source": str,
+        "scope_id": str, "page_id": str}``. The source subscribes
+        ``VCMPageEventProtocol`` on the colony scope, so mutations from
+        any VCM replica reach the agent regardless of process.
+        """
+        f = self._filters.get("vcm_update")
+        if f is None:
+            return
+        if f(payload):
+            self._append({
+                "kind": "vcm_update",
+                "timestamp": time.time(),
+                "payload": payload,
+            })
+
+    def consider_monorepo_commit(self, payload: dict[str, Any]) -> None:
+        """Invoked by :class:`MonorepoCommitEventSource` after a tier-2
+        ``BranchScopedCapabilityBase`` commit succeeds on a shared
+        ``(scope, branch)``.
+
+        Payload shape: ``{"sha": str, "branch": str, "message": str,
+        "paths": list[str], "capability_fqn": str}``. The source
+        subscribes ``MonorepoCommitProtocol`` on the colony scope, so a
+        peer agent's commit reaches this agent even from another
+        process / replica.
+        """
+        f = self._filters.get("monorepo_commit")
+        if f is None:
+            return
+        if f(payload):
+            self._append({
+                "kind": "monorepo_commit",
+                "timestamp": time.time(),
+                "payload": payload,
+            })
+
+    def consider_domain_state(self, payload: dict[str, Any]) -> None:
+        """Invoked by capability-specific adapters (hypothesis-game
+        phase, experiment lifecycle, mission progress, budget violations)
+        on a state-machine transition.
+
+        Payload shape: ``{"state_machine": str, "transition": str,
+        "from_state": str, "to_state": str, "data": dict}``. Adapters
+        per state machine land alongside their respective
+        per-capability rollout PRs.
+        """
+        f = self._filters.get("domain_state")
+        if f is None:
+            return
+        if f(payload):
+            self._append({
+                "kind": "domain_state",
+                "timestamp": time.time(),
+                "payload": payload,
             })
 
     def render(self) -> str:
@@ -316,3 +462,386 @@ class JSONStreamFormatter(ConsciousnessStreamFormatter):
                     output = output[:self._max_value_chars] + "..."
                 lines.append(f"- **action** [{action_key}]: {output}")
         return "\n".join(lines)
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    """Shared helper — truncate ``text`` to ``max_chars`` with an
+    ellipsis suffix when it overflows."""
+    if len(text) > max_chars:
+        return text[:max_chars] + "..."
+    return text
+
+
+class EventLogFormatter(ConsciousnessStreamFormatter):
+    """Chronological generic formatter — renders entries of any kind
+    as a single bullet list in insertion order.
+
+    Use as the default when a stream feeds multiple kinds and the
+    rendering doesn't need to differentiate them. Each line shows the
+    entry's ``kind`` + a short payload summary (uses
+    ``json.dumps(default=str)`` so non-JSON-clean values still render).
+
+    Parameters
+    ----------
+    section_title : str
+        Markdown header for the rendered section.
+    max_value_chars : int
+        Per-line value truncation budget.
+    max_entries_shown : int | None
+        Cap on entries rendered (most recent kept). ``None`` (the
+        default) renders all entries the stream's rolling window
+        retains.
+    """
+
+    def __init__(
+        self,
+        section_title: str,
+        max_value_chars: int = 200,
+        max_entries_shown: int | None = None,
+    ):
+        self._section_title = section_title
+        self._max_value_chars = max_value_chars
+        self._max_entries_shown = max_entries_shown
+
+    def format(self, entries: list[dict[str, Any]]) -> str:
+        if not entries:
+            return ""
+        rendered = entries
+        if (
+            self._max_entries_shown is not None
+            and len(rendered) > self._max_entries_shown
+        ):
+            rendered = rendered[-self._max_entries_shown:]
+        lines: list[str] = [self._section_title, ""]
+        for entry in rendered:
+            kind = entry.get("kind", "?")
+            # Pick the "interesting" payload field per kind. Falls back
+            # to ``json.dumps`` of the whole entry for unknown kinds.
+            if kind == "event":
+                body = entry.get("contexts", {})
+            elif kind == "action":
+                body = entry.get("call", {})
+            else:
+                body = entry.get("payload", entry)
+            value_str = json.dumps(body, default=str, ensure_ascii=False)
+            lines.append(f"- **{kind}**: {_truncate(value_str, self._max_value_chars)}")
+        return "\n".join(lines)
+
+
+class ToolResultFormatter(ConsciousnessStreamFormatter):
+    """Formats ``tool_output`` entries by extracting the
+    :class:`ToolResult`-shape fields the agent's planner cares about
+    (payload + units + provenance.tool_name).
+
+    Non-``tool_output`` entries are silently skipped — pair this
+    formatter with a stream that filters to ``tool_output`` only, or
+    let the skip be a no-op for mixed streams.
+    """
+
+    def __init__(
+        self,
+        section_title: str = "## Recent tool outputs",
+        max_payload_chars: int = 300,
+    ):
+        self._section_title = section_title
+        self._max_payload_chars = max_payload_chars
+
+    def format(self, entries: list[dict[str, Any]]) -> str:
+        tool_entries = [e for e in entries if e.get("kind") == "tool_output"]
+        if not tool_entries:
+            return ""
+        lines: list[str] = [self._section_title, ""]
+        for entry in tool_entries:
+            payload = entry.get("payload", {})
+            action_key = payload.get("action_key", "?")
+            tool_result = payload.get("tool_result", {}) or {}
+            provenance = tool_result.get("provenance", {}) or {}
+            tool_name = (
+                provenance.get("tool_name")
+                or provenance.get("capability_fqn")
+                or "?"
+            )
+            success_marker = "✓" if payload.get("success") else "✗"
+            tr_payload = tool_result.get("payload", {})
+            units = tool_result.get("units", {})
+            payload_str = json.dumps(tr_payload, default=str, ensure_ascii=False)
+            units_str = (
+                json.dumps(units, default=str, ensure_ascii=False)
+                if units else ""
+            )
+            line = (
+                f"- {success_marker} **{action_key}** (tool: `{tool_name}`): "
+                f"{_truncate(payload_str, self._max_payload_chars)}"
+            )
+            if units_str and units_str != "{}":
+                line += f" — units: {units_str}"
+            lines.append(line)
+        return "\n".join(lines)
+
+
+class VCMUpdateFormatter(ConsciousnessStreamFormatter):
+    """Formats ``vcm_update`` entries — VCM page-graph mutations
+    visible to the agent's bound scope.
+
+    Each line shows the mutation kind (``added`` / ``evicted`` /
+    ``refreshed``) + the page source + the page identifier. Non-VCM
+    entries skipped.
+    """
+
+    def __init__(
+        self,
+        section_title: str = "## Recent VCM page-graph updates",
+        max_entries_shown: int | None = None,
+    ):
+        self._section_title = section_title
+        self._max_entries_shown = max_entries_shown
+
+    def format(self, entries: list[dict[str, Any]]) -> str:
+        vcm_entries = [e for e in entries if e.get("kind") == "vcm_update"]
+        if not vcm_entries:
+            return ""
+        if (
+            self._max_entries_shown is not None
+            and len(vcm_entries) > self._max_entries_shown
+        ):
+            vcm_entries = vcm_entries[-self._max_entries_shown:]
+        lines: list[str] = [self._section_title, ""]
+        for entry in vcm_entries:
+            payload = entry.get("payload", {})
+            mutation_kind = payload.get("kind", "?")
+            page_source = payload.get("page_source", "?")
+            page_id = payload.get("page_id", "?")
+            scope_id = payload.get("scope_id", "")
+            scope_suffix = f" [scope={scope_id}]" if scope_id else ""
+            lines.append(
+                f"- **{mutation_kind}** page `{page_id}` "
+                f"(source: `{page_source}`){scope_suffix}"
+            )
+        return "\n".join(lines)
+
+
+class MonorepoCommitFormatter(ConsciousnessStreamFormatter):
+    """Formats ``monorepo_commit`` entries — tier-2 commits the
+    agent's ``BranchScopedCapabilityBase`` (or a peer's in the same
+    ``(scope, branch)``) just landed on the design monorepo.
+
+    Each line shows the short SHA, the branch, the commit-message
+    prefix (the ``L2 / G-1 / G-2 / F-3 ...`` convention), and a path
+    summary truncated to the configured budget. Non-commit entries
+    skipped.
+    """
+
+    def __init__(
+        self,
+        section_title: str = "## Recent design-monorepo commits",
+        max_message_chars: int = 120,
+        max_paths_shown: int = 5,
+    ):
+        self._section_title = section_title
+        self._max_message_chars = max_message_chars
+        self._max_paths_shown = max_paths_shown
+
+    def format(self, entries: list[dict[str, Any]]) -> str:
+        commit_entries = [
+            e for e in entries if e.get("kind") == "monorepo_commit"
+        ]
+        if not commit_entries:
+            return ""
+        lines: list[str] = [self._section_title, ""]
+        for entry in commit_entries:
+            payload = entry.get("payload", {})
+            sha = (payload.get("sha") or "")[:8] or "?"
+            branch = payload.get("branch", "?")
+            message = _truncate(
+                payload.get("message", ""), self._max_message_chars,
+            )
+            paths = payload.get("paths", []) or []
+            paths_str = ", ".join(paths[:self._max_paths_shown])
+            if len(paths) > self._max_paths_shown:
+                paths_str += f" (+{len(paths) - self._max_paths_shown} more)"
+            line = f"- `{sha}` on `{branch}`: {message}"
+            if paths_str:
+                line += f"\n    paths: {paths_str}"
+            lines.append(line)
+        return "\n".join(lines)
+
+
+class DomainStateFormatter(ConsciousnessStreamFormatter):
+    """Formats ``domain_state`` entries — state-machine transitions
+    from one specific machine (hypothesis-game phase, experiment
+    lifecycle, mission progress, budget violations).
+
+    When ``state_machine_name`` is supplied, only transitions from
+    that machine render; otherwise all domain-state transitions
+    render (with the machine name on each line). Non-domain-state
+    entries skipped.
+    """
+
+    def __init__(
+        self,
+        section_title: str,
+        state_machine_name: str | None = None,
+        max_entries_shown: int | None = None,
+    ):
+        self._section_title = section_title
+        self._state_machine_name = state_machine_name
+        self._max_entries_shown = max_entries_shown
+
+    def format(self, entries: list[dict[str, Any]]) -> str:
+        domain_entries = [
+            e for e in entries if e.get("kind") == "domain_state"
+        ]
+        if self._state_machine_name is not None:
+            domain_entries = [
+                e for e in domain_entries
+                if (e.get("payload") or {}).get("state_machine")
+                == self._state_machine_name
+            ]
+        if not domain_entries:
+            return ""
+        if (
+            self._max_entries_shown is not None
+            and len(domain_entries) > self._max_entries_shown
+        ):
+            domain_entries = domain_entries[-self._max_entries_shown:]
+        lines: list[str] = [self._section_title, ""]
+        for entry in domain_entries:
+            payload = entry.get("payload", {})
+            transition = payload.get("transition", "?")
+            from_state = payload.get("from_state", "")
+            to_state = payload.get("to_state", "")
+            machine_prefix = ""
+            if self._state_machine_name is None:
+                machine_prefix = (
+                    f"[{payload.get('state_machine', '?')}] "
+                )
+            arrow = (
+                f"`{from_state}` → `{to_state}`"
+                if from_state and to_state
+                else f"`{transition}`"
+            )
+            lines.append(f"- {machine_prefix}{arrow}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Filter combinators
+# ---------------------------------------------------------------------------
+
+
+class AnyOf:
+    """Filter combinator — accepts an entry iff ANY of the wrapped
+    filters accepts it.
+
+    Use to compose otherwise-orthogonal predicates: e.g. accept
+    actions tagged ``"design"`` OR actions whose action_key starts
+    with ``"plan_"``.
+    """
+
+    def __init__(self, *filters: Callable[[dict[str, Any]], bool]):
+        if not filters:
+            raise ValueError("AnyOf requires at least one filter")
+        self._filters = filters
+
+    def __call__(self, payload: dict[str, Any]) -> bool:
+        return any(f(payload) for f in self._filters)
+
+
+class AllOf:
+    """Filter combinator — accepts an entry iff EVERY wrapped filter
+    accepts it.
+
+    Equivalent to chaining through ``SuccessfulActionFilter``-style
+    wrappers but more readable for non-success-specific composition.
+    """
+
+    def __init__(self, *filters: Callable[[dict[str, Any]], bool]):
+        if not filters:
+            raise ValueError("AllOf requires at least one filter")
+        self._filters = filters
+
+    def __call__(self, payload: dict[str, Any]) -> bool:
+        return all(f(payload) for f in self._filters)
+
+
+class Not:
+    """Filter combinator — accepts an entry iff the wrapped filter
+    rejects it. Use to exclude a specific subset that an upstream
+    filter would otherwise accept."""
+
+    def __init__(self, inner: Callable[[dict[str, Any]], bool]):
+        self._inner = inner
+
+    def __call__(self, payload: dict[str, Any]) -> bool:
+        return not self._inner(payload)
+
+
+# ---------------------------------------------------------------------------
+# Colony-side bind() helpers (Colony cannot import the per-domain helpers
+# in ``polymathera.cps.agents.streams`` without inverting the architectural
+# layering — so the bare-bones agent-experience helpers live here.)
+# ---------------------------------------------------------------------------
+
+
+def _accept_all_payload(_payload: dict[str, Any]) -> bool:
+    return True
+
+
+def colony_basic_stream(
+    *,
+    name: str = "agent_experience",
+    section_title: str = "## Recent agent experience",
+    max_entries: int = 30,
+) -> "Blueprint":
+    """Generic catch-all stream for any Colony agent that wants to
+    surface its recent events + action calls + tool outputs +
+    monorepo / VCM updates to the LLM planner.
+
+    Pairs with the three universally-available sources
+    (:class:`AccumulatedContextSource`, :class:`ActionCallSource`,
+    :class:`ToolResultSource`) — set them up via
+    ``policy.attach_source(...)`` from the agent's ``initialize``.
+
+    Use as a starting point; agents that need role-specific
+    rendering should compose targeted streams (e.g. CPS's
+    :func:`polymathera.cps.agents.streams.design_reasoning_stream`).
+    """
+    return ConsciousnessStream.bind(
+        name=name,
+        formatter=EventLogFormatter.bind(
+            section_title=section_title,
+            max_entries_shown=max_entries,
+        ),
+        filters={
+            "event": _accept_all_payload,
+            "action": _accept_all_payload,
+            "tool_output": _accept_all_payload,
+            "vcm_update": _accept_all_payload,
+            "monorepo_commit": _accept_all_payload,
+            "domain_state": _accept_all_payload,
+        },
+        max_entries=max_entries,
+    )
+
+
+async def attach_colony_standard_sources(policy: Any) -> None:
+    """Attach the three Colony-universal sources (Accumulated event
+    context, action calls, tool outputs) to an agent's action policy
+    + call ``attach_pending_sources``.
+
+    Use from a sample / Colony-internal agent's ``initialize`` AFTER
+    ``super().initialize()``. CPS agents use the richer
+    :func:`polymathera.cps.agents.streams.attach_cps_standard_sources`
+    helper which also wires the MonorepoCommit + (optionally) VCMPage
+    sources.
+    """
+    # Late imports to avoid a planning ↔ patterns circular dependency.
+    from .sources import (  # noqa: PLC0415
+        AccumulatedContextSource,
+        ActionCallSource,
+        ToolResultSource,
+    )
+    policy.attach_source(AccumulatedContextSource())
+    policy.attach_source(ActionCallSource())
+    policy.attach_source(ToolResultSource())
+    await policy.attach_pending_sources()

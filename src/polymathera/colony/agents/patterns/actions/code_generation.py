@@ -1735,12 +1735,11 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 run_call_trace=list(self._run_call_trace),
             )
 
-        # Feed this iteration's action calls to every consciousness stream.
-        # Each stream decides independently (via its action_filter) what to
-        # record. Streams bound to this policy surface in the planning prompt.
+        # Feed this iteration's action calls to every consciousness
+        # stream via the base policy's central hook. Each stream's
+        # ``action_filter`` decides independently whether to record.
         for call in self._run_call_trace:
-            for stream in self._consciousness_streams:
-                stream.consider_action(call)
+            self._feed_action_to_streams(call)
 
         # Check if code execution failed
         if (result.result and not result.result.success

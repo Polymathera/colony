@@ -136,6 +136,9 @@ from .protocol import (
     ComplianceAnalysisProtocol,
     SlicingAnalysisProtocol,
     HypothesisTrackingProtocol,
+    # Consciousness-stream event protocols
+    VCMPageEventProtocol,
+    MonorepoCommitProtocol,
     # Key validation
     validate_key,
     validate_pattern,
@@ -234,6 +237,9 @@ __all__ = [
     "ComplianceAnalysisProtocol",
     "SlicingAnalysisProtocol",
     "HypothesisTrackingProtocol",
+    # Consciousness-stream event protocols
+    "VCMPageEventProtocol",
+    "MonorepoCommitProtocol",
     "validate_key",
     "validate_pattern",
     "KeyValidationError",

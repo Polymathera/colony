@@ -166,6 +166,15 @@ class VirtualContextManager:
         from .convergence import ConvergenceRuntime
         self.convergence_runtime: ConvergenceRuntime | None = None
 
+        # Per-replica colony-scoped blackboard handle, lazily created
+        # the first time _on_page_loaded / _on_page_evicted fires.
+        # Cross-process page-event fan-out flows via this blackboard:
+        # the reconciler hooks write a typed record under
+        # VCMPageEventProtocol; any agent's VCMPageEventSource
+        # capability consumes them via @event_handler.
+        self._colony_blackboard: Any = None
+        self._colony_blackboard_lock: asyncio.Lock = asyncio.Lock()
+
     @staticmethod
     def _local_scope_key(scope_id: str) -> str:
         """Key for the manager's own _local_mapped_scopes dict."""
@@ -2147,6 +2156,11 @@ class VirtualContextManager:
         except Exception as e:
             logger.error(f"Error handling PageLoadedEvent: {e}", exc_info=True)
 
+        # Fan out to consciousness-stream consumers via the
+        # colony-scoped blackboard (VCMPageEventProtocol). Failures in
+        # the publish path must not poison the VCM reconciler.
+        await self._publish_page_event("added", event)
+
     async def _on_page_evicted(self, event: PageEvictedEvent):
         """Handle PageEvictedEvent - reconcile Layer 2."""
         logger.info(
@@ -2167,6 +2181,78 @@ class VirtualContextManager:
 
         except Exception as e:
             logger.error(f"Error handling PageEvictedEvent: {e}", exc_info=True)
+
+        await self._publish_page_event("evicted", event)
+
+    # === Consciousness-stream page-event publishing ===
+
+    async def _get_colony_blackboard(self):
+        """Lazily acquire a colony-scoped blackboard handle on this
+        replica. Done lazily because at @serving.initialize_deployment
+        time the execution context is KERNEL with no colony_id, so the
+        colony scope_id cannot be resolved yet. The reconciler hooks
+        run inside a restored user execution context, which is the
+        first point at which the colony scope is well-defined.
+        """
+        if self._colony_blackboard is not None:
+            return self._colony_blackboard
+        async with self._colony_blackboard_lock:
+            if self._colony_blackboard is not None:
+                return self._colony_blackboard
+            from ..agents.blackboard import EnhancedBlackboard
+            from ..agents.scopes import ScopeUtils
+            bb = EnhancedBlackboard(
+                app_name=self.app_name,
+                scope_id=ScopeUtils.get_colony_level_scope(),
+            )
+            await bb.initialize()
+            self._colony_blackboard = bb
+        return self._colony_blackboard
+
+    async def _publish_page_event(
+        self, mutation_kind: str, event: Any,
+    ) -> None:
+        """Publish a reconciled page-graph mutation to the colony
+        blackboard under :class:`VCMPageEventProtocol`. Any agent
+        whose :class:`VCMPageEventSource` capability is mounted will
+        receive the event via the agent's action-policy event queue
+        and surface it through ``record_stream_entry("vcm_update", …)``.
+
+        Failures in this publish path are swallowed + logged so a
+        misbehaving blackboard backend can't poison VCM reconciliation.
+        """
+        try:
+            from ..agents.blackboard import VCMPageEventProtocol
+            bb = await self._get_colony_blackboard()
+            page_id = getattr(event, "page_id", "?")
+            millis = int(time.time() * 1000)
+            payload = {
+                "kind": mutation_kind,
+                "page_id": page_id,
+                "deployment_name": getattr(event, "deployment_name", None),
+                "client_id": getattr(event, "client_id", None),
+                "size": getattr(event, "size", None),
+                "timestamp": getattr(event, "timestamp", time.time()),
+                "event_type": getattr(event, "event_type", None),
+            }
+            key = VCMPageEventProtocol.event_key(
+                mutation_kind=mutation_kind,
+                page_id=page_id,
+                millis=millis,
+            )
+            await bb.write(
+                key=key,
+                value=payload,
+                created_by=f"vcm:{self.app_name}",
+                tags={"vcm", "page_event", mutation_kind},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "VCM: failed to publish %s page event for page %s; "
+                "reconciliation continues.",
+                mutation_kind,
+                getattr(event, "page_id", "?"),
+            )
 
     async def _on_page_load_failed(self, event: PageLoadFailedEvent):
         """Handle PageLoadFailedEvent - update fault tracking."""
@@ -2664,6 +2750,15 @@ class VirtualContextManager:
             except Exception:  # noqa: BLE001
                 logger.exception("convergence_runtime cleanup failed")
             self.convergence_runtime = None
+
+        # Release per-replica colony blackboard used for page-event
+        # publishing. Shared state stays in storage.
+        if self._colony_blackboard is not None:
+            try:
+                await self._colony_blackboard.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("VCM colony blackboard stop failed")
+            self._colony_blackboard = None
 
         logger.info("VirtualContextManager cleanup complete")
 

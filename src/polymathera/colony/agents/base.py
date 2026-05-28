@@ -276,6 +276,10 @@ class AgentCapability(ABC):
         self._agent = agent
         self._input_patterns = input_patterns
         self._blackboard: EnhancedBlackboard | None = blackboard
+        # Buffered colony-scoped blackboard for cross-process pub/sub
+        # (see _get_colony_blackboard). Distinct from _blackboard,
+        # which holds this capability's OWN scope.
+        self._colony_blackboard: EnhancedBlackboard | None = None
         self._pending_request_id: str | None = None
         self._capability_key: str | None = capability_key
         self._app_name: str | None = app_name
@@ -381,6 +385,7 @@ class AgentCapability(ABC):
 
     async def get_blackboard(
         self,
+        scope_id: str | None = None,
         backend_type: str | None = None,
         enable_events: bool = True,
     ) -> EnhancedBlackboard:
@@ -390,19 +395,21 @@ class AgentCapability(ABC):
         In detached mode: creates/uses standalone blackboard
 
         Args:
+            scope_id: Optional override for blackboard scope ID. Defaults to self.scope_id.
             backend_type: Backend type override. None reads from cluster config.
             enable_events: Enable event system for reactive updates.
 
         Returns:
             Blackboard scoped to this capability
         """
-        if self._blackboard is not None:
+        if scope_id is None and self._blackboard is not None:
             return self._blackboard
 
+        blackboard = None
         if self._agent is not None:
             # Attached mode: use agent's blackboard
-            self._blackboard = await self._agent.get_blackboard(
-                scope_id=self.scope_id,
+            blackboard = await self._agent.get_blackboard(
+                scope_id=scope_id or self.scope_id,
                 backend_type=backend_type,
                 enable_events=enable_events,
             )
@@ -410,15 +417,36 @@ class AgentCapability(ABC):
             # Detached mode: create standalone blackboard
             app_name = self._app_name or serving.get_my_app_name()
 
-            self._blackboard = EnhancedBlackboard(
+            blackboard = EnhancedBlackboard(
                 app_name=app_name,
-                scope_id=self.scope_id,
+                scope_id=scope_id or self.scope_id,
                 backend_type=backend_type,
                 enable_events=enable_events,
             )
-            await self._blackboard.initialize()
+            await blackboard.initialize()
 
-        return self._blackboard
+        if scope_id is None:
+            self._blackboard = blackboard
+
+        return blackboard
+
+    async def _get_colony_blackboard(self) -> EnhancedBlackboard:
+        """Colony-scoped blackboard handle for cross-process pub/sub —
+        page events, design-monorepo commits, budget-state transitions,
+        and any other colony-scoped :class:`BlackboardProtocol`.
+
+        ``get_blackboard(scope_id=…)`` builds a fresh blackboard each
+        call (it is not pooled downstream), so capabilities that
+        publish or subscribe on the colony scope buffer a single
+        handle here instead of rebuilding on every call. Distinct from
+        :attr:`_blackboard`, which holds the capability's own scope.
+        """
+        if self._colony_blackboard is None:
+            from .scopes import ScopeUtils
+            self._colony_blackboard = await self.get_blackboard(
+                scope_id=ScopeUtils.get_colony_level_scope(),
+            )
+        return self._colony_blackboard
 
     @classmethod
     def get_capability_name(cls) -> str:

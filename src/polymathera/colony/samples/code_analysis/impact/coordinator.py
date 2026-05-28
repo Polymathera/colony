@@ -1523,6 +1523,30 @@ class ChangeImpactAnalysisCoordinator(Agent):
 
         job_quota = self.metadata.parameters.get("job_quota", self.metadata.parameters.get("max_agents", 10) * 5)
 
+        # Consciousness stream — generic catch-all so the coordinator's
+        # LLM planner can see its worker-spawning + critique +
+        # synthesis action calls + their tool outputs over the rolling
+        # window. Per ``cps/CONSCIOUSNESS_STREAMS_EXPANSION_PLAN.md``
+        # §5.2 the Colony samples get a mission-progress-shaped
+        # stream; until a Colony-side mission_progress helper lands,
+        # ``colony_basic_stream`` covers the same need with the
+        # generic ``EventLogFormatter``.
+        from polymathera.colony.agents.patterns.planning.streams import (
+            colony_basic_stream,
+        )
+        from polymathera.colony.agents.patterns.planning.streams import (
+            attach_colony_standard_sources,
+        )
+        self.action_policy_blueprints["consciousness_streams"] = [
+            colony_basic_stream(
+                name="impact_mission_progress",
+                section_title=(
+                    "## Recent change-impact mission activity"
+                ),
+                max_entries=40,
+            ),
+        ]
+
         self.add_capability_blueprints([
             # Add WorkingSetCapability for cache-aware coordination
             WorkingSetCapability.bind(
@@ -1546,6 +1570,7 @@ class ChangeImpactAnalysisCoordinator(Agent):
         ])
 
         await super().initialize()
+        await attach_colony_standard_sources(self.action_policy)
 
         self.coordinator_capability = self.get_capability(
             ChangeImpactAnalysisCoordinatorCapability.get_capability_name()
