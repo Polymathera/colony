@@ -298,6 +298,46 @@ On the remote node, `Agent._initialize_action_policy` resolves each blueprint in
 !!! info "Why separate from `action_policy_config`"
     `action_policy_config` lives on `AgentMetadata` and is JSON-serialized into Redis for durability. Blueprints are cloudpickle-only. Keeping them in a separate `action_policy_blueprints` field (with `exclude=True` on the Pydantic model) avoids JSON-serialization errors while letting blueprints still travel through `AgentBlueprint` via cloudpickle.
 
+## Compaction & Spillover
+
+By default a stream keeps a rolling window of `max_entries` and silently drops the oldest — fine for short-lived agents, lossy for long-lived ones. Set `compaction_budget_tokens` on a stream's `bind()` to switch it into **compaction mode**, where the stream is treated as an *infinite, linear* history and the prompt renders a bounded *view* over it:
+
+```python
+ConsciousnessStream.bind(
+    name="design_reasoning",
+    formatter=EventLogFormatter.bind(section_title="## Design reasoning"),
+    filters={...},
+    compaction_budget_tokens=4000,   # enable; keep the rendered view under ~4k tokens
+    compaction_keep_recent=12,       # never auto-compact the 12 most-recent raw entries
+)
+```
+
+### The model
+
+- **Durable log = source of truth.** Every recorded entry is appended, in order, to a per-`(agent, stream)` durable log (`StreamLogStore`; default `BlackboardStreamLogStore` — a non-evicting, events-off blackboard scope). Entries carry a monotonic `seq` and are *never* dropped from the log. This is the "infinite linear" history; it survives suspend/resume and restart.
+- **The view is a projection.** The in-memory `_entries` becomes the *hot view*: recent raw entries plus `compaction_summary` stand-ins for older spans. `render()` stays synchronous over this view.
+- **Compaction is reversible.** Compacting a span `[start_seq, end_seq]` records a `CompactionDescriptor` (the LLM-produced summary + the span it covers) in the log index and replaces those raw entries in the view with one synthesized `compaction_summary`. The originals stay in the log, so `expand_span(start, end)` brings them back verbatim — lossy in the view, lossless in the log. (Implementation note: descriptors live in the index, *not* in the raw seq space, so a late-created summary covering an old span still sorts correctly — by its span's `start_seq` — even after an arbitrary expand.)
+- **Spillover = the same log.** "Spilling" an entry just means it left the view; it remains in the log, range-addressable via `read_span`. Reversible compaction *is* spillover with a summary stand-in.
+
+### Triggers
+
+- **Automatic safety-net.** After every iteration, `BaseActionPolicy.execute_iteration` flushes new entries to the log and runs `stream.maintain()`: while the rendered view exceeds `compaction_budget_tokens`, the `CompactionPolicy` (default `KeepRecentCompactionPolicy`) selects the oldest span beyond `compaction_keep_recent` and the `StreamCompactor` (default `LLMStreamCompactor`, via `agent.infer`) condenses it. Token counting reuses the cluster's `TokenizerProtocol` (`TiktokenTokenizer`). Bounded prompts without any agent action.
+- **Agent-driven.** `StreamMaintenanceCapability` exposes planner-facing actions: `compact_stream`, `expand_stream_span` (optionally `reattach_to_context=True` to page the original span back into the *real* LLM context window via the VCM), and `list_stream_history`. It is **auto-mounted** by `Agent._create_action_policy` whenever the agent has ≥1 compaction-enabled stream (idempotent, same pattern as the `REPLCapability` / `KnowledgeRetrievalCapability` auto-installs) — so enabling `compaction_budget_tokens` is the only operator action needed; the capability is *not* added to agents without compacted streams, keeping their action surface clean.
+
+### Swap points (every alternative is an ABC)
+
+| ABC | Default | Alternative |
+|-----|---------|-------------|
+| `StreamLogStore` | `BlackboardStreamLogStore` (non-evicting blackboard scope) | Redis-Streams / SQLite / WAL backing |
+| `CompactionPolicy` | `KeepRecentCompactionPolicy` (oldest beyond a recent window) | relevance-ranked / time-based |
+| `StreamCompactor` | `LLMStreamCompactor` (`agent.infer`) | `ExtractiveStreamCompactor` (no-LLM digest) — the "keep only the most relevant" arm vs. the "summarize" arm |
+| `SpillArchive` | `VcmSpillArchive` (mmap span + page-fault) / `NoopSpillArchive` | direct-S3, etc. |
+| token estimator | reused `TokenizerProtocol` / `TiktokenTokenizer` | `HuggingFaceTokenizer` (model-exact) |
+
+The policy builds the default collaborators in `_init_stream_logs()` (from the live agent) and injects them via `stream.bind_log(...)`; swapping an implementation is a change there, not in the stream. Compaction config (`compaction_budget_tokens`, `compaction_keep_recent`) travels in the serializable `bind()` blueprint; the runtime collaborators do not (they need the live agent).
+
+Streams without `compaction_budget_tokens` are entirely unaffected — the legacy rolling window is unchanged.
+
 ## Design Principles
 
 1. **No domain knowledge in the policy.** `EventDrivenActionPolicy` and `CodeGenerationActionPolicy` do not know what a chat message, a worker result, or a game move is. They only feed events and actions to whatever streams are attached.
@@ -311,6 +351,7 @@ On the remote node, `Agent._initialize_action_policy` resolves each blueprint in
 - Streams module: `polymathera.colony.agents.patterns.planning.streams`
 - Sources module: `polymathera.colony.agents.patterns.planning.sources` (`StreamEventSource`, `ColonyScopedEventSource`, `VCMPageEventSource`, `MonorepoCommitEventSource`)
 - Cross-process protocols: `polymathera.colony.agents.blackboard.protocol` (`VCMPageEventProtocol`, `MonorepoCommitProtocol`)
+- Compaction/spillover: `polymathera.colony.agents.patterns.planning.stream_log` (`StreamLogStore`, `StreamLogIndex`, `CompactionDescriptor`) + `…planning.compaction` (`CompactionPolicy`, `StreamCompactor`, `SpillArchive`, token estimator) + `…capabilities.stream_maintenance.StreamMaintenanceCapability`
 - Used by: `polymathera.colony.agents.patterns.actions.policies.EventDrivenActionPolicy`, `polymathera.colony.agents.patterns.actions.code_generation.CodeGenerationActionPolicy`
 - Rendered by: `polymathera.colony.agents.patterns.planning.context.PlanningContextBuilder`
 - Prompt integration: `polymathera.colony.agents.patterns.actions.code_generation.format_planning_context_for_codegen`

@@ -173,6 +173,84 @@ class BaseActionPolicy(ActionPolicy):
         # absolutely require it earlier, the agent setup can call
         # ``policy._create_action_dispatcher`` from its initialize.
         await self.attach_pending_sources()
+        # Wire durable logs for compaction-enabled streams + rehydrate
+        # their view from durable storage (suspend/resume + restart).
+        await self._init_stream_logs()
+
+    async def _init_stream_logs(self) -> None:
+        """Bind each compaction-enabled consciousness stream to a durable
+        log + the swappable compaction collaborators, then rehydrate its
+        view. No-op for legacy (rolling-window) streams and when the
+        agent has no manager (detached/test policies)."""
+        streams = [
+            s for s in self._consciousness_streams
+            if getattr(s, "compaction_enabled", False)
+        ]
+        if not streams:
+            return
+        agent = self.agent
+        if agent is None:
+            return  # detached policy — no agent to resolve a log against
+        from ...scopes import ScopeUtils
+        from ..planning.compaction import (
+            KeepRecentCompactionPolicy,
+            LLMStreamCompactor,
+            VcmSpillArchive,
+            default_token_estimator,
+        )
+        from ..planning.stream_log import BlackboardStreamLogStore
+
+        estimator = default_token_estimator()
+        compactor = LLMStreamCompactor(agent)
+        # VcmSpillArchive resolves the VCM handle lazily (public get_vcm)
+        # at reattach time — an on-demand agent action that runs long
+        # after the manager's @on_app_ready discover_handles() has wired
+        # the handle. We MUST NOT probe a VCM handle here: policy.initialize
+        # runs before on_app_ready, so any handle would not yet exist.
+        # When VCM is unavailable, reattach degrades to [] (best-effort);
+        # swap in NoopSpillArchive explicitly to opt out of re-attention.
+        archive = VcmSpillArchive(agent)
+        agent_scope = ScopeUtils.get_agent_level_scope(agent)
+        for stream in streams:
+            try:
+                log_scope = f"{agent_scope}:cstream:{stream.name}"
+                # Durable, events-off scope (no subscribers). max_entries
+                # defaults to unbounded ⇒ the log is lossless.
+                blackboard = await agent.get_blackboard(
+                    scope_id=log_scope, enable_events=False,
+                )
+                await stream.bind_log(
+                    store=BlackboardStreamLogStore(blackboard),
+                    compactor=compactor,
+                    archive=archive,
+                    policy=KeepRecentCompactionPolicy(
+                        keep_recent=stream.compaction_keep_recent,
+                    ),
+                    estimator=estimator,
+                )
+                await stream.rehydrate()
+            except Exception:  # noqa: BLE001 — one bad stream must not block init
+                logger.exception(
+                    "Failed to wire durable log for stream %s; it will "
+                    "run un-compacted (in-memory) this session.",
+                    getattr(stream, "name", "?"),
+                )
+
+    async def _maintain_streams(self) -> None:
+        """Flush newly-recorded entries to each compaction-enabled
+        stream's durable log + run its budget safety-net. Driven once
+        per iteration by :meth:`execute_iteration`. Never raises."""
+        for stream in self._consciousness_streams:
+            if not getattr(stream, "compaction_enabled", False):
+                continue
+            try:
+                await stream.flush()
+                await stream.maintain()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "stream maintenance failed for %s",
+                    getattr(stream, "name", "?"),
+                )
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
@@ -462,6 +540,24 @@ class BaseActionPolicy(ActionPolicy):
     @hookable
     @override
     async def execute_iteration(
+        self,
+        state: ActionPolicyExecutionState,
+    ) -> ActionPolicyIterationResult:
+        """Run one iteration, then per-iteration stream maintenance.
+
+        The maintenance (flush new entries to each compaction-enabled
+        stream's durable log + run the token-budget safety-net) runs in
+        a ``finally`` so it happens however the iteration exits — the
+        last iteration's entries are durably persisted even on an early
+        return or exception. ``_maintain_streams`` never raises and is a
+        no-op for legacy (non-compacted) streams.
+        """
+        try:
+            return await self._execute_iteration_inner(state)
+        finally:
+            await self._maintain_streams()
+
+    async def _execute_iteration_inner(
         self,
         state: ActionPolicyExecutionState
     ) -> ActionPolicyIterationResult:

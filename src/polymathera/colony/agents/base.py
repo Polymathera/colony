@@ -2312,6 +2312,30 @@ class Agent(BaseModel):
                 **self.metadata.action_policy_config,
             )
 
+        # Phase 2b: Auto-mount StreamMaintenanceCapability iff the policy
+        # has at least one compaction-enabled consciousness stream. This
+        # gives the planner deliberate control over its own working
+        # memory (compact / expand / list condensed spans) alongside the
+        # automatic per-iteration budget safety-net. Skipped for agents
+        # with no compacted streams so their action surface isn't bloated
+        # with dead actions. Idempotent (same shape as Phase 1b/1c).
+        get_streams = getattr(self.action_policy, "get_consciousness_streams", None)
+        if get_streams is not None and any(
+            getattr(s, "compaction_enabled", False) for s in get_streams()
+        ):
+            from .patterns.capabilities.stream_maintenance import (
+                StreamMaintenanceCapability,
+            )
+            if not any(
+                isinstance(cap, StreamMaintenanceCapability)
+                for cap in self._capabilities.values()
+            ):
+                stream_maint_cap = StreamMaintenanceCapability(
+                    agent=self, capability_key="stream_maintenance",
+                )
+                await stream_maint_cap.initialize()
+                self.add_capability(stream_maint_cap, events_only=False)
+
         # Phase 3: Mark ALL capabilities as "used" by the action policy.
         # This includes both blueprint-instantiated capabilities AND
         # capabilities added directly via add_capability() during initialize().

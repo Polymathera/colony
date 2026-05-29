@@ -47,11 +47,20 @@ Example — session agent's conversational stream::
 from __future__ import annotations
 
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from ...blueprint import Blueprint
+
+if TYPE_CHECKING:  # pragma: no cover — type-only
+    from ....cluster.tokenization import TokenizerProtocol
+    from .compaction import CompactionPolicy, SpillArchive, StreamCompactor
+    from .stream_log import StreamLogStore
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +189,8 @@ class ConsciousnessStream:
         domain_state_filter: Callable[[dict[str, Any]], bool] | None = None,
         filters: dict[str, Callable[[dict[str, Any]], bool]] | None = None,
         max_entries: int = 20,
+        compaction_budget_tokens: int | None = None,
+        compaction_keep_recent: int = 12,
     ):
         """
         Args:
@@ -209,6 +220,17 @@ class ConsciousnessStream:
                 shared stream helper that wants to selectively override
                 one kind without re-specifying the others).
             max_entries: Rolling window size before old entries are dropped.
+                Only used in *legacy* mode (``compaction_budget_tokens``
+                is ``None``). With compaction enabled, the durable log
+                bounds the prompt instead and entries are never dropped.
+            compaction_budget_tokens: Enable compaction/spillover. When
+                set, the rendered view is kept under this many tokens by
+                compacting + spilling the oldest entries (the durable
+                log preserves originals losslessly). ``None`` (default)
+                keeps the legacy rolling-window behavior.
+            compaction_keep_recent: Number of most-recent raw entries the
+                auto-compaction policy never compacts (kept verbatim in
+                the view). Only meaningful when compaction is enabled.
         """
         self.name = name
         self.formatter = formatter.local_instance() if isinstance(formatter, Blueprint) else formatter
@@ -231,6 +253,32 @@ class ConsciousnessStream:
         }
         self._max_entries = max_entries
         self._entries: list[dict[str, Any]] = []
+
+        # --- Compaction / spillover (opt-in via compaction_budget_tokens) ---
+        # When enabled, entries carry a monotonic ``seq``, are never
+        # dropped from memory by ``_append`` (the durable log bounds the
+        # prompt instead), and ``_entries`` becomes the hot *view* (raw
+        # entries + synthesized ``compaction_summary`` stand-ins) rather
+        # than the storage. Runtime collaborators are injected by the
+        # owning policy via :meth:`bind_log` (they need the live agent),
+        # so they stay out of the serialized blueprint.
+        self._compaction_budget_tokens = compaction_budget_tokens
+        self._compaction_keep_recent = compaction_keep_recent
+        self._compaction_enabled = compaction_budget_tokens is not None
+        self._next_seq = 0
+        self._last_flushed_seq = -1
+        self._compactions: list[Any] = []        # list[CompactionDescriptor]
+        self._store: "StreamLogStore | None" = None
+        self._compactor: "StreamCompactor | None" = None
+        self._archive: "SpillArchive | None" = None
+        self._policy: "CompactionPolicy | None" = None
+        self._estimator: "TokenizerProtocol | None" = None
+
+    _MAX_COMPACT_PASSES = 4
+    """Safety cap on compactions per :meth:`maintain` call — bounds the
+    LLM-call count per iteration even if a stream is wildly over budget.
+    ``KeepRecentCompactionPolicy`` converges in one pass; the cap guards
+    against a pathological policy."""
 
     # ------------------------------------------------------------------
     # Backward-compat properties: existing code reads ``_event_filter``
@@ -359,13 +407,328 @@ class ConsciousnessStream:
             })
 
     def render(self) -> str:
-        """Render this stream's entries into a prompt section."""
-        return self.formatter.format(list(self._entries))
+        """Render this stream's entries into a prompt section.
+
+        In compaction mode the hot view mixes raw entries with
+        synthesized ``compaction_summary`` stand-ins, so it is rendered
+        in logical order (summaries sort by the span they cover; raw
+        entries by their seq) — keeping correct interleaving even after
+        an arbitrary :meth:`expand_span`.
+        """
+        entries = (
+            sorted(self._entries, key=self._view_sort_key)
+            if self._compaction_enabled
+            else list(self._entries)
+        )
+        return self.formatter.format(entries)
 
     def _append(self, entry: dict[str, Any]) -> None:
+        if self._compaction_enabled:
+            # Stamp a monotonic seq; never drop (the durable log bounds
+            # the prompt via maintain(), losslessly).
+            entry["seq"] = self._next_seq
+            self._next_seq += 1
+            self._entries.append(entry)
+            return
+        # Legacy rolling window — unchanged behavior.
         self._entries.append(entry)
         if len(self._entries) > self._max_entries:
             self._entries = self._entries[-self._max_entries:]
+
+    @staticmethod
+    def _view_sort_key(entry: dict[str, Any]) -> int:
+        if entry.get("kind") == "compaction_summary":
+            covers = entry.get("payload", {}).get("covers") or [0, 0]
+            return int(covers[0])
+        return int(entry.get("seq", 0))
+
+    @property
+    def compaction_enabled(self) -> bool:
+        """Whether this stream runs in compaction/spillover mode (i.e.
+        ``compaction_budget_tokens`` was set). Public so the owning
+        policy can decide whether to wire a durable log without reaching
+        into stream internals."""
+        return self._compaction_enabled
+
+    @property
+    def compaction_keep_recent(self) -> int:
+        """Number of most-recent raw entries the auto-compaction policy
+        keeps verbatim. Public read accessor for the policy's wiring."""
+        return self._compaction_keep_recent
+
+    # ------------------------------------------------------------------
+    # Compaction / spillover lifecycle (no-ops unless compaction enabled
+    # AND a log is bound). All durable I/O happens here, at async policy
+    # boundaries — never inside the sync render() / consider_* path.
+    # ------------------------------------------------------------------
+
+    async def bind_log(
+        self,
+        *,
+        store: "StreamLogStore",
+        compactor: "StreamCompactor",
+        archive: "SpillArchive",
+        policy: "CompactionPolicy",
+        estimator: "TokenizerProtocol",
+    ) -> None:
+        """Inject the runtime collaborators (built by the owning policy
+        from the live agent). Idempotent; call before :meth:`rehydrate`."""
+        self._store = store
+        self._compactor = compactor
+        self._archive = archive
+        self._policy = policy
+        self._estimator = estimator
+
+    async def rehydrate(self) -> None:
+        """Restore the view from the durable log (suspend/resume +
+        restart). Loads every active summary plus a bounded tail of the
+        most-recent uncovered raw entries; older uncovered entries stay
+        in the log (retrievable via :meth:`expand_span`)."""
+        if self._store is None:
+            return
+        index = await self._store.read_index()
+        self._next_seq = index.next_seq
+        self._last_flushed_seq = index.next_seq - 1
+        self._compactions = list(index.compactions)
+        summaries = [self._summary_entry(c) for c in self._compactions]
+        # Uncovered raw seqs = [0, next_seq) minus the covered ranges.
+        uncovered = self._complement(
+            index.covered_ranges(), 0, index.next_seq - 1,
+        )
+        # Load only a bounded recent tail to keep rehydration cheap.
+        tail_budget = max(self._compaction_keep_recent * 2, self._compaction_keep_recent)
+        raw: list[dict[str, Any]] = []
+        for start, end in reversed(uncovered):
+            span = await self._store.read_span(start, end)
+            raw = span + raw
+            if len(raw) >= tail_budget:
+                raw = raw[-tail_budget:]
+                break
+        self._entries = sorted(raw + summaries, key=self._view_sort_key)
+
+    async def flush(self) -> None:
+        """Persist newly-recorded raw entries to the durable log + sync
+        the index. No-op unless compaction is enabled with a bound log."""
+        if self._store is None or not self._compaction_enabled:
+            return
+        new = sorted(
+            (
+                e for e in self._entries
+                if e.get("kind") != "compaction_summary"
+                and int(e.get("seq", -1)) > self._last_flushed_seq
+            ),
+            key=lambda e: int(e["seq"]),
+        )
+        for entry in new:
+            await self._store.append(int(entry["seq"]), entry)
+            self._last_flushed_seq = int(entry["seq"])
+        if new:
+            await self._store.write_index(self._index())
+
+    async def maintain(self) -> None:
+        """Auto safety-net: while the rendered view exceeds the token
+        budget, compact the oldest span the policy selects. Bounded by
+        :attr:`_MAX_COMPACT_PASSES`. No-op unless fully wired."""
+        if not (
+            self._compaction_enabled
+            and self._store is not None
+            and self._compactor is not None
+            and self._policy is not None
+            and self._estimator is not None
+            and self._compaction_budget_tokens is not None
+        ):
+            return
+        for _ in range(self._MAX_COMPACT_PASSES):
+            if self._estimator.count_tokens(self.render()) <= self._compaction_budget_tokens:
+                return
+            raw_window = sorted(
+                (e for e in self._entries if e.get("kind") != "compaction_summary"),
+                key=lambda e: int(e.get("seq", 0)),
+            )
+            span = self._policy.select_span(raw_window=raw_window)
+            if span is None:
+                return
+            start, end = span
+            victims = [
+                e for e in raw_window if start <= int(e.get("seq", -1)) <= end
+            ]
+            if not victims:
+                return
+            await self._do_compact(start, end, victims, produced_by="auto")
+
+    async def compact_span(
+        self, start_seq: int, end_seq: int, *, produced_by: str = "agent",
+    ) -> dict[str, Any] | None:
+        """Agent-driven compaction of an explicit raw span currently in
+        the view. Returns the resulting descriptor as a dict, or ``None``
+        if the span holds no raw entries."""
+        if self._store is None or self._compactor is None:
+            return None
+        victims = sorted(
+            (
+                e for e in self._entries
+                if e.get("kind") != "compaction_summary"
+                and start_seq <= int(e.get("seq", -1)) <= end_seq
+            ),
+            key=lambda e: int(e["seq"]),
+        )
+        if not victims:
+            return None
+        desc = await self._do_compact(
+            int(victims[0]["seq"]), int(victims[-1]["seq"]), victims,
+            produced_by=produced_by,
+        )
+        return desc.to_dict()
+
+    async def compact_now(self, *, keep_recent: int | None = None) -> dict[str, Any] | None:
+        """Agent-driven: compact the oldest raw entries beyond
+        ``keep_recent`` (default: the stream's configured value) right
+        now, independent of the token budget. Returns the descriptor or
+        ``None`` if there's nothing eligible to compact."""
+        if self._store is None or self._compactor is None:
+            return None
+        from .compaction import KeepRecentCompactionPolicy
+        keep = self._compaction_keep_recent if keep_recent is None else keep_recent
+        raw_window = sorted(
+            (e for e in self._entries if e.get("kind") != "compaction_summary"),
+            key=lambda e: int(e.get("seq", 0)),
+        )
+        span = KeepRecentCompactionPolicy(keep_recent=keep).select_span(
+            raw_window=raw_window,
+        )
+        if span is None:
+            return None
+        start, end = span
+        victims = [e for e in raw_window if start <= int(e.get("seq", -1)) <= end]
+        if not victims:
+            return None
+        desc = await self._do_compact(start, end, victims, produced_by="agent")
+        return desc.to_dict()
+
+    async def expand_span(
+        self, start_seq: int, end_seq: int, *, reattach_to_context: bool = False,
+    ) -> dict[str, Any]:
+        """Reverse compaction: pull the originals of every compacted span
+        intersecting ``[start_seq, end_seq]`` back into the view from the
+        durable log. With ``reattach_to_context``, also page the span back
+        into the agent's real LLM context window via the spill archive."""
+        if self._store is None:
+            return {"expanded": 0, "reattached_pages": []}
+        matched = [
+            c for c in self._compactions
+            if not (c.end_seq < start_seq or c.start_seq > end_seq)
+        ]
+        expanded = 0
+        reattached: list[str] = []
+        for desc in matched:
+            originals = await self._store.read_span(desc.start_seq, desc.end_seq)
+            self._entries = [
+                e for e in self._entries
+                if not (
+                    e.get("kind") == "compaction_summary"
+                    and (e.get("payload", {}).get("covers") or [None, None])
+                    == [desc.start_seq, desc.end_seq]
+                )
+            ]
+            self._entries.extend(originals)
+            self._compactions.remove(desc)
+            expanded += len(originals)
+            if reattach_to_context and self._archive is not None:
+                reattached += await self._archive.reattach(
+                    stream_name=self.name,
+                    start_seq=desc.start_seq,
+                    end_seq=desc.end_seq,
+                    entries=originals,
+                )
+        if matched:
+            self._entries.sort(key=self._view_sort_key)
+            await self._store.write_index(self._index())
+        return {"expanded": expanded, "reattached_pages": reattached}
+
+    def history_summary(self) -> list[dict[str, Any]]:
+        """Planner-facing introspection: the active compacted spans (so
+        the agent knows what it can expand) + the current view extent."""
+        return [
+            {
+                "start_seq": c.start_seq,
+                "end_seq": c.end_seq,
+                "entry_count": c.entry_count,
+                "kinds": c.kinds,
+                "produced_by": c.produced_by,
+            }
+            for c in sorted(self._compactions, key=lambda c: c.start_seq)
+        ]
+
+    async def _do_compact(
+        self, start_seq: int, end_seq: int,
+        victims: list[dict[str, Any]], *, produced_by: str,
+    ) -> Any:
+        from .stream_log import CompactionDescriptor
+        payload = await self._compactor.compact(victims, self.formatter)
+        desc = CompactionDescriptor(
+            start_seq=start_seq,
+            end_seq=end_seq,
+            summary=payload["summary"],
+            kinds=payload.get("kinds", {}),
+            entry_count=payload.get("entry_count", len(victims)),
+            archive_ref=None,
+            produced_by=produced_by,
+            timestamp=time.time(),
+        )
+        self._compactions.append(desc)
+        self._entries = [
+            e for e in self._entries
+            if not (
+                e.get("kind") != "compaction_summary"
+                and start_seq <= int(e.get("seq", -1)) <= end_seq
+            )
+        ]
+        self._entries.append(self._summary_entry(desc))
+        self._entries.sort(key=self._view_sort_key)
+        await self._store.write_index(self._index())
+        return desc
+
+    def _summary_entry(self, desc: Any) -> dict[str, Any]:
+        return {
+            "kind": "compaction_summary",
+            "timestamp": desc.timestamp,
+            "payload": {
+                "covers": [desc.start_seq, desc.end_seq],
+                "summary": desc.summary,
+                "kinds": desc.kinds,
+                "entry_count": desc.entry_count,
+                "produced_by": desc.produced_by,
+                "archive_ref": desc.archive_ref,
+            },
+        }
+
+    def _index(self) -> Any:
+        from .stream_log import StreamLogIndex
+        return StreamLogIndex(
+            next_seq=self._next_seq, compactions=list(self._compactions),
+        )
+
+    @staticmethod
+    def _complement(
+        covered: list[tuple[int, int]], lo: int, hi: int,
+    ) -> list[tuple[int, int]]:
+        """Return the sub-ranges of ``[lo, hi]`` not covered by any span
+        in ``covered`` (sorted, possibly overlapping), in ascending order."""
+        if hi < lo:
+            return []
+        result: list[tuple[int, int]] = []
+        cursor = lo
+        for start, end in sorted(covered):
+            if end < cursor:
+                continue
+            if start > cursor:
+                result.append((cursor, min(start - 1, hi)))
+            cursor = max(cursor, end + 1)
+            if cursor > hi:
+                break
+        if cursor <= hi:
+            result.append((cursor, hi))
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +776,9 @@ class ConversationFormatter(ConsciousnessStreamFormatter):
 
         lines = [self._section_title, ""]
         for entry in entries:
-            if entry["kind"] == "event":
+            if entry["kind"] == "compaction_summary":
+                lines.append(render_compaction_summary(entry))
+            elif entry["kind"] == "event":
                 ctx = entry["contexts"].get(self._user_context_key)
                 if isinstance(ctx, dict):
                     message = ctx.get(self._user_content_field, "")
@@ -448,7 +813,9 @@ class JSONStreamFormatter(ConsciousnessStreamFormatter):
 
         lines = [self._section_title, ""]
         for entry in entries:
-            if entry["kind"] == "event":
+            if entry["kind"] == "compaction_summary":
+                lines.append(render_compaction_summary(entry))
+            elif entry["kind"] == "event":
                 for key, ctx in entry["contexts"].items():
                     value_str = json.dumps(ctx, default=str) if isinstance(ctx, dict) else str(ctx)
                     if len(value_str) > self._max_value_chars:
@@ -470,6 +837,24 @@ def _truncate(text: str, max_chars: int) -> str:
     if len(text) > max_chars:
         return text[:max_chars] + "..."
     return text
+
+
+def render_compaction_summary(entry: dict[str, Any], max_chars: int = 500) -> str:
+    """Render a ``compaction_summary`` view-entry as one markdown line.
+
+    Shared by every stock formatter so a compacted span stays visible
+    (and its seq span discoverable, so the agent knows what it can
+    ``expand_stream_span``). Custom formatters should call this for
+    ``entry["kind"] == "compaction_summary"`` entries.
+    """
+    payload = entry.get("payload", {}) or {}
+    covers = payload.get("covers") or [None, None]
+    count = payload.get("entry_count", 0)
+    summary = _truncate(str(payload.get("summary", "")), max_chars)
+    return (
+        f"- ▸ *condensed history* (seq {covers[0]}–{covers[1]}, "
+        f"{count} entries — expandable): {summary}"
+    )
 
 
 class EventLogFormatter(ConsciousnessStreamFormatter):
@@ -515,6 +900,9 @@ class EventLogFormatter(ConsciousnessStreamFormatter):
         lines: list[str] = [self._section_title, ""]
         for entry in rendered:
             kind = entry.get("kind", "?")
+            if kind == "compaction_summary":
+                lines.append(render_compaction_summary(entry))
+                continue
             # Pick the "interesting" payload field per kind. Falls back
             # to ``json.dumps`` of the whole entry for unknown kinds.
             if kind == "event":
@@ -547,11 +935,17 @@ class ToolResultFormatter(ConsciousnessStreamFormatter):
         self._max_payload_chars = max_payload_chars
 
     def format(self, entries: list[dict[str, Any]]) -> str:
-        tool_entries = [e for e in entries if e.get("kind") == "tool_output"]
-        if not tool_entries:
+        kept = [
+            e for e in entries
+            if e.get("kind") in ("tool_output", "compaction_summary")
+        ]
+        if not kept:
             return ""
         lines: list[str] = [self._section_title, ""]
-        for entry in tool_entries:
+        for entry in kept:
+            if entry.get("kind") == "compaction_summary":
+                lines.append(render_compaction_summary(entry))
+                continue
             payload = entry.get("payload", {})
             action_key = payload.get("action_key", "?")
             tool_result = payload.get("tool_result", {}) or {}
@@ -597,7 +991,10 @@ class VCMUpdateFormatter(ConsciousnessStreamFormatter):
         self._max_entries_shown = max_entries_shown
 
     def format(self, entries: list[dict[str, Any]]) -> str:
-        vcm_entries = [e for e in entries if e.get("kind") == "vcm_update"]
+        vcm_entries = [
+            e for e in entries
+            if e.get("kind") in ("vcm_update", "compaction_summary")
+        ]
         if not vcm_entries:
             return ""
         if (
@@ -607,6 +1004,9 @@ class VCMUpdateFormatter(ConsciousnessStreamFormatter):
             vcm_entries = vcm_entries[-self._max_entries_shown:]
         lines: list[str] = [self._section_title, ""]
         for entry in vcm_entries:
+            if entry.get("kind") == "compaction_summary":
+                lines.append(render_compaction_summary(entry))
+                continue
             payload = entry.get("payload", {})
             mutation_kind = payload.get("kind", "?")
             page_source = payload.get("page_source", "?")
@@ -643,12 +1043,16 @@ class MonorepoCommitFormatter(ConsciousnessStreamFormatter):
 
     def format(self, entries: list[dict[str, Any]]) -> str:
         commit_entries = [
-            e for e in entries if e.get("kind") == "monorepo_commit"
+            e for e in entries
+            if e.get("kind") in ("monorepo_commit", "compaction_summary")
         ]
         if not commit_entries:
             return ""
         lines: list[str] = [self._section_title, ""]
         for entry in commit_entries:
+            if entry.get("kind") == "compaction_summary":
+                lines.append(render_compaction_summary(entry))
+                continue
             payload = entry.get("payload", {})
             sha = (payload.get("sha") or "")[:8] or "?"
             branch = payload.get("branch", "?")
@@ -688,15 +1092,18 @@ class DomainStateFormatter(ConsciousnessStreamFormatter):
         self._max_entries_shown = max_entries_shown
 
     def format(self, entries: list[dict[str, Any]]) -> str:
-        domain_entries = [
-            e for e in entries if e.get("kind") == "domain_state"
-        ]
-        if self._state_machine_name is not None:
-            domain_entries = [
-                e for e in domain_entries
-                if (e.get("payload") or {}).get("state_machine")
-                == self._state_machine_name
-            ]
+        domain_entries: list[dict[str, Any]] = []
+        for e in entries:
+            kind = e.get("kind")
+            if kind == "compaction_summary":
+                domain_entries.append(e)
+            elif kind == "domain_state":
+                if (
+                    self._state_machine_name is None
+                    or (e.get("payload") or {}).get("state_machine")
+                    == self._state_machine_name
+                ):
+                    domain_entries.append(e)
         if not domain_entries:
             return ""
         if (
@@ -706,6 +1113,9 @@ class DomainStateFormatter(ConsciousnessStreamFormatter):
             domain_entries = domain_entries[-self._max_entries_shown:]
         lines: list[str] = [self._section_title, ""]
         for entry in domain_entries:
+            if entry.get("kind") == "compaction_summary":
+                lines.append(render_compaction_summary(entry))
+                continue
             payload = entry.get("payload", {})
             transition = payload.get("transition", "?")
             from_state = payload.get("from_state", "")
