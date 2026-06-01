@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import git
 import pytest
 
-from polymathera.colony.design_monorepo.capabilities import (
+from polymathera.colony.design_monorepo.process import (
     DesignProcessCapability,
 )
 

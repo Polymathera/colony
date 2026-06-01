@@ -16,7 +16,7 @@ from pathlib import Path
 import git
 import pytest
 
-from polymathera.colony.design_monorepo.capabilities import (
+from polymathera.colony.design_monorepo.system_design import (
     SystemDesignCapability,
 )
 
