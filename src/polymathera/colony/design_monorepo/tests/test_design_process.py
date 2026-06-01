@@ -581,7 +581,7 @@ def test_stable_task_id_is_deterministic_and_content_based() -> None:
     """Same (milestone, task) → same id every time. Different inputs
     → different ids. 12-hex-char hash per design-doc Q4."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _stable_task_id,
     )
 
@@ -600,7 +600,7 @@ def test_extract_roadmap_task_marker_finds_marker_anywhere_in_body() -> None:
     """The marker can sit anywhere in the body — operators may add
     prose, the regex still extracts it."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _extract_roadmap_task_marker,
     )
 
@@ -627,7 +627,7 @@ def test_parse_roadmap_proposal_round_trip() -> None:
     """LLM happy path: valid JSON → parsed proposal with stable ids
     auto-injected."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _parse_roadmap_proposal, _stable_task_id,
     )
 
@@ -665,7 +665,7 @@ def test_parse_roadmap_proposal_strips_code_fences() -> None:
     """LLM commonly wraps JSON in ```json fences; the parser
     handles that idiom (same as LLMClaimExtractor._parse)."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _parse_roadmap_proposal,
     )
 
@@ -686,7 +686,7 @@ def test_parse_roadmap_proposal_rejects_invalid_shapes() -> None:
     missing milestones, milestones not a list, milestone without
     title, milestone without tasks."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _parse_roadmap_proposal,
     )
 
@@ -707,7 +707,7 @@ def test_parse_roadmap_proposal_deduplicates_task_titles_within_milestone() -> N
     a milestone. The parser drops duplicates rather than blowing
     up — keeps the action robust against a sloppy LLM."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _parse_roadmap_proposal,
     )
 
@@ -736,7 +736,7 @@ def test_render_roadmap_markdown_stamps_marker_per_task() -> None:
     stable-id marker so operator + sync can both find it visually
     + programmatically."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _extract_roadmap_task_marker, _render_roadmap_markdown,
     )
 
@@ -767,7 +767,7 @@ def test_render_issue_body_for_task_includes_marker_at_end() -> None:
     parser finds it reliably regardless of what prose the LLM put
     in the description."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _extract_roadmap_task_marker, _render_issue_body_for_task,
     )
 
@@ -1136,7 +1136,7 @@ def test_parse_roadmap_markdown_round_trips_renderer_output() -> None:
     """The parser MUST round-trip whatever the renderer produces —
     they're a matched pair (sync is the second leg)."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _parse_roadmap_markdown, _render_roadmap_markdown,
         _stable_task_id,
     )
@@ -1195,7 +1195,7 @@ def test_parse_roadmap_markdown_empty_text_returns_empty_structure() -> None:
     milestones list — symmetric with the renderer's input shape so
     the diff downstream is well-defined."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _parse_roadmap_markdown,
     )
 
@@ -1210,7 +1210,7 @@ def test_parse_roadmap_markdown_skips_task_lines_without_marker() -> None:
     markers; the parser ignores those (no stable_id = nothing to
     sync). Markers are the join key."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _parse_roadmap_markdown,
     )
 
@@ -1233,7 +1233,7 @@ def test_diff_buckets_correctly_when_all_in_sync() -> None:
     """When ROADMAP.md and GitHub issues are perfectly aligned,
     every match lands in ``in_sync`` and other buckets are empty."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _diff_roadmap_vs_issues,
     )
 
@@ -1265,7 +1265,7 @@ def test_diff_buckets_correctly_when_all_in_sync() -> None:
 
 
 def test_diff_surfaces_roadmap_only_tasks() -> None:
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _diff_roadmap_vs_issues,
     )
 
@@ -1285,7 +1285,7 @@ def test_diff_surfaces_roadmap_only_tasks() -> None:
 
 
 def test_diff_surfaces_github_only_tasks() -> None:
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _diff_roadmap_vs_issues,
     )
 
@@ -1308,7 +1308,7 @@ def test_diff_surfaces_divergent_tasks_when_titles_differ() -> None:
     """Same stable_id, different titles → conflict bucket. Sync
     surfaces these for operator mediation; doesn't auto-resolve."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _diff_roadmap_vs_issues,
     )
 
@@ -1343,7 +1343,7 @@ def test_diff_surfaces_untracked_issues_separately() -> None:
     """Issues without markers are tracked but NOT auto-imported —
     operator chose to create them outside the bootstrap flow."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _diff_roadmap_vs_issues,
     )
 
@@ -1369,7 +1369,7 @@ def test_diff_surfaces_untracked_issues_separately() -> None:
 
 
 def test_merge_github_only_creates_untracked_milestone() -> None:
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _UNTRACKED_MILESTONE_TITLE, _merge_github_only_into_roadmap,
     )
 
@@ -1402,7 +1402,7 @@ def test_merge_github_only_reuses_existing_untracked_milestone() -> None:
     """If ``Untracked`` already exists (from a prior sync), append
     to it rather than create a duplicate."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _UNTRACKED_MILESTONE_TITLE, _merge_github_only_into_roadmap,
     )
 
@@ -1429,7 +1429,7 @@ def test_merge_github_only_reuses_existing_untracked_milestone() -> None:
 
 
 def test_merge_github_only_noop_when_empty() -> None:
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _merge_github_only_into_roadmap,
     )
 
@@ -2310,7 +2310,7 @@ def test_parse_assignment_classification_rejects_unknown_assignee() -> None:
     """A JSON object with ``assignee=other`` (not colony/user) is
     rejected — keeps the binary universe enforced."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _parse_assignment_classification,
     )
     assert _parse_assignment_classification(
@@ -2321,7 +2321,7 @@ def test_parse_assignment_classification_rejects_unknown_assignee() -> None:
 def test_parse_assignment_classification_strips_code_fences() -> None:
     """LLM wrapping output in ``` blocks should not break parsing."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _parse_assignment_classification,
     )
     parsed = _parse_assignment_classification(
@@ -2336,7 +2336,7 @@ def test_extract_assignee_marker_case_insensitive() -> None:
     """The marker regex tolerates COLONY vs colony for resilience to
     operator copy-paste."""
 
-    from polymathera.colony.design_monorepo.capabilities import (
+    from polymathera.colony.design_monorepo.process import (
         _extract_assignee_marker,
     )
     assert _extract_assignee_marker(
