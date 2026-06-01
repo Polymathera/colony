@@ -37,6 +37,8 @@ from .capabilities import (
     RepoStateProvider,
     ToolBuilder,
 )
+from .system_design import SystemDesignCapability
+from .process import DesignProcessCapability
 from .clones import resolve_clone_path
 from .client import (
     AGENT_BRANCH_PREFIX,
@@ -164,7 +166,9 @@ __all__ = (
     "BranchScopedCapabilityBase",
     "DesignCheckpointer",
     "DesignMonorepoCapabilityBase",
+    "DesignProcessCapability",
     "ProjectAuthoringCapability",
+    "SystemDesignCapability",
     "ToolBuilder",
     "design_monorepo_capability_blueprints",
     "resolve_clone_path",

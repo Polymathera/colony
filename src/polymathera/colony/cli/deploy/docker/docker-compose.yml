@@ -42,6 +42,14 @@ services:
       - RAY_CLUSTER_ENVIRONMENT=true
       - POLYMATHERA_ENV=development
       - POLYMATHERA_RUNNING_LOCALLY=true
+      # Workaround for protobuf>=4 / opentelemetry-proto<1.32 incompat:
+      # Ray's dashboard agent imports opentelemetry pb2 files generated
+      # against protobuf<4, which crash at module load with the strict
+      # C++ runtime ("Descriptors cannot be created directly"). When the
+      # agent dies, required Ray subprocesses never register with GCS
+      # and `ray.init()` from `polymath deploy` hangs until timeout.
+      # The pure-Python implementation skips the strict check.
+      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
       # Operator YAML path — the global ConfigurationManager loads this at
       # startup. ``colony-env up --config`` `docker cp`s the file into
       # /mnt/shared/config.yaml on the colony-shared volume mounted into
@@ -160,6 +168,14 @@ services:
       - RAY_CLUSTER_ENVIRONMENT=true
       - POLYMATHERA_ENV=development
       - POLYMATHERA_RUNNING_LOCALLY=true
+      # Workaround for protobuf>=4 / opentelemetry-proto<1.32 incompat:
+      # Ray's dashboard agent imports opentelemetry pb2 files generated
+      # against protobuf<4, which crash at module load with the strict
+      # C++ runtime ("Descriptors cannot be created directly"). When the
+      # agent dies, required Ray subprocesses never register with GCS
+      # and `ray.init()` from `polymath deploy` hangs until timeout.
+      # The pure-Python implementation skips the strict check.
+      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
       # Operator YAML path — the global ConfigurationManager loads this at
       # startup. ``colony-env up --config`` `docker cp`s the file into
       # /mnt/shared/config.yaml on the colony-shared volume mounted into
@@ -347,6 +363,9 @@ services:
       - RAY_CLIENT_ADDRESS=ray://ray-head:10001
       - RAY_DASHBOARD_URL=http://ray-head:8265
       - PROMETHEUS_URL=http://ray-head:9090
+      # See ray-head: same protobuf>=4 / opentelemetry-proto<1.32 issue.
+      # The dashboard imports Ray client modules that touch the broken pb2s.
+      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
       # Redis — blackboard, state management, event bus
       - REDIS_HOST=redis
       - REDIS_PORT=6379

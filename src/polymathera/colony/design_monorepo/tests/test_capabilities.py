@@ -122,7 +122,7 @@ async def test_ingest_repo_map_literature_walks_knowledge_sources(
         # skips ``git fetch`` so this works in the bootstrapped-repo
         # fixture which has no remote.
         (repo_root / ".colony" / "repo_map.yaml").write_text(
-            "schema_version: 2\n"
+            "schema_version: 3\n"
             "vcm_sources:\n"
             "  - { name: default, type: git_repo }\n"
             "knowledge_sources:\n"
@@ -164,6 +164,394 @@ async def test_ingest_repo_map_literature_walks_knowledge_sources(
         assert not any("b.txt" in uri for uri in result2["ingested"])
     finally:
         reset_knowledge_deps()
+
+
+async def test_materialize_design_context_end_to_end(
+    bootstrapped_repo: DesignMonorepoClient,
+    state_provider: RepoStateProvider,
+    monkeypatch,
+) -> None:
+    """End-to-end wiring test for ``materialize_design_context``:
+
+    - Writes a ``repo_map.yaml`` with one pinned + one un-pinned
+      ``design_context_sources`` row.
+    - Stubs the VCM handle and colony blackboard so the test runs
+      without a live cluster.
+    - Verifies the action returns the right response shape, calls
+      ``mmap_application_scope`` per row, calls ``lock_page`` only
+      on the pinned row's pages, registers the pinned row with the
+      renewer, and emits one ``DesignContextMappedProtocol`` event
+      per row to the colony blackboard.
+    - Verifies ``stop()`` cancels the renewer cleanly.
+    """
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    repo_root = bootstrapped_repo.working_dir
+
+    # Seed the design-context markdown the materialiser will count.
+    (repo_root / "docs").mkdir(parents=True, exist_ok=True)
+    (repo_root / "docs" / "objectives.md").write_text(
+        "# Objectives\n", encoding="utf-8",
+    )
+    (repo_root / "docs" / "constraints.md").write_text(
+        "# Constraints\n", encoding="utf-8",
+    )
+    (repo_root / "hypotheses").mkdir(parents=True, exist_ok=True)
+    (repo_root / "hypotheses" / "h1.md").write_text(
+        "# Hypothesis 1\n", encoding="utf-8",
+    )
+
+    # Schema v3 with two rows: docs (pinned) + hypotheses (unpinned).
+    (repo_root / ".colony" / "repo_map.yaml").write_text(
+        "schema_version: 3\n"
+        "vcm_sources:\n"
+        "  - { name: default, type: git_repo }\n"
+        "design_context_sources:\n"
+        "  - name: docs\n"
+        "    paths: ['docs/**/*.md']\n"
+        "    pin_in_vcm: true\n"
+        "    pin_lock_duration_days: 5\n"
+        "  - name: hypos\n"
+        "    paths: ['hypotheses/**/*.md']\n",
+        encoding="utf-8",
+    )
+
+    # Stub the VCM handle the action calls into.
+    fake_vcm = MagicMock()
+    fake_vcm.mmap_application_scope = AsyncMock(
+        return_value=MagicMock(status="mapped"),
+    )
+    fake_vcm.get_pages_for_scope = AsyncMock(
+        return_value=[
+            {"page_id": "p1", "size": 100, "group_id": "g"},
+            {"page_id": "p2", "size": 100, "group_id": "g"},
+        ],
+    )
+    fake_vcm.lock_page = AsyncMock()
+    fake_vcm.extend_page_lock = AsyncMock(return_value=True)
+
+    async def _stub_get_vcm():
+        return fake_vcm
+
+    from polymathera.colony import _handles as handles_mod
+    monkeypatch.setattr(handles_mod, "get_vcm", _stub_get_vcm)
+
+    # Pre-set the cached colony blackboard so _get_colony_blackboard
+    # short-circuits and returns our fake (avoids needing a live
+    # serving cluster + ScopeUtils.get_colony_level_scope).
+    fake_bb = MagicMock()
+    fake_bb.write = AsyncMock()
+    state_provider._colony_blackboard = fake_bb
+
+    # Default include_kuzu=True — focus this test on the VCM path
+    # by opting out of path-1; the path-1 wiring is exercised in
+    # ``test_materialize_design_context_kuzu_path_ingests_into_graph``.
+    result = await state_provider.materialize_design_context(
+        refresh=False, include_kuzu=False,
+    )
+
+    # ---- response shape ----
+    assert set(result["mapped"]) == {"docs", "hypos"}
+    assert result["pinned"] == ["docs"]
+    assert result["ingested"] == []  # include_kuzu=False
+    assert result["total_claims"] == 0
+    assert result["failed"] == []
+    # 2 sources × 2 paths (vcm + kuzu-skipped) = 4 outcome rows.
+    assert result["count"] == 4
+    vcm_rows = [r for r in result["rows"] if r["path"] == "vcm"]
+    rows_by_name = {r["source_name"]: r for r in vcm_rows}
+    assert rows_by_name["docs"]["pinned"] is True
+    assert rows_by_name["hypos"]["pinned"] is False
+    assert rows_by_name["docs"]["status"] == "mapped"
+    # Kuzu rows are present but skipped (include_kuzu=False).
+    kuzu_rows = [r for r in result["rows"] if r["path"] == "kuzu"]
+    assert {r["source_name"] for r in kuzu_rows} == {"docs", "hypos"}
+    assert all(r["status"] == "skipped" for r in kuzu_rows)
+
+    # ---- mmap calls ----
+    mmap_calls = fake_vcm.mmap_application_scope.await_args_list
+    assert len(mmap_calls) == 2
+    for call in mmap_calls:
+        assert call.kwargs["source_type"] == "literature"
+
+    # ---- pinning: 2 lock_page calls for the pinned row only ----
+    assert fake_vcm.lock_page.await_count == 2
+    expected_duration_s = 5 * 86400.0
+    for call in fake_vcm.lock_page.await_args_list:
+        assert call.kwargs["locked_by"] == "design_context.docs"
+        assert call.kwargs["lock_duration_s"] == expected_duration_s
+
+    # ---- renewer was created + registered the pinned scope ----
+    assert state_provider._design_context_renewer is not None
+    assert state_provider._design_context_renewer.registered_scope_ids == [
+        next(
+            c.kwargs["scope_id"]
+            for c in mmap_calls
+            if c.kwargs["scope_id"].endswith("docs")
+        ),
+    ]
+
+    # ---- blackboard events: one per outcome row (4 total) ----
+    bb_calls = fake_bb.write.await_args_list
+    assert len(bb_calls) == 4
+    keys = [c.kwargs["key"] for c in bb_calls]
+    assert all(k.startswith("design_context_mapped:") for k in keys)
+    assert any("docs:vcm:" in k for k in keys)
+    assert any("hypos:vcm:" in k for k in keys)
+    assert any("docs:kuzu:" in k for k in keys)
+    assert any("hypos:kuzu:" in k for k in keys)
+    # Pinned row's vcm event carries the 'pinned' tag.
+    docs_vcm = next(c for c in bb_calls if "docs:vcm:" in c.kwargs["key"])
+    assert "pinned" in docs_vcm.kwargs["tags"]
+    assert docs_vcm.kwargs["value"]["pinned"] is True
+    assert docs_vcm.kwargs["value"]["num_files"] == 2  # objectives + constraints
+    assert docs_vcm.kwargs["value"]["status"] == "mapped"
+    hypos_vcm = next(c for c in bb_calls if "hypos:vcm:" in c.kwargs["key"])
+    assert "pinned" not in hypos_vcm.kwargs["tags"]
+    assert hypos_vcm.kwargs["value"]["pinned"] is False
+    # Kuzu rows carry status='skipped' since include_kuzu=False.
+    docs_kuzu = next(c for c in bb_calls if "docs:kuzu:" in c.kwargs["key"])
+    assert docs_kuzu.kwargs["value"]["status"] == "skipped"
+    assert docs_kuzu.kwargs["value"]["num_claims"] == 0
+
+    # ---- stop() cancels the renewer cleanly ----
+    await state_provider.stop()
+    assert state_provider._design_context_renewer is None
+
+
+async def test_materialize_design_context_kuzu_path_ingests_into_graph(
+    bootstrapped_repo: DesignMonorepoClient,
+    state_provider: RepoStateProvider,
+    monkeypatch,
+) -> None:
+    """End-to-end: include_kuzu=True calls Ingestor.ingest_file per
+    matching file with the design_context:// URI scheme, sums
+    claims_extracted into the kuzu outcome row, and emits a kuzu
+    blackboard event with ``status='completed'``."""
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from polymathera.colony.knowledge.models import (
+        IngestionRecord, IngestionStatus, KnowledgeFormat,
+    )
+
+    repo_root = bootstrapped_repo.working_dir
+    (repo_root / "docs").mkdir(parents=True, exist_ok=True)
+    (repo_root / "docs" / "objectives.md").write_text(
+        "# Objectives\n", encoding="utf-8",
+    )
+    (repo_root / "docs" / "constraints.md").write_text(
+        "# Constraints\n", encoding="utf-8",
+    )
+    (repo_root / ".colony" / "repo_map.yaml").write_text(
+        "schema_version: 3\n"
+        "vcm_sources:\n"
+        "  - { name: default, type: git_repo }\n"
+        "design_context_sources:\n"
+        "  - name: docs\n"
+        "    paths: ['docs/**/*.md']\n",
+        encoding="utf-8",
+    )
+
+    # VCM handle — minimal stub; the focus is path-1.
+    fake_vcm = MagicMock()
+    fake_vcm.mmap_application_scope = AsyncMock(
+        return_value=MagicMock(status="mapped"),
+    )
+    fake_vcm.get_pages_for_scope = AsyncMock(return_value=[])
+    fake_vcm.lock_page = AsyncMock()
+    async def _stub_get_vcm():
+        return fake_vcm
+    from polymathera.colony import _handles as handles_mod
+    monkeypatch.setattr(handles_mod, "get_vcm", _stub_get_vcm)
+
+    # Ingestor stub — returns a synthetic COMPLETED record with a
+    # claim count per file. Replaces the singleton so no real Kuzu /
+    # vector store / embedder is needed in this unit test.
+    captured_uris: list[str] = []
+
+    async def _stub_ingest(path, *, tier, source_uri, **_kw):
+        captured_uris.append(source_uri)
+        return IngestionRecord(
+            source_uri=source_uri,
+            detected_format=KnowledgeFormat.MARKDOWN,
+            tier=tier,
+            status=IngestionStatus.COMPLETED,
+            chunks_produced=1,
+            claims_extracted=3,
+            document_hash="sha",
+        )
+
+    fake_ingestor = MagicMock()
+    fake_ingestor.ingest_file = AsyncMock(side_effect=_stub_ingest)
+    from polymathera.colony.knowledge import deps as kdeps_mod
+    monkeypatch.setattr(
+        kdeps_mod, "get_default_ingestor", lambda: fake_ingestor,
+    )
+
+    fake_bb = MagicMock()
+    fake_bb.write = AsyncMock()
+    state_provider._colony_blackboard = fake_bb
+
+    result = await state_provider.materialize_design_context(
+        refresh=False, include_kuzu=True,
+    )
+
+    # Each matching file got ingested with the design_context URI.
+    assert fake_ingestor.ingest_file.await_count == 2
+    assert sorted(captured_uris) == [
+        "design_context://docs/docs/constraints.md",
+        "design_context://docs/docs/objectives.md",
+    ]
+    # All ingest_file calls used tier_1_foundations (design context is
+    # foundational, high retrieval weight per the master pipeline).
+    from polymathera.colony.knowledge.models import CorpusTier
+    for call in fake_ingestor.ingest_file.await_args_list:
+        assert call.kwargs["tier"] == CorpusTier.TIER_1_FOUNDATIONS
+
+    # Response shape: ingested + total_claims surface the kuzu outcome.
+    assert result["ingested"] == ["docs"]
+    assert result["total_claims"] == 6  # 2 files × 3 claims each
+    kuzu_row = next(r for r in result["rows"] if r["path"] == "kuzu")
+    assert kuzu_row["status"] == "completed"
+    assert kuzu_row["num_files"] == 2
+    assert kuzu_row["num_claims"] == 6
+    assert kuzu_row["error"] == ""
+
+    # Two blackboard events: one vcm, one kuzu.
+    bb_calls = fake_bb.write.await_args_list
+    paths_emitted = {
+        c.kwargs["value"]["path"] for c in bb_calls
+    }
+    assert paths_emitted == {"vcm", "kuzu"}
+    docs_kuzu = next(
+        c for c in bb_calls
+        if c.kwargs["value"]["path"] == "kuzu"
+        and c.kwargs["value"]["source_name"] == "docs"
+    )
+    assert docs_kuzu.kwargs["value"]["status"] == "completed"
+    assert docs_kuzu.kwargs["value"]["num_claims"] == 6
+    assert "kuzu" in docs_kuzu.kwargs["tags"]
+
+
+async def test_materialize_design_context_kuzu_partial_on_some_file_failures(
+    bootstrapped_repo: DesignMonorepoClient,
+    state_provider: RepoStateProvider,
+    monkeypatch,
+) -> None:
+    """When some files fail to ingest but others succeed, the kuzu
+    row's status degrades to 'partial' and the error string lists
+    failing files."""
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from polymathera.colony.knowledge.models import (
+        IngestionRecord, IngestionStatus, KnowledgeFormat,
+    )
+
+    repo_root = bootstrapped_repo.working_dir
+    (repo_root / "docs").mkdir(parents=True, exist_ok=True)
+    (repo_root / "docs" / "good.md").write_text("# good\n", encoding="utf-8")
+    (repo_root / "docs" / "bad.md").write_text("# bad\n", encoding="utf-8")
+    (repo_root / ".colony" / "repo_map.yaml").write_text(
+        "schema_version: 3\n"
+        "vcm_sources:\n  - { name: default, type: git_repo }\n"
+        "design_context_sources:\n"
+        "  - name: docs\n    paths: ['docs/**/*.md']\n",
+        encoding="utf-8",
+    )
+
+    fake_vcm = MagicMock()
+    fake_vcm.mmap_application_scope = AsyncMock(
+        return_value=MagicMock(status="mapped"),
+    )
+    fake_vcm.get_pages_for_scope = AsyncMock(return_value=[])
+    fake_vcm.lock_page = AsyncMock()
+    async def _stub_get_vcm():
+        return fake_vcm
+    from polymathera.colony import _handles as handles_mod
+    monkeypatch.setattr(handles_mod, "get_vcm", _stub_get_vcm)
+
+    async def _stub_ingest(path, *, tier, source_uri, **_kw):
+        if "bad.md" in str(path):
+            raise RuntimeError("simulated ingest failure")
+        return IngestionRecord(
+            source_uri=source_uri,
+            detected_format=KnowledgeFormat.MARKDOWN,
+            tier=tier,
+            status=IngestionStatus.COMPLETED,
+            chunks_produced=1,
+            claims_extracted=2,
+            document_hash="sha",
+        )
+
+    fake_ingestor = MagicMock()
+    fake_ingestor.ingest_file = AsyncMock(side_effect=_stub_ingest)
+    from polymathera.colony.knowledge import deps as kdeps_mod
+    monkeypatch.setattr(
+        kdeps_mod, "get_default_ingestor", lambda: fake_ingestor,
+    )
+
+    fake_bb = MagicMock()
+    fake_bb.write = AsyncMock()
+    state_provider._colony_blackboard = fake_bb
+
+    result = await state_provider.materialize_design_context(
+        refresh=False, include_kuzu=True,
+    )
+
+    kuzu_row = next(r for r in result["rows"] if r["path"] == "kuzu")
+    assert kuzu_row["status"] == "partial"
+    assert kuzu_row["num_files"] == 2
+    assert kuzu_row["num_claims"] == 2  # only good.md
+    assert "bad.md" in kuzu_row["error"]
+    # The 'docs' source still appears in 'ingested' (partial counts).
+    assert result["ingested"] == ["docs"]
+    # The failure also appears in 'failed' because error != "".
+    assert any(
+        f["source_name"] == "docs" and f["path"] == "kuzu"
+        for f in result["failed"]
+    )
+
+
+async def test_materialize_design_context_no_rows_short_circuits(
+    bootstrapped_repo: DesignMonorepoClient,
+    state_provider: RepoStateProvider,
+    monkeypatch,
+) -> None:
+    """Empty ``design_context_sources`` block returns a helpful
+    message without touching VCM or the blackboard."""
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    repo_root = bootstrapped_repo.working_dir
+    (repo_root / ".colony" / "repo_map.yaml").write_text(
+        "schema_version: 3\n"
+        "vcm_sources:\n"
+        "  - { name: default, type: git_repo }\n",
+        encoding="utf-8",
+    )
+
+    fake_vcm = MagicMock()
+    fake_vcm.mmap_application_scope = AsyncMock()
+    async def _stub_get_vcm():
+        return fake_vcm
+    from polymathera.colony import _handles as handles_mod
+    monkeypatch.setattr(handles_mod, "get_vcm", _stub_get_vcm)
+
+    fake_bb = MagicMock()
+    fake_bb.write = AsyncMock()
+    state_provider._colony_blackboard = fake_bb
+
+    result = await state_provider.materialize_design_context(refresh=False)
+
+    assert result["count"] == 0
+    assert result["mapped"] == []
+    assert result["pinned"] == []
+    assert "No ``design_context_sources:``" in result["message"]
+    fake_vcm.mmap_application_scope.assert_not_awaited()
+    fake_bb.write.assert_not_awaited()
 
 
 async def test_checkpoint_state_round_trip(
@@ -673,7 +1061,7 @@ async def test_initialize_repo_map_is_idempotent(
     await checkpointer.initialize_repo_map()
     target = bootstrapped_repo.working_dir / REPO_MAP_DIR / REPO_MAP_FILENAME
     target.write_text(
-        "schema_version: 2\n"
+        "schema_version: 3\n"
         "sources:\n"
         "  - name: operator-edited\n"
         "    type: git_repo\n",

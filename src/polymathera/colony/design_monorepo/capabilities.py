@@ -31,6 +31,7 @@ from overrides import override
 from ..agents.base import Agent, AgentCapability
 from ..agents.blackboard import BlackboardEvent, ConvergenceQuiescenceProtocol
 from ..agents.blackboard.protocol import (
+    DesignContextMappedProtocol,
     DesignMonorepoEventProtocol,
     HumanApprovalProtocol,
     VCMEventProtocol,
@@ -251,6 +252,224 @@ class DesignMonorepoCapabilityBase(AgentCapability):
             self._working_dir = Path(working_dir)
         self._read_only = read_only
         self._client: DesignMonorepoClient | None = None
+        # Lazily created by :meth:`_load_design_context_impl` (called
+        # by both ``RepoStateProvider.materialize_design_context`` and
+        # ``DesignProcessCapability.load_design_context``) when at
+        # least one ``design_context_sources`` row has ``pin_in_vcm:
+        # true``. Owned at the base level so :meth:`stop` can cancel
+        # cleanly regardless of which subclass instantiated it.
+        # See ``design_context_renewer.py``.
+        self._design_context_renewer: Any = None
+
+    @override
+    async def stop(self) -> None:
+        """Cancel the design-context lock renewer (if it was started)
+        before standard capability teardown. Locks naturally expire
+        on their existing duration — no explicit unlock — matching
+        the renewer's design.
+
+        Defined on the base class so every design-monorepo capability
+        that materialises design context (RepoStateProvider via
+        ``materialize_design_context``; DesignProcessCapability via
+        ``load_design_context``) cleans up its renewer without
+        having to re-implement this hook.
+        """
+
+        if self._design_context_renewer is not None:
+            try:
+                await self._design_context_renewer.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "%s.stop: design-context renewer raised during "
+                    "shutdown; continuing teardown.",
+                    type(self).__name__,
+                )
+            self._design_context_renewer = None
+        await super().stop()
+
+    async def _load_design_context_impl(
+        self, *, refresh: bool, include_kuzu: bool,
+    ) -> dict[str, Any]:
+        """Shared body for the design-context materialisation action.
+
+        Public callers:
+
+        - :meth:`RepoStateProvider.materialize_design_context` — the
+          legacy / planner-facing action surface (P1).
+        - :meth:`DesignProcessCapability.load_design_context` — the
+          new ``DesignProcessCapability``-side action (top-level design
+          plan §13; ships P5a).
+
+        Both invoke this method with the same arg shape so subscribers
+        of :class:`DesignContextMappedProtocol` see the same payload
+        regardless of which action triggered the run. The renewer is
+        cached on ``self._design_context_renewer`` (base-class
+        attribute), so if BOTH capabilities are mounted on the same
+        agent and BOTH actions get called, each owns its own renewer
+        — wasteful but correct (locks are per-page-id, multi-locker
+        is idempotent for page eviction).
+        """
+
+        import time
+
+        from polymathera.colony._handles import get_vcm
+        from polymathera.colony.vcm.models import MmapConfig
+
+        from .design_context_renewer import DesignContextLockRenewer
+        from .materialize import materialize_design_context_sources
+        from .repo_map import RepoMap
+
+        repo_root = self._working_dir
+        if not (repo_root / ".git").is_dir():
+            self._lazy_clone_from_agent_metadata()
+        if not (repo_root / ".git").is_dir():
+            raise DesignMonorepoError(
+                f"{repo_root} is not a git repository — set the colony's "
+                "design-monorepo URL on the landing page and start a "
+                "fresh session, or run ``initialize_repo_map`` first.",
+            )
+        if refresh:
+            await asyncio.to_thread(self._refresh_against_origin)
+
+        repo_map = await asyncio.to_thread(RepoMap.load, repo_root)
+
+        if not repo_map.design_context_sources:
+            return {
+                "mapped": [],
+                "pinned": [],
+                "failed": [],
+                "count": 0,
+                "rows": [],
+                "message": (
+                    "No ``design_context_sources:`` rows declared in "
+                    f"{REPO_MAP_DIR}/{REPO_MAP_FILENAME}. Add a section "
+                    "to the repo map to opt this project in to "
+                    "design-context materialisation."
+                ),
+            }
+
+        # Resolve provenance from the per-agent clone (matches the
+        # ``ingest_repo_map_literature`` pattern — same clone, same
+        # branch state). VCM mapping happens off this clone's URL +
+        # active branch + active commit.
+        from git import Repo
+        repo = await asyncio.to_thread(Repo, str(repo_root))
+        params = getattr(self._agent.metadata, "parameters", None) or {} \
+            if self._agent is not None else {}
+        origin_url = params.get(self._DESIGN_MONOREPO_URL_KEY, "")
+        try:
+            branch = repo.active_branch.name
+        except TypeError:
+            # Detached HEAD — fall back to a stable label so the
+            # mmap call still has a branch identifier; the commit
+            # below is the real disambiguator.
+            branch = "HEAD"
+        commit = repo.head.commit.hexsha
+
+        vcm_handle = await get_vcm()
+        # Lazily create the renewer on first call.
+        if self._design_context_renewer is None:
+            self._design_context_renewer = DesignContextLockRenewer(
+                vcm_handle=vcm_handle,
+            )
+
+        # Colony-level scope id — same convention ``ScopeUtils`` uses
+        # for the dashboard's VCM mapping. ``materialize_design_context_sources``
+        # composes ``"{base}:design_context.{row.name}"`` per row.
+        base_scope_id = f"design_monorepo:{origin_url or 'local'}:{branch}"
+
+        report = await materialize_design_context_sources(
+            vcm_handle=vcm_handle,
+            repo_map=repo_map,
+            repo_root=repo_root,
+            base_scope_id=base_scope_id,
+            origin_url=origin_url,
+            branch=branch,
+            commit=commit,
+            mmap_config=MmapConfig(),
+            renewer=self._design_context_renewer,
+            include_kuzu=include_kuzu,
+        )
+
+        # Emit one DesignContextMappedProtocol event per outcome row
+        # (so two events per source when include_kuzu: one with
+        # path='vcm', one with path='kuzu'). Colony scope so
+        # subscribers across all agents in the cluster see it.
+        blackboard = await self._get_colony_blackboard()
+        now = time.time()
+        millis_base = int(now * 1000)
+        for idx, row in enumerate(report.rows):
+            key = DesignContextMappedProtocol.event_key(
+                source_name=row.source_name,
+                path=row.path,
+                # +idx breaks key collisions on multi-row batches
+                # that complete within the same millisecond.
+                millis=millis_base + idx,
+            )
+            await blackboard.write(
+                key=key,
+                value={
+                    "source_name": row.source_name,
+                    "path": row.path,
+                    "page_scope_id": row.scope_id,
+                    "num_files": row.num_files,
+                    "num_claims": row.num_claims,
+                    "pinned": row.pinned,
+                    "status": row.status,
+                    "error": row.error,
+                    "materialized_at": now,
+                },
+                created_by=(
+                    f"design_context_materializer:{self.capability_key}"
+                ),
+                tags={
+                    "design_context",
+                    "materialized",
+                    row.path,
+                    *(("pinned",) if row.pinned else ()),
+                },
+            )
+
+        mapped = [
+            r.source_name for r in report.vcm_rows
+            if r.status in ("mapped", "already_mapped")
+        ]
+        pinned = [r.source_name for r in report.vcm_rows if r.pinned]
+        ingested = [
+            r.source_name for r in report.kuzu_rows
+            if r.status in ("completed", "partial")
+        ]
+        failed = [
+            {
+                "source_name": r.source_name,
+                "path": r.path,
+                "error": r.error or r.status,
+            }
+            for r in report.rows
+            if r.status == "error" or r.error
+        ]
+        rows_payload = [
+            {
+                "source_name": r.source_name,
+                "path": r.path,
+                "scope_id": r.scope_id,
+                "status": r.status,
+                "num_files": r.num_files,
+                "num_claims": r.num_claims,
+                "pinned": r.pinned,
+                "error": r.error,
+            }
+            for r in report.rows
+        ]
+        return {
+            "mapped": mapped,
+            "pinned": pinned,
+            "ingested": ingested,
+            "total_claims": report.total_claims_extracted,
+            "failed": failed,
+            "count": len(report.rows),
+            "rows": rows_payload,
+        }
 
     @property
     def working_dir(self) -> Path:
@@ -843,6 +1062,11 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
         self._cached_manifest_mtime: int | None = None
         self._discovered_extensions: DiscoveredExtensions | None = None
         self._discovered_extensions_fp: tuple[int | None, ...] | None = None
+        # ``self._design_context_renewer`` is initialised on the base
+        # class (:class:`DesignMonorepoCapabilityBase`) — see its
+        # ``__init__`` + ``stop()`` for the renewer lifecycle. Lazily
+        # created on first call to ``materialize_design_context`` /
+        # ``load_design_context``.
 
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"design_state", "git", "read"})
@@ -1154,6 +1378,84 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
                 "qdrant_url": qdrant_cfg.url or None,
             },
         }
+
+    @action_executor(
+        planning_summary=(
+            "Materialize the design monorepo's ``design_context_sources:`` "
+            "block as VCM scopes (path 2 of the three ingestion paths)."
+        ),
+    )
+    async def materialize_design_context(
+        self, *, refresh: bool = True, include_kuzu: bool = True,
+    ) -> dict[str, Any]:
+        """Walk the design monorepo's ``.colony/repo_map.yaml``
+        ``design_context_sources:`` block and materialise every row
+        through the two non-raw ingestion paths of §5 of the top-
+        level design plan:
+
+        - **Path 2 (VCM, always)**: map the row as a synthetic
+          ``literature``-typed VCM scope; if ``pin_in_vcm: true``,
+          the materialised pages are ``lock_page``'d and a
+          background renewer (owned by this capability instance)
+          refreshes the locks before expiry so the pages survive
+          eviction.
+        - **Path 1 (Kuzu KG, when ``include_kuzu=True``)**: for
+          each matching file, feed it to the singleton Ingestor with
+          ``source_uri="design_context://{row.name}/{rel}"``. The
+          ingestor's claim extractor writes ``Claim`` instances into
+          the colony-shared graph store (Kuzu if
+          ``knowledge.graph_db_path`` is set in the operator YAML,
+          InMemory otherwise) so downstream actions like
+          ``find_inconsistencies`` and
+          ``search_design_context(path='kuzu')`` can query them.
+          Phase P3a ships the deterministic (rule-based) extractor;
+          richer LLM-driven extraction lands in Phase P3d.
+
+        ``refresh=True`` (default) runs ``git fetch origin`` +
+        ``git reset --hard origin/<branch>`` on the per-agent clone
+        before reading ``repo_map.yaml`` — so an operator's edit-on-
+        host → push → tell-agent flow picks up the latest rows. Set
+        to ``False`` to read from the current clone state.
+
+        ``include_kuzu=False`` skips path-1 entirely (useful when the
+        operator hasn't wired a graph store yet, or for an
+        intentionally VCM-only run). One ``kuzu`` outcome row per
+        source is still emitted with ``status='skipped'`` so
+        subscribers see a complete picture.
+
+        Returns a dict the planner can branch on without log access:
+
+        - ``mapped`` — source names whose VCM mmap succeeded.
+        - ``pinned`` — subset of ``mapped`` that were also pinned.
+        - ``ingested`` — source names whose KG ingestion succeeded
+          (``completed`` or ``partial``).
+        - ``total_claims`` — sum of claims extracted across all
+          ingested sources (path-1 only).
+        - ``failed`` — list of ``{source_name, path, error}`` rows.
+        - ``count`` — number of outcome rows (one per (source, path)).
+        - ``rows`` — full per-row outcomes (the same payload that
+          gets written to the blackboard as
+          ``DesignContextMappedProtocol`` records).
+
+        Emits one ``DesignContextMappedProtocol`` colony-scope event
+        per outcome row (so two events per source when
+        ``include_kuzu=True``: one for ``path='vcm'``, one for
+        ``path='kuzu'``).
+
+        Failures on a single row are logged + recorded in the report
+        and do NOT block subsequent rows. Raw ``read_file`` access
+        (path 3) needs no materialisation — the operator just reads
+        the files directly.
+
+        Delegates to :meth:`DesignMonorepoCapabilityBase._load_design_context_impl`
+        — the same body is reused by
+        :meth:`DesignProcessCapability.load_design_context` (top-level
+        design plan §13) so both action surfaces stay in lockstep.
+        """
+
+        return await self._load_design_context_impl(
+            refresh=refresh, include_kuzu=include_kuzu,
+        )
 
     def _refresh_against_origin(self) -> None:
         """Best-effort ``git fetch origin && git reset --hard

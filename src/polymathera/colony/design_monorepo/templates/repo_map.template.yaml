@@ -1,22 +1,28 @@
-# `.colony/repo_map.yaml` — VCM mapping + KB ingestion declarations
-# for this design monorepo.
+# `.colony/repo_map.yaml` — VCM mapping + KB ingestion + design-context
+# declarations for this design monorepo.
 #
-# Two **independent** sections — ticking one does not imply the other:
+# Three **independent** sections — ticking one does not imply the others:
 #
-#   vcm_sources:        list of named scopes the framework maps into
-#                       VCM. The materialiser issues one
-#                       ``mmap_application_scope`` call per row.
-#   knowledge_sources:  list of named glob bundles the KB materialiser
-#                       feeds to the process-singleton ``Ingestor``.
+#   vcm_sources:             list of named scopes the framework maps
+#                            into VCM. The materialiser issues one
+#                            ``mmap_application_scope`` call per row.
+#   knowledge_sources:       list of named glob bundles the KB
+#                            materialiser feeds to the process-
+#                            singleton ``Ingestor``.
+#   design_context_sources:  list of markdown corpora declared as
+#                            "design context". The materialiser routes
+#                            each row through VCM chunked pages (and,
+#                            once Phase 3 ships, Kuzu KG claim
+#                            extraction). Raw read_file access needs
+#                            no declaration.
 #
-# The Design Monorepo tab renders one checkbox list per section so
-# the operator picks each independently. The same path can appear in
-# both, one, or neither — VCM mapping and KB ingestion are
-# orthogonal operations.
+# The Design Monorepo tab renders checkbox lists for the operator-
+# facing sections (vcm_sources, knowledge_sources). The same path can
+# appear in any combination — the three operations are orthogonal.
 #
 # Full schema reference: docs/architecture/repo-map.md.
 
-schema_version: 2
+schema_version: 3
 
 # ---------- VCM mapping ----------------------------------------------
 vcm_sources:
@@ -86,3 +92,33 @@ knowledge_sources: []
   #   destination: kb/literature/atomic-physics/
   #   profile: scientific_paper
   #   tier: tier_3_research
+
+# ---------- Design-context declarations ------------------------------
+# Free-form layout: no closed role vocabulary. Each row declares "this
+# set of markdown files counts as design context"; agents (LLMs) infer
+# the structure (objectives / constraints / alternatives / hypotheses /
+# decisions / contradicts / verifies / ...) per chunk during KG
+# ingestion (Phase 3). Free-form ``hint`` is an extractor cue, never
+# a gate.
+#
+# Set ``pin_in_vcm: true`` to lock the materialised pages so they
+# survive eviction (renewer task refreshes the locks ahead of expiry).
+# Use sparingly — pinned pages reduce the working-set budget available
+# for transient context.
+design_context_sources: []
+  # Examples — uncomment and adapt to your design-doc layout:
+  #
+  # - name: system-design-docs
+  #   paths:
+  #     - "kb/design/**/*.md"
+  #     - "docs/**/*.md"
+  #     - "src/**/design_notes/*.md"
+  #   hint: |
+  #     Mission, success criteria, hard constraints, design
+  #     alternatives, hypotheses, and decisions. Files frequently
+  #     mix multiple kinds within a single document.
+  #   pin_in_vcm: true
+  #   pin_lock_duration_days: 7
+  #
+  # - name: hypotheses
+  #   paths: ["**/hypotheses/*.md"]

@@ -48,6 +48,13 @@ class MissionSpec(BaseModel):
     are passed to the agent system so it can wire the named capabilities at
     spawn time.
 
+    ``worker`` is optional (default ``""``): some missions are LLM-planner-
+    driven on the coordinator alone and never spawn a separate worker class
+    (e.g. ``project_planning`` — the coordinator drives the full
+    propose-approve-apply flow via existing action surfaces). Downstream
+    readers (``cli/polymath.py``, ``session_agent.py``'s
+    ``available_missions``) already default to empty string.
+
     Schema is the single source of truth for every registration mechanism that
     surfaces a mission to the SessionAgent (the colony-builtin dict, the
     ``polymathera.mission_types`` entry-point group, and L1-A's
@@ -62,7 +69,7 @@ class MissionSpec(BaseModel):
     description: str
     coordinator_v1: str
     coordinator_v2: str
-    worker: str
+    worker: str = ""
     coordinator_capabilities: list[str] = Field(default_factory=list)
     worker_capabilities: list[str] = Field(default_factory=list)
     extra_metadata_keys: list[str] = Field(default_factory=list)
@@ -320,6 +327,104 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             ],
         },
     },
+    "project_planning": {
+        "label": "Project Planning",
+        "description": (
+            "Bootstrap or revise the design roadmap from the project's "
+            "design context (objectives + constraints + requirements), "
+            "create matching GitHub issues + Project items, and propose "
+            "colony/user task assignments — every mutation gated on a "
+            "single human-approval round so the user reviews + approves "
+            "(or rejects) before anything is written. Three modes via "
+            "mission_params['mode']: bootstrap (initial roadmap from "
+            "design context), refresh (bidirectional sync between "
+            "ROADMAP.md and GitHub issues), assignments (propose "
+            "colony-vs-user assignment per open roadmap-linked issue)."
+        ),
+        "coordinator_v1": "polymathera.colony.agents.missions.project_planning.coordinator.ProjectPlanningCoordinator",
+        "coordinator_v2": "polymathera.colony.agents.missions.project_planning.coordinator.ProjectPlanningCoordinator",
+        # No separate worker class: the LLM planner on the coordinator
+        # drives the full propose-approve-apply flow over the existing
+        # P5 action surfaces. ``MissionSpec.worker`` defaults to "" for
+        # this mission shape.
+        "coordinator_capabilities": [
+            "DesignProcessCapability",
+            "SystemDesignCapability",
+            "GitHubCapability",
+            "HumanApprovalCapability",
+            "RepoStateProvider",
+            "DesignCheckpointer",
+            "ToolBuilder",
+        ],
+        "worker_capabilities": [],
+        "extra_metadata_keys": [
+            "mode",
+            "repo",
+            "roadmap_path",
+            "user_github_login",
+            "direction",
+        ],
+        "self_concept": {
+            "description": (
+                "Propose, gate on user approval, and apply roadmap "
+                "edits. The mission orchestrates three existing action "
+                "surfaces — bootstrap_roadmap_from_objectives (initial "
+                "roadmap), sync_roadmap_with_github (reconcile), and "
+                "propose_task_assignments (colony/user routing). Every "
+                "apply step is preceded by a dry-run + a single "
+                "HumanApprovalRequest carrying the proposal as ``extra``."
+            ),
+            "goals": [
+                (
+                    "Read mission_params['mode'] to pick the action: "
+                    "bootstrap → bootstrap_roadmap_from_objectives; "
+                    "refresh → sync_roadmap_with_github; "
+                    "assignments → propose_task_assignments"
+                ),
+                (
+                    "Call the chosen action with dry_run=True to compute "
+                    "the proposal; render it concisely in the approval "
+                    "question; pass the full proposal dict as ``extra``"
+                ),
+                (
+                    "Post one HumanApprovalRequest via "
+                    "request_human_approval(question=..., extra={proposal,"
+                    " mode, repo, ...}); WAIT for the user's choice to "
+                    "surface as planner context"
+                ),
+                (
+                    "On choice='approve': re-call the same action with "
+                    "dry_run=False and report the applied result"
+                ),
+                (
+                    "On choice='reject': exit cleanly without writing; "
+                    "report what was proposed and why it was rejected"
+                ),
+            ],
+            "constraints": [
+                (
+                    "NEVER call any DesignProcessCapability action with "
+                    "dry_run=False until a HumanApprovalResponse with "
+                    "choice='approve' is observed for the matching "
+                    "request_id"
+                ),
+                (
+                    "Always pass mission_params['user_github_login'] as "
+                    "the user_github_login arg to "
+                    "propose_task_assignments — never hardcode or invent"
+                ),
+                (
+                    "Forward mission_params['repo'] and ['roadmap_path'] "
+                    "verbatim to the action calls; do not infer them"
+                ),
+                (
+                    "Stamp the colony:roadmap-task marker via the "
+                    "existing actions (they already do this); never "
+                    "create issues directly through GitHubCapability"
+                ),
+            ],
+        },
+    },
 }
 
 
@@ -474,6 +579,10 @@ class GitHubAuthConfig(ConfigComponent):
     private_key_pem: str = Field(
         default="",
         json_schema_extra={"env": "GITHUB_PRIVATE_KEY_PEM", "optional": True},
+    )
+    app_slug: str = Field(
+        default="",
+        json_schema_extra={"env": "GITHUB_APP_SLUG", "optional": True},
     )
 
 

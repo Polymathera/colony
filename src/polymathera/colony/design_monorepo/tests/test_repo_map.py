@@ -16,10 +16,12 @@ import pytest
 
 from polymathera.colony.design_monorepo.repo_map import (
     AcquirerSpec,
+    DesignContextSource,
     KnowledgeSource,
     REPO_MAP_DIR,
     REPO_MAP_FILENAME,
     RepoMap,
+    SCHEMA_VERSION,
     VcmSource,
 )
 from polymathera.colony.knowledge.models import CorpusTier
@@ -61,7 +63,7 @@ def test_load_parses_a_real_repo_map(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     (repo_root / REPO_MAP_DIR).mkdir(parents=True)
     (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
-        "schema_version: 2\n"
+        "schema_version: 3\n"
         "vcm_sources:\n"
         "  - name: code\n"
         "    type: git_repo\n"
@@ -178,7 +180,7 @@ def test_load_parses_knowledge_sources_block(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     (repo_root / REPO_MAP_DIR).mkdir(parents=True)
     (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
-        "schema_version: 2\n"
+        "schema_version: 3\n"
         "vcm_sources:\n"
         "  - name: code\n"
         "    type: git_repo\n"
@@ -203,7 +205,7 @@ def test_knowledge_source_requires_name(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     (repo_root / REPO_MAP_DIR).mkdir(parents=True)
     (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
-        "schema_version: 2\n"
+        "schema_version: 3\n"
         "vcm_sources: []\n"
         "knowledge_sources:\n"
         "  - paths: ['x/*']\n",  # missing required ``name``
@@ -244,7 +246,7 @@ def test_load_parses_per_source_paging_block(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     (repo_root / REPO_MAP_DIR).mkdir(parents=True)
     (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
-        "schema_version: 2\n"
+        "schema_version: 3\n"
         "vcm_sources:\n"
         "  - name: code\n"
         "    type: git_repo\n"
@@ -313,7 +315,7 @@ def test_load_parses_acquirer_row(tmp_path: Path) -> None:
     repo_root = tmp_path / "r"
     (repo_root / REPO_MAP_DIR).mkdir(parents=True)
     (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
-        "schema_version: 2\n"
+        "schema_version: 3\n"
         "vcm_sources: []\n"
         "knowledge_sources:\n"
         "  - name: allred_2002\n"
@@ -346,3 +348,197 @@ def test_load_rejects_v1_schema(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="schema_version"):
         RepoMap.load(repo_root)
+
+
+def test_load_rejects_v2_schema(tmp_path: Path) -> None:
+    """Schema v3 (design-context section) is the current version. v2
+    is the previous one; operators must bump explicitly (the
+    materialiser-side schema upgrade tool is out of scope here)."""
+
+    repo_root = tmp_path / "r"
+    (repo_root / REPO_MAP_DIR).mkdir(parents=True)
+    (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
+        "schema_version: 2\nvcm_sources: []\n", encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="schema_version"):
+        RepoMap.load(repo_root)
+
+
+def test_current_schema_version_is_3() -> None:
+    """Locks the constant — bumping it again should force a conscious
+    test update + design-doc note, not a silent change."""
+
+    assert SCHEMA_VERSION == 3
+
+
+# ---------------------------------------------------------------------------
+# design_context_sources — schema v3 addition
+# ---------------------------------------------------------------------------
+
+
+def test_design_context_source_defaults() -> None:
+    src = DesignContextSource(name="dc", paths=["docs/**/*.md"])
+    assert src.hint is None
+    assert src.pin_in_vcm is False
+    assert src.pin_lock_duration_days == 7
+
+
+def test_design_context_source_requires_non_empty_paths() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        DesignContextSource(name="dc", paths=[])
+
+
+def test_design_context_source_pin_lock_duration_must_be_positive() -> None:
+    with pytest.raises(ValueError):
+        DesignContextSource(
+            name="dc", paths=["x"], pin_lock_duration_days=0,
+        )
+
+
+def test_design_context_source_matches_glob() -> None:
+    src = DesignContextSource(name="dc", paths=["docs/**/*.md"])
+    assert src.matches("docs/objectives.md") is True
+    assert src.matches("docs/sub/dir/decisions.md") is True
+    assert src.matches("src/code.py") is False
+
+
+def test_design_context_source_extra_fields_rejected() -> None:
+    """The model uses ``extra='forbid'`` — typos must raise."""
+
+    with pytest.raises(ValueError):
+        DesignContextSource(
+            name="dc", paths=["x"], role="objectives",  # type: ignore[call-arg]
+        )
+
+
+def test_repo_map_default_has_empty_design_context_sources() -> None:
+    rm = RepoMap.default_for_unmapped_repo()
+    assert rm.design_context_sources == []
+
+
+def test_repo_map_rejects_duplicate_design_context_source_names() -> None:
+    with pytest.raises(ValueError, match="duplicate design_context_sources"):
+        RepoMap(
+            vcm_sources=[VcmSource(name="default", type="git_repo")],
+            design_context_sources=[
+                DesignContextSource(name="dup", paths=["a"]),
+                DesignContextSource(name="dup", paths=["b"]),
+            ],
+        )
+
+
+def test_load_parses_design_context_sources_block(tmp_path: Path) -> None:
+    repo_root = tmp_path / "r"
+    (repo_root / REPO_MAP_DIR).mkdir(parents=True)
+    (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
+        "schema_version: 3\n"
+        "vcm_sources:\n"
+        "  - name: default\n"
+        "    type: git_repo\n"
+        "design_context_sources:\n"
+        "  - name: system-design-docs\n"
+        "    paths:\n"
+        "      - 'kb/design/**/*.md'\n"
+        "      - 'docs/**/*.md'\n"
+        "    hint: 'mixed objectives + constraints + decisions'\n"
+        "    pin_in_vcm: true\n"
+        "    pin_lock_duration_days: 5\n"
+        "  - name: hypotheses\n"
+        "    paths: ['**/hypotheses/*.md']\n",
+        encoding="utf-8",
+    )
+    rm = RepoMap.load(repo_root)
+    assert [s.name for s in rm.design_context_sources] == [
+        "system-design-docs", "hypotheses",
+    ]
+    pinned = rm.design_context_sources[0]
+    assert pinned.pin_in_vcm is True
+    assert pinned.pin_lock_duration_days == 5
+    assert pinned.hint is not None and "mixed" in pinned.hint
+    unpinned = rm.design_context_sources[1]
+    assert unpinned.pin_in_vcm is False
+    assert unpinned.pin_lock_duration_days == 7  # default
+    assert unpinned.hint is None
+
+
+def test_load_treats_design_context_sources_as_optional(tmp_path: Path) -> None:
+    """A v3 file with no design_context_sources block is legal — the
+    field defaults to []."""
+
+    repo_root = tmp_path / "r"
+    (repo_root / REPO_MAP_DIR).mkdir(parents=True)
+    (repo_root / REPO_MAP_DIR / REPO_MAP_FILENAME).write_text(
+        "schema_version: 3\n"
+        "vcm_sources:\n"
+        "  - name: default\n"
+        "    type: git_repo\n",
+        encoding="utf-8",
+    )
+    rm = RepoMap.load(repo_root)
+    assert rm.design_context_sources == []
+
+
+# ---------------------------------------------------------------------------
+# DesignContextMappedProtocol — key/parse round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_design_context_mapped_protocol_round_trip() -> None:
+    from polymathera.colony.agents.blackboard.protocol import (
+        DesignContextMappedProtocol,
+    )
+
+    key = DesignContextMappedProtocol.event_key(
+        source_name="hard-constraints", path="vcm", millis=1700000000123,
+    )
+    assert key.startswith("design_context_mapped:")
+    parsed = DesignContextMappedProtocol.parse_event_key(key)
+    assert parsed == {
+        "source_name": "hard-constraints",
+        "path": "vcm",
+        "millis": "1700000000123",
+    }
+
+
+def test_design_context_mapped_protocol_round_trip_with_colon_in_name() -> None:
+    """Source names with ``:`` collide with the blackboard separator
+    so the protocol substitutes ``/`` and reverses on parse."""
+
+    from polymathera.colony.agents.blackboard.protocol import (
+        DesignContextMappedProtocol,
+    )
+
+    key = DesignContextMappedProtocol.event_key(
+        source_name="ns:foo", path="vcm", millis=1,
+    )
+    # The on-wire key has the substituted form; the parsed name is
+    # the original.
+    assert ":foo" not in key.split("design_context_mapped:")[1].split(":")[0]
+    parsed = DesignContextMappedProtocol.parse_event_key(key)
+    assert parsed["source_name"] == "ns:foo"
+    assert parsed["path"] == "vcm"
+
+
+def test_design_context_mapped_protocol_patterns() -> None:
+    from polymathera.colony.agents.blackboard.protocol import (
+        DesignContextMappedProtocol,
+    )
+
+    assert DesignContextMappedProtocol.event_pattern() == (
+        "design_context_mapped:*"
+    )
+    assert DesignContextMappedProtocol.event_pattern_for_source("foo") == (
+        "design_context_mapped:foo:*"
+    )
+    assert DesignContextMappedProtocol.event_pattern_for_path("vcm") == (
+        "design_context_mapped:*:vcm:*"
+    )
+
+
+def test_design_context_mapped_protocol_rejects_alien_key() -> None:
+    from polymathera.colony.agents.blackboard.protocol import (
+        DesignContextMappedProtocol,
+    )
+
+    with pytest.raises(ValueError, match="Not a DesignContextMapped"):
+        DesignContextMappedProtocol.parse_event_key("monorepo_commit:foo:bar")

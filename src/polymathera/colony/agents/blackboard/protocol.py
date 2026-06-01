@@ -2175,3 +2175,396 @@ class MonorepoCommitProtocol(BlackboardProtocol):
         return {"branch": branch_safe.replace("__", "/"), "sha": sha}
 
 
+class DesignContextMappedProtocol(BlackboardProtocol):
+    """Protocol fired when the design-context materialiser finishes
+    mapping a ``design_context_sources`` row through one of its
+    ingestion paths.
+
+    Three ingestion paths defined by the top-level design plan
+    (``colony_docs/markdown/plans/design_top_level_design_process.md``
+    §5): ``"vcm"`` (chunked pages, Phase 1), ``"kuzu"`` (LLM
+    claim-extraction into the knowledge graph, Phase 3), and raw
+    ``read_file`` (no event — agents read files directly). One event
+    per (source_name, path) tuple. Subscribers (the system-design
+    capability, the dashboard) react to know when context is fresh
+    enough to query.
+
+    Body fields the writer SHOULD include in the blackboard value
+    payload (the protocol enforces only the key shape):
+
+    - ``source_name`` (str): the ``design_context_sources`` row name
+    - ``path`` (str): ``"vcm"`` | ``"kuzu"``
+    - ``page_scope_id`` (str, vcm path only): scope id passed to
+      ``mmap_application_scope``
+    - ``num_files`` (int): file count matched by the row's globs
+    - ``num_claims`` (int, kuzu path only): claims extracted into the KG
+    - ``pinned`` (bool, vcm path only): whether pages were lock_page'd
+    - ``materialized_at`` (float): unix seconds
+
+    Key format::
+
+        design_context_mapped:{source_name}:{path}:{millis}
+
+    ``millis`` lets multiple re-materialisations of the same row co-exist
+    on the blackboard with a natural ordering.
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    _PREFIX: ClassVar[str] = "design_context_mapped:"
+
+    # --- Key construction ---
+
+    @staticmethod
+    def event_key(source_name: str, path: str, millis: int) -> str:
+        # source_name from the operator's repo_map.yaml is a free-form
+        # identifier — guard against ``:`` collisions with the key
+        # separator the same way other protocols do.
+        safe_name = str(source_name).replace(":", "/")
+        return (
+            f"{DesignContextMappedProtocol._PREFIX}"
+            f"{safe_name}:{path}:{millis}"
+        )
+
+    # --- Pattern construction ---
+
+    @staticmethod
+    def event_pattern() -> str:
+        return f"{DesignContextMappedProtocol._PREFIX}*"
+
+    @staticmethod
+    def event_pattern_for_source(source_name: str) -> str:
+        safe_name = str(source_name).replace(":", "/")
+        return (
+            f"{DesignContextMappedProtocol._PREFIX}"
+            f"{safe_name}:*"
+        )
+
+    @staticmethod
+    def event_pattern_for_path(path: str) -> str:
+        return f"{DesignContextMappedProtocol._PREFIX}*:{path}:*"
+
+    # --- Key parsing ---
+
+    @staticmethod
+    def parse_event_key(key: str) -> dict[str, str]:
+        """Return ``{"source_name": ..., "path": ..., "millis": ...}``."""
+        if not key.startswith(DesignContextMappedProtocol._PREFIX):
+            raise ValueError(
+                f"Not a DesignContextMapped key: {key!r}",
+            )
+        rest = key[len(DesignContextMappedProtocol._PREFIX):]
+        # Right-anchored split: the trailing ``:millis`` and ``:path``
+        # are well-formed; everything earlier belongs to ``source_name``
+        # (which may contain ``/`` placeholders we restore below).
+        parts = rest.rsplit(":", 2)
+        if len(parts) != 3:
+            raise ValueError(
+                f"Malformed DesignContextMapped key: {key!r}",
+            )
+        safe_name, path, millis = parts
+        return {
+            "source_name": safe_name.replace("/", ":"),
+            "path": path,
+            "millis": millis,
+        }
+
+
+class DesignInconsistencyProtocol(BlackboardProtocol):
+    """Protocol fired when :meth:`SystemDesignCapability.find_inconsistencies`
+    surfaces a claim-shaped finding in the design-context knowledge
+    graph — either an explicit contradiction (claim with predicate
+    ``contradicts`` / ``conflicts_with`` / ``is_incompatible_with``)
+    or a hit from an operator-authored ``consistency_rule`` claim
+    that the rule engine evaluates as firing.
+
+    Phase P3c emits the contradiction-claim variant only — operator-
+    authored rules require richer claim types than the deterministic
+    extractor produces and become useful once Phase P3d's
+    LLMClaimExtractor lands.
+
+    Body fields the writer SHOULD include in the blackboard value
+    payload (the protocol enforces only the key shape):
+
+    - ``kind`` (str): ``contradiction`` | ``rule_finding`` | ``orphan``
+    - ``subject`` / ``predicate`` / ``object`` (str): the source claim
+    - ``citation_uri`` (str): ``design_context://<source>/<rel>``
+    - ``source_name`` (str): the design_context_sources row name
+    - ``file`` (str): the file path inside the source corpus
+    - ``confidence`` (float)
+    - ``rule_id`` (str, optional): when ``kind='rule_finding'``
+    - ``detected_at`` (float): unix seconds
+
+    Key format::
+
+        design_inconsistency:{source_name}:{kind}:{millis}
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    _PREFIX: ClassVar[str] = "design_inconsistency:"
+
+    @staticmethod
+    def event_key(source_name: str, kind: str, millis: int) -> str:
+        safe_name = str(source_name).replace(":", "/")
+        safe_kind = str(kind).replace(":", "/")
+        return (
+            f"{DesignInconsistencyProtocol._PREFIX}"
+            f"{safe_name}:{safe_kind}:{millis}"
+        )
+
+    @staticmethod
+    def event_pattern() -> str:
+        return f"{DesignInconsistencyProtocol._PREFIX}*"
+
+    @staticmethod
+    def event_pattern_for_source(source_name: str) -> str:
+        safe_name = str(source_name).replace(":", "/")
+        return f"{DesignInconsistencyProtocol._PREFIX}{safe_name}:*"
+
+    @staticmethod
+    def event_pattern_for_kind(kind: str) -> str:
+        safe_kind = str(kind).replace(":", "/")
+        return f"{DesignInconsistencyProtocol._PREFIX}*:{safe_kind}:*"
+
+    @staticmethod
+    def parse_event_key(key: str) -> dict[str, str]:
+        if not key.startswith(DesignInconsistencyProtocol._PREFIX):
+            raise ValueError(
+                f"Not a DesignInconsistency key: {key!r}",
+            )
+        rest = key[len(DesignInconsistencyProtocol._PREFIX):]
+        parts = rest.rsplit(":", 2)
+        if len(parts) != 3:
+            raise ValueError(
+                f"Malformed DesignInconsistency key: {key!r}",
+            )
+        safe_name, safe_kind, millis = parts
+        return {
+            "source_name": safe_name.replace("/", ":"),
+            "kind": safe_kind.replace("/", ":"),
+            "millis": millis,
+        }
+
+
+class BottleneckDetectedProtocol(BlackboardProtocol):
+    """Protocol fired when :meth:`DesignProcessCapability.identify_bottlenecks`
+    surfaces a workflow-state finding — an open issue stalled past
+    the configured no-activity threshold, an open issue with a
+    deep blocking chain, an under-assigned milestone past its
+    halfway point, etc.
+
+    Phase P5a ships the ``stalled_issue`` kind (built-in heuristic
+    over ``GitHubCapability.list_issues``); richer kinds — including
+    operator-authored ``bottleneck_rule``-claim-driven findings —
+    surface once Phase P3d's :class:`LLMClaimExtractor` produces
+    those typed claims from operator markdown.
+
+    Body fields the writer SHOULD include in the blackboard value
+    payload (the protocol enforces only the key shape):
+
+    - ``kind`` (str): ``stalled_issue`` | ``rule_finding`` | …
+    - ``severity`` (str): ``low`` | ``medium`` | ``high``
+    - ``repo`` (str): ``owner/name``
+    - ``issue_number`` (int): the affected issue
+    - ``url`` (str): ``html_url``
+    - ``summary`` (str): one-line description for the dashboard
+    - ``suggested_remedies`` (list[str]): planner-facing hints
+    - ``rule_id`` (str, optional): when ``kind='rule_finding'``
+    - ``detected_at`` (float): unix seconds
+
+    Key format::
+
+        bottleneck_detected:{repo_safe}:{kind}:{millis}
+
+    ``repo_safe`` is the repo with ``/`` replaced by ``__`` so
+    repo names like ``polymathera/cps`` don't collide with the
+    key separator.
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    _PREFIX: ClassVar[str] = "bottleneck_detected:"
+
+    @staticmethod
+    def event_key(repo: str, kind: str, millis: int) -> str:
+        repo_safe = str(repo).replace("/", "__")
+        safe_kind = str(kind).replace(":", "/")
+        return (
+            f"{BottleneckDetectedProtocol._PREFIX}"
+            f"{repo_safe}:{safe_kind}:{millis}"
+        )
+
+    @staticmethod
+    def event_pattern() -> str:
+        return f"{BottleneckDetectedProtocol._PREFIX}*"
+
+    @staticmethod
+    def event_pattern_for_repo(repo: str) -> str:
+        repo_safe = str(repo).replace("/", "__")
+        return f"{BottleneckDetectedProtocol._PREFIX}{repo_safe}:*"
+
+    @staticmethod
+    def event_pattern_for_kind(kind: str) -> str:
+        safe_kind = str(kind).replace(":", "/")
+        return f"{BottleneckDetectedProtocol._PREFIX}*:{safe_kind}:*"
+
+    @staticmethod
+    def parse_event_key(key: str) -> dict[str, str]:
+        if not key.startswith(BottleneckDetectedProtocol._PREFIX):
+            raise ValueError(
+                f"Not a BottleneckDetected key: {key!r}",
+            )
+        rest = key[len(BottleneckDetectedProtocol._PREFIX):]
+        parts = rest.rsplit(":", 2)
+        if len(parts) != 3:
+            raise ValueError(
+                f"Malformed BottleneckDetected key: {key!r}",
+            )
+        repo_safe, safe_kind, millis = parts
+        return {
+            "repo": repo_safe.replace("__", "/"),
+            "kind": safe_kind.replace("/", ":"),
+            "millis": millis,
+        }
+
+
+class RoadmapSyncProtocol(BlackboardProtocol):
+    """Protocol fired when :meth:`DesignProcessCapability.sync_roadmap_with_github`
+    completes — one event per sync run carrying the diff that was
+    applied (or proposed for user review, depending on the sync
+    mode).
+
+    Phase P5c ships the sync action; this protocol lands earlier
+    (P5a) so subscribers (the Colony Status panel, the operator
+    notification stream) can register their handlers ahead of the
+    first sync run.
+
+    Body fields the writer SHOULD include:
+
+    - ``direction`` (str): ``bidirectional`` | ``roadmap_to_github``
+      | ``github_to_roadmap``
+    - ``diff`` (list[dict]): per-change records the planner /
+      dashboard can render
+    - ``conflict_count`` (int): how many entries needed user mediation
+    - ``ran_at`` (float): unix seconds
+
+    Key format::
+
+        roadmap_sync:{repo_safe}:{direction}:{millis}
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    _PREFIX: ClassVar[str] = "roadmap_sync:"
+
+    @staticmethod
+    def event_key(repo: str, direction: str, millis: int) -> str:
+        repo_safe = str(repo).replace("/", "__")
+        safe_dir = str(direction).replace(":", "/")
+        return (
+            f"{RoadmapSyncProtocol._PREFIX}"
+            f"{repo_safe}:{safe_dir}:{millis}"
+        )
+
+    @staticmethod
+    def event_pattern() -> str:
+        return f"{RoadmapSyncProtocol._PREFIX}*"
+
+    @staticmethod
+    def event_pattern_for_repo(repo: str) -> str:
+        repo_safe = str(repo).replace("/", "__")
+        return f"{RoadmapSyncProtocol._PREFIX}{repo_safe}:*"
+
+    @staticmethod
+    def parse_event_key(key: str) -> dict[str, str]:
+        if not key.startswith(RoadmapSyncProtocol._PREFIX):
+            raise ValueError(
+                f"Not a RoadmapSync key: {key!r}",
+            )
+        rest = key[len(RoadmapSyncProtocol._PREFIX):]
+        parts = rest.rsplit(":", 2)
+        if len(parts) != 3:
+            raise ValueError(
+                f"Malformed RoadmapSync key: {key!r}",
+            )
+        repo_safe, safe_dir, millis = parts
+        return {
+            "repo": repo_safe.replace("__", "/"),
+            "direction": safe_dir.replace("/", ":"),
+            "millis": millis,
+        }
+
+
+class DesignSuggestionProtocol(BlackboardProtocol):
+    """Protocol fired when :class:`SystemDesignCapability` surfaces a
+    suggestion the planner should consider — an unverified hypothesis
+    (Phase P3c via :meth:`audit_hypothesis_coverage`), a proposed
+    design alternative (Phase P3d+ via ``propose_alternatives``), a
+    missing literature reference, or a tool worth introducing.
+
+    Body fields the writer SHOULD include in the blackboard value
+    payload (the protocol enforces only the key shape):
+
+    - ``kind`` (str): ``hypothesis_orphan`` | ``alternative`` |
+      ``literature`` | ``tool``
+    - ``target_claim_type`` (str): which extracted claim type this
+      suggestion bears on (e.g. ``hypothesis``)
+    - ``summary`` (str): one-line description
+    - ``evidence`` (list[dict]): citations supporting the suggestion
+      (each ``{citation_uri, snippet}``)
+    - ``confidence`` (float)
+    - ``detected_at`` (float): unix seconds
+
+    Key format::
+
+        design_suggestion:{source_name}:{kind}:{millis}
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    _PREFIX: ClassVar[str] = "design_suggestion:"
+
+    @staticmethod
+    def event_key(source_name: str, kind: str, millis: int) -> str:
+        safe_name = str(source_name).replace(":", "/")
+        safe_kind = str(kind).replace(":", "/")
+        return (
+            f"{DesignSuggestionProtocol._PREFIX}"
+            f"{safe_name}:{safe_kind}:{millis}"
+        )
+
+    @staticmethod
+    def event_pattern() -> str:
+        return f"{DesignSuggestionProtocol._PREFIX}*"
+
+    @staticmethod
+    def event_pattern_for_source(source_name: str) -> str:
+        safe_name = str(source_name).replace(":", "/")
+        return f"{DesignSuggestionProtocol._PREFIX}{safe_name}:*"
+
+    @staticmethod
+    def event_pattern_for_kind(kind: str) -> str:
+        safe_kind = str(kind).replace(":", "/")
+        return f"{DesignSuggestionProtocol._PREFIX}*:{safe_kind}:*"
+
+    @staticmethod
+    def parse_event_key(key: str) -> dict[str, str]:
+        if not key.startswith(DesignSuggestionProtocol._PREFIX):
+            raise ValueError(
+                f"Not a DesignSuggestion key: {key!r}",
+            )
+        rest = key[len(DesignSuggestionProtocol._PREFIX):]
+        parts = rest.rsplit(":", 2)
+        if len(parts) != 3:
+            raise ValueError(
+                f"Malformed DesignSuggestion key: {key!r}",
+            )
+        safe_name, safe_kind, millis = parts
+        return {
+            "source_name": safe_name.replace("/", ":"),
+            "kind": safe_kind.replace("/", ":"),
+            "millis": millis,
+        }
+
+

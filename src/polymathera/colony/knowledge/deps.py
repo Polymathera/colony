@@ -30,9 +30,16 @@ from ..agents.blueprint import Blueprint
 from ..distributed.config import get_component_or_default
 from .cluster_config import KnowledgeConfig
 from .embedder import InMemoryEmbedder
+from .extractors.claims import (
+    ClaimExtractor,
+    DeterministicClaimExtractor,
+    LLMCallable,
+    LLMClaimExtractor,
+)
 from .ingestion import Ingestor
 from .models import KnowledgeFormat
 from .retrieval import RetrievalDeps
+from .stores.graph import InMemoryGraphStore, KuzuGraphStore
 from .stores.image import InMemoryImageStore, LocalFsImageStore
 from .stores.vector import InMemoryVectorStore, QdrantVectorStore
 
@@ -105,6 +112,120 @@ def _default_vector_store(embedder: "Embedder") -> "VectorStore":
     logger.info(
         "knowledge.deps: using QdrantVectorStore(url=%s, collection=%s, dim=%d)",
         cfg.url, cfg.collection, embedder.dimensions,
+    )
+    return store
+
+
+def build_default_llm_callable(
+    *, max_tokens: int, temperature: float,
+) -> LLMCallable:
+    """Build the lazy :data:`LLMCallable` the singleton Ingestor's
+    :class:`LLMClaimExtractor` invokes per chunk.
+
+    The wrapper:
+
+    1. Lazily imports + awaits :func:`get_llm_cluster` on every call.
+       The LLMCluster handle isn't available at ``set_knowledge_deps``
+       time (the Ray Serving cluster may not be deployed yet), so
+       construction-time resolution would race; per-call resolution
+       is safe — the handle is cached inside ``get_llm_cluster``.
+    2. Builds an :class:`InferenceRequest` with the active execution
+       context (carried by ``serving.require_execution_context()``
+       via the field's default factory).
+    3. Forwards to ``LLMCluster.infer`` and returns the generated
+       text — the shape :class:`LLMClaimExtractor` expects (raw
+       string of JSON-shaped claim list).
+
+    On failure (no cluster deployed, route refused, timeout, ...)
+    the call raises; :meth:`LLMClaimExtractor.extract` already wraps
+    in a ``try/except`` that logs + returns 0 claims for that chunk,
+    so graceful degradation is automatic — the deterministic
+    extractor still runs.
+    """
+
+    import uuid
+
+    async def _llm_call(prompt: str) -> str:
+        from .._handles import get_llm_cluster
+        from ..cluster.models import InferenceRequest
+
+        handle = await get_llm_cluster()
+        request = InferenceRequest(
+            request_id=f"claim_extract_{uuid.uuid4().hex[:12]}",
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        response = await handle.infer(request)
+        return response.generated_text
+
+    return _llm_call
+
+
+def _build_default_extractors(
+    cfg: KnowledgeConfig,
+) -> tuple[ClaimExtractor, ...]:
+    """Compose the default extractor tuple for the singleton Ingestor.
+
+    Order: LLM extractor first (when enabled — produces the richer
+    open-set claim types the design-process actions key on), then
+    the deterministic ``is_a`` extractor as a complementary
+    rule-based source. Both run on every chunk; their outputs are
+    unioned into the Ingestor's claim list and written to the graph
+    store independently.
+
+    When ``llm_claim_extraction_enabled=False`` the LLM extractor is
+    excluded — deterministic-only mode for cost-sensitive deployments
+    or unit-test environments without a live LLM cluster.
+    """
+
+    extractors: list[ClaimExtractor] = []
+    if cfg.llm_claim_extraction_enabled:
+        llm_callable = build_default_llm_callable(
+            max_tokens=cfg.llm_claim_extraction_max_tokens,
+            temperature=cfg.llm_claim_extraction_temperature,
+        )
+        extractors.append(
+            LLMClaimExtractor(
+                llm_callable,
+                timeout_s=cfg.llm_claim_extraction_timeout_s,
+            ),
+        )
+    extractors.append(DeterministicClaimExtractor())
+    return tuple(extractors)
+
+
+def _default_graph_store() -> "GraphStore":
+    """Pick the default graph store from :class:`KnowledgeConfig`.
+
+    When ``knowledge.graph_db_path`` is set, build a
+    :class:`KuzuGraphStore` rooted at that path so design-context
+    + literature claims persist across process restarts and are
+    shared across Ray workers / replicas on the same colony-shared
+    volume. Falls back to :class:`InMemoryGraphStore` for tests and
+    single-process dev runs (which works correctly for the same
+    APIs but loses state on process exit).
+
+    Falls back to in-memory if Kùzu is configured but the ``kuzu``
+    package is missing, with a warning — the operator likely
+    installed without the ``[knowledge]`` extra.
+    """
+
+    graph_db_path = _knowledge_config().graph_db_path
+    if not graph_db_path:
+        return InMemoryGraphStore()
+    try:
+        store = KuzuGraphStore.open(graph_db_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "knowledge.graph_db_path=%s but KuzuGraphStore.open failed "
+            "(%s); falling back to InMemoryGraphStore. State will not "
+            "persist across process restarts.",
+            graph_db_path, exc,
+        )
+        return InMemoryGraphStore()
+    logger.info(
+        "knowledge.deps: using KuzuGraphStore(db_path=%s)", graph_db_path,
     )
     return store
 
@@ -190,20 +311,42 @@ def set_knowledge_deps(
     with _lock:
         resolved_embedder = embedder or InMemoryEmbedder()
         resolved_image_store = image_store or _default_image_store()
+        # Graph store: explicit override wins; otherwise fall back to
+        # ``knowledge.graph_db_path`` (Kuzu on disk) or
+        # ``InMemoryGraphStore`` per :func:`_default_graph_store`.
+        resolved_graph_store = (
+            graph_store if graph_store is not None
+            else _default_graph_store()
+        )
         _deps = RetrievalDeps(
             embedder=resolved_embedder,
             vector_store=vector_store or _default_vector_store(resolved_embedder),
-            graph_store=graph_store,
+            graph_store=resolved_graph_store,
             image_store=resolved_image_store,
         )
         # Build a matching Ingestor so curation and retrieval share
-        # the *same* embedder + vector store + image store. Re-bound
-        # on every set. The reader registry is resolved from
-        # ``knowledge.pdf_extractor`` so flipping the backend in YAML
-        # is picked up on the next ``set_knowledge_deps()`` call.
+        # the *same* embedder + vector store + image store + graph
+        # store. Re-bound on every set. The reader registry is
+        # resolved from ``knowledge.pdf_extractor`` so flipping the
+        # backend in YAML is picked up on the next
+        # ``set_knowledge_deps()`` call.
+        #
+        # ``extractors`` is the tuple of :class:`ClaimExtractor`
+        # instances applied to every chunk. Built by
+        # :func:`_build_default_extractors` from the active
+        # :class:`KnowledgeConfig`: by default that's
+        # ``(LLMClaimExtractor(_lazy_llm_callable), DeterministicClaimExtractor())``
+        # — LLM first for the rich open-set claim types,
+        # deterministic as a complementary rule-based source.
+        # Operators wanting fully-custom extractors wire a custom
+        # Ingestor via :func:`set_knowledge_deps` and pass it through
+        # explicitly (today the only public switch is the
+        # ``llm_claim_extraction_enabled`` flag).
         config_registry = _default_reader_registry(resolved_image_store)
+        knowledge_cfg = _knowledge_config()
         _ingestor = Ingestor(
             readers=config_registry,
+            extractors=_build_default_extractors(knowledge_cfg),
             embedder=_deps.embedder,
             vector_store=_deps.vector_store,
             graph_store=_deps.graph_store,

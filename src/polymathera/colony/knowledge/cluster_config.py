@@ -245,6 +245,95 @@ class KnowledgeConfig(ConfigComponent):
         ),
     )
 
+    graph_db_path: str = Field(
+        default="",
+        description=(
+            "On-disk path for the :class:`KuzuGraphStore` that backs "
+            "the design-context knowledge graph (path-1 ingestion of "
+            "the top-level design plan). Empty selects the in-memory "
+            "fallback (:class:`InMemoryGraphStore`) — fine for tests "
+            "and single-process dev. Docker-compose: "
+            "``/mnt/shared/colony-design-graph.kuzu`` so the graph "
+            "survives container restarts and is shared across all "
+            "Ray workers / replicas. The same store is shared between "
+            "literature / standards ingestion and design-context "
+            "ingestion so cross-corpus queries work natively."
+        ),
+        json_schema_extra=tier_metadata(
+            tier=Tier.L1_OPERATOR, mutability=Mutability.RELOADABLE,
+        ),
+    )
+
+    llm_claim_extraction_enabled: bool = Field(
+        default=True,
+        description=(
+            "Wire :class:`LLMClaimExtractor` into the singleton "
+            ":class:`Ingestor`'s extractor tuple alongside the rule-"
+            "based :class:`DeterministicClaimExtractor`. The LLM "
+            "extractor lazily resolves the cluster's :class:`LLMCluster` "
+            "handle on each chunk and emits open-set typed claims "
+            "(``hypothesizes`` / ``contradicts`` / ``verifies`` / "
+            "``constrains`` / etc.) that the design-process actions "
+            "(``find_inconsistencies``, ``audit_hypothesis_coverage``, "
+            "``search_design_context(path='kuzu')``) operate on. "
+            "Set ``False`` to ship deterministic-only — useful for "
+            "cost-sensitive deployments without an LLM cluster, or "
+            "for unit-test environments. Graceful degradation: when "
+            "True but no LLM cluster is deployed, the extractor logs "
+            "the per-chunk failure at WARN and returns 0 claims (the "
+            "deterministic extractor still runs)."
+        ),
+        json_schema_extra=tier_metadata(
+            tier=Tier.L1_OPERATOR, mutability=Mutability.RELOADABLE,
+        ),
+    )
+
+    llm_claim_extraction_max_tokens: int = Field(
+        default=2048,
+        ge=128,
+        description=(
+            "``max_tokens`` for the per-chunk LLM extraction request. "
+            "Default 2048 fits typical JSON-array responses for a "
+            "single prose chunk; raise for very rich chunks where the "
+            "LLM truncates the JSON output (``LLMClaimExtractor`` logs "
+            "a parse error in that case). Only consulted when "
+            "``llm_claim_extraction_enabled=True``."
+        ),
+        json_schema_extra=tier_metadata(
+            tier=Tier.L1_OPERATOR, mutability=Mutability.RELOADABLE,
+        ),
+    )
+
+    llm_claim_extraction_temperature: float = Field(
+        default=0.1,
+        ge=0.0, le=2.0,
+        description=(
+            "``temperature`` for the per-chunk LLM extraction request. "
+            "Default 0.1 keeps the JSON-structured output stable; "
+            "raise for more exploratory claim extraction if the "
+            "underlying model is too conservative at 0.1. Only "
+            "consulted when ``llm_claim_extraction_enabled=True``."
+        ),
+        json_schema_extra=tier_metadata(
+            tier=Tier.L1_OPERATOR, mutability=Mutability.RELOADABLE,
+        ),
+    )
+
+    llm_claim_extraction_timeout_s: float = Field(
+        default=30.0,
+        ge=1.0,
+        description=(
+            "Per-call timeout the :class:`LLMClaimExtractor` applies "
+            "via :func:`asyncio.wait_for`. On timeout the extractor "
+            "logs at WARN and returns 0 claims for that chunk (so a "
+            "stalled LLM never blocks the whole ingestion run). Only "
+            "consulted when ``llm_claim_extraction_enabled=True``."
+        ),
+        json_schema_extra=tier_metadata(
+            tier=Tier.L1_OPERATOR, mutability=Mutability.RELOADABLE,
+        ),
+    )
+
     qdrant: QdrantConfig = Field(
         default_factory=QdrantConfig,
         description="Qdrant vector-store connection (in-memory if empty).",

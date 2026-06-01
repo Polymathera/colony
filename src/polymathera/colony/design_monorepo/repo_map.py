@@ -1,6 +1,6 @@
 """``.colony/repo_map.yaml`` — declarative manifest for a design monorepo.
 
-Two independent sections:
+Three independent sections:
 
 - **``vcm_sources:``** declares VCM mapping. The materialiser issues
   one ``mmap_application_scope`` call per row so a single repo can be
@@ -9,12 +9,18 @@ Two independent sections:
 - **``knowledge_sources:``** declares KB ingestion. The materialiser
   walks each row's path globs and feeds matching files to the
   process-singleton :class:`Ingestor`.
+- **``design_context_sources:``** (schema v3+) declares which markdown
+  files form the project's design context. The materialiser registers
+  one synthetic VCM scope per row (``source_type='literature'`` —
+  prose chunker) and, if ``pin_in_vcm`` is true, holds long-lived
+  page locks so the context survives eviction. No closed role
+  vocabulary — agents infer structure from the markdown content.
 
-The two sections are **orthogonal**: the same path can be VCM-mapped,
-KB-ingested, both, or neither, and the operator picks each
-independently. The dashboard's "Design Monorepo" tab renders one
-checkbox list per section so ticks on one side never imply ticks on
-the other.
+The three sections are **orthogonal**: the same path can appear in
+any combination of them. The dashboard renders the operator-facing
+sections (``vcm_sources``, ``knowledge_sources``) as independent
+checkbox lists; ``design_context_sources`` is configuration-only and
+ingested wholesale once the operator declares it.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ from ..knowledge.models import CorpusTier
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 REPO_MAP_FILENAME = "repo_map.yaml"
 REPO_MAP_DIR = ".colony"
@@ -313,6 +319,89 @@ class KnowledgeSource(BaseModel):
         return spec.match_file(rel_path)
 
 
+class DesignContextSource(BaseModel):
+    """One row of ``design_context_sources:`` — declares a corpus of
+    markdown files as the project's design context (objectives,
+    constraints, alternatives, hypotheses, decisions, etc., in
+    arbitrary mixes per file).
+
+    The materialiser turns each row into a synthetic ``vcm_source``
+    of ``type: literature`` (prose chunker), so agents read pages
+    via the standard VCM page-load path. If ``pin_in_vcm`` is true,
+    the materialiser additionally calls
+    :meth:`~vcm.page_table.VirtualPageTable.lock_page` per
+    materialised page and a renewer task refreshes the locks at
+    ``6/7 * pin_lock_duration_days`` to outrun expiry.
+
+    Free file layout — no closed role vocabulary. The
+    (future-phase) Kuzu KG extractor infers structure from the
+    markdown itself; this row is purely the "what bytes count as
+    design context" declaration.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        description=(
+            "Identifier; namespaces the materialiser output as "
+            "``design_context.<name>`` (must be unique within "
+            "``design_context_sources``)."
+        ),
+    )
+    paths: list[str] = Field(
+        description=(
+            "Glob patterns relative to monorepo root (pathspec / "
+            "GitWildMatch semantics — same as ``knowledge_sources.paths``)."
+        ),
+    )
+    hint: str | None = Field(
+        default=None,
+        description=(
+            "Free-form prose passed to the LLM claim-extractor as a "
+            "'what is this corpus' cue. Not validated, not a gate — "
+            "only an extractor hint. Omit if unsure."
+        ),
+    )
+    pin_in_vcm: bool = Field(
+        default=False,
+        description=(
+            "If true, materialised pages are locked via "
+            "``VirtualPageTable.lock_page`` so they survive eviction. "
+            "Use sparingly — pinned pages reduce the working-set "
+            "budget available for transient context."
+        ),
+    )
+    pin_lock_duration_days: int = Field(
+        default=7,
+        ge=1,
+        description=(
+            "Lock window the renewer uses. The renewer fires at "
+            "``6/7 * pin_lock_duration_days`` to avoid expiry races. "
+            "Only consulted when ``pin_in_vcm`` is true."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_paths(self) -> "DesignContextSource":
+        if not self.paths:
+            raise ValueError(
+                f"DesignContextSource[{self.name}]: 'paths' must be "
+                f"non-empty.",
+            )
+        return self
+
+    def matches(self, rel_path: str) -> bool:
+        """Return ``True`` when ``rel_path`` matches any of this row's
+        ``paths`` patterns. Same delegation to ``pathspec`` as
+        :meth:`KnowledgeSource.matches` so semantics stay aligned."""
+
+        from pathspec import PathSpec
+        from pathspec.patterns import GitWildMatchPattern
+
+        spec = PathSpec.from_lines(GitWildMatchPattern, self.paths)
+        return spec.match_file(rel_path)
+
+
 class RepoMap(BaseModel):
     """Top-level schema for ``.colony/repo_map.yaml``."""
 
@@ -321,13 +410,27 @@ class RepoMap(BaseModel):
     schema_version: int = SCHEMA_VERSION
     vcm_sources: list[VcmSource]
     knowledge_sources: list[KnowledgeSource] = Field(default_factory=list)
+    design_context_sources: list[DesignContextSource] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_design_context_sources_unique(self) -> "RepoMap":
+        seen: set[str] = set()
+        for src in self.design_context_sources:
+            if src.name in seen:
+                raise ValueError(
+                    f"RepoMap: duplicate design_context_sources name "
+                    f"{src.name!r}; each row must have a unique name.",
+                )
+            seen.add(src.name)
+        return self
 
     @classmethod
     def default_for_unmapped_repo(cls) -> "RepoMap":
         """Single ``git_repo`` row over the whole tree — the
         backwards-compatible fallback when no ``repo_map.yaml`` is
-        present in the design monorepo. ``knowledge_sources`` defaults
-        to empty so existing repos do not silently start ingesting."""
+        present in the design monorepo. ``knowledge_sources`` and
+        ``design_context_sources`` default to empty so existing repos
+        do not silently start ingesting."""
 
         return cls(vcm_sources=[VcmSource(name="default", type="git_repo")])
 

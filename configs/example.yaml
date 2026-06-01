@@ -137,6 +137,29 @@ knowledge:
   # dashboard's KB tab). Empty selects the in-memory image store.
   image_dir: "/mnt/shared/colony-images"
 
+  # On-disk Kùzu DB for the design-context knowledge graph (path-1
+  # ingestion of the top-level design plan). Shared with literature
+  # / standards ingestion so cross-corpus queries work natively. Empty
+  # selects InMemoryGraphStore (claims lost on process restart — fine
+  # for tests / single-process dev).
+  graph_db_path: "/mnt/shared/colony-design-graph.kuzu"
+
+  # LLM-driven claim extraction (path-1 ingestion). When true (the
+  # default), the singleton Ingestor's extractor tuple is
+  # ``(LLMClaimExtractor, DeterministicClaimExtractor)`` — the LLM
+  # produces open-set typed claims (``hypothesizes`` / ``contradicts``
+  # / ``verifies`` / ``constrains`` / ...) that ``find_inconsistencies``
+  # and ``audit_hypothesis_coverage`` query, alongside the
+  # rule-based ``is_a`` patterns. Set to false to ship deterministic-
+  # only (no LLM cost; design-process actions return sparse results).
+  # Graceful degradation: if true but no LLM cluster is deployed, the
+  # extractor logs the per-chunk failure at WARN and returns 0 claims
+  # (the deterministic extractor still runs).
+  llm_claim_extraction_enabled: true
+  llm_claim_extraction_max_tokens: 2048
+  llm_claim_extraction_temperature: 0.1
+  llm_claim_extraction_timeout_s: 30.0
+
   # Vector store. Empty url selects InMemoryVectorStore (fine for
   # tests / single-process dev). The values below match the
   # docker-compose service.

@@ -105,8 +105,13 @@ def test_builtins_always_present(monkeypatch: pytest.MonkeyPatch) -> None:
 
     _patch_entry_points(monkeypatch, ())
     reg = get_mission_registry()
-    # Builtin sample missions (declared in colony/cli/polymath.py).
-    for builtin in ("impact", "slicing", "compliance", "intent", "contracts", "basic"):
+    # Builtin sample missions (declared in colony/cli/polymath.py)
+    # plus the P6 project_planning mission registered under
+    # colony/agents/missions/.
+    for builtin in (
+        "impact", "slicing", "compliance", "intent", "contracts", "basic",
+        "project_planning",
+    ):
         assert builtin in reg, (
             f"Builtin mission {builtin!r} disappeared from get_mission_registry()"
         )

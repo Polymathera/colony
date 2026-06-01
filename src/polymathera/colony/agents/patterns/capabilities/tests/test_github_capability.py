@@ -667,15 +667,18 @@ def test_action_executors_are_registered():
         "get_file_contents", "search_code",
         # issues
         "list_issues", "get_issue", "create_issue",
-        "comment_on_issue", "close_issue", "reopen_issue",
-        "add_labels",
+        "comment_on_issue", "comment_as_session_agent",
+        "close_issue", "reopen_issue", "add_labels",
+        "list_milestones",
         # PRs
         "list_pull_requests", "get_pull_request",
         "get_pr_diff", "create_pull_request",
         "comment_on_pr", "review_pr", "get_pr_checks",
         # projects + coordination
-        "list_project_items",
+        "list_project_items", "add_issue_to_project",
         "claim_unassigned_issue", "release_claim",
+        # P5d: identity + assignment
+        "whoami", "assign_issue",
     }
     assert keys == expected
 
@@ -690,3 +693,664 @@ def test_bind_round_trips_through_cloudpickle():
     bp = GitHubCapability.bind(scope=BlackboardScope.SESSION)
     bp2 = cloudpickle.loads(cloudpickle.dumps(bp))
     assert bp2.cls is GitHubCapability
+
+
+# ---------------------------------------------------------------------------
+# P4: Projects v2 attachment (create_issue auto-attach + add_issue_to_project)
+# ---------------------------------------------------------------------------
+
+
+def _make_cap_with_default_project(
+    *, client: Any = None, default_project_id: str | None = "PVT_123",
+) -> GitHubCapability:
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    return GitHubCapability(
+        agent=agent,
+        scope=BlackboardScope.SESSION,
+        client=client,
+        default_repo="acme/proj",
+        default_project_id=default_project_id,
+    )
+
+
+def test_create_issue_auto_attaches_to_default_project():
+    """When a default_project_id is set + the flag is True (default),
+    create_issue runs the addProjectV2ItemById mutation right after
+    the REST POST and surfaces the new project item id in the
+    response."""
+
+    stub = _StubClient()
+    stub.responses[("POST", "/repos/acme/proj/issues")] = {
+        "number": 7, "node_id": "I_kwDO123",
+        "title": "t", "state": "open",
+        "user": {"login": "a"}, "labels": [], "assignees": [],
+    }
+    # The mutation key in _StubClient is ("GRAPHQL", query[:40]) — the
+    # _ADD_PROJECT_V2_ITEM mutation starts with "mutation($projectId:
+    # ID!, $contentId: ID!) {...".
+    mutation_key = (
+        "GRAPHQL", "mutation($projectId: ID!, $contentId: ID!"[:40],
+    )
+    stub.responses[mutation_key] = {
+        "addProjectV2ItemById": {"item": {"id": "PVTI_ABC"}},
+    }
+    with _with_context():
+        cap = _make_cap_with_default_project(client=stub)
+        result = _run(cap.create_issue(title="t", body="b"))
+    assert result["ok"] is True
+    assert result["issue"]["number"] == 7
+    assert result["project_item_id"] == "PVTI_ABC"
+    assert result["project_id"] == "PVT_123"
+    assert "project_attach_error" not in result
+
+    # GraphQL mutation was actually called with the right variables.
+    graphql_calls = [c for c in stub.calls if c[0] == "GRAPHQL"]
+    assert len(graphql_calls) == 1
+    _, _, _kw, variables = graphql_calls[0]
+    assert variables == {"projectId": "PVT_123", "contentId": "I_kwDO123"}
+
+
+def test_create_issue_skips_attach_when_flag_off():
+    """``auto_attach_to_default_project=False`` skips the GraphQL
+    call entirely even when a default_project_id is set."""
+
+    stub = _StubClient()
+    stub.responses[("POST", "/repos/acme/proj/issues")] = {
+        "number": 7, "node_id": "I_kwDO123",
+        "title": "t", "state": "open",
+        "user": {"login": "a"}, "labels": [], "assignees": [],
+    }
+    with _with_context():
+        cap = _make_cap_with_default_project(client=stub)
+        result = _run(cap.create_issue(
+            title="t", body="b", auto_attach_to_default_project=False,
+        ))
+    assert result["ok"] is True
+    assert "project_item_id" not in result
+    graphql_calls = [c for c in stub.calls if c[0] == "GRAPHQL"]
+    assert graphql_calls == []
+
+
+def test_create_issue_skips_attach_when_no_default_project_set():
+    """No default_project_id → no auto-attach (silently). Operator
+    explicitly passing ``project_id=`` would override."""
+
+    stub = _StubClient()
+    stub.responses[("POST", "/repos/acme/proj/issues")] = {
+        "number": 7, "node_id": "I_kwDO123",
+        "title": "t", "state": "open",
+        "user": {"login": "a"}, "labels": [], "assignees": [],
+    }
+    with _with_context():
+        cap = _make_cap_with_default_project(
+            client=stub, default_project_id=None,
+        )
+        result = _run(cap.create_issue(title="t", body="b"))
+    assert result["ok"] is True
+    assert "project_item_id" not in result
+    graphql_calls = [c for c in stub.calls if c[0] == "GRAPHQL"]
+    assert graphql_calls == []
+
+
+def test_create_issue_attach_failure_is_non_fatal():
+    """The issue is already created when the GraphQL mutation runs;
+    a mutation failure must NOT roll back the issue. Surface the
+    error as ``project_attach_error`` in the otherwise-ok response."""
+
+    stub = _StubClient()
+    stub.responses[("POST", "/repos/acme/proj/issues")] = {
+        "number": 7, "node_id": "I_kwDO123",
+        "title": "t", "state": "open",
+        "user": {"login": "a"}, "labels": [], "assignees": [],
+    }
+    mutation_key = (
+        "GRAPHQL", "mutation($projectId: ID!, $contentId: ID!"[:40],
+    )
+    stub.raises[mutation_key] = RuntimeError("project not found")
+    with _with_context():
+        cap = _make_cap_with_default_project(client=stub)
+        result = _run(cap.create_issue(title="t", body="b"))
+    assert result["ok"] is True  # issue creation succeeded
+    assert result["issue"]["number"] == 7
+    assert "project not found" in result["project_attach_error"]
+
+
+def test_create_issue_explicit_project_id_overrides_default():
+    """``project_id=`` passed to create_issue overrides
+    ``default_project_id`` for that call."""
+
+    stub = _StubClient()
+    stub.responses[("POST", "/repos/acme/proj/issues")] = {
+        "number": 7, "node_id": "I_kwDO123",
+        "title": "t", "state": "open",
+        "user": {"login": "a"}, "labels": [], "assignees": [],
+    }
+    mutation_key = (
+        "GRAPHQL", "mutation($projectId: ID!, $contentId: ID!"[:40],
+    )
+    stub.responses[mutation_key] = {
+        "addProjectV2ItemById": {"item": {"id": "PVTI_OVERRIDE"}},
+    }
+    with _with_context():
+        cap = _make_cap_with_default_project(client=stub)
+        result = _run(cap.create_issue(
+            title="t", body="b", project_id="PVT_OTHER",
+        ))
+    graphql_calls = [c for c in stub.calls if c[0] == "GRAPHQL"]
+    _, _, _kw, variables = graphql_calls[0]
+    assert variables["projectId"] == "PVT_OTHER"
+    assert result["project_id"] == "PVT_OTHER"
+
+
+def test_create_issue_no_node_id_records_attach_error():
+    """If GitHub's REST response unexpectedly lacks ``node_id``,
+    surface a clear error rather than silently skipping the attach."""
+
+    stub = _StubClient()
+    stub.responses[("POST", "/repos/acme/proj/issues")] = {
+        "number": 7,  # no node_id!
+        "title": "t", "state": "open",
+        "user": {"login": "a"}, "labels": [], "assignees": [],
+    }
+    with _with_context():
+        cap = _make_cap_with_default_project(client=stub)
+        result = _run(cap.create_issue(title="t", body="b"))
+    assert result["ok"] is True
+    assert "node_id" in result["project_attach_error"]
+
+
+def test_add_issue_to_project_resolves_node_id_then_calls_mutation():
+    """Two-step: GET issue → mutation. Returns the new item id +
+    echoes the (repo, number, project_id) for the planner."""
+
+    stub = _StubClient()
+    stub.responses[("GET", "/repos/acme/proj/issues/42")] = {
+        "number": 42, "node_id": "I_kwDO_42",
+        "title": "x", "state": "open",
+        "user": {"login": "a"}, "labels": [], "assignees": [],
+    }
+    mutation_key = (
+        "GRAPHQL", "mutation($projectId: ID!, $contentId: ID!"[:40],
+    )
+    stub.responses[mutation_key] = {
+        "addProjectV2ItemById": {"item": {"id": "PVTI_42"}},
+    }
+    with _with_context():
+        cap = _make_cap_with_default_project(client=stub)
+        result = _run(cap.add_issue_to_project(issue_number=42))
+    assert result["ok"] is True
+    assert result["item_id"] == "PVTI_42"
+    assert result["number"] == 42
+    assert result["repo"] == "acme/proj"
+    assert result["project_id"] == "PVT_123"
+
+    # GraphQL got the right node_id from the REST GET.
+    graphql_calls = [c for c in stub.calls if c[0] == "GRAPHQL"]
+    _, _, _kw, variables = graphql_calls[0]
+    assert variables == {"projectId": "PVT_123", "contentId": "I_kwDO_42"}
+
+
+def test_add_issue_to_project_errors_when_no_project_id():
+    """No project_id arg + no default → clear error, no API calls."""
+
+    stub = _StubClient()
+    with _with_context():
+        cap = _make_cap_with_default_project(
+            client=stub, default_project_id=None,
+        )
+        result = _run(cap.add_issue_to_project(issue_number=42))
+    assert result["ok"] is False
+    assert "project_id" in result["message"]
+    # No REST GET, no GraphQL.
+    assert stub.calls == []
+
+
+def test_add_issue_to_project_errors_when_node_id_missing_on_issue():
+    """REST returns issue without node_id → clear error before the
+    mutation fires."""
+
+    stub = _StubClient()
+    stub.responses[("GET", "/repos/acme/proj/issues/42")] = {
+        "number": 42,  # no node_id
+        "title": "x", "state": "open",
+        "user": {"login": "a"}, "labels": [], "assignees": [],
+    }
+    with _with_context():
+        cap = _make_cap_with_default_project(client=stub)
+        result = _run(cap.add_issue_to_project(issue_number=42))
+    assert result["ok"] is False
+    assert "node_id" in result["message"]
+    graphql_calls = [c for c in stub.calls if c[0] == "GRAPHQL"]
+    assert graphql_calls == []
+
+
+# ---------------------------------------------------------------------------
+# P4: comment_as_session_agent + signature/footer helpers
+# ---------------------------------------------------------------------------
+
+
+def test_render_session_agent_signature_chat_with_user():
+    from polymathera.colony.agents.patterns.capabilities.github import (
+        _render_session_agent_signature,
+    )
+
+    sig = _render_session_agent_signature(
+        agent_role="SessionAgent",
+        trigger="chat",
+        session_id="sess_4f2a91",
+        replying_to="amam-nassar",
+    )
+    assert "Colony" in sig
+    assert "SessionAgent" in sig
+    assert "@amam-nassar" in sig
+    assert "sess_4f2a91" in sig
+    assert sig.startswith("<sub>")
+    assert sig.endswith("</sub>")
+
+
+def test_render_session_agent_signature_mention_includes_src_comment():
+    from polymathera.colony.agents.patterns.capabilities.github import (
+        _render_session_agent_signature,
+    )
+
+    sig = _render_session_agent_signature(
+        agent_role="SessionAgent",
+        trigger="mention",
+        session_id="sess_X",
+        replying_to="alice",
+        src_comment_id=12345,
+    )
+    assert "@alice" in sig
+    assert "mention" in sig
+    assert "12345" in sig
+
+
+def test_render_session_agent_signature_scheduled_mission():
+    from polymathera.colony.agents.patterns.capabilities.github import (
+        _render_session_agent_signature,
+    )
+
+    sig = _render_session_agent_signature(
+        agent_role="SessionAgent",
+        trigger="scheduled",
+        session_id="sess_X",
+        scheduled_mission_name="bottleneck-sweep",
+    )
+    assert "scheduled mission" in sig
+    assert "bottleneck-sweep" in sig
+    assert "@" not in sig  # no replying_to in scheduled trigger
+
+
+def test_render_session_agent_signature_automated_fallback():
+    from polymathera.colony.agents.patterns.capabilities.github import (
+        _render_session_agent_signature,
+    )
+
+    sig = _render_session_agent_signature(
+        agent_role="SessionAgent", trigger="automated",
+        session_id="sess_X",
+    )
+    assert "automated" in sig
+    assert "sess_X" in sig
+
+
+def test_render_attribution_footer_is_html_comment_with_parseable_kv():
+    from polymathera.colony.agents.patterns.capabilities.github import (
+        _render_attribution_footer,
+    )
+
+    footer = _render_attribution_footer(
+        author="session-agent",
+        session_id="sess_4f2a91",
+        run_id="run_8e1c33",
+        user="amam-nassar",
+        trigger="mention",
+        src_comment_id=12345,
+    )
+    assert footer.startswith("<!-- colony:")
+    assert footer.endswith(" -->")
+    # Each slot grep-able.
+    for needle in (
+        "author=session-agent",
+        "session=sess_4f2a91",
+        "run=run_8e1c33",
+        "user=amam-nassar",
+        "trigger=mention",
+        "src_comment=12345",
+    ):
+        assert needle in footer
+
+
+def test_render_attribution_footer_omits_unset_slots():
+    """Optional fields (run_id, user, src_comment, scheduled_mission)
+    are omitted from the footer when None — keeps the payload tight
+    and the parser oblivious to absence."""
+
+    from polymathera.colony.agents.patterns.capabilities.github import (
+        _render_attribution_footer,
+    )
+
+    footer = _render_attribution_footer(
+        author="session-agent", session_id="sess_X",
+    )
+    assert "run=" not in footer
+    assert "user=" not in footer
+    assert "src_comment=" not in footer
+    assert "scheduled_mission=" not in footer
+    # trigger defaults to chat and IS present.
+    assert "trigger=chat" in footer
+
+
+def test_comment_as_session_agent_wraps_body_with_signature_and_footer():
+    """The wrapper builds full_body = signature + body + footer and
+    delegates to comment_on_issue."""
+
+    stub = _StubClient()
+    stub.responses[("POST", "/repos/acme/proj/issues/9/comments")] = {
+        "id": 123, "html_url": "u",
+    }
+    with _with_context():
+        cap = _make_cap(client=stub)
+        result = _run(cap.comment_as_session_agent(
+            issue_number=9, body="here is the answer",
+            session_id="sess_X", replying_to="alice",
+        ))
+    assert result["ok"] is True
+    assert result["comment_id"] == 123
+
+    # Inspect the body that was actually posted.
+    posts = [c for c in stub.calls if c[0] == "POST"]
+    assert len(posts) == 1
+    body = posts[0][3]["body"]
+    # Three blocks separated by blank lines.
+    assert body.startswith("<sub>")
+    assert "@alice" in body
+    assert "sess_X" in body
+    assert "here is the answer" in body
+    assert "<!-- colony:" in body
+    assert "session=sess_X" in body
+
+
+def test_comment_as_session_agent_scheduled_trigger_uses_mission_name():
+    stub = _StubClient()
+    stub.responses[("POST", "/repos/acme/proj/issues/9/comments")] = {
+        "id": 999, "html_url": "u",
+    }
+    with _with_context():
+        cap = _make_cap(client=stub)
+        _run(cap.comment_as_session_agent(
+            issue_number=9, body="cron fired",
+            session_id="sess_X", trigger="scheduled",
+            scheduled_mission_name="weekly-suggestion-pass",
+        ))
+    body = [c for c in stub.calls if c[0] == "POST"][0][3]["body"]
+    assert "scheduled mission" in body
+    assert "weekly-suggestion-pass" in body
+    assert "trigger=scheduled" in body
+    assert "scheduled_mission=weekly-suggestion-pass" in body
+
+
+def test_comment_as_session_agent_custom_agent_role():
+    """``agent_role`` overrides the signature label + footer author
+    so non-SessionAgent agents can adopt the same convention."""
+
+    stub = _StubClient()
+    stub.responses[("POST", "/repos/acme/proj/issues/9/comments")] = {
+        "id": 1, "html_url": "u",
+    }
+    with _with_context():
+        cap = _make_cap(client=stub)
+        _run(cap.comment_as_session_agent(
+            issue_number=9, body="x",
+            session_id="sess_X",
+            agent_role="DesignProcessCoordinator",
+        ))
+    body = [c for c in stub.calls if c[0] == "POST"][0][3]["body"]
+    assert "DesignProcessCoordinator" in body
+    assert "author=designprocesscoordinator" in body
+
+
+# ---------------------------------------------------------------------------
+# P5a: list_milestones
+# ---------------------------------------------------------------------------
+
+
+def test_list_milestones_flattens_to_planner_friendly_shape():
+    """The action returns the API-side open/closed counts directly
+    (no per-milestone issue scan) plus html_url + due_on for the
+    Colony Status panel."""
+
+    stub = _StubClient()
+    stub.responses[("GET", "/repos/acme/proj/milestones")] = [
+        {
+            "number": 1, "title": "M1", "description": "first",
+            "state": "open", "due_on": "2026-06-01T00:00:00Z",
+            "open_issues": 7, "closed_issues": 3,
+            "html_url": "https://github.com/acme/proj/milestone/1",
+        },
+        {
+            "number": 2, "title": "M2", "description": None,
+            "state": "open", "due_on": None,
+            "open_issues": 0, "closed_issues": 0,
+            "html_url": "u2",
+        },
+    ]
+    with _with_context():
+        cap = _make_cap(client=stub)
+        result = _run(cap.list_milestones())
+    assert result["ok"] is True
+    assert result["count"] == 2
+    assert result["milestones"][0] == {
+        "number": 1, "title": "M1", "description": "first",
+        "state": "open", "due_on": "2026-06-01T00:00:00Z",
+        "open_issues": 7, "closed_issues": 3,
+        "html_url": "https://github.com/acme/proj/milestone/1",
+    }
+    # The GET hit /milestones with state+sort+direction params.
+    method, path, kw, _ = stub.calls[0]
+    assert method == "GET"
+    assert path == "/repos/acme/proj/milestones"
+    assert kw["params"]["state"] == "open"
+    assert kw["params"]["sort"] == "due_on"
+
+
+def test_list_milestones_state_filter_passes_through():
+    stub = _StubClient()
+    stub.responses[("GET", "/repos/acme/proj/milestones")] = []
+    with _with_context():
+        cap = _make_cap(client=stub)
+        _run(cap.list_milestones(state="closed"))
+    assert stub.calls[0][2]["params"]["state"] == "closed"
+
+
+def test_list_milestones_returns_empty_when_no_default_repo():
+    stub = _StubClient()
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent, scope=BlackboardScope.SESSION, client=stub,
+            # No default_repo set, no explicit repo arg.
+        )
+        result = _run(cap.list_milestones())
+    assert result["ok"] is False
+    assert result["milestones"] == []
+    assert "default_repo" in result["message"]
+    assert stub.calls == []  # no API call
+
+
+# ---------------------------------------------------------------------------
+# P5d: whoami + assign_issue
+# ---------------------------------------------------------------------------
+
+
+def test_whoami_returns_bot_login_when_slug_configured():
+    """``whoami`` resolves the configured App slug into the
+    ``<slug>[bot]`` login GitHub uses for assignment + commit
+    attribution."""
+
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent,
+            scope=BlackboardScope.SESSION,
+            client=_StubClient(),  # never called
+            default_repo="acme/proj",
+            app_slug="colony-bot",
+            app_id="42",
+        )
+        result = _run(cap.whoami())
+    assert result["ok"] is True
+    assert result["login"] == "colony-bot[bot]"
+    assert result["slug"] == "colony-bot"
+    assert result["app_id"] == "42"
+    assert result["app_url"] == "https://github.com/apps/colony-bot"
+
+
+def test_whoami_errors_when_slug_missing():
+    """No slug configured → clean error result the planner can show
+    the user."""
+
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent,
+            scope=BlackboardScope.SESSION,
+            client=_StubClient(),
+            default_repo="acme/proj",
+            app_slug="",  # explicitly empty
+        )
+        result = _run(cap.whoami())
+    assert result["ok"] is False
+    assert "GITHUB_APP_SLUG" in result["message"]
+    assert result["login"] is None
+    assert result["slug"] is None
+
+
+def test_assign_issue_replace_mode_patches_with_full_list():
+    """``replace=True`` (default) sets the issue's assignees to
+    exactly the passed list via PATCH /issues/{n}."""
+
+    stub = _StubClient()
+    stub.responses[("PATCH", "/repos/acme/proj/issues/7")] = {
+        "number": 7, "title": "t", "state": "open",
+        "user": {"login": "a"}, "labels": [],
+        "assignees": [{"login": "colony-bot[bot]"}],
+    }
+    with _with_context():
+        cap = _make_cap(client=stub)
+        result = _run(cap.assign_issue(7, ["colony-bot[bot]"]))
+    assert result["ok"] is True
+    assert result["issue"]["assignees"] == ["colony-bot[bot]"]
+    method, path, _, body = stub.calls[0]
+    assert method == "PATCH"
+    assert path == "/repos/acme/proj/issues/7"
+    assert body == {"assignees": ["colony-bot[bot]"]}
+
+
+def test_assign_issue_replace_with_empty_list_unassigns_everyone():
+    """``replace=True`` + ``assignees=[]`` clears the issue."""
+
+    stub = _StubClient()
+    stub.responses[("PATCH", "/repos/acme/proj/issues/7")] = {
+        "number": 7, "title": "t", "state": "open",
+        "user": {"login": "a"}, "labels": [], "assignees": [],
+    }
+    with _with_context():
+        cap = _make_cap(client=stub)
+        result = _run(cap.assign_issue(7, []))
+    assert result["ok"] is True
+    assert result["issue"]["assignees"] == []
+    _, _, _, body = stub.calls[0]
+    assert body == {"assignees": []}
+
+
+def test_assign_issue_additive_mode_uses_post_endpoint():
+    """``replace=False`` uses POST /issues/{n}/assignees which is
+    additive — GitHub keeps existing assignees + adds the new ones."""
+
+    stub = _StubClient()
+    stub.responses[("POST", "/repos/acme/proj/issues/7/assignees")] = {
+        "number": 7, "title": "t", "state": "open",
+        "user": {"login": "a"}, "labels": [],
+        "assignees": [
+            {"login": "human"}, {"login": "colony-bot[bot]"},
+        ],
+    }
+    with _with_context():
+        cap = _make_cap(client=stub)
+        result = _run(cap.assign_issue(
+            7, ["colony-bot[bot]"], replace=False,
+        ))
+    assert result["ok"] is True
+    method, path, _, body = stub.calls[0]
+    assert method == "POST"
+    assert path == "/repos/acme/proj/issues/7/assignees"
+    assert body == {"assignees": ["colony-bot[bot]"]}
+
+
+def test_assign_issue_strips_empty_assignees():
+    """Empty / non-string entries are filtered before the API call so
+    callers can pass ``[None, ""]`` without breaking GitHub."""
+
+    stub = _StubClient()
+    stub.responses[("PATCH", "/repos/acme/proj/issues/7")] = {
+        "number": 7, "title": "t", "state": "open",
+        "user": {"login": "a"}, "labels": [],
+        "assignees": [{"login": "real"}],
+    }
+    with _with_context():
+        cap = _make_cap(client=stub)
+        result = _run(cap.assign_issue(
+            7, ["real", "", None, "  "],  # type: ignore[list-item]
+        ))
+    assert result["ok"] is True
+    _, _, _, body = stub.calls[0]
+    assert body == {"assignees": ["real"]}
+
+
+def test_assign_issue_returns_error_when_no_default_repo():
+    stub = _StubClient()
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent, scope=BlackboardScope.SESSION, client=stub,
+        )
+        result = _run(cap.assign_issue(7, ["x"]))
+    assert result["ok"] is False
+    assert "default_repo" in result["message"]
+    assert stub.calls == []
+
+
+def test_assign_issue_surfaces_client_errors():
+    from polymathera.colony.agents.patterns.capabilities._github.client import (
+        NotFoundError,
+    )
+
+    stub = _StubClient()
+    stub.raises[("PATCH", "/repos/acme/proj/issues/9")] = NotFoundError(
+        "issue 9 missing", status_code=404,
+    )
+    with _with_context():
+        cap = _make_cap(client=stub)
+        result = _run(cap.assign_issue(9, ["x"]))
+    assert result["ok"] is False
+    assert result["status_code"] == 404
+
+
+def test_assign_issue_added_to_registered_executors():
+    """Catch regression where the action is silently dropped from
+    the dispatcher surface."""
+
+    import inspect
+    keys = {
+        m._action_key for _, m in inspect.getmembers(
+            GitHubCapability, predicate=inspect.isfunction,
+        ) if getattr(m, "_action_key", None)
+    }
+    assert "assign_issue" in keys
+    assert "whoami" in keys

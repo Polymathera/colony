@@ -60,6 +60,116 @@ def _err(message: str, **fields: Any) -> dict[str, Any]:
     return {"ok": False, "message": message, **fields}
 
 
+# ---------------------------------------------------------------------------
+# Colony GitHub-identity conventions (top-level design plan §16.5)
+# ---------------------------------------------------------------------------
+#
+# Every Colony-authored GitHub comment carries a one-line signature
+# (visible) + a machine-readable HTML-comment footer (invisible to
+# humans, parsed by the future GitHub-inbound poller / webhook in P8
+# to join inbound comments back to their originating Colony session).
+# The helpers below render both. They're pure (no I/O), module-level
+# so the encoding is unit-testable + reusable from other capabilities
+# that decide to adopt the same convention.
+
+_SESSION_AGENT_SIGNATURE_TEMPLATE = (
+    "<sub>🤖 **Colony · _{agent_role}_** {context_blurb}</sub>"
+)
+"""Markdown-rendered prefix. ``<sub>`` keeps the line visually small
+on GitHub; ``_{agent_role}_`` is italic for the agent name, ``**``
+bolds the Colony brand. Layout matches the top-level design plan §16.5."""
+
+
+def _render_session_agent_signature(
+    *,
+    agent_role: str,
+    trigger: Literal["chat", "scheduled", "mention", "automated"],
+    session_id: str,
+    replying_to: str | None = None,
+    src_comment_id: int | None = None,
+    scheduled_mission_name: str | None = None,
+) -> str:
+    """Render the visible-to-humans signature line for a Colony-
+    authored comment.
+
+    Trigger semantics:
+
+    - ``chat`` — Colony posted on behalf of a user message; the
+      signature reads "replying to @{login}".
+    - ``mention`` — Colony was @-mentioned in a GitHub comment; the
+      signature reads "replying to @{login} (mention #{comment_id})".
+    - ``scheduled`` — Colony posted from a scheduled mission run; the
+      signature reads "triggered by scheduled mission {name}".
+    - ``automated`` — any other automated trigger; signature reads
+      "(automated)".
+    """
+
+    if trigger == "scheduled":
+        name = scheduled_mission_name or "<unnamed>"
+        context_blurb = (
+            f"triggered by scheduled mission `{name}` · "
+            f"session `{session_id}`"
+        )
+    elif trigger == "mention" and replying_to and src_comment_id is not None:
+        context_blurb = (
+            f"replying to @{replying_to} (mention #{src_comment_id}) · "
+            f"session `{session_id}`"
+        )
+    elif trigger == "mention" and replying_to:
+        context_blurb = (
+            f"replying to @{replying_to} (mention) · "
+            f"session `{session_id}`"
+        )
+    elif replying_to:
+        context_blurb = (
+            f"replying to @{replying_to} · session `{session_id}`"
+        )
+    else:
+        context_blurb = f"(automated) · session `{session_id}`"
+    return _SESSION_AGENT_SIGNATURE_TEMPLATE.format(
+        agent_role=agent_role, context_blurb=context_blurb,
+    )
+
+
+def _render_attribution_footer(
+    *,
+    author: str,
+    session_id: str,
+    run_id: str | None = None,
+    user: str | None = None,
+    trigger: Literal["chat", "scheduled", "mention", "automated"] = "chat",
+    src_comment_id: int | None = None,
+    scheduled_mission_name: str | None = None,
+) -> str:
+    """Render the machine-readable HTML-comment footer for a Colony-
+    authored comment.
+
+    The footer is invisible to humans rendering the comment on
+    GitHub (HTML comments are stripped from the rendered view) but
+    structured for the GitHub-inbound parser (P8): the parser pulls
+    out ``session=...``, ``run=...``, ``user=...``, ``trigger=...``,
+    ``src_comment=...``, ``scheduled_mission=...`` and writes the
+    join into the InteractionLog so the inbound thread maps back to
+    its originating Colony session.
+
+    Whitespace inside the HTML comment is preserved by GitHub
+    Markdown, so we keep one ``key=value`` per relevant slot
+    separated by ``; `` for grep-friendliness.
+    """
+
+    parts = [f"author={author}", f"session={session_id}"]
+    if run_id is not None:
+        parts.append(f"run={run_id}")
+    if user is not None:
+        parts.append(f"user={user}")
+    parts.append(f"trigger={trigger}")
+    if src_comment_id is not None:
+        parts.append(f"src_comment={src_comment_id}")
+    if scheduled_mission_name is not None:
+        parts.append(f"scheduled_mission={scheduled_mission_name}")
+    return f"<!-- colony:{'; '.join(parts)} -->"
+
+
 def _summarise_issue(raw: dict[str, Any]) -> dict[str, Any]:
     """Shrink GitHub's verbose issue/PR dict to what the LLM needs.
 
@@ -154,6 +264,7 @@ class GitHubCapability(AgentCapability):
         installation_id: str | None = None,
         default_repo: str | None = None,
         default_project_id: str | None = None,
+        app_slug: str | None = None,
         max_requests_per_minute: int = 120,
         client: GitHubClient | None = None,
         httpx_client: httpx.AsyncClient | None = None,
@@ -176,6 +287,7 @@ class GitHubCapability(AgentCapability):
         self._private_key_pem = private_key_pem
         self._private_key_path = private_key_path
         self._installation_id = installation_id
+        self._app_slug = app_slug
         self._client: GitHubClient | None = client
         self._init_error: str | None = None
         self._client_initialized = client is not None
@@ -209,6 +321,8 @@ class GitHubCapability(AgentCapability):
         app_id = self._app_id or gh.app_id or None
         installation_id = self._installation_id or gh.installation_id or None
         private_key_pem = self._private_key_pem or gh.private_key_pem or None
+        if self._app_slug is None:
+            self._app_slug = gh.app_slug or None
         if not private_key_pem and self._private_key_path:
             with open(self._private_key_path, "r", encoding="utf-8") as fh:
                 private_key_pem = fh.read()
@@ -563,8 +677,23 @@ class GitHubCapability(AgentCapability):
         repo: str | None = None,
         labels: list[str] | None = None,
         assignees: list[str] | None = None,
+        auto_attach_to_default_project: bool = True,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
-        """Open a new issue."""
+        """Open a new issue.
+
+        ``auto_attach_to_default_project`` (default ``True``) plus a
+        resolved ``project_id`` (explicit arg wins; otherwise the
+        capability's ``default_project_id``) makes the action also
+        attach the new issue to the operator's Projects v2 board in
+        the same call — one planner step instead of two. Attach
+        failure (project not found, permissions, transient GraphQL
+        hiccup) is **non-fatal**: the issue creation already
+        succeeded, so we surface the attach error as
+        ``project_attach_error`` in the response rather than rolling
+        back. Set the flag to ``False`` for issues you intentionally
+        want unsorted (e.g. spam/triage queue).
+        """
         repo = self._resolve_repo(repo)
         if not repo:
             return _err("no repo provided and no default_repo set")
@@ -582,10 +711,39 @@ class GitHubCapability(AgentCapability):
             )
         except Exception as e:
             return self._shape_error(e)
+
         out = _ok(issue=_summarise_issue(data))
         await self._write_audit("create_issue", {
             "repo": repo, "number": data.get("number"), "title": title,
         })
+
+        # Optional Projects v2 attachment. Resolved at call time so an
+        # operator can toggle ``default_project_id`` between sessions
+        # without re-instantiating the capability.
+        if auto_attach_to_default_project:
+            pid = project_id or self._default_project_id
+            content_node_id = data.get("node_id")
+            if pid and content_node_id:
+                attach = await self._add_to_project_v2(
+                    client=client,
+                    project_id=pid,
+                    content_node_id=content_node_id,
+                )
+                if attach["ok"]:
+                    out["project_item_id"] = attach["item_id"]
+                    out["project_id"] = pid
+                else:
+                    # Mutation failed AFTER the issue was created — the
+                    # issue exists, so we don't flip ``out["ok"]``.
+                    # Surface the error verbatim so the planner can
+                    # decide whether to retry the attach.
+                    out["project_attach_error"] = attach["message"]
+            elif pid and not content_node_id:
+                out["project_attach_error"] = (
+                    "issue created but its GraphQL node_id was missing "
+                    "from the REST response; cannot run "
+                    "addProjectV2ItemById without it."
+                )
         return out
 
     @action_executor()
@@ -619,6 +777,83 @@ class GitHubCapability(AgentCapability):
             "comment_id": data.get("id"),
         })
         return out
+
+    @action_executor()
+    async def comment_as_session_agent(
+        self,
+        *,
+        issue_number: int,
+        body: str,
+        session_id: str,
+        replying_to: str | None = None,
+        trigger: Literal[
+            "chat", "scheduled", "mention", "automated",
+        ] = "chat",
+        run_id: str | None = None,
+        src_comment_id: int | None = None,
+        scheduled_mission_name: str | None = None,
+        agent_role: str = "SessionAgent",
+        repo: str | None = None,
+    ) -> dict[str, Any]:
+        """Post a comment with the Colony signing + attribution
+        conventions baked in (top-level design plan §16.5).
+
+        The planner should call THIS instead of bare
+        :meth:`comment_on_issue` for any user-facing reply, so:
+
+        - the comment carries the visible Colony signature line so
+          humans reading the GitHub thread know what / who replied;
+        - the comment carries the machine-readable HTML-comment
+          footer the future GitHub-inbound poller / webhook (Phase
+          P8) parses to join inbound replies back to their
+          originating Colony session in the InteractionLog.
+
+        ``trigger`` semantics:
+
+        - ``chat`` (default) — replying to a user message in the
+          chat UI. ``replying_to`` should be the user's GitHub login.
+        - ``mention`` — replying because the bot was @-mentioned in
+          a GitHub comment. Set ``src_comment_id`` to the comment
+          that mentioned us.
+        - ``scheduled`` — posted from a scheduled mission run. Set
+          ``scheduled_mission_name`` so the signature reads
+          "triggered by scheduled mission `<name>`".
+        - ``automated`` — any other automated trigger; signature
+          reads "(automated)".
+
+        ``agent_role`` defaults to ``"SessionAgent"`` — override for
+        other agent types (e.g. a coordinator agent posting status
+        updates).
+        """
+
+        signature = _render_session_agent_signature(
+            agent_role=agent_role,
+            trigger=trigger,
+            session_id=session_id,
+            replying_to=replying_to,
+            src_comment_id=src_comment_id,
+            scheduled_mission_name=scheduled_mission_name,
+        )
+        footer = _render_attribution_footer(
+            author="session-agent" if agent_role == "SessionAgent"
+            else agent_role.lower().replace(" ", "-"),
+            session_id=session_id,
+            run_id=run_id,
+            user=replying_to,
+            trigger=trigger,
+            src_comment_id=src_comment_id,
+            scheduled_mission_name=scheduled_mission_name,
+        )
+        full_body = f"{signature}\n\n{body}\n\n{footer}"
+        # Delegate to the bare action; it already handles repo
+        # resolution, client init, error shaping, audit-write of the
+        # ``comment_on_issue`` event. The audit row records the bare
+        # call (the wrapper convention is captured in the on-wire
+        # body via the footer, which the inbound parser will pull
+        # out — no separate audit-row schema needed).
+        return await self.comment_on_issue(
+            issue_number, full_body, repo=repo,
+        )
 
     @action_executor()
     async def close_issue(
@@ -698,6 +933,147 @@ class GitHubCapability(AgentCapability):
                 for label in (data or [])
             ],
         )
+
+    @action_executor()
+    async def list_milestones(
+        self,
+        *,
+        repo: str | None = None,
+        state: Literal["open", "closed", "all"] = "open",
+        sort: Literal["due_on", "completeness"] = "due_on",
+        direction: Literal["asc", "desc"] = "asc",
+        max_results: int = 50,
+    ) -> dict[str, Any]:
+        """List repository milestones with their open/closed issue
+        counts (provided by the GitHub API per-milestone — no
+        per-milestone issue scan needed).
+
+        Each returned entry has::
+
+            {number, title, description, state, due_on,
+             open_issues, closed_issues, html_url}
+
+        Used by :meth:`DesignProcessCapability.summarise_progress`
+        to roll milestone state up into a progress snapshot.
+        """
+        repo = self._resolve_repo(repo)
+        if not repo:
+            return _err(
+                "no repo provided and no default_repo set",
+                milestones=[],
+            )
+        client, err = await self._ensure_client()
+        if client is None:
+            return _err(err or "", milestones=[])
+        params: dict[str, Any] = {
+            "state": state,
+            "sort": sort,
+            "direction": direction,
+            "per_page": min(100, max_results),
+        }
+        try:
+            data = await client.get(
+                f"/repos/{repo}/milestones", **params,
+            )
+        except Exception as e:
+            return self._shape_error(e) | {"milestones": []}
+        milestones = [
+            {
+                "number": m.get("number"),
+                "title": m.get("title"),
+                "description": m.get("description"),
+                "state": m.get("state"),
+                "due_on": m.get("due_on"),
+                "open_issues": m.get("open_issues", 0),
+                "closed_issues": m.get("closed_issues", 0),
+                "html_url": m.get("html_url"),
+            }
+            for m in (data or [])
+        ][:max_results]
+        return _ok(milestones=milestones, count=len(milestones))
+
+    @action_executor()
+    async def whoami(self) -> dict[str, Any]:
+        """Return the GitHub identity Colony posts and commits as.
+
+        Resolves the configured GitHub App slug (env
+        ``GITHUB_APP_SLUG`` or ``app_slug`` kwarg) into the bot
+        login GitHub uses for assignment, comments, and commit
+        attribution: ``<slug>[bot]``.
+
+        Used by :meth:`DesignProcessCapability.propose_task_assignments`
+        to know which login to set as the assignee for tasks Colony
+        will execute itself (vs. tasks routed to the human user).
+        """
+        slug = (self._app_slug or "").strip()
+        if not slug:
+            return _err(
+                "GitHub App slug not configured — set "
+                "GITHUB_APP_SLUG (env) or pass app_slug to "
+                "GitHubCapability so we can resolve the bot login "
+                "Colony commits and comments as.",
+                login=None, slug=None,
+            )
+        return _ok(
+            login=f"{slug}[bot]",
+            slug=slug,
+            app_id=self._app_id or None,
+            app_url=f"https://github.com/apps/{slug}",
+        )
+
+    @action_executor()
+    async def assign_issue(
+        self,
+        issue_number: int,
+        assignees: list[str],
+        *,
+        repo: str | None = None,
+        replace: bool = True,
+    ) -> dict[str, Any]:
+        """Set the assignees on an issue.
+
+        Args:
+            issue_number: The issue number to assign.
+            assignees: GitHub logins to assign. Bot logins take the
+                form ``<app-slug>[bot]`` — use :meth:`whoami` to get
+                Colony's bot login. Pass ``[]`` with ``replace=True``
+                to unassign everyone.
+            repo: ``owner/repo``; falls back to ``default_repo``.
+            replace: If ``True`` (default), the issue's assignees are
+                set to exactly ``assignees`` — anyone previously
+                assigned and not in this list is removed. If
+                ``False``, the list is additive: ``assignees`` is
+                appended to whoever is already assigned (GitHub
+                de-duplicates).
+
+        Returns the updated issue summary.
+        """
+        repo = self._resolve_repo(repo)
+        if not repo:
+            return _err("no repo provided and no default_repo set")
+        client, err = await self._ensure_client()
+        if client is None:
+            return _err(err or "")
+        # Normalise; strip empties so callers can pass ``[None]`` etc.
+        clean = [a for a in (assignees or []) if isinstance(a, str) and a.strip()]
+        try:
+            if replace:
+                data = await client.patch(
+                    f"/repos/{repo}/issues/{issue_number}",
+                    json={"assignees": clean},
+                )
+            else:
+                data = await client.post(
+                    f"/repos/{repo}/issues/{issue_number}/assignees",
+                    json={"assignees": clean},
+                )
+        except Exception as e:
+            return self._shape_error(e)
+        await self._write_audit("assign_issue", {
+            "repo": repo, "issue_number": issue_number,
+            "assignees": clean, "replace": replace,
+        })
+        return _ok(issue=_summarise_issue(data or {}))
 
     # =====================================================================
     # Pull requests
@@ -925,6 +1301,19 @@ class GitHubCapability(AgentCapability):
     }
     """.strip()
 
+    # Idempotent server-side: re-adding the same content to a project
+    # returns the existing item id rather than erroring. The mutation
+    # accepts the project's GraphQL node id + the content's GraphQL
+    # node id (issues + PRs both have a node_id REST returns as
+    # ``node_id`` on the response payload).
+    _ADD_PROJECT_V2_ITEM = """
+    mutation($projectId: ID!, $contentId: ID!) {
+      addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+        item { id }
+      }
+    }
+    """.strip()
+
     _LIST_PROJECT_ITEMS = """
     query($projectId: ID!, $first: Int!) {
       node(id: $projectId) {
@@ -1019,6 +1408,95 @@ class GitHubCapability(AgentCapability):
             project_title=node.get("title"),
             items=items, count=len(items),
         )
+
+    async def _add_to_project_v2(
+        self,
+        *,
+        client: "GitHubClient",
+        project_id: str,
+        content_node_id: str,
+    ) -> dict[str, Any]:
+        """Run the ``addProjectV2ItemById`` mutation. Returns the
+        standard ``{ok, message, item_id?}`` envelope. Server-side
+        idempotent — re-adding the same content returns the existing
+        item id.
+
+        Internal helper; callers should be public actions
+        (``create_issue`` auto-attach, ``add_issue_to_project``,
+        future ``add_pr_to_project``) so the audit log carries an
+        action label.
+        """
+
+        try:
+            data = await client.graphql(
+                self._ADD_PROJECT_V2_ITEM,
+                variables={
+                    "projectId": project_id,
+                    "contentId": content_node_id,
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            return self._shape_error(e)
+        item = ((data or {}).get("addProjectV2ItemById") or {}).get("item") or {}
+        item_id = item.get("id")
+        if not item_id:
+            return _err(
+                "addProjectV2ItemById returned no item id (unexpected "
+                "GraphQL shape); the issue may not have been attached.",
+            )
+        return _ok(item_id=item_id)
+
+    @action_executor()
+    async def add_issue_to_project(
+        self,
+        issue_number: int,
+        *,
+        project_id: str | None = None,
+        repo: str | None = None,
+    ) -> dict[str, Any]:
+        """Attach an existing issue to a Projects v2 board.
+
+        ``project_id`` falls back to the capability's
+        ``default_project_id`` when omitted. Resolves the issue's
+        GraphQL node id via REST first (one round-trip; cheaper than
+        a GraphQL ``repository.issue.id`` lookup) and then runs the
+        ``addProjectV2ItemById`` mutation. Idempotent server-side
+        (re-adding returns the existing item id).
+        """
+
+        pid = project_id or self._default_project_id
+        if not pid:
+            return _err(
+                "no project_id provided and no default_project_id set",
+            )
+        repo = self._resolve_repo(repo)
+        if not repo:
+            return _err("no repo provided and no default_repo set")
+        client, err = await self._ensure_client()
+        if client is None:
+            return _err(err or "")
+        try:
+            issue_data = await client.get(
+                f"/repos/{repo}/issues/{issue_number}",
+            )
+        except Exception as e:
+            return self._shape_error(e)
+        content_node_id = issue_data.get("node_id")
+        if not content_node_id:
+            return _err(
+                f"issue {repo}#{issue_number} REST response had no "
+                f"node_id; cannot run addProjectV2ItemById without it.",
+            )
+        result = await self._add_to_project_v2(
+            client=client, project_id=pid,
+            content_node_id=content_node_id,
+        )
+        if result["ok"]:
+            await self._write_audit("add_issue_to_project", {
+                "repo": repo, "number": issue_number,
+                "project_id": pid, "item_id": result.get("item_id"),
+            })
+        return result | {"repo": repo, "number": issue_number, "project_id": pid}
 
     @action_executor(interruptible=True)
     async def claim_unassigned_issue(
