@@ -192,6 +192,58 @@ cluster:
     assert env.get("COLONY_IMAGE") == bake_tag
 
 
+def test_active_profiles_off_when_smee_url_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No smee URL in env → no compose profiles active → no
+    ``--profile`` arg appended to the compose command."""
+    p = DockerComposeProvider(DeployConfig(mode="compose"))
+    monkeypatch.setattr(
+        p, "_compose_subprocess_env", lambda: {"PATH": "/usr/bin"},
+    )
+    assert p._active_profiles() == []
+    cmd = p._compose_cmd("up", "-d")
+    assert "--profile" not in cmd
+
+
+def test_active_profiles_local_webhook_when_smee_url_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``POLYMATHERA_SMEE_FORWARDING_URL`` in env activates the
+    ``local-webhook`` profile and injects ``--profile local-webhook``
+    into every compose command."""
+    p = DockerComposeProvider(DeployConfig(mode="compose"))
+    monkeypatch.setattr(
+        p, "_compose_subprocess_env",
+        lambda: {
+            "PATH": "/usr/bin",
+            "POLYMATHERA_SMEE_FORWARDING_URL": "https://smee.io/abc123",
+        },
+    )
+    assert p._active_profiles() == ["local-webhook"]
+    cmd = p._compose_cmd("up", "-d")
+    # Profile arg appears before the subcommand args, after -f / --env-file.
+    assert "--profile" in cmd
+    profile_idx = cmd.index("--profile")
+    assert cmd[profile_idx + 1] == "local-webhook"
+    up_idx = cmd.index("up")
+    assert profile_idx < up_idx
+
+
+def test_active_profiles_off_when_smee_url_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty string is treated as 'unset' — operators commenting out
+    the value by setting it to '' shouldn't accidentally activate
+    the sidecar."""
+    p = DockerComposeProvider(DeployConfig(mode="compose"))
+    monkeypatch.setattr(
+        p, "_compose_subprocess_env",
+        lambda: {"POLYMATHERA_SMEE_FORWARDING_URL": ""},
+    )
+    assert p._active_profiles() == []
+
+
 @pytest.mark.asyncio
 async def test_image_info_parses_baked_vs_overlay(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,

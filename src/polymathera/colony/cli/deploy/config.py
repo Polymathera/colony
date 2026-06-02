@@ -69,10 +69,24 @@ class DeployConfig:
             # Same App, OAuth client for user-to-server flow.
             "GITHUB_APP_CLIENT_ID",
             "GITHUB_APP_CLIENT_SECRET",
+            # P9 webhook receiver HMAC secret. Required by
+            # ``POST /api/v1/github/webhook`` on the dashboard
+            # service (compose substitution at startup); empty is
+            # fine — the receiver short-circuits to 503 then.
+            "GITHUB_WEBHOOK_SECRET",
             # WebSearchCapability / ColonyDocsCapability — Tavily.
             "TAVILY_API_KEY",
             # Slack-relay capability.
             "SLACK_APP_TOKEN",
             "SLACK_BOT_TOKEN",
+            # Local-dev smee.io webhook forwarder URL (e.g.
+            # ``https://smee.io/<channel>``). When set, the
+            # ``DockerComposeProvider`` activates the
+            # ``local-webhook`` compose profile, starting the
+            # ``smee-forwarder`` sidecar that relays GitHub webhook
+            # deliveries from the smee.io channel to the local
+            # dashboard. Leave unset in production deployments —
+            # GitHub posts straight to the public dashboard URL.
+            "POLYMATHERA_SMEE_FORWARDING_URL",
         ]
     )

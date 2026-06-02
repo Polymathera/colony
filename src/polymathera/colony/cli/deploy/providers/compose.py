@@ -65,14 +65,40 @@ class DockerComposeProvider(DeploymentProvider):
         ``extra_files`` are additional ``-f`` arguments appended after the
         primary compose file; compose merges them in order. Used by
         :meth:`up` to layer in path-source extension volume mounts.
+
+        Profile-gated services (currently just the ``smee-forwarder``
+        sidecar — ``local-webhook`` profile) are included automatically
+        when their activation env var is set in ``.env``. See
+        :meth:`_active_profiles`.
         """
         cmd = ["docker", "compose", "-f", str(_COMPOSE_FILE)]
         for extra in (extra_files or []):
             cmd.extend(["-f", str(extra)])
         if _ENV_FILE.is_file():
             cmd.extend(["--env-file", str(_ENV_FILE)])
+        for profile in self._active_profiles():
+            cmd.extend(["--profile", profile])
         cmd.extend(args)
         return cmd
+
+    def _active_profiles(self) -> list[str]:
+        """Compose profiles to activate based on what's set in ``.env``.
+
+        Mapping (keep in sync with ``profiles:`` blocks in
+        ``docker-compose.yml``):
+
+        - ``local-webhook`` — activated iff
+          ``POLYMATHERA_SMEE_FORWARDING_URL`` resolves non-empty after
+          ``.env`` overlay. Starts the ``smee-forwarder`` sidecar so
+          GitHub webhooks reach the local dashboard via smee.io. Set
+          only in dev; production points GitHub straight at the
+          dashboard's public URL and skips the relay entirely.
+        """
+        profiles: list[str] = []
+        env = self._compose_subprocess_env()
+        if env.get("POLYMATHERA_SMEE_FORWARDING_URL"):
+            profiles.append("local-webhook")
+        return profiles
 
     def _compose_subprocess_env(self) -> dict[str, str]:
         """Build the subprocess environment for ``docker compose`` calls.

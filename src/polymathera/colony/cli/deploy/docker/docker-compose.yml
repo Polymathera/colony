@@ -474,6 +474,49 @@ services:
       timeout: 5s
       retries: 5
 
+  smee-forwarder:
+    # Long-lived smee.io webhook forwarder for local dev. GitHub
+    # can't POST webhooks to ``localhost``, so smee.io acts as a
+    # public relay: GitHub -> smee.io channel -> smee-client ->
+    # this container -> ``dashboard:8080/api/v1/github/webhook``
+    # (resolved via the docker-compose network).
+    #
+    # Sidecar is profile-gated: only included in ``docker compose
+    # up`` when the ``local-webhook`` profile is active. The
+    # ``DockerComposeProvider`` activates the profile *only* when
+    # ``POLYMATHERA_SMEE_FORWARDING_URL`` is set in ``.env`` (see
+    # ``providers/compose.py::_active_profiles``), so production
+    # deployments (where GitHub posts straight to the public
+    # dashboard URL — no relay needed) never start it. The env-var
+    # itself is local-dev-only by design.
+    #
+    # Official ``node:20-alpine`` + ``npx smee-client@latest`` —
+    # smee-client is published by the Probot project on npmjs;
+    # using the official Node image avoids depending on a third
+    # party's Docker Hub repo. First start runs ``npx`` install
+    # (a few seconds, cached by npm in the container's tmpfs);
+    # restarts re-install (acceptable for a dev-only sidecar).
+    image: node:20-alpine
+    container_name: colony-smee-forwarder
+    profiles:
+      - local-webhook
+    entrypoint: ["sh", "-c"]
+    # ``$$URL`` / ``$$TARGET`` escape to single ``$`` in compose's
+    # rendered YAML so the shell *inside* the container expands
+    # them from the ``environment:`` block — letting compose's
+    # substitution leave the literal ``$URL`` for the container.
+    command:
+      - 'npx --yes smee-client@latest --url "$$URL" --target "$$TARGET"'
+    environment:
+      URL: ${POLYMATHERA_SMEE_FORWARDING_URL:-}
+      TARGET: http://dashboard:8080/api/v1/github/webhook
+    depends_on:
+      dashboard:
+        condition: service_healthy
+    networks:
+      - colony-net
+    restart: unless-stopped
+
 volumes:
   colony-shared:
   # Persistent overlay for L1-G ``cluster.extensions.packages``: the
