@@ -83,6 +83,22 @@ async def session_chat(
 
     # Look up session metadata (agent ID, tenant, colony for execution context)
     session_info = await _get_session_info(colony, session_id)
+
+    # Refuse to attach chat to a colony-singleton system session. The
+    # system session hosts always-on capabilities (P8 GitHub inbound +
+    # InteractionLog; P9+ webhook / mention routing) and has no user
+    # behind it; chat attempts here would never receive a response.
+    # Traces tab paths are independent and stay open. Pre-P8-0
+    # sessions without the field default to ``user`` via the
+    # _SessionInfo dataclass and pass through unaffected.
+    if session_info is not None and session_info.session_kind == "system":
+        await websocket.send_json({
+            "type": "error",
+            "message": "Cannot attach chat to a system session.",
+        })
+        await websocket.close()
+        return
+
     session_agent_id = session_info.session_agent_id if session_info else None
 
     # colony_id: try WebSocket header first, fall back to session's colony_id.
@@ -270,6 +286,10 @@ class _SessionInfo:
     session_agent_id: str | None
     tenant_id: str
     colony_id: str
+    # ``user`` (chat-bound human) or ``system`` (colony singleton —
+    # chat-attach is refused). Defaults to ``user`` so any pre-P8-0
+    # serialized session that lacks the field passes the guard.
+    session_kind: str = "user"
 
 
 async def _get_session_info(colony: ColonyConnection, session_id: str) -> _SessionInfo | None:
@@ -289,6 +309,7 @@ async def _get_session_info(colony: ColonyConnection, session_id: str) -> _Sessi
                 session_agent_id=session.session_agent_id or None,
                 tenant_id=session.tenant_id,
                 colony_id=session.colony_id,
+                session_kind=session.session_kind,
             )
     except Exception as e:
         logger.warning("Failed to look up session info for %s: %s", session_id, e)

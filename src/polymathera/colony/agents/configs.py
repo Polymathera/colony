@@ -591,6 +591,17 @@ class GitHubAuthConfig(ConfigComponent):
         default="",
         json_schema_extra={"env": "GITHUB_APP_CLIENT_SECRET", "optional": True},
     )
+    # P9: HMAC-SHA256 key the ``POST /api/v1/github/webhook`` receiver
+    # verifies inbound payloads against (operator sets matching value
+    # in the GitHub App's webhook secret field). When unset, the
+    # receiver rejects every inbound webhook with 503 — webhook mode
+    # is opt-in, the operator must wire this AND set
+    # ``mode: webhook`` in the colony's
+    # ``.colony/github_inbound.yaml`` for the receiver to fire.
+    webhook_secret: str = Field(
+        default="",
+        json_schema_extra={"env": "GITHUB_WEBHOOK_SECRET", "optional": True},
+    )
 
     @field_validator("private_key_pem", mode="after")
     @classmethod

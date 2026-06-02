@@ -2568,3 +2568,82 @@ class DesignSuggestionProtocol(BlackboardProtocol):
         }
 
 
+class MentionEventProtocol(BlackboardProtocol):
+    """Protocol fired when :class:`MentionRoutingCapability` detects an
+    ``@colony`` / ``@polymath`` mention in an inbound GitHub event's
+    body text (issue body, PR body, or issue comment).
+
+    P10 v1 emits one event per matched mention. Downstream subscribers:
+
+    - :class:`InteractionLogCapability` mirrors each ``mention:*`` write
+      into ``interaction_log`` so mentions are queryable via
+      ``fetch_recent_activity`` / ``fetch_by_ref``.
+    - Future P10 follow-up: an LLM-driven handler on the system
+      ``SessionAgent`` that judges intent + responds via
+      ``GitHubCapability.comment_on_issue``.
+
+    Body fields the writer SHOULD include in the value payload
+    (the protocol enforces only the key shape):
+
+    - ``mention_kind`` (str): the matched handle — ``colony`` /
+      ``polymath`` / ``colony-<name>`` / ``polymath-<name>``.
+    - ``repo`` (str): ``owner/repo``.
+    - ``issue_number`` (int): the issue (or PR) the mention is on.
+    - ``comment_id`` (int | None): when the mention is in a comment;
+      ``None`` when it's in an issue/PR body.
+    - ``commenter_login`` (str | None): the GitHub user who typed the
+      mention.
+    - ``body`` (str): the full body text the mention was found in (the
+      LLM-judge follow-up consumes this for intent inference).
+    - ``html_url`` (str | None): a deep-link back to the comment / issue
+      so dashboards / responders can surface it.
+
+    Key format::
+
+        mention:{owner}__{repo}:{issue_number}:{comment_id_or_zero}
+
+    The repo's slash is encoded as ``__`` (same convention as
+    :class:`MonorepoCommitProtocol`) so the key has a fixed colon-
+    count of three. ``comment_id_or_zero`` is ``0`` when the mention
+    is in an issue/PR body (no comment id to surface) — keeps the key
+    shape uniform so pattern matching doesn't have to branch.
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.COLONY
+
+    _PREFIX: ClassVar[str] = "mention:"
+
+    @staticmethod
+    def event_key(
+        repo: str, issue_number: int, comment_id: int | None = None,
+    ) -> str:
+        safe_repo = str(repo).replace("/", "__")
+        comment_token = comment_id if comment_id is not None else 0
+        return (
+            f"{MentionEventProtocol._PREFIX}"
+            f"{safe_repo}:{int(issue_number)}:{int(comment_token)}"
+        )
+
+    @staticmethod
+    def event_pattern() -> str:
+        return f"{MentionEventProtocol._PREFIX}*"
+
+    @staticmethod
+    def event_pattern_for_repo(repo: str) -> str:
+        safe_repo = str(repo).replace("/", "__")
+        return f"{MentionEventProtocol._PREFIX}{safe_repo}:*"
+
+    @staticmethod
+    def parse_event_key(key: str) -> dict[str, str]:
+        if not key.startswith(MentionEventProtocol._PREFIX):
+            raise ValueError(f"Not a MentionEvent key: {key!r}")
+        rest = key[len(MentionEventProtocol._PREFIX):]
+        parts = rest.split(":")
+        if len(parts) != 3:
+            raise ValueError(f"Malformed MentionEvent key: {key!r}")
+        safe_repo, issue_number, comment_id = parts
+        return {
+            "repo": safe_repo.replace("__", "/"),
+            "issue_number": issue_number,
+            "comment_id": comment_id,
+        }

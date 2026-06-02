@@ -422,6 +422,11 @@ services:
       - GITHUB_PRIVATE_KEY_PEM=${GITHUB_PRIVATE_KEY_PEM:-}
       - GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID:-}
       - GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET:-}
+      # Webhook receiver — HMAC secret. Dashboard service ONLY
+      # (the receiver runs here; agent processes use App-installation
+      # tokens, not the webhook secret). Empty when no colony uses
+      # ``mode: webhook``.
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
       # Knowledge stack — Qdrant URL, GROBID URL, PDF extractor
       # backend, and image directory live in the operator YAML
       # (``knowledge`` — see configs/example.yaml).

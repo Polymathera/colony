@@ -78,7 +78,7 @@ _ASSIGNEE_MARKER_RE = re.compile(
 ASSIGNEE_TARGETS: tuple[str, str] = ("colony", "user")
 
 
-def _parse_owner_repo_from_url(url: str) -> str | None:
+def parse_owner_repo_from_url(url: str) -> str | None:
     """Extract ``owner/repo`` from a github.com clone URL.
 
     Handles the common shapes:
@@ -960,7 +960,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         url = self.design_monorepo_url
         if not url:
             return None
-        return _parse_owner_repo_from_url(url)
+        return parse_owner_repo_from_url(url)
 
     def _no_github_repo_error(self, **extras: Any) -> dict[str, Any]:
         """Standard error dict every action returns when

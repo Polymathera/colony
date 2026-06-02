@@ -3,6 +3,7 @@ import { useHealthStatus } from "@/api/hooks/useInfrastructure";
 import { useSessions } from "@/api/hooks/useSessions";
 import { Badge } from "../shared/Badge";
 import { ColoniesSection } from "./ColoniesSection";
+import { ColonyStatusPanel } from "./ColonyStatusPanel";
 import {
   TenantGitHubInstallationSection,
   UserGitHubIdentitySection,
@@ -87,6 +88,13 @@ export function LandingPage({
           session-create time. See colony/github_identity_fix_plan.md. */}
       <TenantGitHubInstallationSection />
       <UserGitHubIdentitySection />
+
+      {/* P11 Colony Status panel — alerts + recent activity +
+          GitHub Project deep-link. Lives outside the session-tabs
+          gate so the operator sees inbound GitHub events the system
+          session captured without having to open a chat session.
+          See colony/p11_p12_plan.md. */}
+      <ColonyStatusPanel />
 
       {/* Actions */}
       <div className="flex gap-3">

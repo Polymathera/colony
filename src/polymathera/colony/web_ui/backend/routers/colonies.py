@@ -60,6 +60,29 @@ async def create_colony(
     result = await auth_service.create_colony(
         db, user["tenant_id"], request.name, request.description,
     )
+
+    # P8-0: bootstrap the system session for the new colony so
+    # colony-singleton capabilities are alive immediately (no dashboard
+    # restart required). Idempotent; the dashboard's lifespan walker
+    # will no-op on this colony next startup. Best-effort — the colony
+    # row is already persisted, so a singleton-bootstrap failure does
+    # not invalidate the create response. The error is logged and the
+    # next lifespan or create_colony call retries.
+    from ..chat.system_session import ensure_system_session_for_colony
+    try:
+        await ensure_system_session_for_colony(
+            colony,
+            tenant_id=result["tenant_id"],
+            colony_id=result["colony_id"],
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "create_colony: system-session bootstrap failed for "
+            "colony %s; colony-singleton capabilities will not be "
+            "running until the next dashboard restart.",
+            result["colony_id"],
+        )
+
     return ColonyInfo(**result)
 
 

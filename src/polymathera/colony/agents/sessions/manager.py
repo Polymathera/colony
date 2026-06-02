@@ -240,6 +240,115 @@ class SessionManagerDeployment:
         return session
 
     @serving.endpoint(ring=serving.Ring.KERNEL)
+    async def ensure_system_session(self) -> Session:
+        """Idempotently return the system session for the current
+        ``(tenant_id, colony_id)`` syscontext.
+
+        The system session is the always-on colony singleton that
+        hosts colony-wide capabilities (P8: ``GitHubInboundCapability``
+        + ``InteractionLogCapability``; P9+: webhook receiver, mention
+        routing, …). Discriminated by ``session_kind="system"``;
+        never expires; chat-attach refuses to bind a user to it.
+
+        Lookup-first then create-if-missing, both inside a single
+        ``write_transaction`` so concurrent bootstrap callers from
+        different routes / lifespan / colony-create funnel through
+        ``state_manager``'s compare-and-swap and the lookup
+        short-circuits the second caller.
+        """
+        syscontext = serving.require_execution_context()
+        if not syscontext.tenant_id or not syscontext.colony_id:
+            raise ValueError(
+                "ensure_system_session requires tenant_id + colony_id "
+                "in the execution context."
+            )
+
+        if self.vcm_handle is None:
+            raise RuntimeError(
+                "Session manager is still initializing (VCM handle not yet "
+                "available). Please wait a few seconds and try again."
+            )
+
+        # Pass 1 — lookup only, no write. The vast majority of calls
+        # land here (every dashboard-startup walker re-visit after the
+        # first bootstrap).
+        existing: Session | None = None
+        async for state in self.state_manager.read_transaction():
+            session_ids = state.sessions_by_tenant.get(syscontext.tenant_id, [])
+            for sid in session_ids:
+                s = state.sessions.get(sid)
+                if (
+                    s is not None
+                    and s.session_kind == "system"
+                    and s.syscontext.colony_id == syscontext.colony_id
+                ):
+                    existing = s
+                    break
+        if existing is not None:
+            return existing
+
+        # Pass 2 — bootstrap (rare). Create the VCM branch outside the
+        # write_transaction (it has its own RPC + must not run with the
+        # transaction held). Then a single write_transaction does the
+        # add_session + tenant-usage increment atomically.
+        session_id = f"session_{uuid.uuid4().hex[:12]}"
+        branch: VCMBranch | None = await self.vcm_handle.create_branch(
+            parent_branch_id=None,
+            name=f"session_{session_id}",
+        )
+
+        session = Session(
+            session_id=session_id,
+            syscontext=syscontext,
+            branch_id=branch.branch_id,
+            state=SessionState.ACTIVE,
+            metadata=SessionMetadata(
+                syscontext=syscontext,
+                created_by="colony_bootstrap",
+                name=f"System session for colony {syscontext.colony_id}",
+            ),
+            expires_at=None,  # never expires — outlives any TTL
+            session_kind="system",
+        )
+
+        # Re-check inside the write_transaction to close the
+        # lookup→create race when two callers reach pass 2 at the same
+        # time. Only the first one's add_session sticks; the second
+        # observes an existing row and skips.
+        created = session
+        async for state in self.state_manager.write_transaction():
+            # Re-check for a row inserted between pass 1 and now.
+            existing_in_write = None
+            for sid in state.sessions_by_tenant.get(syscontext.tenant_id, []):
+                s = state.sessions.get(sid)
+                if (
+                    s is not None
+                    and s.session_kind == "system"
+                    and s.syscontext.colony_id == syscontext.colony_id
+                ):
+                    existing_in_write = s
+                    break
+
+            if existing_in_write is not None:
+                # Discard the locally-created session; another caller
+                # won. Branch leak: the VCM branch we created above is
+                # orphaned. Acceptable for v1 — bootstrap is rare, and
+                # branches are cheap; tracked in P8 follow-up.
+                created = existing_in_write
+            else:
+                state.add_session(session)
+                usage = self._get_or_create_usage(state)
+                usage.active_sessions += 1
+
+        logger.info(
+            "ensure_system_session: tenant=%s colony=%s session=%s "
+            "(created=%s)",
+            syscontext.tenant_id, syscontext.colony_id,
+            created.session_id, created is session,
+        )
+        return created
+
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def set_session_agent_id(self, session_id: str, agent_id: str) -> str | None:
         """Set the session agent ID for a session. If the session already
         has a session_agent_id, returns the existing one without overwriting.

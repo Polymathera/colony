@@ -88,12 +88,48 @@ async def lifespan(app: FastAPI):
     if colony._db_pool:
         from .auth.schema import ensure_auth_schema
         from .chat.schema import ensure_chat_schema
+        from polymathera.colony.agents.patterns.capabilities.github_inbound import (
+            ensure_github_inbound_schema,
+        )
+        from polymathera.colony.agents.patterns.capabilities.interaction_log import (
+            ensure_interaction_log_schema,
+        )
+        from .github_webhook import ensure_github_webhook_schema
         await ensure_auth_schema(colony._db_pool)
         await ensure_chat_schema(colony._db_pool)
+        # P8a: cursor table for GitHubInboundCapability. Must land
+        # before the system-session bootstrap below so the capability's
+        # initialize() can read the table on first tick.
+        await ensure_github_inbound_schema(colony._db_pool)
+        # P8b: interaction_log table for InteractionLogCapability.
+        # Same lifecycle reasoning — must land before system-session
+        # bootstrap.
+        await ensure_interaction_log_schema(colony._db_pool)
+        # P9: dedup table for the github webhook receiver.
+        await ensure_github_webhook_schema(colony._db_pool)
 
         # Make chat store available via app state
         from .chat.store import ChatMessageStore
         app.state.chat_store = ChatMessageStore(colony._db_pool)
+
+        # P8-0: bootstrap a system session per colony. Always-on host
+        # for colony-singleton capabilities (P8: GitHub inbound +
+        # InteractionLog; P9+ webhook + mention routing). Idempotent;
+        # called again from ``routers.colonies.create_colony`` after a
+        # new colony lands so fresh colonies get their system session
+        # without a dashboard restart. Best-effort — a single colony's
+        # failure does NOT prevent the dashboard from starting.
+        from .chat.system_session import (
+            ensure_system_sessions_for_all_colonies,
+        )
+        try:
+            await ensure_system_sessions_for_all_colonies(colony)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "lifespan: system-session bootstrap failed; "
+                "colony-singleton capabilities will not be running. "
+                "Dashboard remains up.",
+            )
     else:
         app.state.chat_store = None
 
@@ -154,8 +190,10 @@ def create_app(config: DashboardConfig) -> FastAPI:
         chat,
         auth,
         colonies,
+        colony_status,
         human_approval,
         github_oauth,
+        github_webhook,
         tenants,
     )
     from .routers import config as config_router
@@ -163,8 +201,10 @@ def create_app(config: DashboardConfig) -> FastAPI:
 
     app.include_router(auth.router, prefix="/api/v1", tags=["auth"])
     app.include_router(github_oauth.router, prefix="/api/v1", tags=["github-oauth"])
+    app.include_router(github_webhook.router, prefix="/api/v1", tags=["github-webhook"])
     app.include_router(tenants.router, prefix="/api/v1", tags=["tenants"])
     app.include_router(colonies.router, prefix="/api/v1", tags=["colonies"])
+    app.include_router(colony_status.router, prefix="/api/v1", tags=["colony-status"])
     app.include_router(infrastructure.router, prefix="/api/v1", tags=["infrastructure"])
     app.include_router(deployments.router, prefix="/api/v1", tags=["deployments"])
     app.include_router(agents.router, prefix="/api/v1", tags=["agents"])

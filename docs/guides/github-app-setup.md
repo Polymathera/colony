@@ -35,7 +35,21 @@ You're registering **one** App on GitHub. That single App will be shared by ever
      - **Hosted deployment**: `https://<your-colony-dashboard-host>/api/v1/auth/github/callback`.
      If you run both local and hosted environments against the same App, click **Add Callback URL** on the App settings page to add the second URL alongside the first — GitHub allows multiple, and the connect router sends whichever one matches the live request's host. Can be left blank if no users in any tenant will ever connect GitHub; you can add it later by editing the App.
    - **Setup URL**: leave blank.
-   - **Webhook**: uncheck **Active**. Colony doesn't currently consume webhooks; that's a future phase.
+   - **Webhook** (a section on the App registration form, further down the same page): leave its **Active** checkbox ticked if you want inbound events (issue opened, PR comment, …) to flow into Colony's blackboard for downstream reactions (P10 mention routing, the `InteractionLog` cross-channel log). When ticked, fill the three sub-fields in the **Webhook** section as follows:
+     - **Webhook URL** (text input directly under the Active checkbox): the single public URL GitHub will POST every webhook delivery to. Type the value below into that input box on the GitHub form — GitHub stores it on the App registration and uses it as the delivery destination for every install of this App, across every tenant:
+       - **Hosted / production** (single Colony dashboard reachable from the public internet): `https://<your-colony-dashboard-host>/api/v1/github/webhook`. The same URL handles every tenant — see §1.5 below for how the receiver demuxes deliveries back to the right tenant + colonies.
+       - **Local development** (`localhost` — GitHub can't POST to it directly): you need a public tunnel (smee\.io / ngrok / cloudflared) that forwards `https://<tunnel-host>/...` to `http://localhost:8080/api/v1/github/webhook`. Type the *tunnel* URL into GitHub's **Webhook URL** field. End-to-end for smee\.io:
+         1. Visit <https://smee.io/new> in a browser. The page issues a fresh channel and redirects to `https://smee.io/<channel-id>` — copy that URL.
+         2. Install the forwarder: `npm install --global smee-client`. To invoke without a global install, use the fully-qualified `npx smee-client@latest`.
+         3. Run the forwarder in a long-lived shell: `smee-client --url https://smee.io/<channel-id> --target http://localhost:8080/api/v1/github/webhook` (or `npx smee-client@latest --url ... --target ...` if you skipped the global install). Leave it running for the duration of your dev session — it streams deliveries from smee.io to your local dashboard over a persistent SSE connection.
+         4. Paste the same `https://smee.io/<channel-id>` URL into GitHub's **Webhook URL** input box on the App registration form.
+     - **Webhook secret** (text input immediately below **Webhook URL** on the same GitHub form): a deploy-wide HMAC key the receiver uses to verify every delivery actually came from GitHub. Generate one long random value (e.g. `python -c "import secrets; print(secrets.token_urlsafe(48))"`), then paste the **same value** into **two** places:
+       1. The **Webhook secret** input on this GitHub App registration form (so GitHub signs every outgoing delivery's body with it).
+       2. The `GITHUB_WEBHOOK_SECRET=` line in your Colony deployment's `.env` file (see §2) — so the receiver computes the same HMAC and matches the `X-Hub-Signature-256` header GitHub sends. A mismatch yields 401 with no further work.
+     - **SSL verification**: leave **Enable SSL verification** ticked (default) for hosted deployments — Colony serves the receiver over HTTPS. For smee\.io / ngrok HTTPS tunnels the default also works.
+   - **Subscribe to events** (in the "Permissions & events" tab on the GitHub App registration form — this is the per-event-type opt-in that tells GitHub which deliveries to send to your Webhook URL): tick the boxes for `Issues`, `Issue comments`, and `Pull requests`. Leave the rest (Discussions / Wiki / Release / etc.) unticked — the receiver returns `{"status": "ignored"}` (HTTP 200) for any event type Colony's normalizer doesn't handle in v1, so subscribing to extra events just costs you bandwidth.
+   - **Polling fallback** (not a GitHub-side setting — a *per-colony* Colony-side switch): each colony's `.colony/github_inbound.yaml` chooses between `mode: poll` (the agent-side ticker hits the GitHub GraphQL API on a cadence — works without a public webhook URL, ideal for local dev) and `mode: webhook` (the dashboard receiver is the active surface — strictly preferable for prod once the App webhook is wired). Both modes emit the same downstream `GitHubEventProtocol` blackboard events; subscribers don't care which surface fired.
+   - If no colony in any tenant will ever use `mode: webhook`, **un-tick** the **Webhook → Active** checkbox above. The receiver short-circuits to 503 in that case, and the poll-only path still works.
 3. **Repository permissions** — set each to *Read & Write* unless
    noted:
    - **Contents** — clone + push to the design monorepo.
@@ -55,6 +69,28 @@ You're registering **one** App on GitHub. That single App will be shared by ever
 
    > **What are the Client ID and Client secret?** They're the same Colony GitHub App's *OAuth client credentials* — distinct from the App ID + private key (which authenticate the App server-to-server). The Client ID + secret authenticate the **user-to-server OAuth web flow** that Colony uses to verify each Colony user's personal GitHub identity. Both credential pairs live on the same App; the service provider sets both, and the OAuth credentials are reused for every "Connect GitHub" click by every user across every tenant. Colony stores them as deploy-wide env vars in §2 — they are not per-tenant or per-user.
 
+## 1.5. How one webhook URL serves every tenant  *(reference — no action required)*
+
+You configured **one** Webhook URL on **one** GitHub App registration, and the App is shared by every tenant. Yet each tenant installs the App into their own GitHub org and grants access to *their* repos. So how does a delivery for `tenant-acme/their-repo` find its way to the right colonies inside Colony, without leaking to `tenant-globex`?
+
+The receiver demuxes purely on the `installation.id` field that GitHub stamps onto every webhook payload. The flow is:
+
+1. **Tenant admin installs the App** (§3 below). GitHub creates a new *installation* — an `(App, GitHub org)` pair — and assigns it a stable numeric `installation_id`. The tenant admin pastes that id into the Colony dashboard's **Tenant GitHub Installation** panel, which writes it to the row of `tenants.github_installation_id` for *their* tenant in Colony's Postgres.
+2. **Something happens on a repo** the tenant granted Colony access to (a user opens an issue, comments on a PR, …). GitHub picks every App installed on that repo, looks up each App's **Webhook URL**, and POSTs the event there. For Colony's App, that single URL is your dashboard's `/api/v1/github/webhook`.
+3. **The receiver** ([`web_ui/backend/routers/github_webhook.py`](../../src/polymathera/colony/web_ui/backend/routers/github_webhook.py)):
+   - Verifies HMAC against the **single deploy-wide** `GITHUB_WEBHOOK_SECRET` (the same secret you set on the App registration in §1 — every delivery from every install is signed with it, because the secret lives on the App, not on the install).
+   - Reads `payload["installation"]["id"]` (GitHub stamps this on every App-delivered event).
+   - Runs `SELECT tenant_id FROM tenants WHERE github_installation_id = $1` to find which Colony tenant owns this installation.
+   - Fans out the normalized `GitHubEventProtocol` write to **every colony in that tenant** (`SELECT colony_id FROM colonies WHERE tenant_id = $1`), writing each to the colony-scoped `EnhancedBlackboard`. Other tenants' colonies never see the event because the lookup never names them.
+
+What this means in practice for a multi-tenant SaaS deployment:
+
+- **One dashboard URL, one webhook secret, one App registration.** All shared by every tenant. No per-tenant DNS or per-tenant secret to manage.
+- **Per-tenant isolation is enforced by the `tenants.github_installation_id` lookup.** A delivery whose `installation_id` doesn't appear in any tenant row returns `{"status": "no_tenant_for_installation"}` (200 — GitHub doesn't retry) and writes nothing.
+- **Intra-tenant fan-out is currently broadcast, NOT filtered.** Every colony inside the same tenant receives every webhook the receiver accepts for that tenant — even if the colony's `.colony/github_inbound.yaml` `poll_repos` list wouldn't subscribe to that repo. This is a v1 simplification documented in the publisher's own module docstring ([`publisher.py`](../../src/polymathera/colony/web_ui/backend/github_webhook/publisher.py)). The practical cost is wasted blackboard writes + duplicate `interaction_log` rows in colonies that don't care about the repo; it's not cross-colony data *leakage* (every colony inside a tenant is by-design allowed to see that tenant's events) but it IS wasted work. A follow-up will add the `poll_repos` filter when the cost becomes real. Until then, operators running tenants with many colonies + a noisy webhook stream should prefer `mode: poll` per-colony — the poller honors `poll_repos` natively.
+- **Per-user identity is NOT a routing input.** GitHub webhooks identify the human actor by their GitHub login (`payload["sender"]["login"]`, normalized into `value["author_login"]`); Colony stores it as data on the blackboard event so downstream consumers (mention routing, `InteractionLog`) can see *who* did the thing — but the receiver never looks up "which Colony user is this?" because GitHub events fan out to *colonies*, not to *user sessions*. (User sessions consume colony-scoped events via the system session's `SessionAgent`; see [`design_top_level_design_process.md`](../../../colony_docs/markdown/plans/design_top_level_design_process.md) §10–§15.)
+- **Local dev** uses the same routing logic — the only difference is that the **Webhook URL** points at a smee\.io / ngrok tunnel that forwards to your local dashboard. The HMAC / lookup / fan-out steps run identically.
+
 ## 2. Configure deploy-wide env vars  *(service provider · once per Colony deployment)*
 
 Same role as §1 — these env vars belong to the Colony deployment, not to individual tenants or users. Every tenant + every user shares them implicitly through the running deployment.
@@ -72,6 +108,13 @@ GITHUB_PRIVATE_KEY_PEM="-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n--
 # "Connect GitHub" on their profile.
 GITHUB_APP_CLIENT_ID=Iv1.abc...
 GITHUB_APP_CLIENT_SECRET=...
+
+# Optional — only when at least one colony uses ``mode: webhook`` in
+# its ``.colony/github_inbound.yaml``. Must match the "Webhook secret"
+# value set on the GitHub App in §1. Leave empty for poll-only
+# deployments (the receiver short-circuits to 503; the agent-side
+# poller still ticks).
+GITHUB_WEBHOOK_SECRET=...
 ```
 
 > **PEM must be single-line with `\n` escapes.** `docker-compose`'s `environment:` list truncates env-var values at the first real newline (everything after the `BEGIN RSA PRIVATE KEY` header gets dropped on its way to the container — pyjwt then fails with `InvalidKeyError: Could not parse the provided public key`). The `GitHubAuthConfig._normalize_pem` validator converts the `\n` escapes back to real newlines before signing, so the key reaches pyjwt in valid PEM form. Convert a downloaded `.pem` with:

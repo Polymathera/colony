@@ -200,6 +200,66 @@ async def list_colonies(db_pool, tenant_id: str) -> list[dict[str, Any]]:
     ]
 
 
+async def list_all_colonies(db_pool) -> list[dict[str, Any]]:
+    """List every colony across every tenant.
+
+    Cross-tenant variant of :func:`list_colonies`. Used by the
+    dashboard's startup walker to bootstrap a system session per
+    colony (P8-0). Not exposed via any route — only callable from
+    server-side admin code that already has the db_pool handle.
+    """
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, name, tenant_id, description, is_default, "
+            "created_at FROM colonies "
+            "ORDER BY tenant_id ASC, created_at ASC",
+        )
+
+    return [
+        {
+            "colony_id": row["id"],
+            "name": row["name"],
+            "tenant_id": row["tenant_id"],
+            "description": row["description"],
+            "is_default": row["is_default"],
+            "created_at": (
+                row["created_at"].isoformat()
+                if row["created_at"] else None
+            ),
+        }
+        for row in rows
+    ]
+
+
+async def get_tenant_by_installation_id(
+    db_pool, *, installation_id: str | int,
+) -> dict[str, Any] | None:
+    """Return ``{"tenant_id"}`` for the tenant whose
+    ``github_installation_id`` column matches.
+
+    Used by the P9 webhook receiver to map an inbound webhook's
+    ``installation.id`` payload field to a tenant. Returns ``None``
+    when no tenant has installed the App with this id (rejected
+    upstream — the webhook is fired for an installation we don't
+    serve).
+
+    ``installation_id`` accepts ``int`` or ``str``; we cast to
+    ``str`` for the comparison because the column type is ``TEXT``
+    (operator pastes the integer in the dashboard panel + we store
+    it as a string for forward-compat).
+    """
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id FROM tenants WHERE github_installation_id = $1",
+            str(installation_id),
+        )
+    if row is None:
+        return None
+    return {"tenant_id": row["id"]}
+
+
 async def get_design_monorepo(
     db_pool, *, colony_id: str, tenant_id: str,
 ) -> dict[str, Any] | None:

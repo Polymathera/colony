@@ -29,7 +29,7 @@ Tenant resource management:
 import time
 import uuid
 from enum import Enum
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -83,6 +83,21 @@ class SessionMetadata(BaseModel):
     tags: set[str] = Field(default_factory=set, description="Tags for categorization")
     parent_session_id: str | None = Field(None, description="Parent session if forked")
     custom: dict[str, Any] = Field(default_factory=dict, description="Custom metadata")
+    # Forward-compat for RBAC. ``None`` (default) means "no roles
+    # declared" — the dashboard's chat-UI sessions list shows the
+    # session regardless of any ``?user_role=`` filter. When set,
+    # the list filter matches any overlap between the query param's
+    # roles and this session's roles (set semantics, not subset).
+    # Per design doc §18: NO enforcement in v1 — just metadata
+    # plumbing so a future RBAC PR has the field to read from.
+    user_role: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional list of role labels for the session author "
+            "(e.g. ``['operator']``, ``['operator', 'reviewer']``). "
+            "Stub for future RBAC — not enforced in v1."
+        ),
+    )
 
 
 class TenantQuota(BaseModel):
@@ -418,6 +433,24 @@ class Session(BaseModel):
         description="Agent ID of the SessionAgent spawned for this session"
     )
 
+    # Discriminator. ``user`` (default — backward-compat for serialized
+    # state pre-P8-0) is the chat-bound human session. ``system`` is the
+    # always-on colony singleton spawned at colony-bootstrap to host
+    # colony-wide capabilities (P8: ``GitHubInboundCapability`` +
+    # ``InteractionLogCapability``; P9: webhook receiver; P10: mention
+    # routing; …). The chat-attach WebSocket refuses to bind to a
+    # system session; the Traces tab still surfaces it. The
+    # ``include_system`` filter on ``GET /sessions/`` hides system
+    # sessions from the chat-UI sessions list by default.
+    session_kind: Literal["user", "system"] = Field(
+        default="user",
+        description=(
+            "``user`` (default) for chat-bound sessions; ``system`` "
+            "for the colony singleton spawned at colony-bootstrap. "
+            "See class docstring for the full rationale."
+        ),
+    )
+
     # Default run configuration for this session
     default_run_config: AgentRunConfig | None = Field(
         None,
@@ -504,6 +537,18 @@ class Session(BaseModel):
         return SessionContextManager(self)
 
 
+# TODO(future-PR): Migrate session storage from this in-memory
+# ``SharedState`` (Redis-backed via ``StateManager``) to a proper
+# Postgres ``sessions`` table. The current backend loses sessions on
+# Redis flush / process restart and makes cross-process queries
+# (e.g., the dashboard's startup walker that enumerates colonies to
+# bootstrap system sessions) awkward because every read goes through
+# the ``SessionManagerDeployment`` Ray Serve actor. A Postgres table
+# would (a) survive cluster restarts trivially, (b) let routes query
+# session metadata via plain SQL without a Serve round-trip, and
+# (c) give the in-progress P8 ``InteractionLog`` a natural FK target
+# for cross-channel joins. Out of scope for P8-0 — tracked here so
+# whoever picks it up can find the surface in one place.
 class SessionSystemState(SharedState):
     """Distributed state for session registry, tenant resources, and run tracking.
 

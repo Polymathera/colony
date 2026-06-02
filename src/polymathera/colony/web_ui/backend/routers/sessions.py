@@ -115,6 +115,26 @@ def _resolve_github_identity(
 @router.get("/sessions/", response_model=list[SessionSummary])
 async def list_sessions(
     limit: int = Query(100, le=500),
+    include_system: bool = Query(
+        False,
+        description=(
+            "Include colony-singleton system sessions (``session_kind="
+            "'system'``) in the response. Default ``false`` hides them "
+            "from the chat-UI sessions list; the Traces tab passes "
+            "``true`` to surface them for observability."
+        ),
+    ),
+    user_role: list[str] | None = Query(
+        default=None,
+        description=(
+            "P12 forward-compat RBAC stub. When set, keep only "
+            "sessions whose ``metadata.user_role`` overlaps with any "
+            "of the supplied roles. NOT an authorisation gate — pure "
+            "client-side filter; sessions without any ``user_role`` "
+            "declared pass the filter regardless (legacy + system "
+            "sessions don't fail-open into an enforcement story)."
+        ),
+    ),
     user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ):
@@ -133,6 +153,26 @@ async def list_sessions(
             limit=limit,
         )
 
+        if not include_system:
+            # Default chat-UI view hides system sessions. Filter on
+            # the field directly; pre-P8-0 serialized rows default to
+            # ``session_kind="user"`` and pass through unaffected.
+            sessions = [
+                s for s in sessions
+                if _get(s, "session_kind", "user") != "system"
+            ]
+
+        if user_role:
+            # P12: any-overlap filter on metadata.user_role. Sessions
+            # whose metadata.user_role is None or empty pass through
+            # unchanged — RBAC is a future PR, this is plumbing only.
+            requested = set(user_role)
+            sessions = [
+                s for s in sessions
+                if not _session_has_user_roles(s)
+                or requested & set(_session_user_roles(s))
+            ]
+
         return [
             SessionSummary(
                 session_id=_get(s, "session_id", ""),
@@ -148,6 +188,19 @@ async def list_sessions(
     except Exception as e:
         logger.warning(f"Failed to list sessions: {e}")
         return []
+
+
+def _session_user_roles(s: Any) -> list[str]:
+    """Resolve ``metadata.user_role`` across dict-shaped and Pydantic-
+    shaped session objects. Returns ``[]`` when absent or empty so
+    callers can use set semantics directly."""
+    metadata = _get(s, "metadata", None)
+    roles = _get(metadata, "user_role", None) if metadata is not None else None
+    return list(roles) if roles else []
+
+
+def _session_has_user_roles(s: Any) -> bool:
+    return bool(_session_user_roles(s))
 
 
 @router.get("/sessions/{session_id}")

@@ -318,17 +318,20 @@ class GitHubCapability(AgentCapability):
     # --- Internal construction --------------------------------------------
 
     async def _build_live_client(self) -> GitHubClient:
-        # App-level credentials (``app_id`` + ``private_key_pem``) are
-        # deploy-wide and come from env via ``GitHubAuthConfig``.
         # ``installation_id`` is per-tenant (P5 of
         # ``colony/github_identity_fix_plan.md``) and rides on agent
         # metadata as ``parameters["github_identity"]
-        # ["tenant_installation_id"]``. Tests inject directly via the
-        # constructor kwargs; production reads metadata.
-        from ...configs import get_github_auth_config
-        gh = await get_github_auth_config()
-        app_id = self._app_id or gh.app_id or None
-        private_key_pem = self._private_key_pem or gh.private_key_pem or None
+        # ["tenant_installation_id"]``. Tests inject directly via
+        # ``self._installation_id``; production reads metadata. The
+        # App-creds + httpx + TokenCache + GitHubClient construction
+        # is delegated to :func:`build_github_client_for_installation`,
+        # the shared factory both this capability and
+        # :class:`GitHubInboundCapability` use.
+        from ._github.factory import build_github_client_for_installation
+
+        # Read the PEM from the file path if neither inline nor env
+        # path supplies it (rare; mostly test fixtures).
+        private_key_pem = self._private_key_pem
         if not private_key_pem and self._private_key_path:
             with open(self._private_key_path, "r", encoding="utf-8") as fh:
                 private_key_pem = fh.read()
@@ -339,11 +342,6 @@ class GitHubCapability(AgentCapability):
             gh_identity = params.get("github_identity") or {}
             installation_id = gh_identity.get("tenant_installation_id")
 
-        if not app_id or not private_key_pem:
-            raise RuntimeError(
-                "GitHubCapability: GITHUB_APP_ID and "
-                "GITHUB_PRIVATE_KEY_PEM env vars are required."
-            )
         if not installation_id:
             raise RuntimeError(
                 "GitHubCapability: per-tenant GitHub App installation "
@@ -351,21 +349,15 @@ class GitHubCapability(AgentCapability):
                 "the Tenant GitHub Installation panel before sessions "
                 "in this tenant can use the REST API."
             )
-        if self._httpx_client is None:
-            self._httpx_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(
-                    connect=10.0, read=30.0, write=10.0, pool=10.0,
-                ),
-            )
-        auth = GitHubAppAuth(
-            app_id=app_id, private_key_pem=private_key_pem,
-        )
-        tokens = TokenCache(
-            app_auth=auth,
+
+        client, self._httpx_client = await build_github_client_for_installation(
             installation_id=installation_id,
-            client=self._httpx_client,
+            app_id_override=self._app_id,
+            private_key_pem_override=private_key_pem,
+            httpx_client=self._httpx_client,
+            capability_name="GitHubCapability",
         )
-        return GitHubClient(tokens=tokens, client=self._httpx_client)
+        return client
 
     def get_action_group_description(self) -> str:
         return (

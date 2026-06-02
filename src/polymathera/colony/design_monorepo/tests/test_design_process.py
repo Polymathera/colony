@@ -2284,57 +2284,57 @@ def test_extract_assignee_marker_case_insensitive() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_parse_owner_repo_from_url_https_with_dot_git() -> None:
+def testparse_owner_repo_from_url_https_with_dot_git() -> None:
     from polymathera.colony.design_monorepo.process import (
-        _parse_owner_repo_from_url,
+        parse_owner_repo_from_url,
     )
-    assert _parse_owner_repo_from_url(
+    assert parse_owner_repo_from_url(
         "https://github.com/acme/widgets.git",
     ) == "acme/widgets"
 
 
-def test_parse_owner_repo_from_url_https_no_suffix() -> None:
+def testparse_owner_repo_from_url_https_no_suffix() -> None:
     from polymathera.colony.design_monorepo.process import (
-        _parse_owner_repo_from_url,
+        parse_owner_repo_from_url,
     )
-    assert _parse_owner_repo_from_url(
+    assert parse_owner_repo_from_url(
         "https://github.com/acme/widgets",
     ) == "acme/widgets"
 
 
-def test_parse_owner_repo_from_url_ssh() -> None:
+def testparse_owner_repo_from_url_ssh() -> None:
     from polymathera.colony.design_monorepo.process import (
-        _parse_owner_repo_from_url,
+        parse_owner_repo_from_url,
     )
-    assert _parse_owner_repo_from_url(
+    assert parse_owner_repo_from_url(
         "git@github.com:acme/widgets.git",
     ) == "acme/widgets"
 
 
-def test_parse_owner_repo_from_url_rejects_gitlab() -> None:
+def testparse_owner_repo_from_url_rejects_gitlab() -> None:
     """Non-github URLs return None — caller surfaces a clean error
     rather than mis-route to github.com."""
 
     from polymathera.colony.design_monorepo.process import (
-        _parse_owner_repo_from_url,
+        parse_owner_repo_from_url,
     )
-    assert _parse_owner_repo_from_url(
+    assert parse_owner_repo_from_url(
         "https://gitlab.com/acme/widgets.git",
     ) is None
 
 
-def test_parse_owner_repo_from_url_rejects_malformed() -> None:
+def testparse_owner_repo_from_url_rejects_malformed() -> None:
     from polymathera.colony.design_monorepo.process import (
-        _parse_owner_repo_from_url,
+        parse_owner_repo_from_url,
     )
     # No owner/repo split.
-    assert _parse_owner_repo_from_url(
+    assert parse_owner_repo_from_url(
         "https://github.com/justonepart",
     ) is None
     # Empty.
-    assert _parse_owner_repo_from_url("") is None
+    assert parse_owner_repo_from_url("") is None
     # Extra path segments.
-    assert _parse_owner_repo_from_url(
+    assert parse_owner_repo_from_url(
         "https://github.com/acme/widgets/extra",
     ) is None
 
