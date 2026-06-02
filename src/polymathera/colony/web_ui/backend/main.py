@@ -155,11 +155,15 @@ def create_app(config: DashboardConfig) -> FastAPI:
         auth,
         colonies,
         human_approval,
+        github_oauth,
+        tenants,
     )
     from .routers import config as config_router
     from .streaming import sse
 
     app.include_router(auth.router, prefix="/api/v1", tags=["auth"])
+    app.include_router(github_oauth.router, prefix="/api/v1", tags=["github-oauth"])
+    app.include_router(tenants.router, prefix="/api/v1", tags=["tenants"])
     app.include_router(colonies.router, prefix="/api/v1", tags=["colonies"])
     app.include_router(infrastructure.router, prefix="/api/v1", tags=["infrastructure"])
     app.include_router(deployments.router, prefix="/api/v1", tags=["deployments"])

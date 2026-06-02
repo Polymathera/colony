@@ -14,16 +14,18 @@ The colony's settings UI is the single source of truth; the framework enforces i
 
 ## The settings — what the operator configures
 
-Per colony, four columns on the `colonies` row:
+The attribution surface splits across two layers (see `colony/github_identity_fix_plan.md`):
 
-| Column | Type | Required when | Used as |
-|---|---|---|---|
-| `git_user_name` | `str \| None` | `commit_principal == "user"` OR `commit_co_author == "user"` | Author / co-author name when "user" wins |
-| `git_user_email` | `str \| None` | same | Author / co-author email when "user" wins |
-| `commit_principal` | `str` — one of `"colony"` / `"user"` | always (schema default = `"colony"`) | Decides who shows as `Author:` |
-| `commit_co_author` | `str \| None` — one of `"colony"` / `"user"` / `None` | optional | Decides the `Co-authored-by:` trailer; `None` = no trailer |
+**Per-colony — the preference**. Two columns on the `colonies` row:
 
-Validation at write time (in [`auth_service.set_git_attribution`](../../src/polymathera/colony/web_ui/backend/auth/service.py)): if `commit_principal` or `commit_co_author` is `"user"`, both `git_user_name` and `git_user_email` must be non-empty. The framework rejects the setting eagerly — far better than failing at commit time, far from the operator's edit.
+| Column | Type | Used as |
+|---|---|---|
+| `commit_principal` | `str` (well-known: `"colony"` / `"user"` / `"agent"`; anything else treated as an agent-type label) | Decides who shows as `Author:` (schema default `"colony"`) |
+| `commit_co_author` | `str \| None` (same value space) | Decides the `Co-authored-by:` trailer; `None` = no trailer (schema default `"user"`) |
+
+**Per-user — the identity**. The `git_user_name` / `git_user_email` that resolve when either field is `"user"` come from the *user* row, populated by the GitHub OAuth callback (the "Connect GitHub" button on the user profile — see [`connect-github.md`](connect-github.md)). Operators do not type these in; verified values come from GitHub directly to prevent commit impersonation.
+
+When the user hasn't connected GitHub and `"user"` is selected, the trailer (or principal) is dropped silently with a `logger.warning` — the commit succeeds with the colony-side identity only. This is intentional: commit attribution must reflect reality.
 
 ## Where the operator sets it
 
@@ -31,8 +33,8 @@ The dashboard's Settings page exposes the four fields. Backend routes (defined i
 
 | Method | Path | Body / response |
 |---|---|---|
-| `GET` | `/api/v1/colonies/{colony_id}/git-attribution` | Returns the four fields as `GitAttributionConfig` |
-| `PUT` | `/api/v1/colonies/{colony_id}/git-attribution` | Body: `SetGitAttributionRequest`. Returns the persisted row. `400` if a `"user"` selection is missing `git_user_name` / `git_user_email`. |
+| `GET` | `/api/v1/colonies/{colony_id}/git-attribution` | Returns `{commit_principal, commit_co_author}` as `GitAttributionConfig` |
+| `PUT` | `/api/v1/colonies/{colony_id}/git-attribution` | Body: `SetGitAttributionRequest`. Returns the persisted row. |
 
 Operators can drive the PUT directly from a shell:
 
@@ -41,14 +43,12 @@ curl -X PUT https://<dashboard-host>/api/v1/colonies/<colony_id>/git-attribution
   -H "Authorization: Bearer <session-token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "git_user_name": "Jane Doe",
-    "git_user_email": "jane.doe@example.com",
     "commit_principal": "user",
     "commit_co_author": "colony"
   }'
 ```
 
-Setting persists in Postgres on the colony row; agents read it at every commit.
+Setting persists in Postgres on the colony row; agents read it at every commit. For the `"user"` side to render correctly, each user contributing to the colony must connect GitHub via their profile UI.
 
 ## How agents read it — the `Identity` union
 
@@ -57,7 +57,12 @@ The framework's commit primitive is `DesignMonorepoClient.commit_with_identity(p
 - `AgentIdentity(agent_id, role, colony_id, agent_email_domain="<domain>")` — the transactional agent identity. Used when the colony has `commit_principal == "colony"`.
 - `CommitIdentity(name, email)` — a free-form Git identity. Used when the colony has `commit_principal == "user"`; carries the operator's configured `git_user_name` / `git_user_email`.
 
-The capability layer's [`_resolve_attribution`](../../src/polymathera/colony/design_monorepo/capabilities.py) helper reads the colony's settings (from `agent.metadata.parameters["git_attribution"]`, populated at session-create time by [`auth_service.get_git_attribution`](../../src/polymathera/colony/web_ui/backend/auth/service.py)) and returns `(principal, co_author_or_None)`. The capability layer's `_commit_attribution(message)` helper formats the message with the `Co-authored-by:` trailer when applicable and returns `(principal, decorated_message)`. Every commit-producing action threads through these two helpers.
+The capability layer's [`_resolve_attribution`](../../src/polymathera/colony/design_monorepo/capabilities.py) helper reads two metadata blocks populated at session-create time:
+
+- `agent.metadata.parameters["git_attribution"]` — the per-colony preference (`commit_principal`, `commit_co_author`) from [`auth_service.get_git_attribution`](../../src/polymathera/colony/web_ui/backend/auth/service.py).
+- `agent.metadata.parameters["github_identity"]` — the per-user OAuth-verified identity (`git_user_name`, `git_user_email`, `user_github_login`, `tenant_installation_id`) from [`auth_service.get_user_github_identity`](../../src/polymathera/colony/web_ui/backend/auth/service.py) + [`auth_service.get_tenant_github_installation`](../../src/polymathera/colony/web_ui/backend/auth/service.py).
+
+The helper returns `(principal, co_author_or_None)`. The capability layer's `_commit_attribution(message)` formats the message with the `Co-authored-by:` trailer when applicable and returns `(principal, decorated_message)`. Every commit-producing action threads through these two helpers.
 
 ## What lands in `git log`
 
@@ -114,12 +119,14 @@ The framework guarantee: if any of these actions produces a commit, the principa
 
 ## Failure modes
 
-- **Operator sets `commit_principal=user` but leaves `git_user_name` blank** → `set_git_attribution` raises `ValueError`; the dashboard surfaces it as a form error. The setting never lands on the row, so subsequent commits keep the prior valid state.
+- **Operator sets `commit_principal=user` but the user has not connected GitHub** → `_resolve_attribution` cannot resolve the user-side `git_user_name` / `git_user_email`; `_safe_resolve("user")` catches the `ValueError` from `resolve_commit_identity` and falls through with `co_author=None`. The commit still succeeds with the synthetic `colony:<colony_id>` identity as principal; the trailer is dropped silently with a `logger.warning`. Operators see this as "my commits don't have my name on them" → fix: click "Connect GitHub" on the profile.
 - **Colony row doesn't exist (typo'd `colony_id`)** → `set_git_attribution` raises `KeyError`; the dashboard surfaces it as 404.
-- **An agent commits before the operator has configured anything** → schema defaults apply (`commit_principal=colony`, `commit_co_author=user`). If `git_user_name` is None, the `Co-authored-by:` trailer is dropped (only the principal commits, no trailer).
+- **An agent commits before the operator has configured anything** → schema defaults apply (`commit_principal=colony`, `commit_co_author=user`). If the user has not connected GitHub, the `Co-authored-by:` trailer is dropped (only the colony principal commits, no trailer).
 
 ## Related
 
+- [`github-app-setup.md`](github-app-setup.md) — operator: register the Colony GitHub App + configure per-tenant installation.
+- [`connect-github.md`](connect-github.md) — user: how the "Connect GitHub" button populates the per-user identity this attribution flow reads.
 - [`registering-a-mission.md`](registering-a-mission.md) — how the SessionAgent dispatches missions whose spawn paths produce commits.
 - [`architecture/project-substance-authoring.md`](../architecture/project-substance-authoring.md) — L1-F write surface; every action listed there respects attribution.
 - [`architecture/design-monorepo-authoring.md`](../architecture/design-monorepo-authoring.md) — L1-E bootstrap surface; same attribution chain.

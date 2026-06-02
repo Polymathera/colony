@@ -78,6 +78,39 @@ _ASSIGNEE_MARKER_RE = re.compile(
 ASSIGNEE_TARGETS: tuple[str, str] = ("colony", "user")
 
 
+def _parse_owner_repo_from_url(url: str) -> str | None:
+    """Extract ``owner/repo`` from a github.com clone URL.
+
+    Handles the common shapes:
+
+    - ``https://github.com/owner/repo.git``
+    - ``https://github.com/owner/repo``
+    - ``git@github.com:owner/repo.git``
+
+    Returns ``None`` for non-github URLs (gitlab, internal forges) or
+    malformed input — caller surfaces a clean error rather than guess.
+    Pure; no IO. Tested in isolation.
+    """
+
+    if not url:
+        return None
+    s = url.strip()
+    # SSH form: ``git@github.com:owner/repo[.git]``
+    if s.startswith("git@github.com:"):
+        path = s[len("git@github.com:"):]
+    elif "github.com/" in s:
+        path = s.split("github.com/", 1)[1]
+    else:
+        return None
+    if path.endswith(".git"):
+        path = path[:-4]
+    path = path.strip("/")
+    parts = path.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
+
 def _stable_task_id(milestone_title: str, task_title: str) -> str:
     """Generate the stable-id stamped into the roadmap-task marker
     (resolution of design-doc Q4). Content-hash so:
@@ -169,6 +202,7 @@ def _build_roadmap_proposal_prompt(
     *,
     design_context_summary: dict[str, Any],
     existing_roadmap: str,
+    roadmap_path: str,
     existing_issues: list[dict[str, Any]],
     max_chars_design_context: int = 12000,
     max_chars_existing_roadmap: int = 4000,
@@ -202,10 +236,11 @@ def _build_roadmap_proposal_prompt(
             )
     dc_block = "".join(dc_lines)[:max_chars_design_context]
 
+    roadmap_heading = f"## Existing roadmap (`{roadmap_path}`)"
     roadmap_block = (
-        f"## Existing ROADMAP.md\n```\n{existing_roadmap[:max_chars_existing_roadmap]}\n```\n"
+        f"{roadmap_heading}\n```\n{existing_roadmap[:max_chars_existing_roadmap]}\n```\n"
         if existing_roadmap
-        else "## Existing ROADMAP.md\n(none — first-time bootstrap)\n"
+        else f"{roadmap_heading}\n(none — first-time bootstrap)\n"
     )
 
     issues_lines = ["## Existing open GitHub issues\n"]
@@ -908,6 +943,82 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"design_process", "workflow", "github"})
 
+    def _resolve_github_repo(self) -> str | None:
+        """Derive ``owner/repo`` from the agent's configured
+        ``design_monorepo_url``. Returns ``None`` when:
+
+        - the capability is detached (no agent);
+        - the agent's metadata carries no ``design_monorepo_url`` (no
+          monorepo configured for the colony);
+        - the URL is non-github (gitlab, internal forge) or malformed.
+
+        Callers in this class use this instead of accepting a ``repo``
+        kwarg from the LLM planner — the design monorepo's GitHub
+        identity is something the capability already knows, and
+        burdening the planner with it just invites hallucinated values.
+        """
+        url = self.design_monorepo_url
+        if not url:
+            return None
+        return _parse_owner_repo_from_url(url)
+
+    def _no_github_repo_error(self, **extras: Any) -> dict[str, Any]:
+        """Standard error dict every action returns when
+        :meth:`_resolve_github_repo` can't produce a GitHub
+        ``owner/repo``. Single source of truth for the message so the
+        planner sees a consistent "missing prerequisite" signal across
+        every roadmap/issue action."""
+
+        return {
+            "error": "no_github_repo",
+            "message": (
+                "This action operates on the colony's design monorepo "
+                "on github.com, but the colony either has no design "
+                "monorepo configured or its URL is not on github.com. "
+                "Configure ``design_monorepo_url`` on the Colonies "
+                "panel (must be a github.com clone URL)."
+            ),
+            **extras,
+        }
+
+    def _resolve_roadmap_path(self, repo_map: RepoMap) -> str | None:
+        """Return the configured roadmap path from the
+        ``is_roadmap=true`` row in ``design_context_sources``, or
+        ``None`` when no such row exists.
+
+        The roadmap's location is operator configuration (declared
+        once in ``.colony/repo_map.yaml``), not something the LLM
+        planner specifies per-call — the planner would otherwise
+        hallucinate plausible-but-wrong paths. The schema enforces
+        at-most-one ``is_roadmap=true`` row + a single non-glob path
+        (see :class:`DesignContextSource._check_paths` /
+        :meth:`RepoMap._check_design_context_sources_unique`), so the
+        return value is unambiguous when present.
+        """
+
+        for src in repo_map.design_context_sources:
+            if src.is_roadmap:
+                return src.paths[0]
+        return None
+
+    def _no_roadmap_declared_error(self, **extras: Any) -> dict[str, Any]:
+        """Standard error dict for actions that require a roadmap row
+        but the operator hasn't declared one. Single source of truth
+        for the message so the planner sees a consistent missing-
+        prerequisite signal."""
+
+        return {
+            "error": "no_roadmap_declared",
+            "message": (
+                "No design_context_sources row has is_roadmap=true in "
+                f"{REPO_MAP_DIR}/{REPO_MAP_FILENAME}. Declare one row "
+                "with a single literal path (e.g. ``is_roadmap: true, "
+                "paths: ['ROADMAP.md']``) so this action knows where "
+                "to read/write the roadmap."
+            ),
+            **extras,
+        }
+
     @action_executor(
         planning_summary=(
             "Refresh the design context (re-read repo_map.yaml + re-"
@@ -958,7 +1069,6 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
     async def summarise_progress(
         self,
         *,
-        repo: str | None = None,
         milestone_state: str = "open",
         max_milestones: int = 50,
     ) -> dict[str, Any]:
@@ -978,9 +1088,10 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         ``milestone_state`` filters which milestones the snapshot
         considers (``open`` / ``closed`` / ``all``).
 
-        Requires a sibling ``GitHubCapability`` on the same agent
-        (mounted alongside this one) — looked up lazily so the
-        capability can be detached / unit-tested.
+        The GitHub repo is derived from the colony's
+        ``design_monorepo_url`` (the capability already knows it);
+        callers do not pass it. Requires a sibling ``GitHubCapability``
+        on the same agent.
         """
 
         # Empty-totals shape — kept consistent across the no-sibling /
@@ -1005,6 +1116,15 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     "summarise_progress can call list_milestones."
                 ),
                 "error": "github_capability_missing",
+            }
+
+        repo = self._resolve_github_repo()
+        if repo is None:
+            return {
+                "current_milestone": None,
+                "milestones": [],
+                "totals": dict(_empty_totals),
+                **self._no_github_repo_error(),
             }
 
         result = await github.list_milestones(
@@ -1076,7 +1196,6 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
     async def identify_bottlenecks(
         self,
         *,
-        repo: str | None = None,
         stalled_no_activity_days: int = (
             _DEFAULT_STALLED_ISSUE_NO_ACTIVITY_DAYS
         ),
@@ -1113,19 +1232,20 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         import time as _time
         from datetime import datetime, timezone
 
+        # Repo is derived from the colony's design monorepo URL (the
+        # capability already knows it); the LLM planner is not asked
+        # to specify it.
+        resolved_repo = self._resolve_github_repo() or ""
+
         # --- Built-in heuristic: stalled open issues -----------------
         github = self._sibling_github_capability()
         stalled: list[dict[str, Any]] = []
-        resolved_repo = ""
-        if github is not None:
+        if github is not None and resolved_repo:
             issues_result = await github.list_issues(
-                repo=repo, state="open",
+                repo=resolved_repo, state="open",
                 max_results=max_issues_scanned,
             )
             if issues_result.get("ok"):
-                resolved_repo = (
-                    repo or getattr(github, "_default_repo", "") or ""
-                )
                 threshold_s = stalled_no_activity_days * 86400.0
                 now_ts = _time.time()
                 for issue in issues_result.get("issues") or []:
@@ -1227,9 +1347,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
     async def bootstrap_roadmap_from_objectives(
         self,
         *,
-        repo: str | None = None,
         target_project_id: str | None = None,
-        roadmap_path: str = "ROADMAP.md",
         dry_run: bool = True,
         llm_max_tokens: int = 4096,
         llm_temperature: float = 0.2,
@@ -1282,7 +1400,9 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         ``commit_sha``, ``issues_created``, ``issue_failures``.
         """
 
-        from .repo_map import RepoMap
+        # ``repo`` is derived later, only when a GitHub sibling is
+        # mounted (the local roadmap write succeeds without a sibling;
+        # only the issue-creation pass needs the GitHub repo).
 
         # ---------- step 1: design-context summary -------------------
         repo_root = self._working_dir
@@ -1314,6 +1434,13 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     "requirements to propose against."
                 ),
             }
+        roadmap_path = self._resolve_roadmap_path(repo_map)
+        if roadmap_path is None:
+            return {
+                "dry_run": dry_run,
+                "proposal": None,
+                **self._no_roadmap_declared_error(),
+            }
         design_context_summary = await asyncio.to_thread(
             _build_design_context_summary, repo_root, repo_map,
         )
@@ -1332,7 +1459,19 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 )
 
         # ---------- step 3: open GitHub issues -----------------------
+        # Resolve repo only when a sibling is mounted (the local-only
+        # path doesn't need it). If sibling is mounted but no repo can
+        # be derived → clean error before any github calls.
         github = self._sibling_github_capability()
+        repo: str | None = None
+        if github is not None:
+            repo = self._resolve_github_repo()
+            if repo is None:
+                return {
+                    "dry_run": dry_run,
+                    "proposal": None,
+                    **self._no_github_repo_error(),
+                }
         existing_issues: list[dict[str, Any]] = []
         if github is not None:
             issues_result = await github.list_issues(
@@ -1352,6 +1491,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         prompt = _build_roadmap_proposal_prompt(
             design_context_summary=design_context_summary,
             existing_roadmap=existing_roadmap,
+            roadmap_path=roadmap_path,
             existing_issues=existing_issues,
         )
         try:
@@ -1537,8 +1677,6 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
     async def sync_roadmap_with_github(
         self,
         *,
-        repo: str | None = None,
-        roadmap_path: str = "ROADMAP.md",
         direction: str = "bidirectional",
         dry_run: bool = True,
         target_project_id: str | None = None,
@@ -1598,6 +1736,10 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 ),
             }
 
+        # ``repo`` is derived later (after the sibling check) so the
+        # more-fundamental "no GitHub capability mounted" error fires
+        # first when both are missing.
+
         # ---------- step 0: design-monorepo presence -----------------
         repo_root = self._working_dir
         if not (repo_root / ".git").is_dir():
@@ -1614,7 +1756,16 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 ),
             }
 
-        # ---------- step 1: read + parse ROADMAP.md ------------------
+        repo_map = await asyncio.to_thread(RepoMap.load, repo_root)
+        roadmap_path = self._resolve_roadmap_path(repo_map)
+        if roadmap_path is None:
+            return {
+                "dry_run": dry_run,
+                "direction": direction,
+                **self._no_roadmap_declared_error(),
+            }
+
+        # ---------- step 1: read + parse the roadmap ----------------
         roadmap_file = repo_root / roadmap_path
         existing_roadmap_text = ""
         if roadmap_file.is_file():
@@ -1625,7 +1776,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             except OSError as exc:
                 logger.warning(
                     "sync_roadmap_with_github: failed to read "
-                    "ROADMAP.md at %s: %s — treating as empty.",
+                    "roadmap at %s: %s — treating as empty.",
                     roadmap_file, exc,
                 )
         roadmap_parsed = _parse_roadmap_markdown(existing_roadmap_text)
@@ -1642,6 +1793,13 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     "mount one alongside DesignProcessCapability so "
                     "sync_roadmap_with_github can list issues."
                 ),
+            }
+        repo = self._resolve_github_repo()
+        if repo is None:
+            return {
+                "dry_run": dry_run,
+                "direction": direction,
+                **self._no_github_repo_error(),
             }
         # state="all" so a roadmap task whose issue is closed still
         # matches (otherwise we'd erroneously propose creating a new
@@ -1809,17 +1967,17 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
     @action_executor(
         planning_summary=(
             "Propose colony-vs-user assignment for each open roadmap-"
-            "linked issue. Honours explicit ``colony:assignee`` marker; "
-            "falls back to LLM classification. ``dry_run`` returns the "
-            "proposal; ``dry_run=False`` applies via assign_issue."
+            "linked issue. ``colony`` → the App-bot (per-tenant); "
+            "``user`` → the human's verified GitHub login (when they've "
+            "connected GitHub). Marker overrides LLM classification. "
+            "``dry_run`` returns the proposal; ``dry_run=False`` applies "
+            "via assign_issue (user proposals are skipped when the user "
+            "hasn't connected GitHub)."
         ),
     )
     async def propose_task_assignments(
         self,
         *,
-        user_github_login: str,
-        repo: str | None = None,
-        roadmap_path: str = "ROADMAP.md",
         dry_run: bool = True,
         reassign_existing: bool = False,
         max_issues_scanned: int = 500,
@@ -1830,14 +1988,18 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         """Classify each open roadmap-linked GitHub issue as colony-
         owned or user-owned and (optionally) apply the assignment.
 
-        The assignment universe is binary:
+        Identity resolution (P7 + P8 of
+        ``colony/github_identity_fix_plan.md``):
 
-        - ``colony`` — Colony executes with its own action surface.
-          Resolved to the GitHub App's bot login via
-          :meth:`GitHubCapability.whoami`.
-        - ``user``   — the human session author (the GitHub identity
-          set as the commit attribution in the chat UI) owns it.
-          ``user_github_login`` is required.
+        - ``colony`` → :meth:`GitHubCapability.whoami` returns the
+          App-bot login (e.g. ``polymathera-colony[bot]``) for the
+          tenant's installation.
+        - ``user`` → the human's GitHub login from
+          ``agent.metadata.parameters["github_identity"]
+          ["user_github_login"]`` (populated by the OAuth callback
+          on the user's profile). When the user hasn't connected
+          GitHub yet, the proposal is marked ``user_unassignable=True``
+          and skipped at apply time.
 
         Classification source (per task, in order):
 
@@ -1855,23 +2017,23 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         ``dry_run=True`` (default) returns the proposal without
         calling ``assign_issue``. ``dry_run=False`` calls
         :meth:`GitHubCapability.assign_issue` per proposal with
-        ``replace=True`` so re-runs don't accumulate co-assignees.
+        ``replace=True`` so re-runs don't accumulate co-assignees;
+        ``user_unassignable`` proposals are skipped (no apply attempt).
         """
 
-        # ---------- step 0: inputs ----------------------------------
-        if not user_github_login or not user_github_login.strip():
-            return {
-                "dry_run": dry_run,
-                "error": "user_github_login_required",
-                "message": (
-                    "propose_task_assignments needs the human "
-                    "user's GitHub login (the identity Colony "
-                    "commits + comments on behalf of) so user-"
-                    "owned tasks can be assigned to a real "
-                    "account."
-                ),
-            }
-        user_login = user_github_login.strip()
+        # P8 (github_identity_fix_plan): user-side login comes from
+        # the per-user OAuth identity threaded into agent metadata
+        # by session-create (P4). ``None`` when the user has not run
+        # the Connect GitHub flow on their profile.
+        user_login: str | None = None
+        if self._agent is not None:
+            params = getattr(self._agent.metadata, "parameters", None) or {}
+            gh_identity = params.get("github_identity") or {}
+            user_login = gh_identity.get("user_github_login")
+
+        # ``repo`` is resolved after the sibling check so the
+        # more-fundamental "no GitHub capability" error wins when both
+        # are missing.
 
         # ---------- step 1: GitHub sibling --------------------------
         github = self._sibling_github_capability()
@@ -1884,6 +2046,12 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     "mount one alongside DesignProcessCapability so "
                     "propose_task_assignments can list + assign issues."
                 ),
+            }
+        repo = self._resolve_github_repo()
+        if repo is None:
+            return {
+                "dry_run": dry_run,
+                **self._no_github_repo_error(),
             }
 
         whoami_result = await github.whoami()
@@ -1899,17 +2067,27 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         colony_login = whoami_result["login"]
 
         # ---------- step 2: roadmap markers (for override hints) ----
+        # The roadmap is OPTIONAL here — propose's primary classification
+        # source is the GitHub issue body (markers + LLM). When a
+        # roadmap row is declared and the file exists, we additionally
+        # pick up marker hints stamped on the roadmap task line; when
+        # not, we skip the file-read step and fall through to issue-
+        # body markers + LLM classification.
         repo_root = self._working_dir
         if not (repo_root / ".git").is_dir():
             self._lazy_clone_from_agent_metadata()
         roadmap_markers_by_id: dict[str, str | None] = {}
         roadmap_text = ""
-        roadmap_file = repo_root / roadmap_path
-        if (repo_root / ".git").is_dir() and roadmap_file.is_file():
-            try:
-                roadmap_text = roadmap_file.read_text(encoding="utf-8")
-            except OSError:
-                roadmap_text = ""
+        if (repo_root / ".git").is_dir():
+            repo_map = await asyncio.to_thread(RepoMap.load, repo_root)
+            roadmap_path = self._resolve_roadmap_path(repo_map)
+            if roadmap_path is not None:
+                roadmap_file = repo_root / roadmap_path
+                if roadmap_file.is_file():
+                    try:
+                        roadmap_text = roadmap_file.read_text(encoding="utf-8")
+                    except OSError:
+                        roadmap_text = ""
         if roadmap_text:
             # Walk task lines; for each stable-id, pull the assignee
             # marker present on the same line (operators stamp it as
@@ -2059,6 +2237,13 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             proposed_login = (
                 colony_login if assignee == "colony" else user_login
             )
+            # User-marked tasks need a connected GitHub identity. When
+            # ``user_login`` is None, surface the gap honestly + skip
+            # apply for this proposal (the user must click "Connect
+            # GitHub" on their profile before this can land).
+            user_unassignable = (
+                assignee == "user" and not user_login
+            )
             proposals.append({
                 "stable_id": sid,
                 "issue_number": issue_number,
@@ -2067,6 +2252,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 "current_assignees": current_assignees,
                 "proposed_assignee": assignee,
                 "proposed_login": proposed_login,
+                "user_unassignable": user_unassignable,
                 "source": source,
                 "reason": reason,
             })
@@ -2092,6 +2278,9 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                         1 for p in proposals
                         if p["proposed_assignee"] == "user"
                     ),
+                    "user_unassignable_count": sum(
+                        1 for p in proposals if p["user_unassignable"]
+                    ),
                     "marker_count": sum(
                         1 for p in proposals if p["source"] == "marker"
                     ),
@@ -2106,6 +2295,11 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         applied: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
         for p in proposals:
+            if p["user_unassignable"]:
+                # User hasn't connected GitHub yet — surfaced in the
+                # proposal already; don't call ``assign_issue`` with
+                # ``[None]``. The user can re-run after connecting.
+                continue
             result = await github.assign_issue(
                 p["issue_number"], [p["proposed_login"]],
                 repo=repo, replace=True,
@@ -2140,6 +2334,9 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 "error_count": len(errors),
                 "skipped_count": len(skipped),
                 "untracked_count": len(untracked_issues),
+                "user_unassignable_count": sum(
+                    1 for p in proposals if p["user_unassignable"]
+                ),
             },
             "error": "",
         }

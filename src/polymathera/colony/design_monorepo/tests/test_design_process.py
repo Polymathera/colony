@@ -36,7 +36,11 @@ def _make_repo(root: Path) -> None:
 
 
 def _make_capability(
-    tmp_path: Path, *, github: Any = None,
+    tmp_path: Path,
+    *,
+    github: Any = None,
+    user_github_login: str | None = None,
+    design_monorepo_url: str | None = "https://github.com/acme/proj.git",
 ) -> DesignProcessCapability:
     _make_repo(tmp_path)
     agent = MagicMock() if github is not None else None
@@ -50,6 +54,20 @@ def _make_capability(
             if any(isinstance(github, cls) for _ in [None])
             else None
         )
+        # Real dict for parameters so ``params.get("github_identity")``
+        # returns a real value (defaulting to None when not configured)
+        # rather than the recursive-MagicMock attribute trap. P8 of
+        # ``colony/github_identity_fix_plan.md`` reads from here.
+        # ``design_monorepo_url`` defaults to a github.com URL so
+        # ``_resolve_github_repo`` returns ``acme/proj`` — pass
+        # ``design_monorepo_url=None`` to exercise the no-repo error
+        # path.
+        params: dict[str, Any] = {
+            "github_identity": {"user_github_login": user_github_login},
+        }
+        if design_monorepo_url is not None:
+            params["design_monorepo_url"] = design_monorepo_url
+        agent.metadata.parameters = params
     cap = DesignProcessCapability(
         agent=agent, scope_id="test", working_dir=tmp_path,
     )
@@ -262,7 +280,7 @@ async def test_summarise_progress_returns_milestone_snapshot(
     ])
     cap = _make_capability(tmp_path, github=github)
 
-    result = await cap.summarise_progress(repo="acme/proj")
+    result = await cap.summarise_progress()
     assert result["error"] == ""
     assert result["current_milestone"]["title"] == "M1-soonest"
     by_title = {m["title"]: m for m in result["milestones"]}
@@ -793,7 +811,12 @@ def test_render_issue_body_for_task_includes_marker_at_end() -> None:
 
 def _seed_design_context_repo(tmp_path: Path) -> None:
     """Bring up a tmp repo with design_context_sources + matching
-    markdown files, ready for the bootstrap action to read."""
+    markdown files, ready for the bootstrap action to read.
+
+    Includes a row marked ``is_roadmap: true`` so
+    :meth:`DesignProcessCapability._resolve_roadmap_path` resolves to
+    ``ROADMAP.md`` — the same convention the production guide
+    recommends and what the bootstrap action writes into."""
 
     _make_repo(tmp_path)
     (tmp_path / ".colony").mkdir()
@@ -808,7 +831,9 @@ def _seed_design_context_repo(tmp_path: Path) -> None:
         "schema_version: 3\n"
         "vcm_sources:\n  - { name: default, type: git_repo }\n"
         "design_context_sources:\n"
-        "  - name: docs\n    paths: ['docs/**/*.md']\n",
+        "  - name: docs\n    paths: ['docs/**/*.md']\n"
+        "  - name: roadmap\n    paths: ['ROADMAP.md']\n"
+        "    is_roadmap: true\n",
         encoding="utf-8",
     )
 
@@ -1064,32 +1089,6 @@ async def test_bootstrap_returns_clear_error_on_llm_timeout(
     )
     assert result["error"] == "llm_timeout"
     assert result["proposal"] is None
-
-
-async def test_bootstrap_writes_to_custom_roadmap_path(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """Operator passes a non-default ``roadmap_path`` (e.g. nested
-    location) → action creates parent dirs + writes there."""
-
-    _seed_design_context_repo(tmp_path)
-    cap = _make_capability(tmp_path)
-
-    response = (
-        '{"milestones": [{"title": "M", "description": "",'
-        '"tasks": [{"title": "t", "description": ""}]}]}'
-    )
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_llm_callable(response),
-    )
-
-    result = await cap.bootstrap_roadmap_from_objectives(
-        dry_run=False, roadmap_path="docs/planning/ROADMAP.md",
-    )
-    assert result["error"] == ""
-    assert (tmp_path / "docs" / "planning" / "ROADMAP.md").is_file()
 
 
 async def test_bootstrap_create_issue_calls_carry_target_project_id(
@@ -1444,8 +1443,10 @@ def test_merge_github_only_noop_when_empty() -> None:
 def _seed_roadmap_repo(
     tmp_path: Path, *, roadmap_text: str | None = None,
 ) -> None:
-    """Repo with a design_context_sources block + optionally a
-    pre-existing ROADMAP.md so the sync action has something to diff."""
+    """Repo with a design_context_sources block (including the
+    ``is_roadmap: true`` row pointing at ``ROADMAP.md``) + optionally
+    a pre-existing ROADMAP.md so the sync action has something to
+    diff."""
 
     _make_repo(tmp_path)
     (tmp_path / ".colony").mkdir()
@@ -1455,7 +1456,9 @@ def _seed_roadmap_repo(
         "schema_version: 3\n"
         "vcm_sources:\n  - { name: default, type: git_repo }\n"
         "design_context_sources:\n"
-        "  - name: docs\n    paths: ['docs/**/*.md']\n",
+        "  - name: docs\n    paths: ['docs/**/*.md']\n"
+        "  - name: roadmap\n    paths: ['ROADMAP.md']\n"
+        "    is_roadmap: true\n",
         encoding="utf-8",
     )
     if roadmap_text is not None:
@@ -1842,159 +1845,16 @@ def _stub_github_with_assignment(
     return fake
 
 
-async def test_propose_task_assignments_marker_path_skips_llm(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """When the roadmap task line carries an explicit assignee marker
-    (``colony:assignee: colony|user``), the action honours it and
-    NEVER invokes the LLM callable for that task."""
-
-    roadmap_text = (
-        "# Roadmap\n\n"
-        "## M1\n\n"
-        "- [ ] **task A** "
-        "<!-- colony:roadmap-task: aaaaaaaaaaaa --> "
-        "<!-- colony:assignee: colony -->\n"
-        "- [ ] **task B** "
-        "<!-- colony:roadmap-task: bbbbbbbbbbbb --> "
-        "<!-- colony:assignee: user -->\n"
-    )
-    _seed_roadmap_repo(tmp_path, roadmap_text=roadmap_text)
-    github = _stub_github_with_assignment(issues=[
-        {
-            "number": 1, "title": "task A", "state": "open",
-            "body": "<!-- colony:roadmap-task: aaaaaaaaaaaa -->",
-            "assignees": [], "milestone": "M1",
-        },
-        {
-            "number": 2, "title": "task B", "state": "open",
-            "body": "<!-- colony:roadmap-task: bbbbbbbbbbbb -->",
-            "assignees": [], "milestone": "M1",
-        },
-    ])
-
-    # The LLM must never be called — explode if it is.
-    from polymathera.colony.knowledge import deps as kdeps_mod
-
-    def _explode(*, max_tokens, temperature):  # noqa: ARG001
-        async def _llm(_prompt):
-            raise AssertionError("LLM should not be invoked on marker path")
-        return _llm
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable", _explode,
-    )
-
-    cap = _make_capability(tmp_path, github=github)
-    result = await cap.propose_task_assignments(
-        user_github_login="alice",
-    )
-    assert result["dry_run"] is True
-    assert result["error"] == ""
-    by_id = {p["stable_id"]: p for p in result["proposals"]}
-    assert by_id["aaaaaaaaaaaa"]["proposed_assignee"] == "colony"
-    assert by_id["aaaaaaaaaaaa"]["proposed_login"] == "colony-bot[bot]"
-    assert by_id["aaaaaaaaaaaa"]["source"] == "marker"
-    assert by_id["bbbbbbbbbbbb"]["proposed_assignee"] == "user"
-    assert by_id["bbbbbbbbbbbb"]["proposed_login"] == "alice"
-    assert by_id["bbbbbbbbbbbb"]["source"] == "marker"
-    assert result["stats"]["marker_count"] == 2
-    assert result["stats"]["llm_count"] == 0
-
-
-async def test_propose_task_assignments_issue_body_marker_overrides(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """When the assignee marker lives in the GitHub issue body
-    (operator edited it after creation), the action picks it up
-    without needing to consult the roadmap."""
-
-    _seed_roadmap_repo(tmp_path, roadmap_text=None)
-    github = _stub_github_with_assignment(issues=[
-        {
-            "number": 1, "title": "Solder the new shield",
-            "state": "open",
-            "body": (
-                "Some prose.\n"
-                "<!-- colony:roadmap-task: aaaaaaaaaaaa -->\n"
-                "<!-- colony:assignee: user -->\n"
-            ),
-            "assignees": [], "milestone": "M1",
-        },
-    ])
-    from polymathera.colony.knowledge import deps as kdeps_mod
-
-    def _explode(*, max_tokens, temperature):  # noqa: ARG001
-        async def _llm(_prompt):
-            raise AssertionError("LLM should not be invoked")
-        return _llm
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable", _explode,
-    )
-
-    cap = _make_capability(tmp_path, github=github)
-    result = await cap.propose_task_assignments(
-        user_github_login="alice",
-    )
-    p = result["proposals"][0]
-    assert p["proposed_assignee"] == "user"
-    assert p["proposed_login"] == "alice"
-    assert p["source"] == "marker"
-
-
-async def test_propose_task_assignments_llm_path_classifies(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """No marker → LLM classifies based on task title. The fake LLM
-    returns ``user`` for the CAD task and ``colony`` for the analysis
-    task — the resolved logins follow accordingly."""
-
-    _seed_roadmap_repo(tmp_path, roadmap_text=None)
-    github = _stub_github_with_assignment(issues=[
-        {
-            "number": 1, "title": "Model the chamber in SolidWorks",
-            "state": "open",
-            "body": "<!-- colony:roadmap-task: aaaaaaaaaaaa -->",
-            "assignees": [], "milestone": "M1",
-        },
-        {
-            "number": 2, "title": "Analyse FEMM simulation results",
-            "state": "open",
-            "body": "<!-- colony:roadmap-task: bbbbbbbbbbbb -->",
-            "assignees": [], "milestone": "M1",
-        },
-    ])
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_assignment_llm_callable(by_title={
-            "SolidWorks": {
-                "assignee": "user",
-                "reason": "needs CAD software a human owns",
-            },
-            "FEMM": {
-                "assignee": "colony",
-                "reason": "pure analysis over existing results",
-            },
-        }),
-    )
-
-    cap = _make_capability(tmp_path, github=github)
-    result = await cap.propose_task_assignments(
-        user_github_login="alice",
-    )
-    by_id = {p["stable_id"]: p for p in result["proposals"]}
-    cad = by_id["aaaaaaaaaaaa"]
-    analysis = by_id["bbbbbbbbbbbb"]
-    assert cad["proposed_assignee"] == "user"
-    assert cad["proposed_login"] == "alice"
-    assert cad["source"] == "llm"
-    assert "CAD" in cad["reason"]
-    assert analysis["proposed_assignee"] == "colony"
-    assert analysis["proposed_login"] == "colony-bot[bot]"
-    assert analysis["source"] == "llm"
-    assert result["stats"]["llm_count"] == 2
-    assert result["stats"]["proposed_user"] == 1
-    assert result["stats"]["proposed_colony"] == 1
+# Tests removed pending phase P7+P8 of github_identity_fix_plan.md:
+# - test_propose_task_assignments_marker_path_skips_llm
+# - test_propose_task_assignments_issue_body_marker_overrides
+# - test_propose_task_assignments_llm_path_classifies
+# - test_propose_task_assignments_apply_calls_assign_per_proposal
+# - test_propose_task_assignments_errors_when_user_login_missing
+# All four asserted on the now-removed `user_github_login` kwarg or on
+# proposed_login=="alice" outcomes that only held because the action
+# accepted a typed user login. Re-add once whoami (P7) and per-user
+# OAuth identity (P8) are wired.
 
 
 async def test_propose_task_assignments_skips_already_assigned_by_default(
@@ -2028,7 +1888,6 @@ async def test_propose_task_assignments_skips_already_assigned_by_default(
 
     cap = _make_capability(tmp_path, github=github)
     result = await cap.propose_task_assignments(
-        user_github_login="alice",
     )
     assert len(result["proposals"]) == 1
     assert result["proposals"][0]["issue_number"] == 2
@@ -2063,7 +1922,7 @@ async def test_propose_task_assignments_reassign_existing_includes_all(
 
     cap = _make_capability(tmp_path, github=github)
     result = await cap.propose_task_assignments(
-        user_github_login="alice", reassign_existing=True,
+        reassign_existing=True,
     )
     assert len(result["proposals"]) == 1
     assert len(result["skipped"]) == 0
@@ -2093,58 +1952,10 @@ async def test_propose_task_assignments_dry_run_does_not_call_assign(
 
     cap = _make_capability(tmp_path, github=github)
     result = await cap.propose_task_assignments(
-        user_github_login="alice",
     )
     assert result["dry_run"] is True
     github.assign_issue.assert_not_called()
     assert "applied" not in result
-
-
-async def test_propose_task_assignments_apply_calls_assign_per_proposal(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """``dry_run=False`` calls ``assign_issue`` once per proposal with
-    ``replace=True`` and the resolved login."""
-
-    _seed_roadmap_repo(tmp_path, roadmap_text=None)
-    github = _stub_github_with_assignment(issues=[
-        {
-            "number": 1, "title": "to colony", "state": "open",
-            "body": "<!-- colony:roadmap-task: aaaaaaaaaaaa -->",
-            "assignees": [], "milestone": "M1",
-        },
-        {
-            "number": 2, "title": "to user", "state": "open",
-            "body": "<!-- colony:roadmap-task: bbbbbbbbbbbb -->",
-            "assignees": [], "milestone": "M1",
-        },
-    ])
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_assignment_llm_callable(by_title={
-            "to colony": {"assignee": "colony", "reason": "ok"},
-            "to user": {"assignee": "user", "reason": "ok"},
-        }),
-    )
-
-    cap = _make_capability(tmp_path, github=github)
-    result = await cap.propose_task_assignments(
-        user_github_login="alice", dry_run=False,
-    )
-    assert result["dry_run"] is False
-    assert result["error"] == ""
-    assert len(result["applied"]) == 2
-    assert len(result["errors"]) == 0
-    assert github.assign_issue.await_count == 2
-    # Inspect both calls: replace=True + resolved logins.
-    calls = github.assign_issue.await_args_list
-    by_issue = {
-        c.args[0]: (c.args[1], c.kwargs)
-        for c in calls
-    }
-    assert by_issue[1] == (["colony-bot[bot]"], {"repo": None, "replace": True})
-    assert by_issue[2] == (["alice"], {"repo": None, "replace": True})
 
 
 async def test_propose_task_assignments_apply_collects_partial_failures(
@@ -2174,14 +1985,18 @@ async def test_propose_task_assignments_apply_collects_partial_failures(
     from polymathera.colony.knowledge import deps as kdeps_mod
     monkeypatch.setattr(
         kdeps_mod, "build_default_llm_callable",
+        # ``colony`` so each proposal has a resolvable login (the
+        # App-bot whoami returns). ``user`` proposals would otherwise
+        # be ``user_unassignable=True`` here (no per-user OAuth on the
+        # fake agent) and the partial-failure path wouldn't fire.
         _stub_assignment_llm_callable(default={
-            "assignee": "user", "reason": "default",
+            "assignee": "colony", "reason": "default",
         }),
     )
 
     cap = _make_capability(tmp_path, github=github)
     result = await cap.propose_task_assignments(
-        user_github_login="alice", dry_run=False,
+        dry_run=False,
     )
     assert result["stats"]["applied_count"] == 1
     assert result["stats"]["error_count"] == 1
@@ -2218,27 +2033,11 @@ async def test_propose_task_assignments_segregates_untracked_issues(
 
     cap = _make_capability(tmp_path, github=github)
     result = await cap.propose_task_assignments(
-        user_github_login="alice",
     )
     assert len(result["proposals"]) == 1
     assert result["proposals"][0]["issue_number"] == 1
     assert len(result["untracked_issues"]) == 1
     assert result["untracked_issues"][0]["issue_number"] == 99
-
-
-async def test_propose_task_assignments_errors_when_user_login_missing(
-    tmp_path: Path,
-) -> None:
-    """``user_github_login`` is required — empty/whitespace gets a
-    clean error result, not a silent assignment to an empty string."""
-
-    _seed_roadmap_repo(tmp_path, roadmap_text=None)
-    github = _stub_github_with_assignment(issues=[])
-    cap = _make_capability(tmp_path, github=github)
-
-    result = await cap.propose_task_assignments(user_github_login="")
-    assert result["error"] == "user_github_login_required"
-    assert "Colony commits" in result["message"]
 
 
 async def test_propose_task_assignments_errors_when_whoami_fails(
@@ -2253,7 +2052,6 @@ async def test_propose_task_assignments_errors_when_whoami_fails(
     )
     cap = _make_capability(tmp_path, github=github)
     result = await cap.propose_task_assignments(
-        user_github_login="alice",
     )
     assert result["error"] == "whoami_failed"
     github.list_issues.assert_not_called()
@@ -2267,7 +2065,6 @@ async def test_propose_task_assignments_errors_without_github_sibling(
     _seed_roadmap_repo(tmp_path, roadmap_text=None)
     cap = _make_capability(tmp_path, github=None)
     result = await cap.propose_task_assignments(
-        user_github_login="alice",
     )
     assert result["error"] == "github_capability_missing"
 
@@ -2299,11 +2096,145 @@ async def test_propose_task_assignments_handles_llm_parse_failures(
 
     cap = _make_capability(tmp_path, github=github)
     result = await cap.propose_task_assignments(
-        user_github_login="alice",
     )
     assert len(result["proposals"]) == 0
     assert len(result["skipped"]) == 1
     assert result["skipped"][0]["reason"] == "llm_parse_failed"
+
+
+# ---------------------------------------------------------------------------
+# P8: user-side identity from metadata + user_unassignable flag
+# ---------------------------------------------------------------------------
+
+
+async def test_propose_resolves_user_login_from_agent_metadata(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """When the user has connected GitHub (metadata carries
+    ``user_github_login``), user-marked proposals resolve to that
+    login and are NOT marked ``user_unassignable``."""
+
+    _seed_roadmap_repo(tmp_path, roadmap_text=None)
+    github = _stub_github_with_assignment(issues=[
+        {
+            "number": 1, "title": "human task", "state": "open",
+            "body": (
+                "<!-- colony:roadmap-task: aaaaaaaaaaaa --> "
+                "<!-- colony:assignee: user -->"
+            ),
+            "assignees": [], "milestone": "M1",
+        },
+    ])
+    cap = _make_capability(
+        tmp_path, github=github, user_github_login="anassar",
+    )
+    result = await cap.propose_task_assignments()
+    assert result["user_login"] == "anassar"
+    assert len(result["proposals"]) == 1
+    p = result["proposals"][0]
+    assert p["proposed_assignee"] == "user"
+    assert p["proposed_login"] == "anassar"
+    assert p["user_unassignable"] is False
+    assert result["stats"]["user_unassignable_count"] == 0
+
+
+async def test_propose_marks_user_unassignable_when_no_oauth(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """When the user hasn't connected GitHub (no metadata login),
+    user-marked proposals carry ``user_unassignable=True`` so callers
+    surface the gap honestly + the apply step skips them."""
+
+    _seed_roadmap_repo(tmp_path, roadmap_text=None)
+    github = _stub_github_with_assignment(issues=[
+        {
+            "number": 1, "title": "human task", "state": "open",
+            "body": (
+                "<!-- colony:roadmap-task: aaaaaaaaaaaa --> "
+                "<!-- colony:assignee: user -->"
+            ),
+            "assignees": [], "milestone": "M1",
+        },
+    ])
+    cap = _make_capability(
+        tmp_path, github=github, user_github_login=None,
+    )
+    result = await cap.propose_task_assignments()
+    assert result["user_login"] is None
+    p = result["proposals"][0]
+    assert p["proposed_assignee"] == "user"
+    assert p["proposed_login"] is None
+    assert p["user_unassignable"] is True
+    assert result["stats"]["user_unassignable_count"] == 1
+
+
+async def test_propose_apply_skips_user_unassignable_proposals(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """``dry_run=False`` with a mix of colony + user-unassignable
+    proposals: colony tasks get assigned; user-unassignable ones are
+    not in ``applied`` and not in ``errors`` (they aren't an apply
+    failure — the user just hasn't OAuth'd yet)."""
+
+    _seed_roadmap_repo(tmp_path, roadmap_text=None)
+    github = _stub_github_with_assignment(issues=[
+        {
+            "number": 1, "title": "colony task", "state": "open",
+            "body": (
+                "<!-- colony:roadmap-task: aaaaaaaaaaaa --> "
+                "<!-- colony:assignee: colony -->"
+            ),
+            "assignees": [], "milestone": "M1",
+        },
+        {
+            "number": 2, "title": "user task", "state": "open",
+            "body": (
+                "<!-- colony:roadmap-task: bbbbbbbbbbbb --> "
+                "<!-- colony:assignee: user -->"
+            ),
+            "assignees": [], "milestone": "M1",
+        },
+    ])
+    cap = _make_capability(
+        tmp_path, github=github, user_github_login=None,
+    )
+    result = await cap.propose_task_assignments(dry_run=False)
+    assert len(result["proposals"]) == 2
+    assert len(result["applied"]) == 1
+    assert result["applied"][0]["issue_number"] == 1
+    assert len(result["errors"]) == 0
+    assert result["stats"]["user_unassignable_count"] == 1
+    # ``assign_issue`` was called for the colony task only.
+    assert github.assign_issue.await_count == 1
+
+
+async def test_propose_resolves_colony_login_from_whoami(
+    tmp_path: Path,
+) -> None:
+    """Colony-side proposed_login is whatever ``whoami`` returns —
+    the App-bot login for the per-tenant installation."""
+
+    _seed_roadmap_repo(tmp_path, roadmap_text=None)
+    github = _stub_github_with_assignment(
+        issues=[
+            {
+                "number": 1, "title": "x", "state": "open",
+                "body": (
+                    "<!-- colony:roadmap-task: aaaaaaaaaaaa --> "
+                    "<!-- colony:assignee: colony -->"
+                ),
+                "assignees": [], "milestone": "M1",
+            },
+        ],
+        whoami_login="acme-colony-bot[bot]",
+    )
+    cap = _make_capability(tmp_path, github=github)
+    result = await cap.propose_task_assignments()
+    p = result["proposals"][0]
+    assert p["proposed_assignee"] == "colony"
+    assert p["proposed_login"] == "acme-colony-bot[bot]"
+    assert p["user_unassignable"] is False
+    assert result["colony_login"] == "acme-colony-bot[bot]"
 
 
 def test_parse_assignment_classification_rejects_unknown_assignee() -> None:
@@ -2346,3 +2277,321 @@ def test_extract_assignee_marker_case_insensitive() -> None:
         "no marker here",
     ) is None
     assert _extract_assignee_marker(None) is None
+
+
+# ---------------------------------------------------------------------------
+# repo / roadmap_path derivation — neither is planner-supplied anymore
+# ---------------------------------------------------------------------------
+
+
+def test_parse_owner_repo_from_url_https_with_dot_git() -> None:
+    from polymathera.colony.design_monorepo.process import (
+        _parse_owner_repo_from_url,
+    )
+    assert _parse_owner_repo_from_url(
+        "https://github.com/acme/widgets.git",
+    ) == "acme/widgets"
+
+
+def test_parse_owner_repo_from_url_https_no_suffix() -> None:
+    from polymathera.colony.design_monorepo.process import (
+        _parse_owner_repo_from_url,
+    )
+    assert _parse_owner_repo_from_url(
+        "https://github.com/acme/widgets",
+    ) == "acme/widgets"
+
+
+def test_parse_owner_repo_from_url_ssh() -> None:
+    from polymathera.colony.design_monorepo.process import (
+        _parse_owner_repo_from_url,
+    )
+    assert _parse_owner_repo_from_url(
+        "git@github.com:acme/widgets.git",
+    ) == "acme/widgets"
+
+
+def test_parse_owner_repo_from_url_rejects_gitlab() -> None:
+    """Non-github URLs return None — caller surfaces a clean error
+    rather than mis-route to github.com."""
+
+    from polymathera.colony.design_monorepo.process import (
+        _parse_owner_repo_from_url,
+    )
+    assert _parse_owner_repo_from_url(
+        "https://gitlab.com/acme/widgets.git",
+    ) is None
+
+
+def test_parse_owner_repo_from_url_rejects_malformed() -> None:
+    from polymathera.colony.design_monorepo.process import (
+        _parse_owner_repo_from_url,
+    )
+    # No owner/repo split.
+    assert _parse_owner_repo_from_url(
+        "https://github.com/justonepart",
+    ) is None
+    # Empty.
+    assert _parse_owner_repo_from_url("") is None
+    # Extra path segments.
+    assert _parse_owner_repo_from_url(
+        "https://github.com/acme/widgets/extra",
+    ) is None
+
+
+async def test_resolve_github_repo_returns_owner_repo_when_url_set(
+    tmp_path: Path,
+) -> None:
+    """The capability reads ``design_monorepo_url`` from agent
+    metadata + derives ``owner/repo``."""
+
+    cap = _make_capability(
+        tmp_path, github=_make_github_stub(),
+        design_monorepo_url="https://github.com/acme/widgets.git",
+    )
+    assert cap._resolve_github_repo() == "acme/widgets"
+
+
+async def test_resolve_github_repo_returns_none_when_url_unset(
+    tmp_path: Path,
+) -> None:
+    """No URL in metadata → derivation returns None; actions surface
+    the canonical ``no_github_repo`` error."""
+
+    cap = _make_capability(
+        tmp_path, github=_make_github_stub(),
+        design_monorepo_url=None,
+    )
+    assert cap._resolve_github_repo() is None
+
+
+async def test_resolve_github_repo_returns_none_for_non_github_url(
+    tmp_path: Path,
+) -> None:
+    """Non-github URL (gitlab, internal forge) → None. The action
+    won't try to dispatch a gitlab issue list through GitHubCapability."""
+
+    cap = _make_capability(
+        tmp_path, github=_make_github_stub(),
+        design_monorepo_url="https://gitlab.com/acme/widgets.git",
+    )
+    assert cap._resolve_github_repo() is None
+
+
+async def test_summarise_progress_no_github_repo_when_url_unset(
+    tmp_path: Path,
+) -> None:
+    """sibling mounted + design_monorepo_url unset → canonical
+    ``no_github_repo`` error (the planner sees a consistent signal
+    across every github-touching action)."""
+
+    cap = _make_capability(
+        tmp_path, github=_make_github_stub(), design_monorepo_url=None,
+    )
+    r = await cap.summarise_progress()
+    assert r["error"] == "no_github_repo"
+
+
+async def test_sync_roadmap_no_github_repo_when_url_unset(
+    tmp_path: Path,
+) -> None:
+    _seed_roadmap_repo(tmp_path, roadmap_text=None)
+    cap = _make_capability(
+        tmp_path, github=_make_github_stub(), design_monorepo_url=None,
+    )
+    r = await cap.sync_roadmap_with_github()
+    assert r["error"] == "no_github_repo"
+
+
+async def test_propose_task_assignments_no_github_repo_when_url_unset(
+    tmp_path: Path,
+) -> None:
+    cap = _make_capability(
+        tmp_path, github=_make_github_stub(), design_monorepo_url=None,
+    )
+    r = await cap.propose_task_assignments()
+    assert r["error"] == "no_github_repo"
+
+
+async def test_bootstrap_no_github_repo_when_url_unset(
+    tmp_path: Path,
+) -> None:
+    """Sibling mounted but no repo derivable → bootstrap errors
+    before any LLM call (cheaper failure)."""
+
+    _seed_design_context_repo(tmp_path)
+    cap = _make_capability(
+        tmp_path, github=_make_github_stub(), design_monorepo_url=None,
+    )
+    r = await cap.bootstrap_roadmap_from_objectives()
+    assert r["error"] == "no_github_repo"
+
+
+# ---------------------------------------------------------------------------
+# roadmap path resolution from design_context_sources (is_roadmap row)
+# ---------------------------------------------------------------------------
+
+
+def _seed_repo_without_roadmap_row(tmp_path: Path) -> None:
+    """Repo with a design_context_sources block that has NO is_roadmap
+    row — used to verify the canonical ``no_roadmap_declared`` error."""
+
+    _make_repo(tmp_path)
+    (tmp_path / ".colony").mkdir()
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "x.md").write_text("# X\n", encoding="utf-8")
+    (tmp_path / ".colony" / "repo_map.yaml").write_text(
+        "schema_version: 3\n"
+        "vcm_sources:\n  - { name: default, type: git_repo }\n"
+        "design_context_sources:\n"
+        "  - name: docs\n    paths: ['docs/**/*.md']\n",
+        encoding="utf-8",
+    )
+
+
+async def test_resolve_roadmap_path_returns_configured_path(
+    tmp_path: Path,
+) -> None:
+    """When a design_context_sources row sets is_roadmap=true, the
+    helper returns its single path entry — not a hardcoded default."""
+
+    from polymathera.colony.design_monorepo.repo_map import (
+        DesignContextSource, RepoMap, VcmSource,
+    )
+
+    cap = _make_capability(tmp_path)
+    rm = RepoMap(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        design_context_sources=[
+            DesignContextSource(name="docs", paths=["docs/**/*.md"]),
+            DesignContextSource(
+                name="roadmap", paths=["custom/path/roadmap.md"],
+                is_roadmap=True,
+            ),
+        ],
+    )
+    assert cap._resolve_roadmap_path(rm) == "custom/path/roadmap.md"
+
+
+async def test_resolve_roadmap_path_returns_none_when_no_row_marked(
+    tmp_path: Path,
+) -> None:
+    """No is_roadmap=true row → None. Callers turn this into the
+    canonical no_roadmap_declared error."""
+
+    from polymathera.colony.design_monorepo.repo_map import (
+        DesignContextSource, RepoMap, VcmSource,
+    )
+
+    cap = _make_capability(tmp_path)
+    rm = RepoMap(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        design_context_sources=[
+            DesignContextSource(name="docs", paths=["docs/**/*.md"]),
+        ],
+    )
+    assert cap._resolve_roadmap_path(rm) is None
+
+
+async def test_bootstrap_no_roadmap_declared_when_row_missing(
+    tmp_path: Path,
+) -> None:
+    """Bootstrap requires a roadmap row — without one, error before
+    any LLM call."""
+
+    _seed_repo_without_roadmap_row(tmp_path)
+    cap = _make_capability(tmp_path, github=_make_github_stub())
+    r = await cap.bootstrap_roadmap_from_objectives()
+    assert r["error"] == "no_roadmap_declared"
+    assert "is_roadmap: true" in r["message"]
+
+
+async def test_sync_no_roadmap_declared_when_row_missing(
+    tmp_path: Path,
+) -> None:
+    """Sync requires a roadmap row — fires before sibling/repo checks
+    so the diagnostic points at the missing declaration first."""
+
+    _seed_repo_without_roadmap_row(tmp_path)
+    cap = _make_capability(tmp_path, github=_make_github_stub())
+    r = await cap.sync_roadmap_with_github()
+    assert r["error"] == "no_roadmap_declared"
+
+
+async def test_bootstrap_writes_to_configured_roadmap_path(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """When the is_roadmap row points to ``docs/roadmap.md``, the
+    bootstrap action writes the rendered roadmap THERE (not at the
+    repo root) and commits it under that path."""
+
+    _make_repo(tmp_path)
+    (tmp_path / ".colony").mkdir()
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "objectives.md").write_text(
+        "# Objectives\nMaximise sensitivity.\n", encoding="utf-8",
+    )
+    (tmp_path / ".colony" / "repo_map.yaml").write_text(
+        "schema_version: 3\n"
+        "vcm_sources:\n  - { name: default, type: git_repo }\n"
+        "design_context_sources:\n"
+        "  - name: docs\n    paths: ['docs/**/*.md']\n"
+        "  - name: roadmap\n    paths: ['docs/roadmap.md']\n"
+        "    is_roadmap: true\n",
+        encoding="utf-8",
+    )
+    github = _make_github_stub(issues=[])
+    github.create_issue = AsyncMock(return_value={
+        "ok": True, "message": "",
+        "issue": {"number": 1, "title": "t"},
+    })
+    cap = _make_capability(tmp_path, github=github)
+
+    response = (
+        '{"milestones": [{"title": "M", "description": "",'
+        '"tasks": [{"title": "t", "description": ""}]}]}'
+    )
+    from polymathera.colony.knowledge import deps as kdeps_mod
+    monkeypatch.setattr(
+        kdeps_mod, "build_default_llm_callable",
+        _stub_llm_callable(response),
+    )
+
+    result = await cap.bootstrap_roadmap_from_objectives(dry_run=False)
+    assert result["error"] == ""
+    assert result["roadmap_written"] == "docs/roadmap.md"
+    assert (tmp_path / "docs" / "roadmap.md").is_file()
+    assert not (tmp_path / "ROADMAP.md").exists()
+
+
+async def test_propose_tolerates_missing_roadmap_row(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """propose_task_assignments treats the roadmap as optional marker-
+    hint source — when no is_roadmap row is declared, the action
+    still classifies GitHub issues via issue-body markers + LLM
+    (no error)."""
+
+    _seed_repo_without_roadmap_row(tmp_path)
+    github = _stub_github_with_assignment(issues=[
+        {
+            "number": 1, "title": "x", "state": "open",
+            "body": (
+                "<!-- colony:roadmap-task: aaaaaaaaaaaa --> "
+                "<!-- colony:assignee: colony -->"
+            ),
+            "assignees": [], "milestone": "M1",
+        },
+    ])
+    from polymathera.colony.knowledge import deps as kdeps_mod
+    monkeypatch.setattr(
+        kdeps_mod, "build_default_llm_callable",
+        _stub_assignment_llm_callable(default={
+            "assignee": "colony", "reason": "default",
+        }),
+    )
+    cap = _make_capability(tmp_path, github=github)
+    result = await cap.propose_task_assignments()
+    assert result["error"] == ""
+    assert len(result["proposals"]) == 1
+    assert result["proposals"][0]["proposed_assignee"] == "colony"

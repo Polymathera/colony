@@ -86,6 +86,12 @@ def _agent_with_attribution(
                 "git_attribution": {
                     "commit_principal": commit_principal,
                     "commit_co_author": commit_co_author,
+                },
+                # Per-user identity moved to ``github_identity`` in
+                # P1 of ``colony/github_identity_fix_plan.md``;
+                # ``_resolve_attribution`` reads ``git_user_name`` /
+                # ``git_user_email`` from this block now.
+                "github_identity": {
                     "git_user_name": git_user_name,
                     "git_user_email": git_user_email,
                 },

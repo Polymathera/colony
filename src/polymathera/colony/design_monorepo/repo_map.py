@@ -380,6 +380,21 @@ class DesignContextSource(BaseModel):
             "Only consulted when ``pin_in_vcm`` is true."
         ),
     )
+    is_roadmap: bool = Field(
+        default=False,
+        description=(
+            "Marks this row as the project's roadmap source. The "
+            "``DesignProcessCapability`` actions "
+            "(``bootstrap_roadmap_from_objectives``, "
+            "``sync_roadmap_with_github``, "
+            "``propose_task_assignments``) read/write the file at "
+            "``paths[0]`` instead of asking the LLM planner for a "
+            "path. At most one row in ``design_context_sources`` may "
+            "set this; when set, ``paths`` MUST be a single literal "
+            "filename (no glob characters) so the actions have a "
+            "deterministic write target."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_paths(self) -> "DesignContextSource":
@@ -388,6 +403,21 @@ class DesignContextSource(BaseModel):
                 f"DesignContextSource[{self.name}]: 'paths' must be "
                 f"non-empty.",
             )
+        if self.is_roadmap:
+            if len(self.paths) != 1:
+                raise ValueError(
+                    f"DesignContextSource[{self.name}]: is_roadmap=true "
+                    f"requires exactly one entry in 'paths' (got "
+                    f"{len(self.paths)}); the roadmap is a single file.",
+                )
+            roadmap_path = self.paths[0]
+            if any(ch in roadmap_path for ch in "*?["):
+                raise ValueError(
+                    f"DesignContextSource[{self.name}]: is_roadmap=true "
+                    f"requires a literal path with no glob characters "
+                    f"(got {roadmap_path!r}); pick a single concrete "
+                    f"file such as 'ROADMAP.md' or 'docs/roadmap.md'.",
+                )
         return self
 
     def matches(self, rel_path: str) -> bool:
@@ -415,6 +445,7 @@ class RepoMap(BaseModel):
     @model_validator(mode="after")
     def _check_design_context_sources_unique(self) -> "RepoMap":
         seen: set[str] = set()
+        roadmap_rows: list[str] = []
         for src in self.design_context_sources:
             if src.name in seen:
                 raise ValueError(
@@ -422,6 +453,14 @@ class RepoMap(BaseModel):
                     f"{src.name!r}; each row must have a unique name.",
                 )
             seen.add(src.name)
+            if src.is_roadmap:
+                roadmap_rows.append(src.name)
+        if len(roadmap_rows) > 1:
+            raise ValueError(
+                f"RepoMap: at most one design_context_sources row may "
+                f"set is_roadmap=true; found "
+                f"{len(roadmap_rows)}: {roadmap_rows!r}.",
+            )
         return self
 
     @classmethod

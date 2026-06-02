@@ -57,15 +57,18 @@ class DeployConfig:
             "MISTRAL_API_KEY",
             "LLAMA_CLOUD_API_KEY",
             "HUGGING_FACE_HUB_TOKEN",
-            # Git remote credentials — PAT path.
-            "GITHUB_TOKEN",
+            # Git remote credentials.
+            # GitHub: per-tenant App installation. ``GitHubAuthConfig``
+            # reads App ID + private key from env (deploy-wide); the
+            # per-tenant installation id lives on ``tenants`` (not env).
+            # GitLab: still PAT-based until the GitLab integration
+            # follows the same App pattern.
             "GITLAB_TOKEN",
-            # Git remote credentials — GitHub App path
-            # (``GitHubAuthConfig`` mints a short-lived installation
-            # token from the three together).
             "GITHUB_APP_ID",
-            "GITHUB_INSTALLATION_ID",
             "GITHUB_PRIVATE_KEY_PEM",
+            # Same App, OAuth client for user-to-server flow.
+            "GITHUB_APP_CLIENT_ID",
+            "GITHUB_APP_CLIENT_SECRET",
             # WebSearchCapability / ColonyDocsCapability — Tavily.
             "TAVILY_API_KEY",
             # Slack-relay capability.

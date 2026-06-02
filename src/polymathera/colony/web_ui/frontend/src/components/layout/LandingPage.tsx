@@ -3,6 +3,10 @@ import { useHealthStatus } from "@/api/hooks/useInfrastructure";
 import { useSessions } from "@/api/hooks/useSessions";
 import { Badge } from "../shared/Badge";
 import { ColoniesSection } from "./ColoniesSection";
+import {
+  TenantGitHubInstallationSection,
+  UserGitHubIdentitySection,
+} from "./GitHubIdentitySection";
 import { formatTimestamp } from "@/lib/utils";
 
 interface LandingPageProps {
@@ -76,6 +80,13 @@ export function LandingPage({
         activeColonyId={activeColonyId}
         onSelectColony={onSelectColony}
       />
+
+      {/* Per-tenant GitHub App installation id + per-user GitHub
+          OAuth identity. Both live here so they're configurable
+          before a session boots — the agent metadata reads them at
+          session-create time. See colony/github_identity_fix_plan.md. */}
+      <TenantGitHubInstallationSection />
+      <UserGitHubIdentitySection />
 
       {/* Actions */}
       <div className="flex gap-3">

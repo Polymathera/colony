@@ -221,18 +221,19 @@ export function useSetColonyDesignMonorepo(colonyId: string | null) {
 }
 
 // ----------------------------------------------------------------------
-// Per-colony git-commit attribution (principal + optional co-author).
+// Per-colony git-commit attribution preferences (principal + optional
+// co-author).
 //
 // ``commit_principal`` is a free-form string — well-known values
 // ``"user"`` / ``"colony"`` / ``"agent"``, anything else treated as
 // an agent-type label. ``commit_co_author`` is the same value space,
-// or ``null`` to disable the ``Co-Authored-By:`` trailer. The
-// ``git_user_*`` fields are required when either field is ``"user"``.
+// or ``null`` to disable the ``Co-Authored-By:`` trailer. Per-user
+// identity (``git_user_name`` / ``git_user_email``) is OAuth-verified
+// on the user profile now (see colony/github_identity_fix_plan.md);
+// no per-colony fields here.
 // ----------------------------------------------------------------------
 
 export interface ColonyGitAttributionConfig {
-  git_user_name: string | null;
-  git_user_email: string | null;
   commit_principal: string;
   commit_co_author: string | null;
 }

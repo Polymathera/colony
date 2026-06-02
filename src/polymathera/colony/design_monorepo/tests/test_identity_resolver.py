@@ -33,7 +33,7 @@ def test_user_principal_uses_configured_name_and_email() -> None:
 
 
 def test_user_principal_without_name_and_email_raises() -> None:
-    with pytest.raises(ValueError, match="git_user_name"):
+    with pytest.raises(ValueError, match="Connect GitHub"):
         resolve_commit_identity(PRINCIPAL_USER, colony_id="c1")
 
 

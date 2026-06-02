@@ -97,6 +97,13 @@ async def create_user(db_pool, username: str, password: str) -> dict[str, str]:
             raise ValueError(f"Username '{username}' already exists")
 
         async with conn.transaction():
+            # Create tenant first — ``users.tenant_id`` and
+            # ``colonies.tenant_id`` are both FK'd to ``tenants(id)``
+            # after P1 of ``colony/github_identity_fix_plan.md``.
+            await conn.execute(
+                "INSERT INTO tenants (id, name) VALUES ($1, $2)",
+                tenant_id, username,
+            )
             # Create user
             await conn.execute(
                 "INSERT INTO users (id, username, password_hash, tenant_id) VALUES ($1, $2, $3, $4)",
@@ -246,27 +253,25 @@ async def set_design_monorepo(
 async def get_git_attribution(
     db_pool, *, colony_id: str, tenant_id: str,
 ) -> dict[str, Any] | None:
-    """Return the per-colony git-commit attribution row.
+    """Return the per-colony git-commit attribution preferences.
 
-    Shape: ``{"git_user_name", "git_user_email", "commit_principal",
-    "commit_co_author"}``. ``None`` when the colony doesn't exist for
-    this tenant. Defaults baked into the schema mean the principal
-    and co-author fields are always populated; the user
-    name/email fields are optional and stay ``None`` until set.
+    Shape: ``{"commit_principal", "commit_co_author"}``. ``None`` when
+    the colony doesn't exist for this tenant. Defaults baked into the
+    schema mean both fields are always populated. Per-user identity
+    (``git_user_name`` / ``git_user_email``) moved to ``users`` in
+    P1 of ``colony/github_identity_fix_plan.md`` (populated by the
+    OAuth callback, not by this row).
     """
 
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT git_user_name, git_user_email, commit_principal, "
-            "commit_co_author FROM colonies "
+            "SELECT commit_principal, commit_co_author FROM colonies "
             "WHERE id = $1 AND tenant_id = $2",
             colony_id, tenant_id,
         )
     if row is None:
         return None
     return {
-        "git_user_name": row["git_user_name"],
-        "git_user_email": row["git_user_email"],
         "commit_principal": row["commit_principal"],
         "commit_co_author": row["commit_co_author"],
     }
@@ -276,36 +281,28 @@ async def set_git_attribution(
     db_pool, *,
     colony_id: str,
     tenant_id: str,
-    git_user_name: str | None,
-    git_user_email: str | None,
     commit_principal: str,
     commit_co_author: str | None,
 ) -> dict[str, Any]:
-    """Persist the colony's git-commit attribution. Returns the
-    newly-stored row. Raises :class:`KeyError` when the colony does
-    not exist or belongs to a different tenant.
+    """Persist the colony's per-commit attribution preferences.
 
-    Validation: when ``commit_principal`` or ``commit_co_author``
-    equals ``"user"``, both ``git_user_name`` and ``git_user_email``
-    must be non-empty — otherwise the resolver would fail at commit
-    time, far from the operator's edit. We reject early instead.
+    Returns the newly-stored row. Raises :class:`KeyError` when the
+    colony does not exist or belongs to a different tenant. The
+    legacy ``git_user_name`` / ``git_user_email`` per-colony fields
+    are gone — per-user identity is OAuth-verified on ``users`` (P1
+    of ``colony/github_identity_fix_plan.md``); when the operator
+    picks ``"user"`` as principal or co-author and no user has
+    connected GitHub yet, the resolver emits the commit without the
+    user side rather than failing here (the per-user identity is
+    only resolvable per-session, not at this colony-config edit
+    time).
     """
-
-    needs_user = commit_principal == "user" or commit_co_author == "user"
-    if needs_user and (not git_user_name or not git_user_email):
-        raise ValueError(
-            "git_user_name and git_user_email are required when "
-            "commit_principal or commit_co_author is 'user'.",
-        )
 
     async with db_pool.acquire() as conn:
         result = await conn.execute(
-            "UPDATE colonies SET git_user_name = $1, "
-            "git_user_email = $2, commit_principal = $3, "
-            "commit_co_author = $4 "
-            "WHERE id = $5 AND tenant_id = $6",
-            git_user_name or None,
-            git_user_email or None,
+            "UPDATE colonies SET commit_principal = $1, "
+            "commit_co_author = $2 "
+            "WHERE id = $3 AND tenant_id = $4",
             commit_principal,
             commit_co_author or None,
             colony_id,
@@ -314,8 +311,6 @@ async def set_git_attribution(
     if result == "UPDATE 0":
         raise KeyError(f"colony {colony_id!r} not found for tenant {tenant_id!r}")
     return {
-        "git_user_name": git_user_name or None,
-        "git_user_email": git_user_email or None,
         "commit_principal": commit_principal,
         "commit_co_author": commit_co_author or None,
     }
@@ -339,3 +334,129 @@ async def get_default_colony(db_pool, tenant_id: str) -> dict[str, Any] | None:
         "tenant_id": row["tenant_id"],
         "description": row["description"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Tenant — per-tenant GitHub App installation id
+# ---------------------------------------------------------------------------
+
+async def get_tenant_github_installation(
+    db_pool, *, tenant_id: str,
+) -> dict[str, Any] | None:
+    """Return ``{"installation_id"}`` for the tenant, or ``None`` if
+    the tenant doesn't exist. ``installation_id`` is ``None`` until
+    a tenant admin configures it (P3 UI)."""
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT github_installation_id FROM tenants WHERE id = $1",
+            tenant_id,
+        )
+    if row is None:
+        return None
+    return {"installation_id": row["github_installation_id"]}
+
+
+async def set_tenant_github_installation(
+    db_pool, *, tenant_id: str, installation_id: str | None,
+) -> dict[str, Any]:
+    """Persist the tenant's GitHub App installation id. ``None`` clears
+    it (the tenant uninstalled the App). Raises :class:`KeyError` when
+    the tenant doesn't exist."""
+
+    async with db_pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE tenants SET github_installation_id = $1 WHERE id = $2",
+            installation_id or None,
+            tenant_id,
+        )
+    if result == "UPDATE 0":
+        raise KeyError(f"tenant {tenant_id!r} not found")
+    return {"installation_id": installation_id or None}
+
+
+# ---------------------------------------------------------------------------
+# User — per-user OAuth-verified GitHub identity
+# ---------------------------------------------------------------------------
+
+async def get_user_github_identity(
+    db_pool, *, user_id: str,
+) -> dict[str, Any] | None:
+    """Return the user's connected GitHub identity, or ``None`` when
+    the user hasn't OAuth'd yet (all GitHub-side fields are NULL)."""
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT github_login, github_user_id, github_email, "
+            "git_user_name, github_connected_at, github_last_verified_at "
+            "FROM users WHERE id = $1",
+            user_id,
+        )
+    if row is None or row["github_login"] is None:
+        return None
+    return {
+        "github_login": row["github_login"],
+        "github_user_id": row["github_user_id"],
+        "github_email": row["github_email"],
+        "git_user_name": row["git_user_name"],
+        "github_connected_at": row["github_connected_at"],
+        "github_last_verified_at": row["github_last_verified_at"],
+    }
+
+
+async def set_user_github_identity(
+    db_pool, *,
+    user_id: str,
+    github_login: str,
+    github_user_id: int,
+    github_email: str,
+    git_user_name: str | None,
+) -> dict[str, Any]:
+    """Persist OAuth-verified GitHub identity onto the user row. Called
+    by the OAuth callback (P2c). Sets ``github_connected_at`` on the
+    first connect, refreshes ``github_last_verified_at`` on every
+    call (lets the UI show "last verified N days ago"). Raises
+    :class:`KeyError` when the user doesn't exist."""
+
+    async with db_pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE users SET "
+            "  github_login = $1, "
+            "  github_user_id = $2, "
+            "  github_email = $3, "
+            "  git_user_name = $4, "
+            "  github_connected_at = COALESCE(github_connected_at, NOW()), "
+            "  github_last_verified_at = NOW() "
+            "WHERE id = $5",
+            github_login, github_user_id, github_email, git_user_name,
+            user_id,
+        )
+    if result == "UPDATE 0":
+        raise KeyError(f"user {user_id!r} not found")
+    # Return the freshly-persisted shape so the route handler can
+    # echo it back to the UI without an extra SELECT.
+    fresh = await get_user_github_identity(db_pool, user_id=user_id)
+    assert fresh is not None  # we just wrote it
+    return fresh
+
+
+async def delete_user_github_identity(
+    db_pool, *, user_id: str,
+) -> bool:
+    """Disconnect a user's GitHub identity (clear all GitHub-side
+    fields). Returns ``True`` if a row was updated; ``False`` if the
+    user doesn't exist."""
+
+    async with db_pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE users SET "
+            "  github_login = NULL, "
+            "  github_user_id = NULL, "
+            "  github_email = NULL, "
+            "  git_user_name = NULL, "
+            "  github_connected_at = NULL, "
+            "  github_last_verified_at = NULL "
+            "WHERE id = $1",
+            user_id,
+        )
+    return result != "UPDATE 0"

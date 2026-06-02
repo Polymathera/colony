@@ -31,17 +31,27 @@ session-creation time, attaches it to
 monorepo capability trio lazy-clones the repo into the per-agent
 working directory on first action.
 
-Authentication is the operator's responsibility. The
-`docker-compose.yml` already plumbs `GITHUB_TOKEN` into every Ray
-service. For `https://github.com/...` clone URLs the framework
-rewrites the URL in-process to embed the token
-(`https://x-access-token:$GITHUB_TOKEN@github.com/...`) via
-`utils.git.utils.inject_github_token`, so non-interactive clones
-work for private repos without the user having to embed credentials
-in the URL they paste. ssh remotes, GitLab, and URLs that already
-carry credentials pass through untouched — git's standard machinery
-handles those itself. Whatever access the token has, the capability
-has — clone failures (404, auth, etc.) surface verbatim from `git`.
+Authentication is per-tenant via the GitHub App installation flow
+(see [`guides/github-app-setup.md`](../guides/github-app-setup.md)).
+At agent startup, `DesignMonorepoCapabilityBase.initialize` calls
+`ensure_git_credentials_from_agent_metadata` (in
+`colony/distributed/git_credentials.py`); that mints an installation
+token from the tenant's `github_installation_id` + the deploy-wide
+App credentials, writes it atomically to
+`/tmp/colony-git-credentials`, and starts a 50-minute refresh task.
+The container's system git config has a credential helper
+(`/usr/local/bin/colony-git-credentials`, installed by
+`Dockerfile.base`) that reads the file when git asks for credentials.
+For `https://github.com/...` URLs this means non-interactive clone
+and push work without the user embedding credentials. ssh remotes,
+GitLab (still PAT-based via `$GITLAB_TOKEN`), and URLs that already
+carry credentials pass through untouched. When the tenant hasn't
+installed the App or the deploy-wide App env vars are missing, the
+token file is absent and git surfaces its standard
+"Authentication failed" error — the
+[`_classify_git_clone_error`](../../src/polymathera/colony/distributed/stores/git.py)
+classifier reshapes that into a typed `GitAuthError` whose message
+names the exact knobs to fix.
 
 ```http
 GET  /api/v1/colonies/{colony_id}/design-monorepo

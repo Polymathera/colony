@@ -231,8 +231,11 @@ class GitHubCapability(AgentCapability):
             ``private_key_path``.
         private_key_path: Filesystem path to the PEM file. Mutually
             exclusive with ``private_key_pem``.
-        installation_id: GitHub App installation id. Falls back to
-            ``GITHUB_INSTALLATION_ID``.
+        installation_id: GitHub App installation id (per-tenant).
+            In production, read from
+            ``agent.metadata.parameters["github_identity"]
+            ["tenant_installation_id"]`` — this kwarg is for test
+            injection only.
         default_repo: Optional ``owner/repo`` default — used when an
             action accepts ``repo=None``.
         default_project_id: Optional Projects v2 GraphQL node id used
@@ -264,7 +267,6 @@ class GitHubCapability(AgentCapability):
         installation_id: str | None = None,
         default_repo: str | None = None,
         default_project_id: str | None = None,
-        app_slug: str | None = None,
         max_requests_per_minute: int = 120,
         client: GitHubClient | None = None,
         httpx_client: httpx.AsyncClient | None = None,
@@ -287,10 +289,13 @@ class GitHubCapability(AgentCapability):
         self._private_key_pem = private_key_pem
         self._private_key_path = private_key_path
         self._installation_id = installation_id
-        self._app_slug = app_slug
         self._client: GitHubClient | None = client
         self._init_error: str | None = None
         self._client_initialized = client is not None
+        # whoami() caches the identity round-trip (the App-bot identity
+        # doesn't change at runtime — see P7 of
+        # ``colony/github_identity_fix_plan.md``).
+        self._identity_cache: dict[str, Any] | None = None
 
     async def initialize(self) -> None:
         # Build a live client; any configuration error is captured so
@@ -313,24 +318,38 @@ class GitHubCapability(AgentCapability):
     # --- Internal construction --------------------------------------------
 
     async def _build_live_client(self) -> GitHubClient:
-        # Explicit kwargs override; otherwise read from typed
-        # ``GitHubAuthConfig`` (env-bound). Empty defaults remain falsy so the
-        # downstream "all required" check still triggers when nothing is set.
+        # App-level credentials (``app_id`` + ``private_key_pem``) are
+        # deploy-wide and come from env via ``GitHubAuthConfig``.
+        # ``installation_id`` is per-tenant (P5 of
+        # ``colony/github_identity_fix_plan.md``) and rides on agent
+        # metadata as ``parameters["github_identity"]
+        # ["tenant_installation_id"]``. Tests inject directly via the
+        # constructor kwargs; production reads metadata.
         from ...configs import get_github_auth_config
         gh = await get_github_auth_config()
         app_id = self._app_id or gh.app_id or None
-        installation_id = self._installation_id or gh.installation_id or None
         private_key_pem = self._private_key_pem or gh.private_key_pem or None
-        if self._app_slug is None:
-            self._app_slug = gh.app_slug or None
         if not private_key_pem and self._private_key_path:
             with open(self._private_key_path, "r", encoding="utf-8") as fh:
                 private_key_pem = fh.read()
-        if not app_id or not installation_id or not private_key_pem:
+
+        installation_id = self._installation_id
+        if not installation_id and self._agent is not None:
+            params = getattr(self._agent.metadata, "parameters", None) or {}
+            gh_identity = params.get("github_identity") or {}
+            installation_id = gh_identity.get("tenant_installation_id")
+
+        if not app_id or not private_key_pem:
             raise RuntimeError(
-                "GitHubCapability: app_id, installation_id, and a "
-                "private key are all required (explicit kwargs, "
-                "environment variables, or private_key_path)."
+                "GitHubCapability: GITHUB_APP_ID and "
+                "GITHUB_PRIVATE_KEY_PEM env vars are required."
+            )
+        if not installation_id:
+            raise RuntimeError(
+                "GitHubCapability: per-tenant GitHub App installation "
+                "id is missing — the tenant admin must set it via "
+                "the Tenant GitHub Installation panel before sessions "
+                "in this tenant can use the REST API."
             )
         if self._httpx_client is None:
             self._httpx_client = httpx.AsyncClient(
@@ -994,32 +1013,36 @@ class GitHubCapability(AgentCapability):
 
     @action_executor()
     async def whoami(self) -> dict[str, Any]:
-        """Return the GitHub identity Colony posts and commits as.
+        """Return the GitHub identity the capability authenticates as.
 
-        Resolves the configured GitHub App slug (env
-        ``GITHUB_APP_SLUG`` or ``app_slug`` kwarg) into the bot
-        login GitHub uses for assignment, comments, and commit
-        attribution: ``<slug>[bot]``.
-
-        Used by :meth:`DesignProcessCapability.propose_task_assignments`
-        to know which login to set as the assignee for tasks Colony
-        will execute itself (vs. tasks routed to the human user).
+        Calls ``GET /user`` once against the per-tenant installation
+        token (set up by P5) and caches the result on the capability
+        — the App-bot identity is fixed for the lifetime of the
+        installation, so we don't re-fetch per call. Returns
+        ``{login, id, type, html_url, name, email}``; for
+        installation-token auth, ``type`` is ``"Bot"`` and ``login``
+        is ``<app-slug>[bot]``.
         """
-        slug = (self._app_slug or "").strip()
-        if not slug:
-            return _err(
-                "GitHub App slug not configured — set "
-                "GITHUB_APP_SLUG (env) or pass app_slug to "
-                "GitHubCapability so we can resolve the bot login "
-                "Colony commits and comments as.",
-                login=None, slug=None,
-            )
-        return _ok(
-            login=f"{slug}[bot]",
-            slug=slug,
-            app_id=self._app_id or None,
-            app_url=f"https://github.com/apps/{slug}",
+
+        if self._identity_cache is not None:
+            return self._identity_cache
+        client, err = await self._ensure_client()
+        if client is None:
+            return _err(err or "")
+        try:
+            data = await client.get("/user")
+        except Exception as e:
+            return self._shape_error(e)
+        result = _ok(
+            login=data.get("login"),
+            id=data.get("id"),
+            type=data.get("type"),
+            html_url=data.get("html_url"),
+            name=data.get("name"),
+            email=data.get("email"),
         )
+        self._identity_cache = result
+        return result
 
     @action_executor()
     async def assign_issue(

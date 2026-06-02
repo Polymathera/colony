@@ -17,9 +17,16 @@ from overrides import override
 from polymathera.colony.distributed.config import register_polymathera_config
 from polymathera.colony.distributed import get_polymathera
 from polymathera.colony.distributed.metrics.common import BaseMetricsMonitor
+import httpx
+
 from polymathera.colony.utils import setup_logger
 from polymathera.colony.utils.retry import standard_retry
-from polymathera.colony.utils.git.clients import GitHubClient, GitLabClient, GitClientBase
+from polymathera.colony.utils.git.clients import GitLabClient
+from polymathera.colony.agents.patterns.capabilities._github import (
+    GitHubAppAuth,
+    GitHubClient as AppGitHubClient,
+    TokenCache,
+)
 
 from .base import AnalyzerConfig, BaseAnalyzer, FileContentCache
 
@@ -1088,43 +1095,131 @@ class GitHubScrapingTool:
     """
     A tool to scrape GitHub data to augment git history with issues,
     pull requests, comments, long-running branches, and tagged commits.
+
+    GitHub-side calls use the per-tenant GitHub App installation
+    (see ``colony/github_identity_fix_plan.md``); pass
+    ``installation_id`` from the calling tenant's
+    ``tenants.github_installation_id``. GitLab still uses
+    ``GITLAB_TOKEN`` via the legacy :class:`GitLabClient`.
+
+    No live callers in the repo today.
     """
 
-    def __init__(self):
-        self.github_client: GitHubClient | None = None
+    def __init__(self, installation_id: str | None = None):
+        self.installation_id = installation_id
+        self.github_client: AppGitHubClient | None = None
         self.gitlab_client: GitLabClient | None = None
+        self._http_client: httpx.AsyncClient | None = None
 
     async def initialize(self):
-        self.github_client = await GitHubClient()
-        self.gitlab_client = await GitLabClient()
-        await self.github_client.initialize()
+        if self.installation_id:
+            from polymathera.colony.agents.configs import (
+                get_github_auth_config,
+            )
+            gh = await get_github_auth_config()
+            if gh.app_id and gh.private_key_pem:
+                self._http_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(
+                        connect=10.0, read=30.0,
+                        write=10.0, pool=10.0,
+                    ),
+                )
+                tokens = TokenCache(
+                    app_auth=GitHubAppAuth(
+                        app_id=gh.app_id,
+                        private_key_pem=gh.private_key_pem,
+                    ),
+                    installation_id=self.installation_id,
+                    client=self._http_client,
+                )
+                self.github_client = AppGitHubClient(
+                    tokens=tokens, client=self._http_client,
+                )
+        self.gitlab_client = GitLabClient()
         await self.gitlab_client.initialize()
 
-    def _get_client(self, repo_url: str) -> GitClientBase:
-        if "github.com" in repo_url:
-            return self.github_client
-        elif "gitlab.com" in repo_url:
-            return self.gitlab_client
-        else:
-            raise ValueError(f"Unsupported repository: {repo_url}")
+    async def close(self) -> None:
+        """Release the per-instance httpx client (if one was built)."""
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except Exception:  # noqa: BLE001 — defensive
+                pass
+            self._http_client = None
+        self.github_client = None
 
     async def _scrape_repo(self, repo_url: str) -> dict[str, Any]:
-        client = self._get_client(repo_url)
         owner, repo = repo_url.split("/")[-2:]
-        issues = await client.get_issues(owner, repo)
-        pull_requests = await client.get_pull_requests(owner, repo)
-        branches = await client.get_branches(owner, repo)
-        tags = await client.get_tags(owner, repo)
+        if "github.com" in repo_url:
+            return await self._scrape_github(owner, repo)
+        if "gitlab.com" in repo_url and self.gitlab_client is not None:
+            return await self._scrape_gitlab(owner, repo)
+        raise ValueError(f"Unsupported repository: {repo_url}")
 
-        # Fetch comments for each issue and pull request
-        for item in issues + pull_requests:
-            item["comments_data"] = await client.get_comments(owner, repo, item["number"])
-
+    async def _scrape_github(self, owner: str, repo: str) -> dict[str, Any]:
+        """Scrape issues / PRs / branches / tags from GitHub via the
+        per-tenant App installation. Returns an empty payload when
+        the App client isn't configured rather than raising — the
+        sample is best-effort augmentation."""
+        if self.github_client is None:
+            return {
+                "issues": [], "pull_requests": [],
+                "branches": [], "tags": [],
+            }
+        # ``state=all`` to match the legacy client's behaviour
+        # (which used ``?state=all`` query strings).
+        issues = [
+            item async for item in self.github_client.iter_paginated(
+                f"/repos/{owner}/{repo}/issues", state="all",
+            )
+        ]
+        pull_requests = [
+            item async for item in self.github_client.iter_paginated(
+                f"/repos/{owner}/{repo}/pulls", state="all",
+            )
+        ]
+        branches = [
+            item async for item in self.github_client.iter_paginated(
+                f"/repos/{owner}/{repo}/branches",
+            )
+        ]
+        tags = [
+            item async for item in self.github_client.iter_paginated(
+                f"/repos/{owner}/{repo}/tags",
+            )
+        ]
+        for item in itertools.chain(issues, pull_requests):
+            number = item.get("number")
+            if number is None:
+                continue
+            item["comments_data"] = [
+                c async for c in self.github_client.iter_paginated(
+                    f"/repos/{owner}/{repo}/issues/{number}/comments",
+                )
+            ]
         return {
             "issues": issues,
             "pull_requests": pull_requests,
             "branches": branches,
             "tags": tags,
+        }
+
+    async def _scrape_gitlab(
+        self, owner: str, repo: str,
+    ) -> dict[str, Any]:
+        """Legacy PAT-backed GitLab path. The :class:`GitLabClient`
+        convenience methods are still PAT-based; GitLab migration to
+        an App-installation-equivalent flow is a separate change."""
+        assert self.gitlab_client is not None
+        return {
+            "issues": await self.gitlab_client.get_issues(owner, repo),
+            "pull_requests": await self.gitlab_client.get_pull_requests(
+                owner, repo,
+            ),
+            "branches": await self.gitlab_client.get_branches(
+                owner, repo,
+            ),
+            "tags": await self.gitlab_client.get_tags(owner, repo),
         }
 
     def _augment_git_history(

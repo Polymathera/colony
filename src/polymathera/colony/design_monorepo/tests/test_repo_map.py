@@ -381,6 +381,42 @@ def test_design_context_source_defaults() -> None:
     assert src.hint is None
     assert src.pin_in_vcm is False
     assert src.pin_lock_duration_days == 7
+    assert src.is_roadmap is False
+
+
+def test_design_context_source_is_roadmap_requires_single_path() -> None:
+    """is_roadmap=true demands exactly one path entry — the roadmap
+    is a single file, not a glob bundle."""
+
+    with pytest.raises(ValueError, match="is_roadmap=true requires exactly one"):
+        DesignContextSource(
+            name="roadmap", paths=["a.md", "b.md"], is_roadmap=True,
+        )
+
+
+def test_design_context_source_is_roadmap_rejects_glob_chars() -> None:
+    """is_roadmap=true demands a literal path; glob chars are
+    rejected so the writer has a deterministic target."""
+
+    for bad in ("docs/*.md", "docs/?.md", "docs/[abc].md", "**/roadmap.md"):
+        with pytest.raises(ValueError, match="literal path with no glob"):
+            DesignContextSource(
+                name="roadmap", paths=[bad], is_roadmap=True,
+            )
+
+
+def test_design_context_source_is_roadmap_accepts_concrete_path() -> None:
+    """Concrete filenames + concrete sub-paths are both legal."""
+
+    src = DesignContextSource(
+        name="roadmap", paths=["ROADMAP.md"], is_roadmap=True,
+    )
+    assert src.is_roadmap is True
+    assert src.paths == ["ROADMAP.md"]
+    src_nested = DesignContextSource(
+        name="roadmap", paths=["docs/roadmap.md"], is_roadmap=True,
+    )
+    assert src_nested.paths == ["docs/roadmap.md"]
 
 
 def test_design_context_source_requires_non_empty_paths() -> None:
@@ -425,6 +461,40 @@ def test_repo_map_rejects_duplicate_design_context_source_names() -> None:
                 DesignContextSource(name="dup", paths=["b"]),
             ],
         )
+
+
+def test_repo_map_rejects_multiple_is_roadmap_rows() -> None:
+    """At most one row in design_context_sources may set is_roadmap=true
+    — otherwise the resolver would have to pick between two roadmaps."""
+
+    with pytest.raises(ValueError, match="at most one"):
+        RepoMap(
+            vcm_sources=[VcmSource(name="default", type="git_repo")],
+            design_context_sources=[
+                DesignContextSource(
+                    name="r1", paths=["A.md"], is_roadmap=True,
+                ),
+                DesignContextSource(
+                    name="r2", paths=["B.md"], is_roadmap=True,
+                ),
+            ],
+        )
+
+
+def test_repo_map_accepts_single_is_roadmap_row() -> None:
+    rm = RepoMap(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        design_context_sources=[
+            DesignContextSource(name="docs", paths=["docs/**/*.md"]),
+            DesignContextSource(
+                name="roadmap", paths=["ROADMAP.md"], is_roadmap=True,
+            ),
+        ],
+    )
+    roadmap_rows = [
+        s for s in rm.design_context_sources if s.is_roadmap
+    ]
+    assert [s.name for s in roadmap_rows] == ["roadmap"]
 
 
 def test_load_parses_design_context_sources_block(tmp_path: Path) -> None:

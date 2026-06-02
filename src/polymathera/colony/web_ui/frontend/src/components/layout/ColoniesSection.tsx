@@ -347,31 +347,25 @@ function GitAttributionField({
   colonyId: string;
   onSelectColony: (colonyId: string) => void;
 }) {
-  // Per-commit attribution shown as a single read-only line, with an
-  // inline edit form that toggles open. Mirrors ``DesignMonorepoField``
-  // shape so the Colonies panel feels consistent.
+  // Per-commit attribution preference shown as a single read-only
+  // line, with an inline edit form that toggles open. Mirrors
+  // ``DesignMonorepoField`` shape so the Colonies panel feels
+  // consistent.
   //
-  // Defaults from the schema (``commit_principal=colony``,
-  // ``commit_co_author=user``) mean the read view normally shows
-  // ``colony · user`` as a hint to the operator that they need to
-  // configure name/email before the user co-author trailer actually
-  // resolves; the backend ``set_git_attribution`` rejects ``user``
-  // selection without name/email so the failure mode is local.
+  // Per-user identity (``git_user_name`` / ``git_user_email``) lives
+  // on the user profile now, OAuth-verified from GitHub. See
+  // colony/github_identity_fix_plan.md.
   const cfg = useColonyGitAttribution(colonyId);
   const set = useSetColonyGitAttribution(colonyId);
   const [editing, setEditing] = useState(false);
   const [draftPrincipal, setDraftPrincipal] = useState("colony");
   const [draftCoAuthor, setDraftCoAuthor] = useState<string>("user");
-  const [draftName, setDraftName] = useState("");
-  const [draftEmail, setDraftEmail] = useState("");
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
   const startEdit = () => {
     onSelectColony(colonyId);
     setDraftPrincipal(cfg.data?.commit_principal ?? "colony");
     setDraftCoAuthor(cfg.data?.commit_co_author ?? "");
-    setDraftName(cfg.data?.git_user_name ?? "");
-    setDraftEmail(cfg.data?.git_user_email ?? "");
     setEditing(true);
   };
 
@@ -381,8 +375,6 @@ function GitAttributionField({
       commit_principal: draftPrincipal.trim() || "colony",
       // Empty input → no co-author trailer.
       commit_co_author: draftCoAuthor.trim() || null,
-      git_user_name: draftName.trim() || null,
-      git_user_email: draftEmail.trim() || null,
     };
     try {
       await set.mutateAsync(payload);
@@ -425,23 +417,6 @@ function GitAttributionField({
           />
         </div>
         <div className="flex flex-wrap items-center gap-1">
-          <span className="text-[10px] text-muted-foreground self-center">
-            User name / email (required when ``user`` is selected):
-          </span>
-        </div>
-        <div className="flex flex-wrap items-center gap-1">
-          <input
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            placeholder="Your Name"
-            className="px-1.5 py-0.5 rounded border bg-background text-xs flex-1 min-w-[10rem]"
-          />
-          <input
-            value={draftEmail}
-            onChange={(e) => setDraftEmail(e.target.value)}
-            placeholder="you@example.com"
-            className="px-1.5 py-0.5 rounded border bg-background text-xs flex-1 min-w-[12rem]"
-          />
           <button
             type="submit"
             disabled={set.isPending}
@@ -468,11 +443,6 @@ function GitAttributionField({
 
   const principal = cfg.data?.commit_principal ?? "colony";
   const coAuthor = cfg.data?.commit_co_author;
-  const userName = cfg.data?.git_user_name;
-  const userEmail = cfg.data?.git_user_email;
-  const userIdent = userName && userEmail
-    ? `${userName} <${userEmail}>`
-    : null;
   return (
     <div className="flex items-center gap-2 text-[11px]">
       <span className="text-muted-foreground">Commit attribution:</span>
@@ -480,17 +450,6 @@ function GitAttributionField({
         {principal}
         {coAuthor ? ` + ${coAuthor}` : ""}
       </code>
-      {(principal === "user" || coAuthor === "user") && (
-        userIdent ? (
-          <span className="text-[10px] text-muted-foreground">
-            ({userIdent})
-          </span>
-        ) : (
-          <span className="text-[10px] text-amber-400" title="Set name/email to use 'user'">
-            (name/email not set)
-          </span>
-        )
-      )}
       <button
         type="button"
         onClick={startEdit}

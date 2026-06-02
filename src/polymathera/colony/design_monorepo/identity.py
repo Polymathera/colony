@@ -100,10 +100,11 @@ def resolve_commit_identity(
     Well-known principals:
 
     - ``"user"`` — uses ``user_name`` / ``user_email`` directly. These
-      come from the colony row's ``git_user_name`` / ``git_user_email``
-      fields. Raises ``ValueError`` when they're missing — operator
-      must configure them on the landing page before selecting
-      ``"user"`` as principal or co-author.
+      come from the per-user OAuth-verified ``users.git_user_name`` /
+      ``users.github_email`` fields (populated when the user clicks
+      "Connect GitHub" on their profile; see
+      ``colony/github_identity_fix_plan.md``). Raises ``ValueError``
+      when they're missing — the user has not connected GitHub yet.
     - ``"colony"`` — synthetic collective identity for the whole
       colony. Renders as ``colony:<colony_id> <colony_id>@<domain>``.
       Persists across the ephemeral lifetime of individual agents,
@@ -126,9 +127,10 @@ def resolve_commit_identity(
     if principal == PRINCIPAL_USER:
         if not user_name or not user_email:
             raise ValueError(
-                "principal='user' requires git_user_name and "
-                "git_user_email to be configured on the colony "
-                "(landing page → Colonies → pencil → Save).",
+                "principal='user' requires the user to have connected "
+                "their GitHub account (Profile → Connect GitHub). "
+                "Until then, git_user_name and git_user_email are "
+                "unset.",
             )
         return CommitIdentity(
             git_name=user_name,

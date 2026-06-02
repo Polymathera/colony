@@ -93,11 +93,14 @@ Pass environment variables to the cluster via the `.env` file (preferred) or she
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | API key for Anthropic Claude |
 | `OPENAI_API_KEY` | API key for OpenAI |
-| `GITHUB_TOKEN` | PAT used by the in-container git credential helper to clone private GitHub repos (Design Monorepo tab, the materialiser, agent-side per-agent clones). Needs `repo` scope for private repos. |
-| `GITLAB_TOKEN` | Same role as `GITHUB_TOKEN`, for `gitlab.com`. |
+| `GITHUB_APP_ID` | Deploy-wide GitHub App registration. Combined with `GITHUB_PRIVATE_KEY_PEM` + the per-tenant `installation_id` (set via the dashboard) to mint short-lived installation tokens for git push + REST. See [`github-app-setup.md`](github-app-setup.md). |
+| `GITHUB_PRIVATE_KEY_PEM` | Multi-line PEM downloaded from the GitHub App settings page. |
+| `GITHUB_APP_CLIENT_ID` | Same App's OAuth client id. Required only for the per-user "Connect GitHub" flow on the user profile. |
+| `GITHUB_APP_CLIENT_SECRET` | Same App's OAuth client secret. Required only for "Connect GitHub". |
+| `GITLAB_TOKEN` | PAT for `gitlab.com` (still in use; GitLab hasn't moved to the App pattern yet). |
 | `COLONY_DASHBOARD_UI_PORT` | Dashboard port (default: 8080) |
 
-The `.env` file lives at `polymathera/colony/cli/deploy/.env` (next to `.env.template`). `colony-env up` always reads this file via `docker compose --env-file=…` and additionally **overlays its values onto the subprocess environment before spawning compose** — so a stale `GITHUB_TOKEN` exported in the launching shell can no longer shadow a fresh one in `.env`. Only keys listed in `DeployConfig.api_key_env_vars` are overlaid; unrelated host vars (`PATH`, `HOME`, `DOCKER_HOST`, …) flow through unchanged.
+The `.env` file lives at `polymathera/colony/cli/deploy/.env` (next to `.env.template`). `colony-env up` always reads this file via `docker compose --env-file=…` and additionally **overlays its values onto the subprocess environment before spawning compose** — so a stale `GITHUB_APP_ID` exported in the launching shell can no longer shadow a fresh one in `.env`. Only keys listed in `DeployConfig.api_key_env_vars` are overlaid; unrelated host vars (`PATH`, `HOME`, `DOCKER_HOST`, …) flow through unchanged.
 
 Concretely, the precedence inside compose's `${VAR}` substitution becomes:
 

@@ -87,7 +87,6 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}
       # PDF-extractor API keys — only the one matching the active
       # backend is actually used at runtime.
@@ -107,8 +106,10 @@ services:
       # capability stays disabled (actions return error dicts). See
       # docs/guides/capability-setup.md for App registration steps.
       - GITHUB_APP_ID=${GITHUB_APP_ID:-}
-      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID:-}
       - GITHUB_PRIVATE_KEY_PEM=${GITHUB_PRIVATE_KEY_PEM:-}
+      # Same App's OAuth client (user-to-server "Connect GitHub" flow).
+      - GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID:-}
+      - GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET:-}
       # Slack chat service (optional)
       - SLACK_ENABLED=false
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
@@ -210,7 +211,6 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}
       # PDF-extractor API keys — only the one matching the active
       # backend is used at runtime.
@@ -226,8 +226,10 @@ services:
       # GitHubCapability — App credentials. See
       # docs/guides/capability-setup.md.
       - GITHUB_APP_ID=${GITHUB_APP_ID:-}
-      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID:-}
       - GITHUB_PRIVATE_KEY_PEM=${GITHUB_PRIVATE_KEY_PEM:-}
+      # Same App's OAuth client (user-to-server "Connect GitHub" flow).
+      - GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID:-}
+      - GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET:-}
       # Slack chat service (optional)
       - SLACK_ENABLED=false
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
@@ -406,8 +408,20 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      # GitHub App credentials. The dashboard process serves the
+      # ``/auth/github/connect`` + ``/auth/github/callback`` routes,
+      # which need the App's OAuth client_id/secret to drive the
+      # user-to-server "Connect GitHub" flow. App ID + private key
+      # mirror ray-head/ray-worker for symmetry + so future
+      # dashboard-side endpoints that need installation tokens
+      # (e.g. verifying a tenant's pasted installation_id) have the
+      # credentials already in env. Without all four, the OAuth
+      # router 503s with a clean "GitHub OAuth not configured" detail.
+      - GITHUB_APP_ID=${GITHUB_APP_ID:-}
+      - GITHUB_PRIVATE_KEY_PEM=${GITHUB_PRIVATE_KEY_PEM:-}
+      - GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID:-}
+      - GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET:-}
       # Knowledge stack — Qdrant URL, GROBID URL, PDF extractor
       # backend, and image directory live in the operator YAML
       # (``knowledge`` — see configs/example.yaml).

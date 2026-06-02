@@ -74,20 +74,31 @@ RUN apt-get update -yq && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 
-# Credential helpers for HTTPS Git operations against github.com /
-# gitlab.com. git invokes the helper when it needs auth and reads
-# ``username=oauth2`` plus the token from its stdout — the same scheme
-# ``gh auth setup-git`` configures on a developer's laptop, and the only
-# scheme that works for every PAT type GitHub issues today (classic,
-# fine-grained, App installation). ``$GITHUB_TOKEN`` / ``$GITLAB_TOKEN``
-# expand from the container environment at git-invocation time, so the
-# image ships only the helper's literal text — never the secret. Written
-# to ``/etc/gitconfig`` (``--system``) so it covers every user in the
-# container (root, ``RAY_CONTAINER_USER``, etc.). An unset env var
-# yields git's standard "Invalid username or token" failure, which the
-# auth-error classifier surfaces as a 401 in the dashboard.
-RUN git config --system credential.https://github.com.helper \
-        '!f() { echo "username=oauth2"; echo "password=$GITHUB_TOKEN"; }; f' \
+# Credential helpers for HTTPS Git operations.
+#
+# github.com: per-tenant GitHub App installation. The agent process
+# mints a short-lived installation token at startup (see
+# ``colony/distributed/git_credentials.py``) + writes it to the file
+# the shell helper reads. The image ships only the helper's literal
+# text — never the secret; the token file is created at runtime,
+# scoped per-container, refreshed every 50 minutes (well inside
+# GitHub's 60-minute token TTL). Missing file (= tenant hasn't
+# configured the App installation) → helper prints nothing → git
+# surfaces its standard "Authentication failed" error → the
+# auth-error classifier in ``colony/distributed/stores/git.py``
+# reshapes it into a typed ``GitAuthError`` with an actionable
+# message.
+#
+# gitlab.com: still PAT-based via ``$GITLAB_TOKEN`` until GitLab
+# integration follows the same App-installation pattern.
+#
+# System-level (``--system`` → ``/etc/gitconfig``) so it covers
+# every user in the container (root, ``RAY_CONTAINER_USER``, etc.).
+COPY src/polymathera/colony/cli/deploy/docker/scripts/colony-git-credentials.sh \
+        /usr/local/bin/colony-git-credentials
+RUN chmod +x /usr/local/bin/colony-git-credentials \
+ && git config --system credential.https://github.com.helper \
+        '!/usr/local/bin/colony-git-credentials' \
  && git config --system credential.https://gitlab.com.helper \
         '!f() { echo "username=oauth2"; echo "password=$GITLAB_TOKEN"; }; f'
 

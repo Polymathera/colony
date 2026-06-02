@@ -1185,49 +1185,85 @@ def test_list_milestones_returns_empty_when_no_default_repo():
 # ---------------------------------------------------------------------------
 
 
-def test_whoami_returns_bot_login_when_slug_configured():
-    """``whoami`` resolves the configured App slug into the
-    ``<slug>[bot]`` login GitHub uses for assignment + commit
-    attribution."""
+def test_whoami_returns_app_bot_identity_from_get_user():
+    """``whoami`` calls ``GET /user`` once against the per-tenant
+    installation token. For App-installation auth GitHub returns the
+    App's bot user record — login = ``<slug>[bot]``, type = ``Bot``.
+    """
 
-    agent = MagicMock()
-    agent.agent_id = "agent-A"
+    stub = _StubClient()
+    stub.responses[("GET", "/user")] = {
+        "login": "colony-bot[bot]",
+        "id": 1_000_001,
+        "type": "Bot",
+        "html_url": "https://github.com/apps/colony-bot",
+        "name": "Colony",
+        "email": None,
+    }
     with _with_context():
-        cap = GitHubCapability(
-            agent=agent,
-            scope=BlackboardScope.SESSION,
-            client=_StubClient(),  # never called
-            default_repo="acme/proj",
-            app_slug="colony-bot",
-            app_id="42",
-        )
+        cap = _make_cap(client=stub)
         result = _run(cap.whoami())
     assert result["ok"] is True
     assert result["login"] == "colony-bot[bot]"
-    assert result["slug"] == "colony-bot"
-    assert result["app_id"] == "42"
-    assert result["app_url"] == "https://github.com/apps/colony-bot"
+    assert result["id"] == 1_000_001
+    assert result["type"] == "Bot"
+    assert result["html_url"] == "https://github.com/apps/colony-bot"
 
 
-def test_whoami_errors_when_slug_missing():
-    """No slug configured → clean error result the planner can show
-    the user."""
+def test_whoami_caches_after_first_call():
+    """The App-bot identity is fixed for the installation's lifetime,
+    so ``whoami`` caches the round-trip and doesn't re-hit GitHub on
+    repeat calls."""
+
+    stub = _StubClient()
+    stub.responses[("GET", "/user")] = {
+        "login": "colony-bot[bot]", "id": 1, "type": "Bot",
+    }
+    with _with_context():
+        cap = _make_cap(client=stub)
+        first = _run(cap.whoami())
+        second = _run(cap.whoami())
+    assert first["login"] == "colony-bot[bot]"
+    assert second is first  # exact same cached dict instance
+    # Only one round-trip even though we called twice.
+    get_calls = [c for c in stub.calls if c[0] == "GET" and c[1] == "/user"]
+    assert len(get_calls) == 1
+
+
+def test_whoami_surfaces_http_errors_via_shape_error():
+    """When ``GET /user`` returns a 404 (e.g. the installation got
+    revoked), the action returns a structured error instead of
+    raising — mirrors every other action's error handling."""
+
+    stub = _StubClient()
+    stub.raises[("GET", "/user")] = NotFoundError(
+        "/user not found", status_code=404,
+    )
+    with _with_context():
+        cap = _make_cap(client=stub)
+        result = _run(cap.whoami())
+    assert result["ok"] is False
+    assert result["status_code"] == 404
+
+
+def test_whoami_surfaces_no_client_error():
+    """No client configured (init error) → clean error result, no
+    network attempt."""
 
     agent = MagicMock()
     agent.agent_id = "agent-A"
     with _with_context():
         cap = GitHubCapability(
-            agent=agent,
-            scope=BlackboardScope.SESSION,
-            client=_StubClient(),
+            agent=agent, scope=BlackboardScope.SESSION,
             default_repo="acme/proj",
-            app_slug="",  # explicitly empty
         )
+        # Simulate the init-error path without actually wiring envs.
+        cap._client = None
+        cap._init_error = "credentials missing"
+        cap._client_initialized = True
         result = _run(cap.whoami())
     assert result["ok"] is False
-    assert "GITHUB_APP_SLUG" in result["message"]
-    assert result["login"] is None
-    assert result["slug"] is None
+    assert "credentials missing" in result["message"]
 
 
 def test_assign_issue_replace_mode_patches_with_full_list():
@@ -1354,3 +1390,169 @@ def test_assign_issue_added_to_registered_executors():
     }
     assert "assign_issue" in keys
     assert "whoami" in keys
+
+
+# ---------------------------------------------------------------------------
+# P5 (github_identity_fix_plan): installation_id resolves from
+# agent.metadata.parameters["github_identity"]["tenant_installation_id"]
+# ---------------------------------------------------------------------------
+
+
+def _patched_github_auth_config(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    app_id: str = "123",
+    private_key_pem: str = "",
+) -> None:
+    """Patch ``get_github_auth_config`` so ``_build_live_client`` sees
+    the requested deploy-wide App credentials without touching the
+    real ConfigurationManager. Use the RSA-key fixture for
+    ``private_key_pem`` when you want a valid PEM."""
+
+    from polymathera.colony.agents.patterns.capabilities import (
+        github as gh_mod,
+    )
+
+    class _Stub:
+        def __init__(self, app_id: str, private_key_pem: str):
+            self.app_id = app_id
+            self.private_key_pem = private_key_pem
+
+    async def _fake_get():
+        return _Stub(app_id=app_id, private_key_pem=private_key_pem)
+
+    # The capability module imports get_github_auth_config lazily inside
+    # _build_live_client (``from ...configs import get_github_auth_config``)
+    # so we patch the source module that re-exports it.
+    from polymathera.colony.agents import configs as configs_mod
+    monkeypatch.setattr(
+        configs_mod, "get_github_auth_config", _fake_get,
+    )
+    # And the symbol on the capability module if it was bound at
+    # import time (defensive — current code imports per-call).
+    if hasattr(gh_mod, "get_github_auth_config"):
+        monkeypatch.setattr(
+            gh_mod, "get_github_auth_config", _fake_get,
+        )
+
+
+def test_build_live_client_reads_installation_id_from_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-tenant installation id rides on agent metadata, not env."""
+
+    priv, _ = _make_rsa_key_pem()
+    _patched_github_auth_config(monkeypatch, private_key_pem=priv)
+
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    agent.metadata.parameters = {
+        "github_identity": {"tenant_installation_id": "777"},
+    }
+
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent, scope=BlackboardScope.SESSION,
+            default_repo="acme/proj",
+        )
+        client = _run(cap._build_live_client())
+    # TokenCache stores the installation_id as a string on a private
+    # field; assert via that since _build_live_client returns the
+    # client whose tokens carry it.
+    assert client._tokens._installation_id == "777"
+
+
+def test_build_live_client_kwarg_overrides_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit kwarg wins over metadata — preserves the test-injection
+    path."""
+
+    priv, _ = _make_rsa_key_pem()
+    _patched_github_auth_config(monkeypatch, private_key_pem=priv)
+
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    agent.metadata.parameters = {
+        "github_identity": {"tenant_installation_id": "from-metadata"},
+    }
+
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent, scope=BlackboardScope.SESSION,
+            default_repo="acme/proj",
+            installation_id="from-kwarg",
+        )
+        client = _run(cap._build_live_client())
+    assert client._tokens._installation_id == "from-kwarg"
+
+
+def test_build_live_client_errors_when_no_installation_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing per-tenant installation id → clean RuntimeError naming
+    the Tenant GitHub Installation panel."""
+
+    priv, _ = _make_rsa_key_pem()
+    _patched_github_auth_config(monkeypatch, private_key_pem=priv)
+
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    agent.metadata.parameters = {}  # no github_identity at all
+
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent, scope=BlackboardScope.SESSION,
+            default_repo="acme/proj",
+        )
+        with pytest.raises(RuntimeError, match="Tenant GitHub Installation"):
+            _run(cap._build_live_client())
+
+
+def test_build_live_client_errors_when_no_app_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing deploy-level App ID / private key → clean RuntimeError
+    naming the two env vars (so the operator knows where to look)."""
+
+    _patched_github_auth_config(monkeypatch, app_id="", private_key_pem="")
+
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    agent.metadata.parameters = {
+        "github_identity": {"tenant_installation_id": "777"},
+    }
+
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent, scope=BlackboardScope.SESSION,
+            default_repo="acme/proj",
+        )
+        with pytest.raises(
+            RuntimeError, match="GITHUB_APP_ID.*GITHUB_PRIVATE_KEY_PEM",
+        ):
+            _run(cap._build_live_client())
+
+
+def test_build_live_client_tolerates_missing_github_identity_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metadata without ``github_identity`` shouldn't crash — the
+    capability errors with the missing-installation_id message, not an
+    AttributeError on ``None.get``."""
+
+    priv, _ = _make_rsa_key_pem()
+    _patched_github_auth_config(monkeypatch, private_key_pem=priv)
+
+    agent = MagicMock()
+    agent.agent_id = "agent-A"
+    # ``parameters`` exists but is missing the github_identity key.
+    agent.metadata.parameters = {"design_monorepo_url": "https://x"}
+
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent, scope=BlackboardScope.SESSION,
+            default_repo="acme/proj",
+        )
+        with pytest.raises(RuntimeError, match="installation"):
+            _run(cap._build_live_client())

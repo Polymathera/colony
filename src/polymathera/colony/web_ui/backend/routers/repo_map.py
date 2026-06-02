@@ -133,7 +133,13 @@ _TREE_MAX_DEPTH = 8
 
 
 async def _clone_or_retrieve(
-    *, origin_url: str, branch: str, commit: str, refresh: bool = True,
+    *,
+    origin_url: str,
+    branch: str,
+    commit: str,
+    user: dict,
+    colony: ColonyConnection,
+    refresh: bool = True,
 ) -> Path:
     """Idempotent clone via ``GitFileStorage``, with an optional
     fetch-and-reset against ``origin`` so the dashboard's read-only
@@ -150,6 +156,17 @@ async def _clone_or_retrieve(
     than in the shared storage layer so VCM mapping behaviour stays
     untouched.
 
+    Bootstrapping git credentials: agent processes call
+    :func:`ensure_git_credentials_from_agent_metadata` from
+    ``DesignMonorepoCapabilityBase.initialize`` so the credential
+    helper file (``/tmp/colony-git-credentials``) exists before any
+    git op. The dashboard process never goes through that path, so
+    we must mint+write the same token here using the user's tenant
+    id (looked up from the JWT) + the tenant's
+    ``github_installation_id`` (from postgres). Without this,
+    ``Repo.clone_from`` falls through to git's interactive prompt
+    and fails with ``"could not read Username for 'https://github.com'"``.
+
     Auth failures are surfaced as ``HTTPException(401, ...)`` so the
     dashboard renders an actionable message (which env var to fix,
     which scopes / SSO settings to check) instead of a generic
@@ -158,8 +175,22 @@ async def _clone_or_retrieve(
     """
 
     from polymathera.colony.distributed import get_polymathera
+    from polymathera.colony.distributed.git_credentials import (
+        ensure_git_credentials_for_installation,
+    )
     from polymathera.colony.distributed.ray_utils import serving
     from polymathera.colony.distributed.stores.git import GitAuthError
+
+    from ..auth import service as auth_service
+
+    tenant_id = user.get("tenant_id", "")
+    if tenant_id:
+        tinst = await auth_service.get_tenant_github_installation(
+            colony._db_pool, tenant_id=tenant_id,
+        )
+        await ensure_git_credentials_for_installation(
+            (tinst or {}).get("installation_id"),
+        )
 
     polymathera = get_polymathera()
     storage = await polymathera.get_storage()
@@ -291,6 +322,7 @@ async def get_repo_map(
     try:
         repo_path = await _clone_or_retrieve(
             origin_url=origin_url, branch=branch, commit=commit,
+            user=_user, colony=colony,
         )
     except HTTPException:
         # ``_clone_or_retrieve`` already converts auth failures
@@ -342,6 +374,7 @@ async def get_repo_tree(
     try:
         repo_path = await _clone_or_retrieve(
             origin_url=origin_url, branch=branch, commit=commit,
+            user=_user, colony=colony,
         )
     except HTTPException:
         # ``_clone_or_retrieve`` already converts auth failures
@@ -383,6 +416,7 @@ async def preview_repo_map(
             origin_url=request.origin_url,
             branch=request.branch,
             commit=request.commit,
+            user=_user, colony=colony,
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Clone failed: {e}") from e

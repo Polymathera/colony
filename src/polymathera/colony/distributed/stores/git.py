@@ -48,9 +48,17 @@ class GitAuthError(GitError):
 
     Raised when ``git clone`` returns exit code 128 with stderr
     matching a known auth-failure marker (e.g., GitHub's
-    ``Invalid username or token``). Repeating the call cannot recover
-    — the operator needs to fix the credentials in
-    ``GITHUB_TOKEN`` / ``GITLAB_TOKEN``. The retry decorator on
+    ``Invalid username or token``). Repeating the call cannot
+    recover — the operator needs to fix one of:
+
+    - GitHub: the deploy-wide App credentials (``GITHUB_APP_ID`` /
+      ``GITHUB_PRIVATE_KEY_PEM``) AND the per-tenant installation id
+      (set via the Tenant GitHub Installation panel). The agent
+      process mints an installation token at startup; see
+      ``colony/distributed/git_credentials.py``.
+    - GitLab: ``GITLAB_TOKEN``.
+
+    The retry decorator on
     :meth:`GitFileStorage.clone_or_retrieve_repository` is configured
     to skip retries for this exception so we don't burn three
     rate-limited auth attempts on a permanent failure.
@@ -74,11 +82,14 @@ def _classify_git_clone_error(exc: GitCommandError) -> Exception:
     )
     if any(m in stderr for m in auth_markers):
         return GitAuthError(
-            "git authentication failed. Verify GITHUB_TOKEN / "
-            "GITLAB_TOKEN: (1) is set and not expired, (2) has the "
-            "right scopes (classic PAT: 'repo' for private repos; "
-            "fine-grained PAT: repository-level read access), and "
-            "(3) the org has authorised the token if SSO is enforced. "
+            "git authentication failed. For GitHub, verify: (1) the "
+            "deploy-wide App env vars are set — GITHUB_APP_ID and "
+            "GITHUB_PRIVATE_KEY_PEM, (2) the tenant has installed the "
+            "Polymathera Colony App and the installation id is "
+            "configured via the Tenant GitHub Installation panel, "
+            "and (3) the App has read/write scope on the target "
+            "repo. For GitLab, verify GITLAB_TOKEN is set and has "
+            "the right scope. "
             f"Underlying git error: {(getattr(exc, 'stderr', '') or str(exc)).strip()}"
         )
     return exc

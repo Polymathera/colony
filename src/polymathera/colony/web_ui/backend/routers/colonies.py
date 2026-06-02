@@ -227,18 +227,6 @@ async def set_colony_enabled_knowledge_sources(
 
 
 class GitAttributionConfig(BaseModel):
-    git_user_name: str | None = Field(
-        default=None,
-        description=(
-            "Display name used when ``commit_principal`` or "
-            "``commit_co_author`` is ``\"user\"``. Required in those "
-            "cases; ignored otherwise."
-        ),
-    )
-    git_user_email: str | None = Field(
-        default=None,
-        description="Email paired with ``git_user_name``.",
-    )
     commit_principal: str = Field(
         default="colony",
         description=(
@@ -255,11 +243,12 @@ class GitAttributionConfig(BaseModel):
             "``commit_principal``. ``null`` disables the trailer."
         ),
     )
+    # Per-user identity (``git_user_name`` / ``git_user_email``) is
+    # OAuth-verified on ``users`` now (P1 of
+    # ``colony/github_identity_fix_plan.md``); no per-colony fields.
 
 
 class SetGitAttributionRequest(BaseModel):
-    git_user_name: str | None = None
-    git_user_email: str | None = None
     commit_principal: str = "colony"
     commit_co_author: str | None = "user"
 
@@ -301,16 +290,9 @@ async def set_colony_git_attribution(
             db,
             colony_id=colony_id,
             tenant_id=user["tenant_id"],
-            git_user_name=request.git_user_name,
-            git_user_email=request.git_user_email,
             commit_principal=request.commit_principal,
             commit_co_author=request.commit_co_author,
         )
-    except ValueError as exc:
-        # Operator picked a 'user' principal/co_author without
-        # configuring name/email — surface as 400 so the UI can show
-        # an inline validation message instead of a generic 5xx.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return GitAttributionConfig(**row)

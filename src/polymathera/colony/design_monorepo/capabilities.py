@@ -261,6 +261,39 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         # See ``design_context_renewer.py``.
         self._design_context_renewer: Any = None
 
+    async def initialize(self) -> None:
+        """Capability init + start the git credential helper.
+
+        On first call across all push-capable mounts in this process,
+        starts the singleton :class:`GitCredentialsManager` so any
+        ``git push`` from this agent finds a fresh installation token
+        in the file the Dockerfile credential helper reads (see P9 of
+        ``colony/github_identity_fix_plan.md``).
+
+        Silent when the agent is in read-only mode (no push possible)
+        or when the tenant hasn't configured an App installation
+        (``ensure_git_credentials_from_agent_metadata`` no-ops in
+        that case + git surfaces its own auth error at push time).
+        """
+
+        await super().initialize()
+        if self._agent is None or self._read_only:
+            return
+        try:
+            from ..distributed.git_credentials import (
+                ensure_git_credentials_from_agent_metadata,
+            )
+            await ensure_git_credentials_from_agent_metadata(
+                self._agent.metadata,
+            )
+        except Exception:  # noqa: BLE001 — defensive, never block agent init
+            logger.exception(
+                "%s.initialize: failed to start git credential "
+                "helper; pushes will fail with an auth error until "
+                "this is resolved.",
+                type(self).__name__,
+            )
+
     @override
     async def stop(self) -> None:
         """Cancel the design-context lock renewer (if it was started)
@@ -498,10 +531,15 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         and agents whose metadata does not carry the parameter both
         return ``False``.
         """
+        return bool(self.design_monorepo_url)
+
+    @property
+    def design_monorepo_url(self) -> str:
+        """The L4 design-monorepo URL configured on this capability's agent metadata."""
         if self._agent is None:
-            return False
+            return None
         params = getattr(self._agent.metadata, "parameters", None) or {}
-        return bool(params.get(self._DESIGN_MONOREPO_URL_KEY))
+        return params.get(self._DESIGN_MONOREPO_URL_KEY)
 
     def ensure_materialized(self) -> bool:
         """Trigger the lazy clone if the per-agent working tree has
@@ -566,10 +604,11 @@ class DesignMonorepoCapabilityBase(AgentCapability):
 
         # Authentication for github.com / gitlab.com flows through the
         # system-level credential helper baked into the container image
-        # (see ``Dockerfile.local``). The helper reads
-        # ``$GITHUB_TOKEN`` / ``$GITLAB_TOKEN`` from the process
-        # environment and feeds them to git on demand. Pass the URL
-        # bare; do NOT embed credentials.
+        # (see ``Dockerfile.base``). For github.com the helper reads
+        # an installation token from a file the agent process writes
+        # at startup (see ``colony/distributed/git_credentials.py``);
+        # for gitlab.com it still reads ``$GITLAB_TOKEN``. Pass the
+        # URL bare; do NOT embed credentials.
         self._working_dir.mkdir(parents=True, exist_ok=True)
         try:
             cloned = Repo.clone_from(url, str(self._working_dir))
@@ -678,8 +717,12 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         cfg = params.get(self._GIT_ATTRIBUTION_KEY) or {}
         principal_label = cfg.get("commit_principal") or "colony"
         co_author_label = cfg.get("commit_co_author")
-        user_name = cfg.get("git_user_name")
-        user_email = cfg.get("git_user_email")
+        # Per-user identity moved to ``github_identity`` in P1 of
+        # ``colony/github_identity_fix_plan.md`` (OAuth-verified on
+        # the user profile; populated by session-create in P4).
+        gh_identity = params.get("github_identity") or {}
+        user_name = gh_identity.get("git_user_name")
+        user_email = gh_identity.get("git_user_email")
 
         agent_id: str | None = None
         role: str | None = None

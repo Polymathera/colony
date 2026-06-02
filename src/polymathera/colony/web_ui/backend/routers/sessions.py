@@ -75,6 +75,39 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+def _resolve_github_identity(
+    tenant_row: dict | None,
+    user_row: dict | None,
+) -> dict:
+    """Compose the ``github_identity`` metadata block agents read.
+
+    Inputs are the raw rows returned by
+    :func:`auth_service.get_tenant_github_installation` and
+    :func:`auth_service.get_user_github_identity` — either may be
+    ``None`` (tenant missing the row; user hasn't OAuth'd). The
+    returned dict always has the five keys downstream readers
+    expect; absent values are ``None``.
+    """
+
+    return {
+        "tenant_installation_id": (
+            (tenant_row or {}).get("installation_id")
+        ),
+        "user_github_login": (
+            (user_row or {}).get("github_login")
+        ),
+        "user_github_id": (
+            (user_row or {}).get("github_user_id")
+        ),
+        "git_user_email": (
+            (user_row or {}).get("github_email")
+        ),
+        "git_user_name": (
+            (user_row or {}).get("git_user_name")
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Read endpoints
 # ---------------------------------------------------------------------------
@@ -571,6 +604,27 @@ async def create_session(
                             colony_id=get_colony_id() or "",
                             tenant_id=get_tenant_id() or "",
                         ) or {}
+                    ),
+                    # GitHub identity for this session (P4 of
+                    # ``colony/github_identity_fix_plan.md``).
+                    # Per-tenant: the App installation id Colony uses
+                    # to mint REST tokens scoped to this tenant's
+                    # repos (read by ``GitHubCapability`` in P5).
+                    # Per-user: the OAuth-verified GitHub login +
+                    # email + name (read by ``_resolve_attribution``
+                    # in P6 and by ``propose_task_assignments`` in P8).
+                    # Every field is ``None`` until the operator wires
+                    # the corresponding piece; downstream readers
+                    # handle the unset case explicitly.
+                    "github_identity": _resolve_github_identity(
+                        await auth_service.get_tenant_github_installation(
+                            colony._db_pool,
+                            tenant_id=user.get("tenant_id", ""),
+                        ),
+                        await auth_service.get_user_github_identity(
+                            colony._db_pool,
+                            user_id=user.get("sub", ""),
+                        ),
                     ),
                 },
                 action_policy_config={

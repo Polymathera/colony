@@ -714,6 +714,8 @@ async def test_initialize_repo_map_attribution_default_colony_co_author_user(
         "git_attribution": {
             "commit_principal": "colony",
             "commit_co_author": "user",
+        },
+        "github_identity": {
             "git_user_name": "Ada Lovelace",
             "git_user_email": "ada@example.com",
         },
@@ -769,6 +771,8 @@ async def test_initialize_repo_map_attribution_user_principal_no_co_author(
         "git_attribution": {
             "commit_principal": "user",
             "commit_co_author": None,
+        },
+        "github_identity": {
             "git_user_name": "Ada Lovelace",
             "git_user_email": "ada@example.com",
         },
@@ -822,6 +826,8 @@ async def test_initialize_repo_map_attribution_falls_back_when_user_unset(
         "git_attribution": {
             "commit_principal": "colony",
             "commit_co_author": "user",
+        },
+        "github_identity": {
             "git_user_name": None,
             "git_user_email": None,
         },

@@ -82,10 +82,10 @@ class DockerComposeProvider(DeploymentProvider):
 
             shell env  >  --env-file  >  compose ``environment:`` defaults
 
-        That means a stale ``GITHUB_TOKEN`` exported in the user's shell
+        That means a stale ``GITHUB_APP_ID`` exported in the user's shell
         silently shadows the value in ``deploy/.env`` — the trap that
-        produced "Invalid username or token" failures from valid token
-        material on disk.
+        produced "Invalid username or token" failures from valid
+        credential material on disk.
 
         We make ``.env`` authoritative by overlaying its values on top
         of ``os.environ`` *before* spawning compose. Compose still

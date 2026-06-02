@@ -1,8 +1,15 @@
 # Capability operator setup
 
-This guide tells operators what to configure on the **host** (env vars,
-external accounts, Docker socket, optional volume mounts) so that the
-five new agent capabilities work end-to-end.
+This guide tells the **service provider** running a Colony deployment
+what to configure on the **deployment host** (env vars, external
+accounts, Docker socket, optional volume mounts) so that the five
+new agent capabilities work end-to-end.
+
+> Some capabilities (`GitHubCapability` in particular) also require
+> per-tenant work by a **tenant admin** and per-user work by an
+> **end user** — see [`github-app-setup.md`](github-app-setup.md)
+> and [`connect-github.md`](connect-github.md) for the three-role
+> split. This page covers the service-provider piece only.
 
 The capabilities themselves are bound to the session agent
 unconditionally — none of them crash the agent when their
@@ -18,7 +25,7 @@ plan to use.
 | [`ColonyDocsCapability`](../architecture/web-search-capability.md) | `TAVILY_API_KEY` (same) | Tavily account |
 | [`SandboxedShellCapability`](../architecture/sandboxed-shell-capability.md) | none | Docker daemon (already mounted in dev) |
 | [`UserPluginCapability`](../architecture/user-plugin-capability.md) | none | optional: host mount for custom skills |
-| [`GitHubCapability`](../architecture/github-capability.md) | `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY_PEM` | GitHub App registration + installation |
+| [`GitHubCapability`](../architecture/github-capability.md) | `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY_PEM`, optionally `GITHUB_APP_CLIENT_ID` + `GITHUB_APP_CLIENT_SECRET` for the per-user OAuth flow | GitHub App registration; per-tenant App installation set via the dashboard (not env) — see [`github-app-setup.md`](github-app-setup.md) |
 
 The full list of compose env-var passthroughs is in
 [`colony/cli/deploy/docker/docker-compose.yml`](https://github.com/polymathera/colony/blob/main/colony/src/polymathera/colony/cli/deploy/docker/docker-compose.yml).
@@ -39,12 +46,16 @@ from (Compose auto-loads it):
 # .env  (gitignored — never check in)
 TAVILY_API_KEY=tvly-...
 GITHUB_APP_ID=123456
-GITHUB_INSTALLATION_ID=78901234
 GITHUB_PRIVATE_KEY_PEM="-----BEGIN RSA PRIVATE KEY-----
 MIIEow...
 -----END RSA PRIVATE KEY-----
 "
+# Optional — only needed for the "Connect GitHub" user OAuth flow.
+GITHUB_APP_CLIENT_ID=Iv1.abc...
+GITHUB_APP_CLIENT_SECRET=...
 ```
+
+The per-tenant `installation_id` is **not** set in env — it's stored per-tenant in Postgres (set by the tenant admin via the dashboard's Tenant GitHub Installation panel). See [`github-app-setup.md`](github-app-setup.md).
 
 Then:
 
@@ -148,71 +159,26 @@ enable/disable toggles; until then, edit on the host and call
 
 ## `GitHubCapability`
 
-Uses GitHub App auth — not personal access tokens. The setup is
-slightly more involved than the others because you have to register
-an App with GitHub first.
+Uses GitHub App auth — not personal access tokens. The full setup
+(register the App, set the env vars, install the App per tenant,
+wire the per-user OAuth flow) is documented in
+[`github-app-setup.md`](github-app-setup.md). The summary for this
+page:
 
-### 1. Register a GitHub App
+- **Service provider** (you, on this host): set `GITHUB_APP_ID`,
+  `GITHUB_PRIVATE_KEY_PEM`, and (for the per-user "Connect GitHub"
+  flow) `GITHUB_APP_CLIENT_ID` + `GITHUB_APP_CLIENT_SECRET`. The
+  shape is shown in the `.env` block earlier on this page;
+  [`github-app-setup.md`](github-app-setup.md) §2 has the rotation
+  + private-key handling.
+- **Tenant admin**: installs the App into the tenant's GitHub org
+  and pastes the resulting installation id into the dashboard's
+  **Tenant GitHub Installation** panel —
+  [`github-app-setup.md`](github-app-setup.md) §3.
+- **End user**: clicks **Connect GitHub** on their profile —
+  [`connect-github.md`](connect-github.md).
 
-1. Open <https://github.com/settings/apps> and click **New GitHub
-   App**.
-2. **Name**: anything (e.g., `acme-colony`).
-3. **Homepage URL**: a placeholder is fine for now.
-4. **Webhook**: leave **Active** *unchecked* unless you intend to
-   wire up the webhook endpoint (the capability's webhook receiver
-   is a documented follow-up; the current code only emits
-   blackboard events from its own action calls). If active, set
-   the URL to something like
-   `https://your-host/api/v1/github/webhook` and a strong secret.
-5. **Repository permissions** the capability needs (set to
-   *Read & Write* for the actions you plan to use):
-   - **Contents** — for `get_file_contents`, `search_code`,
-     `create_pull_request`.
-   - **Issues** — for every issue/comment/label/claim action.
-   - **Pull requests** — for PR list/get/create/comment/review.
-   - **Metadata** (auto-included).
-   - **Checks** (read) — for `get_pr_checks`.
-6. **Organization permissions** (only if you'll use Projects v2):
-   - **Projects** — *Read & Write*.
-7. Save the App. GitHub shows the **App ID** at the top.
-8. Scroll to **Private keys** and click **Generate a private key**.
-   GitHub downloads a `.pem` file — keep it safe.
-
-### 2. Install the App on your org / repos
-
-1. From the App settings, click **Install App** in the left nav.
-2. Choose the org / user and the specific repos to install on.
-3. After install, GitHub redirects to a URL containing
-   `installation_id=…`. Copy that number — that's your
-   `GITHUB_INSTALLATION_ID`.
-
-### 3. Set the env vars
-
-```bash
-export GITHUB_APP_ID="123456"
-export GITHUB_INSTALLATION_ID="78901234"
-# Either inline:
-export GITHUB_PRIVATE_KEY_PEM="$(cat ~/.ssh/acme-colony.private-key.pem)"
-# Or — for `.env` files that don't handle multi-line strings well —
-# bind-mount the PEM into the container and pass `private_key_path`
-# as a kwarg to GitHubCapability.bind() in your custom session-agent
-# blueprint.
-
-colony-env down && colony-env up --workers 3
-```
-
-### 4. Verify
-
-In a new session, ask the agent something like:
-
-> *"List the open issues in `acme/myrepo`."*
-
-The agent should call `list_issues(repo="acme/myrepo")` and return
-real data. If you see *"app_id, installation_id, and a private key
-are all required"* in the response, the env vars didn't propagate —
-check `docker compose exec ray-head env | grep GITHUB_`.
-
-### 5. Audit + rate limits
+### Audit + rate limits
 
 - Every mutation writes a blackboard record at
   `audit:github:{ts}:{uuid}` — visible from the dashboard's
@@ -243,8 +209,15 @@ For traceability, here's where each variable is read:
 |---------|--------|----------------|
 | `TAVILY_API_KEY` | `_github/auth.py`-style fallback in `TavilyBackend.__init__` | `search_web`, `fetch_page`, `search_docs`, `fetch_doc` |
 | `GITHUB_APP_ID` | `GitHubCapability._build_live_client` | every `GitHubCapability` action |
-| `GITHUB_INSTALLATION_ID` | same | same |
 | `GITHUB_PRIVATE_KEY_PEM` | same (also accepts `private_key_path` kwarg) | same |
+| `GITHUB_APP_CLIENT_ID` | `routers/github_oauth.py::github_connect` | `GET /auth/github/connect`, `GET /auth/github/callback` |
+| `GITHUB_APP_CLIENT_SECRET` | `routers/github_oauth.py::github_callback` | `GET /auth/github/callback` |
+
+The per-tenant `installation_id` is **not** an env var — it's
+populated per-tenant in Postgres (`tenants.github_installation_id`),
+set via the dashboard. `GitHubCapability._build_live_client` reads
+it from `agent.metadata.parameters["github_identity"]["tenant_installation_id"]`
+(threaded by the session-create handler).
 
 A capability whose env var is missing logs a one-line warning at
 agent startup and returns clean error dicts when invoked.

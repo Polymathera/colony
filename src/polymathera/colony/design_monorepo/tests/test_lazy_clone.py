@@ -142,9 +142,13 @@ def test_classify_git_clone_error_recognises_auth_failures() -> None:
         result = _classify_git_clone_error(_err(msg))
         assert isinstance(result, GitAuthError), msg
         # The actionable hint is in the message body — the user needs
-        # to know which env var to fix and what scopes to check.
+        # to know which knob to fix. After P9 of
+        # ``colony/github_identity_fix_plan.md``, GitHub auth flows
+        # through the App installation, so the message names the
+        # App's env vars + the tenant-installation panel.
         text = str(result)
-        assert "GITHUB_TOKEN" in text
+        assert "GITHUB_APP_ID" in text
+        assert "installation" in text.lower()
         assert "scope" in text.lower()
 
     # Non-auth failures (network, missing repo, etc.) must NOT be

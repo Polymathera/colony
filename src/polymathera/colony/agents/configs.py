@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..distributed.config import (
     ConfigComponent,
@@ -572,18 +572,41 @@ class GitHubAuthConfig(ConfigComponent):
         default="",
         json_schema_extra={"env": "GITHUB_APP_ID", "optional": True},
     )
-    installation_id: str = Field(
-        default="",
-        json_schema_extra={"env": "GITHUB_INSTALLATION_ID", "optional": True},
-    )
+    # NOTE: per-tenant installation_id no longer lives here. The backend reads it from the database at runtime based on the authenticated user's login, so it is not part of the operator config.
     private_key_pem: str = Field(
         default="",
         json_schema_extra={"env": "GITHUB_PRIVATE_KEY_PEM", "optional": True},
     )
-    app_slug: str = Field(
+    # OAuth client credentials for the same GitHub App's user-to-server
+    # flow (the "Connect GitHub" button on the user profile). The App
+    # registration exposes these alongside the App ID / private key in
+    # the GitHub App settings page. Backend exchanges the authorisation
+    # code for a one-shot user token, reads verified login + emails,
+    # then discards the token.
+    oauth_client_id: str = Field(
         default="",
-        json_schema_extra={"env": "GITHUB_APP_SLUG", "optional": True},
+        json_schema_extra={"env": "GITHUB_APP_CLIENT_ID", "optional": True},
     )
+    oauth_client_secret: str = Field(
+        default="",
+        json_schema_extra={"env": "GITHUB_APP_CLIENT_SECRET", "optional": True},
+    )
+
+    @field_validator("private_key_pem", mode="after")
+    @classmethod
+    def _normalize_pem(cls, v: str) -> str:
+        """Translate literal ``\\n`` sequences to real newlines.
+
+        ``docker-compose``'s ``environment:`` list truncates env-var
+        values at the first real newline (the YAML parser treats the
+        next line as the next list item), so multi-line PEM keys must
+        be stored on a single line with ``\\n`` escapes in ``.env``.
+        We invert that here so pyjwt / cryptography see a valid PEM.
+        Idempotent: leaves real-newline-bearing values alone.
+        """
+        if v and "\\n" in v and "\n" not in v:
+            return v.replace("\\n", "\n")
+        return v
 
 
 async def get_github_auth_config() -> GitHubAuthConfig:

@@ -27,7 +27,25 @@ class GitClientBase:
 
 @register_polymathera_config()
 class GitHubClientConfig(ConfigComponent):
-    github_token: str = Field(default="", json_schema_extra={"env": "GITHUB_TOKEN"})
+    """**Deprecated dead code** — PAT-based REST client config.
+
+    No live consumers: the only ones (``GitDependencyCrawler`` /
+    ``GitHubScrapingTool`` in ``samples/paging/sharding/analyzers/``)
+    were migrated to the per-tenant App installation flow in P9 of
+    ``colony/github_identity_fix_plan.md``. Kept temporarily so
+    out-of-tree code that imports the class doesn't break at import;
+    new code should go through ``GitHubCapability`` (App-installation
+    auth) or the lower-level
+    ``polymathera.colony.agents.patterns.capabilities._github.GitHubClient``.
+    The ``GITHUB_TOKEN`` env var is no longer threaded through
+    docker-compose, so this config never sees a populated value at
+    runtime.
+    """
+
+    github_token: str = Field(
+        default="",
+        json_schema_extra={"env": "GITHUB_TOKEN", "optional": True},
+    )
 
     CONFIG_PATH: ClassVar[str] = "gitutils.github_client"
 

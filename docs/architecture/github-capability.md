@@ -22,15 +22,15 @@ Every action returns a uniform `{"ok": bool, "message": str, …}` shape. Errors
 
 ## Authentication
 
-GitHub Apps, not personal access tokens. The capability needs three pieces of configuration:
+GitHub Apps, not personal access tokens. The capability needs three pieces of configuration, split across two scopes:
 
-| What | Where it comes from |
-|------|---------------------|
-| App ID | Constructor `app_id=` → typed `GitHubAuthConfig.app_id` → env `GITHUB_APP_ID` |
-| Private key (PEM) | Constructor `private_key_pem=` / `private_key_path=` → typed `GitHubAuthConfig.private_key_pem` → env `GITHUB_PRIVATE_KEY_PEM` |
-| Installation ID | Constructor `installation_id=` → typed `GitHubAuthConfig.installation_id` → env `GITHUB_INSTALLATION_ID` |
+| What | Scope | Where it comes from |
+|------|-------|---------------------|
+| App ID | deploy-wide | Constructor `app_id=` → typed `GitHubAuthConfig.app_id` → env `GITHUB_APP_ID` |
+| Private key (PEM) | deploy-wide | Constructor `private_key_pem=` / `private_key_path=` → typed `GitHubAuthConfig.private_key_pem` → env `GITHUB_PRIVATE_KEY_PEM` |
+| Installation ID | **per-tenant** | Constructor `installation_id=` (tests only) → `agent.metadata.parameters["github_identity"]["tenant_installation_id"]` (production), populated from `tenants.github_installation_id` by the session-create handler |
 
-Each value falls through the chain in that order. See [Configuration System](configuration.md) for how operator YAML, env vars, and tier overlays compose.
+The App registration is one per Colony deployment; each tenant installs that App into their GitHub org and pastes the resulting `installation_id` into the dashboard's **Tenant GitHub Installation** panel (the `tenants` table column, not env). See [Configuration System](configuration.md) for how operator YAML, env vars, and tier overlays compose, and [`guides/github-app-setup.md`](../guides/github-app-setup.md) for the full operator + tenant flow.
 
 The flow:
 

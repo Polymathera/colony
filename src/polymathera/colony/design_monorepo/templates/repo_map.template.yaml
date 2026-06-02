@@ -122,3 +122,13 @@ design_context_sources: []
   #
   # - name: hypotheses
   #   paths: ["**/hypotheses/*.md"]
+  #
+  # ``is_roadmap: true`` marks the row whose single literal path is
+  # the project roadmap. ``DesignProcessCapability``'s bootstrap /
+  # sync / propose actions read + write THIS path; no kwarg the
+  # LLM planner could hallucinate. At most one such row per repo;
+  # the path must be a literal filename (no glob characters).
+  #
+  # - name: roadmap
+  #   paths: ["ROADMAP.md"]
+  #   is_roadmap: true

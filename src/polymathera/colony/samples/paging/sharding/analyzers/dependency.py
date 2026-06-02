@@ -1,13 +1,20 @@
+import base64
+import json
 import os
 import re
-import json
-import requests
 from pathlib import Path
 from typing import Any
+
+import httpx
 from overrides import override
 
 from polymathera.colony.utils import setup_logger
-from polymathera.colony.utils.git.clients import GitHubClient, GitLabClient, GitClientBase
+from polymathera.colony.utils.git.clients import GitLabClient
+from polymathera.colony.agents.patterns.capabilities._github import (
+    GitHubAppAuth,
+    GitHubClient as AppGitHubClient,
+    TokenCache,
+)
 
 from ..languages.dependency import DependencyConfig
 from .base import BaseAnalyzer, FileContentCache
@@ -557,67 +564,85 @@ class DependencyParser:
 
 class GitDependencyCrawler:
     """
-    A class that walks all repositories on GitLab and GitHub (starting from a given seed repository) and builds
-    a dependency graph among those repositories based on the build or packaging files in each
-    repository (e.g., pyproject.toml, setup.py, requirements.txt, CMakeLists.txt, package.json, etc.).
+    A class that walks all repositories on GitLab and GitHub (starting
+    from a given seed repository) and builds a dependency graph among
+    those repositories based on the build or packaging files in each
+    repository (e.g., pyproject.toml, setup.py, requirements.txt,
+    CMakeLists.txt, package.json, etc.).
+
+    GitHub-side calls use the per-tenant GitHub App installation
+    (see ``colony/github_identity_fix_plan.md``); pass
+    ``installation_id`` from the calling tenant's
+    ``tenants.github_installation_id``. GitLab still uses
+    ``GITLAB_TOKEN`` via the legacy :class:`GitLabClient`.
+
+    No live callers in the repo today; methods are async-throughout to
+    match the modern :class:`AppGitHubClient` interface.
     """
 
-    def __init__(self):
+    def __init__(self, installation_id: str | None = None):
+        self.installation_id = installation_id
         self.dependency_graph: dict[str, list[str]] = {}
-        self.github_client: GitHubClient | None = None
+        self.github_client: AppGitHubClient | None = None
         self.gitlab_client: GitLabClient | None = None
+        self._http_client: httpx.AsyncClient | None = None
 
     async def initialize(self):
-        self.github_client = await GitHubClient()
-        self.gitlab_client = await GitLabClient()
-        await self.github_client.initialize()
+        # GitHub side: only mintable when both the per-tenant
+        # ``installation_id`` is provided AND the deploy-wide App
+        # credentials (``GITHUB_APP_ID`` + ``GITHUB_PRIVATE_KEY_PEM``)
+        # are configured. Otherwise ``github_client`` stays ``None``
+        # and GitHub-targeted methods fall through to a no-op.
+        if self.installation_id:
+            from polymathera.colony.agents.configs import (
+                get_github_auth_config,
+            )
+            gh = await get_github_auth_config()
+            if gh.app_id and gh.private_key_pem:
+                self._http_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(
+                        connect=10.0, read=30.0,
+                        write=10.0, pool=10.0,
+                    ),
+                )
+                tokens = TokenCache(
+                    app_auth=GitHubAppAuth(
+                        app_id=gh.app_id,
+                        private_key_pem=gh.private_key_pem,
+                    ),
+                    installation_id=self.installation_id,
+                    client=self._http_client,
+                )
+                self.github_client = AppGitHubClient(
+                    tokens=tokens, client=self._http_client,
+                )
+        # GitLab side: PAT-based; unrelated to the App migration.
+        self.gitlab_client = GitLabClient()
         await self.gitlab_client.initialize()
 
-    def _get_client(self, repo_url: str) -> GitClientBase:
-        if "github.com" in repo_url:
-            return self.github_client
-        elif "gitlab.com" in repo_url:
-            return self.gitlab_client
-        else:
-            raise ValueError(f"Unsupported repository: {repo_url}")
+    async def close(self) -> None:
+        """Release the per-instance httpx client (if one was built).
+        Tests + long-lived owners call this to avoid leaking sockets."""
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except Exception:  # noqa: BLE001 — defensive
+                pass
+            self._http_client = None
+        self.github_client = None
 
     def get_dependency_graph(self) -> dict[str, list[str]]:
         return self.dependency_graph
 
-    def crawl(self, start_repo: str | None = None):
+    async def crawl(self, start_repo: str | None = None):
         if start_repo:
-            self._crawl_repo(start_repo)
-        else:
-            client = self._get_client(start_repo)
-            url = f"{self.base_url}repositories"
-            while url:
-                data = client._fetch_data_sync(url)
-                if data:
-                    for repo in data:
-                        self._crawl_repo(repo["full_name"])
-                    url = data.get("next")
-                else:
-                    break
+            await self._crawl_repo(start_repo)
 
-    def crawl(self):
-        url = f"{self.base_url}projects"
-        while url:
-            data = self._make_request(url)
-            if data:
-                for project in data:
-                    self._crawl_project(project["id"], project["path_with_namespace"])
-                url = requests.utils.parse_header_links(
-                    data.headers.get("Link", "")
-                ).get("next")
-            else:
-                break
-
-    def _crawl_repo(self, repo: str):
-        dependencies = self._parse_dependencies(repo)
+    async def _crawl_repo(self, repo: str):
+        dependencies = await self._parse_dependencies(repo)
         self.dependency_graph[repo] = dependencies
 
-    def _parse_dependencies(self, repo: str) -> list[str]:
-        dependencies = []
+    async def _parse_dependencies(self, repo: str) -> list[str]:
         files_to_check = [
             "pyproject.toml",
             "setup.py",
@@ -625,19 +650,43 @@ class GitDependencyCrawler:
             "CMakeLists.txt",
             "package.json",
         ]
-
-        client = self._get_client(repo)
+        dependencies: list[str] = []
         for file in files_to_check:
-            content = client.get_file_contents_sync(repo, file)
+            content = await self._fetch_file_contents(repo, file)
             if content:
                 parser = DependencyParser()
                 parser.parse(file, content)
                 dependencies.extend(parser.get_dependencies())
-
         return list(set(dependencies))
 
-    def _crawl_project(self, project_id: int, project_name: str):
-        dependencies = self._parse_dependencies(project_id)
-        self.dependency_graph[project_name] = dependencies
+    async def _fetch_file_contents(
+        self, repo_url: str, file_path: str,
+    ) -> str | None:
+        """Fetch a single file's contents from either GitHub (App
+        installation) or GitLab (PAT). Returns ``None`` when the file
+        is absent or the appropriate client isn't configured."""
+        if "github.com" in repo_url:
+            if self.github_client is None:
+                return None
+            owner_repo = "/".join(
+                repo_url.rstrip("/").rsplit("/", 2)[-2:],
+            )
+            try:
+                data = await self.github_client.get(
+                    f"/repos/{owner_repo}/contents/{file_path}",
+                )
+            except Exception:  # noqa: BLE001 — fall through on any error
+                return None
+            if data and data.get("content"):
+                try:
+                    return base64.b64decode(data["content"]).decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    return None
+            return None
+        if "gitlab.com" in repo_url and self.gitlab_client is not None:
+            return self.gitlab_client.get_file_contents_sync(
+                repo_url, file_path,
+            )
+        return None
 
 
