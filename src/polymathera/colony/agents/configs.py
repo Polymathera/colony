@@ -624,6 +624,40 @@ async def get_github_auth_config() -> GitHubAuthConfig:
     return await _get_component_or_default("capabilities.github", GitHubAuthConfig)
 
 
+@register_polymathera_config(path="capabilities.gitlab")
+class GitLabAuthConfig(ConfigComponent):
+    """OAuth-Application credentials for the GitLab ``VcsProvider``.
+
+    Unlike GitHub, GitLab has no per-org App-installation flow — there
+    is only the user-to-server OAuth Application registered on
+    GitLab. Server-to-server actions ride a Group Access Token the
+    tenant admin provisions per-group and pastes into Colony (PR 6's
+    encrypted ``tenants.bot_token_encrypted``); there is no
+    deploy-wide GitLab private key.
+    """
+
+    oauth_client_id: str = Field(
+        default="",
+        json_schema_extra={"env": "GITLAB_OAUTH_CLIENT_ID", "optional": True},
+    )
+    oauth_client_secret: str = Field(
+        default="",
+        json_schema_extra={"env": "GITLAB_OAUTH_CLIENT_SECRET", "optional": True},
+    )
+    # Self-hosted GitLab (CE/EE) instances expose the same REST + OAuth
+    # surfaces at the operator's own URL. Default is gitlab.com; an
+    # enterprise deployment overrides this to e.g.
+    # ``https://gitlab.acme.internal``.
+    base_url: str = Field(
+        default="https://gitlab.com",
+        json_schema_extra={"env": "GITLAB_BASE_URL", "optional": True},
+    )
+
+
+async def get_gitlab_auth_config() -> GitLabAuthConfig:
+    return await _get_component_or_default("capabilities.gitlab", GitLabAuthConfig)
+
+
 @register_polymathera_config(path="memory.chroma")
 class ChromaConfig(ConfigComponent):
     """Configuration for the Chroma memory backend."""

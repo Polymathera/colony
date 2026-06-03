@@ -20,6 +20,16 @@ router = APIRouter()
 class CreateColonyRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=500)
+    # Repo binding (optional — user can leave blank to create a
+    # "bare" colony and set the design monorepo later). All four
+    # fields must be supplied together when present.
+    vcs_repo_id: str | None = None
+    vcs_repo_full_name: str | None = None
+    default_branch: str | None = None
+    # Per-commit attribution preferences. Defaults match the schema
+    # (colony as principal, user as co-author).
+    commit_principal: str | None = None
+    commit_co_author: str | None = None
 
 
 class ColonyInfo(BaseModel):
@@ -27,7 +37,12 @@ class ColonyInfo(BaseModel):
     name: str
     tenant_id: str
     description: str = ""
-    is_default: bool = False
+    # Per plan §3.4: a colony is bound to a VCS repo (many-to-one
+    # — multiple colonies can point at the same repo). NULL during
+    # the transient window between row create and repo selection.
+    vcs_repo_id: str | None = None
+    vcs_repo_full_name: str | None = None
+    default_branch: str | None = None
     created_at: str | None = None
 
 
@@ -69,7 +84,11 @@ async def create_colony(
         tenant_id=user["tenant_id"],
         name=request.name,
         description=request.description,
-        is_default=False,
+        vcs_repo_id=request.vcs_repo_id,
+        vcs_repo_full_name=request.vcs_repo_full_name,
+        default_branch=request.default_branch,
+        commit_principal=request.commit_principal,
+        commit_co_author=request.commit_co_author,
     )
     return ColonyInfo(**result)
 

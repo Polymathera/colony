@@ -39,6 +39,106 @@ from .services.colony_connection import ColonyConnection
 logger = logging.getLogger(__name__)
 
 
+async def _register_github_provider() -> None:
+    """Register :class:`GitHubProvider` iff
+    ``GITHUB_APP_CLIENT_ID`` + ``GITHUB_APP_CLIENT_SECRET`` are
+    present. Best-effort — config-load + constructor failures log
+    and the dashboard stays up with GitHub sign-in returning 404."""
+    from polymathera.colony.agents.configs import get_github_auth_config
+    from polymathera.colony.vcs import register_provider
+    from polymathera.colony.vcs.github import GitHubProvider
+
+    try:
+        gh = await get_github_auth_config()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "VCS registry: failed to load GitHubAuthConfig; "
+            "GitHub provider NOT registered.",
+            exc_info=True,
+        )
+        return
+
+    if not (gh.oauth_client_id and gh.oauth_client_secret):
+        logger.info(
+            "VCS registry: GITHUB_APP_CLIENT_ID / "
+            "GITHUB_APP_CLIENT_SECRET unset; GitHub provider NOT "
+            "registered. Sign-in via GitHub will return 404.",
+        )
+        return
+
+    try:
+        register_provider(GitHubProvider(
+            oauth_client_id=gh.oauth_client_id,
+            oauth_client_secret=gh.oauth_client_secret,
+        ))
+        logger.info(
+            "VCS registry: registered GitHubProvider (client_id=%s…)",
+            gh.oauth_client_id[:6],
+        )
+    except ValueError:
+        logger.warning(
+            "VCS registry: GitHubProvider construction failed; "
+            "GitHub provider NOT registered.",
+            exc_info=True,
+        )
+
+
+async def _register_gitlab_provider() -> None:
+    """Register :class:`GitLabProvider` iff
+    ``GITLAB_OAUTH_CLIENT_ID`` + ``GITLAB_OAUTH_CLIENT_SECRET`` are
+    present. ``GITLAB_BASE_URL`` defaults to ``https://gitlab.com``;
+    self-hosted instances override it."""
+    from polymathera.colony.agents.configs import get_gitlab_auth_config
+    from polymathera.colony.vcs import register_provider
+    from polymathera.colony.vcs.gitlab import GitLabProvider
+
+    try:
+        gl = await get_gitlab_auth_config()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "VCS registry: failed to load GitLabAuthConfig; "
+            "GitLab provider NOT registered.",
+            exc_info=True,
+        )
+        return
+
+    if not (gl.oauth_client_id and gl.oauth_client_secret):
+        logger.info(
+            "VCS registry: GITLAB_OAUTH_CLIENT_ID / "
+            "GITLAB_OAUTH_CLIENT_SECRET unset; GitLab provider NOT "
+            "registered. Sign-in via GitLab will return 404.",
+        )
+        return
+
+    try:
+        register_provider(GitLabProvider(
+            oauth_client_id=gl.oauth_client_id,
+            oauth_client_secret=gl.oauth_client_secret,
+            base_url=gl.base_url,
+        ))
+        logger.info(
+            "VCS registry: registered GitLabProvider "
+            "(base=%s client_id=%s…)",
+            gl.base_url, gl.oauth_client_id[:6],
+        )
+    except ValueError:
+        logger.warning(
+            "VCS registry: GitLabProvider construction failed; "
+            "GitLab provider NOT registered.",
+            exc_info=True,
+        )
+
+
+async def _register_vcs_providers() -> None:
+    """Construct + register every :class:`VcsProvider` whose env-bound
+    credentials are present. Called once from :func:`lifespan`. Each
+    provider's registration is independent — one's failure does not
+    block the others. The dashboard stays up regardless; sign-in via
+    a non-registered provider responds 404."""
+    await _register_github_provider()
+    await _register_gitlab_provider()
+
+
 class ExecutionContextMiddleware(BaseHTTPMiddleware):
     """Set a Ring.KERNEL execution context for every dashboard API request.
 
@@ -84,6 +184,14 @@ async def lifespan(app: FastAPI):
     from polymathera.colony.distributed.observability.log_setup import attach_kafka_log_handler
     await attach_kafka_log_handler(kafka_bootstrap=config.kafka_bootstrap)
 
+    # Register VCS providers based on which OAuth credentials are
+    # present in env. Today: GitHub only — GitLab / Bitbucket land
+    # when their providers are implemented (see
+    # ``colony/vcs_native_tenancy_plan.md`` PR 7+). Registration is a
+    # no-op when credentials are absent; the signup-router responds
+    # 404 to ``/auth/{provider}/sign-in`` for unregistered providers.
+    await _register_vcs_providers()
+
     # Initialize database schemas
     if colony._db_pool:
         from .auth.schema import ensure_auth_schema
@@ -107,6 +215,30 @@ async def lifespan(app: FastAPI):
         await ensure_interaction_log_schema(colony._db_pool)
         # P9: dedup table for the github webhook receiver.
         await ensure_github_webhook_schema(colony._db_pool)
+
+        # Seed dev licenses from the operator's ``.env``. Each entry
+        # in ``COLONY_DEV_LICENSED_INSTALLATIONS`` is upserted with
+        # ``source='env_bootstrap'``; tenants not yet landed in
+        # postgres get skipped (the signup walker re-runs this same
+        # seeder once it lands them). Idempotent + source-precedence
+        # aware — never overwrites a Marketplace/admin row.
+        import os
+        from .auth.license_service import seed_dev_licenses
+        try:
+            seeded = await seed_dev_licenses(
+                colony._db_pool,
+                os.environ.get("COLONY_DEV_LICENSED_INSTALLATIONS"),
+            )
+            if seeded:
+                logger.info(
+                    "lifespan: seeded %d dev license(s) from "
+                    "COLONY_DEV_LICENSED_INSTALLATIONS", seeded,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "lifespan: dev license seeding failed; "
+                "non-fatal — dashboard continues.",
+            )
 
         # Make chat store available via app state
         from .chat.store import ChatMessageStore
@@ -192,7 +324,6 @@ def create_app(config: DashboardConfig) -> FastAPI:
         colonies,
         colony_status,
         human_approval,
-        github_oauth,
         github_webhook,
         tenants,
     )
@@ -200,7 +331,6 @@ def create_app(config: DashboardConfig) -> FastAPI:
     from .streaming import sse
 
     app.include_router(auth.router, prefix="/api/v1", tags=["auth"])
-    app.include_router(github_oauth.router, prefix="/api/v1", tags=["github-oauth"])
     app.include_router(github_webhook.router, prefix="/api/v1", tags=["github-webhook"])
     app.include_router(tenants.router, prefix="/api/v1", tags=["tenants"])
     app.include_router(colonies.router, prefix="/api/v1", tags=["colonies"])

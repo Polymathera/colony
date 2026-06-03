@@ -19,7 +19,12 @@ import { MetricsTab } from "../observability/MetricsTab";
 import { TracesTab } from "../observability/TracesTab";
 import { SettingsTab } from "../settings/SettingsTab";
 import { useCreateSession } from "@/api/hooks/useSessions";
-import { useCurrentUser, useLogout, useColonies } from "@/api/hooks/useAuth";
+import {
+  useColonies,
+  useCurrentUser,
+  useLogout,
+  useSwitchActiveColony,
+} from "@/api/hooks/useAuth";
 import { useHealthStatus } from "@/api/hooks/useInfrastructure";
 
 const TABS: Tab[] = [
@@ -122,15 +127,30 @@ export function AppShell() {
   // no cached data yet AND the query is in flight.
   const isLoading = currentUser.isLoading && !currentUser.isError;
 
-  // Set default colony when user data loads
+  const switchActiveColony = useSwitchActiveColony();
+
+  // Validate the active colony against the user's CURRENT colony
+  // set (server-resolved on sign-in). The localStorage cache from a
+  // prior sign-in can hold a colony id that no longer exists after
+  // a ``colony-env down --volumes`` wipe — without this check, the
+  // dashboard would happily send X-Colony-Id pointing at a ghost
+  // colony, the session-create handler would reject it, but the
+  // colony dropdown would still claim the ghost is active. Falls
+  // back to: server's active_colony_id → first visible colony →
+  // null (no colonies).
   useEffect(() => {
-    if (currentUser.data && !activeColonyId) {
-      const defaultColony = currentUser.data.colonies.find((c) => c.is_default);
-      if (defaultColony) {
-        setActiveColonyId(defaultColony.colony_id);
-      } else if (currentUser.data.colonies.length > 0) {
-        setActiveColonyId(currentUser.data.colonies[0].colony_id);
-      }
+    if (!currentUser.data) return;
+    const visible = currentUser.data.colonies;
+    const cachedIsValid =
+      activeColonyId && visible.some((c) => c.colony_id === activeColonyId);
+    if (cachedIsValid) return;
+    const serverActive = currentUser.data.active_colony_id;
+    if (serverActive && visible.some((c) => c.colony_id === serverActive)) {
+      setActiveColonyId(serverActive);
+    } else if (visible.length > 0) {
+      setActiveColonyId(visible[0].colony_id);
+    } else {
+      setActiveColonyId(null);
     }
   }, [currentUser.data, activeColonyId]);
 
@@ -188,7 +208,7 @@ export function AppShell() {
     return (
       <div className="flex h-screen flex-col">
         <main className="flex-1 min-h-0">
-          <AuthPage onAuthenticated={() => currentUser.refetch()} />
+          <AuthPage />
         </main>
         <StatusBar authenticated={isAuthenticated} />
       </div>
@@ -221,11 +241,17 @@ export function AppShell() {
               <select
                 className="rounded border border-border bg-background px-2 py-1 text-xs"
                 value={activeColonyId || ""}
-                onChange={(e) => setActiveColonyId(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setActiveColonyId(next);
+                  // Persist server-side so the JWT carries the new
+                  // (tenant_id, colony_id) pair on subsequent requests.
+                  if (next) switchActiveColony.mutate(next);
+                }}
               >
                 {colonies.data.map((c) => (
                   <option key={c.colony_id} value={c.colony_id}>
-                    {c.name} {c.is_default ? "(default)" : ""}
+                    {c.name}
                   </option>
                 ))}
               </select>
@@ -243,7 +269,7 @@ export function AppShell() {
           </a>
           {/* User info + logout */}
           <span className="text-xs text-muted-foreground">
-            {currentUser.data?.username}
+            {currentUser.data?.vcs_login}
           </span>
           <button
             onClick={handleLogout}

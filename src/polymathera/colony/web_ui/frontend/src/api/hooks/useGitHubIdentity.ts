@@ -1,68 +1,23 @@
 /**
- * Hooks for the per-user GitHub identity + per-tenant App installation
- * surfaces (backend lives in
- * ``colony/src/polymathera/colony/web_ui/backend/routers/{github_oauth,tenants}.py``).
+ * Per-tenant GitHub App installation id hook.
  *
- * The "Connect GitHub" flow is a server-side redirect, not a fetch:
- * the browser navigates to ``/api/v1/auth/github/connect``, the
- * backend redirects to GitHub, the user approves, GitHub redirects
- * back to ``/api/v1/auth/github/callback`` which sets the verified
- * identity on the user row. The UI just calls
- * :func:`startGitHubConnect` (window.location assignment) and
- * refetches :func:`useUserGitHubIdentity` when the user lands back.
+ * The per-user GitHub identity that used to live in this file
+ * (``useUserGitHubIdentity`` / ``useDisconnectGitHub`` /
+ * ``startGitHubConnect``) is gone — sign-in IS the connect now, so
+ * the user's verified identity is already on the
+ * :func:`useCurrentUser` response (``vcs_login`` / ``vcs_provider``
+ * fields).
+ *
+ * The tenant-installation surface stays because it's a separate
+ * concern: the tenant admin pastes the App installation id their
+ * org received when they installed Colony's GitHub App. Today's
+ * sign-in walker auto-populates ``github_installation_id`` from
+ * ``GET /user/installations`` (see services/user_tenant_sync.py)
+ * so this UI is now mostly a debug/override surface.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "../client";
 
-// ----------------------------------------------------------------------
-// Per-user GitHub identity (OAuth-verified)
-// ----------------------------------------------------------------------
-
-export interface UserGitHubIdentity {
-  connected: boolean;
-  github_login?: string;
-  github_user_id?: number;
-  github_email?: string;
-  git_user_name?: string | null;
-  github_connected_at?: string | null;
-  github_last_verified_at?: string | null;
-}
-
-export function useUserGitHubIdentity() {
-  return useQuery({
-    queryKey: ["user", "github-identity"],
-    queryFn: () => apiFetch<UserGitHubIdentity>("/users/me/github"),
-    retry: false,
-    staleTime: 60 * 1000,
-  });
-}
-
-export function useDisconnectGitHub() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () =>
-      apiFetch<{ cleared: boolean }>("/users/me/github", {
-        method: "DELETE",
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["user", "github-identity"] });
-    },
-  });
-}
-
-/**
- * Kick off the OAuth flow by navigating the browser to the connect
- * endpoint. The backend redirects to GitHub; on success the user
- * returns to the dashboard at the callback URL and the next
- * :func:`useUserGitHubIdentity` poll sees the populated identity.
- */
-export function startGitHubConnect(): void {
-  window.location.assign("/api/v1/auth/github/connect");
-}
-
-// ----------------------------------------------------------------------
-// Per-tenant GitHub App installation id
-// ----------------------------------------------------------------------
 
 export interface TenantGitHubInstallation {
   installation_id: string | null;
@@ -94,3 +49,37 @@ export function useSetTenantGitHubInstallation() {
     },
   });
 }
+
+
+// ----------------------------------------------------------------------
+// Discoverable repos — cached by the sign-in walker for the dropdown UI
+// ----------------------------------------------------------------------
+
+export interface DiscoverableRepo {
+  vcs_repo_id: string;
+  vcs_repo_full_name: string;
+  default_branch: string;
+  user_permission: string;     // "read" | "write" | "admin"
+  has_colony_marker: boolean;  // TRUE for repos with .colony/
+  clone_url: string | null;    // Pre-rendered by the tenant's provider
+}
+
+/**
+ * Repos the sign-in walker (services/colony_discovery) discovered for
+ * the caller's active tenant. Powers the "+ New Colony" form's repo
+ * dropdown + the per-colony "Design monorepo" picker.
+ *
+ * Refreshes whenever the user signs in (new walker pass). v1 doesn't
+ * auto-refresh from inside the dashboard — operator clicks
+ * "Sign out and back in" to trigger a fresh discovery walk.
+ */
+export function useDiscoverableRepos() {
+  return useQuery({
+    queryKey: ["tenant", "discoverable-repos"],
+    queryFn: () =>
+      apiFetch<DiscoverableRepo[]>("/tenants/me/discoverable-repos"),
+    retry: false,
+    staleTime: 60 * 1000,
+  });
+}
+

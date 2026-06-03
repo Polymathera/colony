@@ -1,134 +1,78 @@
 /**
- * LandingPage panels for the GitHub identity surface.
+ * LandingPage panels for the VCS identity surface.
  *
- * Two sections, both per-user/per-tenant (not per-colony):
- *
- *   - :func:`UserGitHubIdentitySection` — the "Connect GitHub" button,
- *     and once connected, the verified ``(login, email)`` pair the
- *     user is identified as on GitHub. All fields are read-only: the
- *     OAuth callback is the only writer (typing the email would let a
- *     user attribute commits to anyone — see
- *     ``colony/github_identity_fix_plan.md`` §3).
+ *   - :func:`UserVcsIdentitySection` — read-only display of the
+ *     user's OAuth-verified VCS identity (provider, login, name).
+ *     Populated by the sign-in walker; there's no "Connect/Disconnect"
+ *     button because sign-in IS the connect now (PR 3).
  *
  *   - :func:`TenantGitHubInstallationSection` — text input for the
  *     numeric installation id the tenant gets when they install the
- *     Polymathera Colony GitHub App into their org. Used by the
- *     capability layer to mint REST tokens scoped to that tenant.
- *
- * Both live on the LandingPage alongside ``ColoniesSection`` so the
- * user can set them up before starting a session.
+ *     Polymathera Colony GitHub App into their org. Mostly auto-
+ *     populated by the sign-in walker (``GET /user/installations``);
+ *     this UI is the manual-override / debug surface.
  */
 import { useEffect, useState } from "react";
 import { Pencil } from "lucide-react";
+import { useCurrentUser } from "@/api/hooks/useAuth";
 import {
-  startGitHubConnect,
-  useDisconnectGitHub,
   useSetTenantGitHubInstallation,
   useTenantGitHubInstallation,
-  useUserGitHubIdentity,
 } from "@/api/hooks/useGitHubIdentity";
 
 
-function formatTimestamp(iso: string | null | undefined): string {
-  if (!iso) return "";
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
-}
+export function UserVcsIdentitySection() {
+  const me = useCurrentUser();
 
-
-export function UserGitHubIdentitySection() {
-  const identity = useUserGitHubIdentity();
-  const disconnect = useDisconnectGitHub();
-
-  if (identity.isLoading) {
+  if (me.isLoading) {
     return (
       <div className="w-full max-w-md text-xs text-muted-foreground">
-        Loading GitHub identity…
+        Loading identity…
       </div>
     );
   }
+
+  const user = me.data;
+  if (!user || !user.vcs_login) {
+    // Should not happen in normal flow — sign-in always populates
+    // these fields — but defensive when the cookies somehow get out
+    // of sync with the DB row.
+    return null;
+  }
+
+  const providerLabel =
+    user.vcs_provider === "github" ? "GitHub" : (user.vcs_provider || "VCS");
 
   return (
     <div className="w-full max-w-md">
       <div className="mb-2 flex items-center justify-between">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          Your GitHub Identity
+          Your VCS Identity
         </h3>
       </div>
       <div className="rounded-lg border border-border bg-card p-4">
-        {identity.data?.connected ? (
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">Login:</span>
-              <code className="text-foreground">
-                {identity.data.github_login}
-              </code>
-            </div>
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">Email:</span>
-              <span className="text-foreground">
-                {identity.data.github_email}
-              </span>
-            </div>
-            {identity.data.git_user_name && (
-              <div className="flex items-center gap-2 text-sm">
-                <span className="text-muted-foreground">Name:</span>
-                <span className="text-foreground">
-                  {identity.data.git_user_name}
-                </span>
-              </div>
-            )}
-            <div className="text-[10px] text-muted-foreground">
-              Verified {formatTimestamp(identity.data.github_last_verified_at)}
-            </div>
-            <div className="flex gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => startGitHubConnect()}
-                className="px-2 py-0.5 rounded border text-xs"
-                title="Re-verify by running the OAuth flow again"
-              >
-                Re-verify
-              </button>
-              <button
-                type="button"
-                onClick={() => disconnect.mutate()}
-                disabled={disconnect.isPending}
-                className="px-2 py-0.5 rounded border text-xs text-red-500 disabled:opacity-50"
-              >
-                {disconnect.isPending ? "…" : "Disconnect"}
-              </button>
-            </div>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground">Provider:</span>
+            <span className="text-foreground">{providerLabel}</span>
           </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            <p className="text-xs text-muted-foreground">
-              Connect your GitHub account so Colony can attribute
-              commits to you and assign issues to your real GitHub
-              profile. Colony never acts AS you — your verified
-              identity is fetched once and the token is discarded.
-            </p>
-            <button
-              type="button"
-              onClick={() => startGitHubConnect()}
-              className="self-start px-3 py-1 rounded bg-primary text-primary-foreground text-xs"
-            >
-              Connect GitHub
-            </button>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground">Login:</span>
+            <code className="text-foreground">{user.vcs_login}</code>
           </div>
-        )}
-        {disconnect.error && (
-          <div className="mt-2 text-[10px] text-red-500">
-            {(disconnect.error as Error).message}
+          <div className="text-[10px] text-muted-foreground">
+            Re-verify by signing out and signing back in.
           </div>
-        )}
+        </div>
       </div>
     </div>
   );
 }
+
+
+// Back-compat alias so existing imports keep working until callers
+// migrate to the new name. Drop in a follow-up cleanup.
+export const UserGitHubIdentitySection = UserVcsIdentitySection;
 
 
 export function TenantGitHubInstallationSection() {

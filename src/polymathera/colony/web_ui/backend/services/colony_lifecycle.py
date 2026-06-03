@@ -66,39 +66,42 @@ async def provision_colony(
     tenant_id: str,
     name: str,
     description: str = "",
-    is_default: bool = False,
+    vcs_repo_id: str | None = None,
+    vcs_repo_full_name: str | None = None,
+    default_branch: str | None = None,
+    commit_principal: str | None = None,
+    commit_co_author: str | None = None,
 ) -> dict[str, str]:
     """Land a colony row + bootstrap its always-on system SessionAgent.
 
-    Composes two steps that callers MUST run together:
+    Composes the steps every colony-creation path MUST run together:
 
     1. ``auth_service.create_colony`` — atomic SQL insert into the
        ``colonies`` table.
-    2. ``ensure_system_session_for_colony`` — best-effort Ray-side
+    2. If repo binding fields are supplied: derive the clone URL via
+       the tenant's provider's ``repo_clone_url`` + persist via
+       ``set_design_monorepo``. Best-effort — the colony row already
+       exists, so a derivation failure logs and the operator can
+       still type the URL in the UI.
+    3. If commit attribution is supplied: persist via
+       ``set_git_attribution`` (also best-effort).
+    4. ``ensure_system_session_for_colony`` — best-effort Ray-side
        bootstrap of the system ``SessionAgent`` that hosts
-       colony-singleton capabilities. Failures are logged but do NOT
-       fail the call: the user-facing colony row is already
-       persisted, the lifespan walker on the next dashboard restart
-       retries the bootstrap, and the colony is otherwise functional
-       in the meantime (chat sessions still work).
+       colony-singleton capabilities.
 
     Args:
-        colony: The dashboard's ``ColonyConnection`` (needed for
-            ``execution_context`` + session-manager handle by step 2).
+        colony: The dashboard's ``ColonyConnection``.
         tenant_id: The tenant the new colony belongs to.
-        name: Human-facing colony name (e.g. ``"Default"`` for the
-            auto-created one, or whatever the user typed in the UI).
+        name: Human-facing colony name.
         description: Free-text description (optional).
-        is_default: Whether to mark this as the tenant's default
-            colony (``colonies.is_default``). Exactly one colony per
-            tenant should have this; signup auto-creates one as
-            default, ``POST /colonies/`` from the UI never does.
-
-    Returns:
-        ``{"colony_id": ..., "name": ..., "tenant_id": ...}`` —
-        the same shape ``auth_service.create_colony`` returns, so
-        callers' downstream consumers don't have to know there's an
-        intervening bootstrap step.
+        vcs_repo_id / vcs_repo_full_name / default_branch: Bind this
+            colony to a specific VCS repo. Auto-discovery walker (PR 4)
+            populates all three; the "+ New colony" UI form populates
+            them when the user picks from the discoverable-repos
+            dropdown.
+        commit_principal / commit_co_author: Per-commit attribution
+            preferences. ``None`` leaves the schema defaults in place
+            (``colony`` / ``user``).
     """
 
     db_pool = colony._db_pool
@@ -113,8 +116,49 @@ async def provision_colony(
         tenant_id=tenant_id,
         name=name,
         description=description,
-        is_default=is_default,
+        vcs_repo_id=vcs_repo_id,
+        vcs_repo_full_name=vcs_repo_full_name,
+        default_branch=default_branch,
     )
+
+    # Derive + persist the design_monorepo_url from the tenant's
+    # provider's clone-URL template. Today's design-monorepo readers
+    # (UI textbox, RepoStateProvider, materialize_design_context) all
+    # read this column.
+    if vcs_repo_full_name and default_branch and vcs_repo_id:
+        try:
+            await _persist_design_monorepo_url(
+                db_pool,
+                colony_id=result["colony_id"],
+                tenant_id=tenant_id,
+                vcs_repo_id=vcs_repo_id,
+                vcs_repo_full_name=vcs_repo_full_name,
+                default_branch=default_branch,
+            )
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.exception(
+                "provision_colony: failed to derive design_monorepo_url "
+                "for colony %s; operator can set it manually via UI.",
+                result["colony_id"],
+            )
+
+    if commit_principal is not None or commit_co_author is not None:
+        try:
+            await auth_service.set_git_attribution(
+                db_pool,
+                colony_id=result["colony_id"],
+                tenant_id=tenant_id,
+                # Fall back to the schema defaults when the caller
+                # only supplied one of the two.
+                commit_principal=commit_principal or "colony",
+                commit_co_author=commit_co_author,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "provision_colony: failed to persist git_attribution "
+                "for colony %s; operator can set it via UI.",
+                result["colony_id"],
+            )
 
     # Wait for the session_manager's ``@on_app_ready`` to finish
     # (populates vcm_handle) before invoking endpoints that depend on
@@ -144,6 +188,69 @@ async def provision_colony(
         )
 
     return result
+
+
+async def _persist_design_monorepo_url(
+    db_pool,
+    *,
+    colony_id: str,
+    tenant_id: str,
+    vcs_repo_id: str,
+    vcs_repo_full_name: str,
+    default_branch: str,
+) -> None:
+    """Look up the tenant's VCS provider in the registry, render the
+    clone URL, and persist it on the colony row.
+
+    Lazy import of the registry: this module is imported from many
+    paths and we don't want a circular at module-load. The provider
+    is registered at dashboard startup (``main._register_vcs_providers``);
+    if not registered (operator deployed without that provider's
+    OAuth creds), we log and skip — the colony row stays with
+    ``design_monorepo_url = NULL`` and the operator can set it manually.
+    """
+    from polymathera.colony.vcs import get_provider
+    from polymathera.colony.vcs.provider import VcsRepoRef
+
+    # Read the tenant's provider id to know which provider to ask.
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT vcs_provider FROM tenants WHERE id = $1",
+            tenant_id,
+        )
+    if row is None:
+        logger.warning(
+            "_persist_design_monorepo_url: tenant %s not found; "
+            "leaving design_monorepo_url NULL",
+            tenant_id,
+        )
+        return
+    provider_id = row["vcs_provider"] or "github"
+    try:
+        provider = get_provider(provider_id)
+    except KeyError:
+        logger.warning(
+            "_persist_design_monorepo_url: provider %r not registered "
+            "(operator may not have configured its OAuth creds); "
+            "leaving design_monorepo_url NULL for colony %s.",
+            provider_id, colony_id,
+        )
+        return
+    clone_url = provider.repo_clone_url(VcsRepoRef(
+        vcs_repo_id=vcs_repo_id,
+        full_name=vcs_repo_full_name,
+        default_branch=default_branch,
+        # Permission is irrelevant for URL rendering — the
+        # ``repo_clone_url`` method is pure formatting.
+        user_permission="read",
+    ))
+    await auth_service.set_design_monorepo(
+        db_pool,
+        colony_id=colony_id,
+        tenant_id=tenant_id,
+        origin_url=clone_url,
+        branch=default_branch,
+    )
 
 
 __all__ = ("provision_colony",)

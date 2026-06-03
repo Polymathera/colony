@@ -22,6 +22,10 @@ import {
   type ColonyInfo,
 } from "@/api/hooks/useAuth";
 import {
+  useDiscoverableRepos,
+  type DiscoverableRepo,
+} from "@/api/hooks/useGitHubIdentity";
+import {
   useColonyDesignMonorepo,
   useColonyGitAttribution,
   useSetColonyDesignMonorepo,
@@ -97,7 +101,17 @@ function NewColonyForm({
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  // Repo binding — empty string = "no repo (bare colony, set later)".
+  const [repoChoice, setRepoChoice] = useState<string>("");
+  // Commit attribution — defaults match the backend schema defaults.
+  const [principal, setPrincipal] = useState("colony");
+  const [coAuthor, setCoAuthor] = useState("user");
   const create = useCreateColony();
+  const repos = useDiscoverableRepos();
+
+  const picked: DiscoverableRepo | undefined = (repos.data ?? []).find(
+    (r) => r.vcs_repo_id === repoChoice,
+  );
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -106,6 +120,13 @@ function NewColonyForm({
       const created = await create.mutateAsync({
         name: name.trim(),
         description: description.trim(),
+        // When the user didn't pick a repo, send all three as null
+        // so the backend skips the URL-derivation block.
+        vcs_repo_id: picked?.vcs_repo_id ?? null,
+        vcs_repo_full_name: picked?.vcs_repo_full_name ?? null,
+        default_branch: picked?.default_branch ?? null,
+        commit_principal: principal.trim() || "colony",
+        commit_co_author: coAuthor.trim() || null,
       });
       onCreated(created.colony_id);
       onClose();
@@ -132,6 +153,63 @@ function NewColonyForm({
         placeholder="Description (optional)"
         className="px-2 py-1 rounded border bg-background text-sm"
       />
+      {/* Design monorepo — dropdown of repos the sign-in walker
+          cached for this tenant. ``has_colony_marker=true`` rows are
+          badged so the user can prefer them. "(None)" leaves the
+          colony unbound; operator can set the URL later via the
+          per-colony "Design monorepo" picker. */}
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] text-muted-foreground">
+          Design monorepo
+        </span>
+        <select
+          value={repoChoice}
+          onChange={(e) => setRepoChoice(e.target.value)}
+          className="px-2 py-1 rounded border bg-background text-sm"
+          disabled={repos.isLoading}
+        >
+          <option value="">
+            {repos.isLoading
+              ? "Loading repos…"
+              : (repos.data ?? []).length === 0
+                ? "(no discoverable repos — sign out + back in to refresh)"
+                : "(None — set later)"}
+          </option>
+          {(repos.data ?? []).map((r) => (
+            <option key={r.vcs_repo_id} value={r.vcs_repo_id}>
+              {r.vcs_repo_full_name}
+              {r.has_colony_marker ? "  ✓ has .colony/" : ""}
+              {r.user_permission === "read" ? "  (read-only)" : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+      {/* Commit attribution — well-known values: user / colony /
+          agent. Free-form for forward-compat with custom agent labels. */}
+      <div className="flex gap-2">
+        <label className="flex-1 flex flex-col gap-1">
+          <span className="text-[10px] text-muted-foreground">
+            Commit principal
+          </span>
+          <input
+            value={principal}
+            onChange={(e) => setPrincipal(e.target.value)}
+            placeholder="colony"
+            className="px-2 py-1 rounded border bg-background text-sm"
+          />
+        </label>
+        <label className="flex-1 flex flex-col gap-1">
+          <span className="text-[10px] text-muted-foreground">
+            Co-author (blank = none)
+          </span>
+          <input
+            value={coAuthor}
+            onChange={(e) => setCoAuthor(e.target.value)}
+            placeholder="user"
+            className="px-2 py-1 rounded border bg-background text-sm"
+          />
+        </label>
+      </div>
       <div className="flex gap-2">
         <button
           type="submit"
@@ -186,9 +264,9 @@ function ColonyRow({
           <span className="text-sm font-medium text-foreground">
             {colony.name}
           </span>
-          {colony.is_default && (
+          {isActive && (
             <span className="text-[9px] uppercase tracking-wider text-muted-foreground">
-              default
+              active
             </span>
           )}
         </div>
@@ -227,14 +305,15 @@ function DesignMonorepoField({
 }) {
   const cfg = useColonyDesignMonorepo(colonyId);
   const set = useSetColonyDesignMonorepo(colonyId);
+  const repos = useDiscoverableRepos();
   const [editing, setEditing] = useState(false);
-  const [draftUrl, setDraftUrl] = useState("");
-  const [draftBranch, setDraftBranch] = useState("main");
+  // The dropdown is keyed by ``vcs_repo_id``; "" = no selection.
+  const [draftRepoId, setDraftRepoId] = useState<string>("");
   // Transient confirmation flag — the save lands in Postgres
-  // immediately (independent of cluster-ready state), but the form
-  // collapses back to the read view on success which makes the save
-  // easy to miss. A short-lived "Saved" indicator answers "did this
-  // actually persist?" without needing a refresh.
+  // immediately, but the form collapses back to the read view on
+  // success which makes the save easy to miss. A short-lived
+  // "Saved" indicator answers "did this actually persist?" without
+  // needing a refresh.
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
   const startEdit = () => {
@@ -243,18 +322,28 @@ function DesignMonorepoField({
     // the next session (which boots under the active colony) reads B's
     // empty row in the Design Monorepo tab.
     onSelectColony(colonyId);
-    setDraftUrl(cfg.data?.origin_url ?? "");
-    setDraftBranch(cfg.data?.branch ?? "main");
+    // Pre-select the dropdown to the colony's current URL if it
+    // matches a discovered repo's clone URL; otherwise leave blank
+    // so the user has to actively pick.
+    const currentUrl = cfg.data?.origin_url;
+    const match = (repos.data ?? []).find(
+      (r) => r.clone_url === currentUrl,
+    );
+    setDraftRepoId(match?.vcs_repo_id ?? "");
     setEditing(true);
   };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!draftUrl.trim()) return;
+    if (!draftRepoId) return;
+    const picked = (repos.data ?? []).find(
+      (r) => r.vcs_repo_id === draftRepoId,
+    );
+    if (!picked || !picked.clone_url) return;
     try {
       await set.mutateAsync({
-        origin_url: draftUrl.trim(),
-        branch: draftBranch.trim() || "main",
+        origin_url: picked.clone_url,
+        branch: picked.default_branch,
       });
       cfg.refetch();
       setEditing(false);
@@ -271,28 +360,42 @@ function DesignMonorepoField({
   }, [savedAt]);
 
   if (editing) {
+    const available = repos.data ?? [];
     return (
       <form onSubmit={submit} className="flex flex-col gap-1">
         <div className="flex flex-wrap gap-1">
           <span className="text-[10px] text-muted-foreground self-center">
             Design monorepo:
           </span>
-          <input
+          <select
             autoFocus
-            value={draftUrl}
-            onChange={(e) => setDraftUrl(e.target.value)}
-            placeholder="https://github.com/me/repo.git"
+            value={draftRepoId}
+            onChange={(e) => setDraftRepoId(e.target.value)}
             className="px-1.5 py-0.5 rounded border bg-background text-xs flex-1 min-w-[14rem]"
-          />
-          <input
-            value={draftBranch}
-            onChange={(e) => setDraftBranch(e.target.value)}
-            placeholder="branch"
-            className="px-1.5 py-0.5 rounded border bg-background text-xs w-20"
-          />
+            disabled={repos.isLoading}
+          >
+            <option value="">
+              {repos.isLoading
+                ? "Loading repos…"
+                : available.length === 0
+                  ? "(no discoverable repos — sign out + back in to refresh)"
+                  : "(Pick a repo)"}
+            </option>
+            {available.map((r) => (
+              <option
+                key={r.vcs_repo_id}
+                value={r.vcs_repo_id}
+                disabled={r.clone_url === null}
+              >
+                {r.vcs_repo_full_name}
+                {r.has_colony_marker ? "  ✓ has .colony/" : ""}
+                {r.user_permission === "read" ? "  (read-only)" : ""}
+              </option>
+            ))}
+          </select>
           <button
             type="submit"
-            disabled={!draftUrl.trim() || set.isPending}
+            disabled={!draftRepoId || set.isPending}
             className="px-2 py-0.5 rounded bg-primary text-primary-foreground text-xs disabled:opacity-50"
           >
             {set.isPending ? "…" : "Save"}

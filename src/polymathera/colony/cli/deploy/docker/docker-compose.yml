@@ -422,11 +422,25 @@ services:
       - GITHUB_PRIVATE_KEY_PEM=${GITHUB_PRIVATE_KEY_PEM:-}
       - GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID:-}
       - GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET:-}
+      # GitLab OAuth Application — dashboard ONLY (sign-in runs here;
+      # no agent-side GitLab consumer yet). Empty leaves the GitLab
+      # provider unregistered + sign-in returning 404.
+      - GITLAB_OAUTH_CLIENT_ID=${GITLAB_OAUTH_CLIENT_ID:-}
+      - GITLAB_OAUTH_CLIENT_SECRET=${GITLAB_OAUTH_CLIENT_SECRET:-}
+      - GITLAB_BASE_URL=${GITLAB_BASE_URL:-}
       # Webhook receiver — HMAC secret. Dashboard service ONLY
       # (the receiver runs here; agent processes use App-installation
       # tokens, not the webhook secret). Empty when no colony uses
       # ``mode: webhook``.
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
+      # Dev-mode license seeding (see .env.template). Dashboard ONLY
+      # — agent processes don't run the seeder. Empty in production.
+      - COLONY_DEV_LICENSED_INSTALLATIONS=${COLONY_DEV_LICENSED_INSTALLATIONS:-}
+      # Fernet key for at-rest encryption of ``tenants.bot_token_encrypted``
+      # (GitLab GAT / Bitbucket workspace token storage). Dashboard
+      # ONLY today; PR 7+ adds it to ray-head/worker when agents need
+      # to decrypt for non-GitHub mint_bot_credentials.
+      - COLONY_SECRETS_FERNET_KEY=${COLONY_SECRETS_FERNET_KEY:-}
       # Knowledge stack — Qdrant URL, GROBID URL, PDF extractor
       # backend, and image directory live in the operator YAML
       # (``knowledge`` — see configs/example.yaml).

@@ -69,6 +69,13 @@ class DeployConfig:
             # Same App, OAuth client for user-to-server flow.
             "GITHUB_APP_CLIENT_ID",
             "GITHUB_APP_CLIENT_SECRET",
+            # GitLab OAuth Application — independent of GitHub. When
+            # the secret is unset, GitLab provider stays unregistered
+            # and ``/api/v1/auth/gitlab/sign-in`` returns 404.
+            # Base URL defaults to gitlab.com; override for self-hosted.
+            "GITLAB_OAUTH_CLIENT_ID",
+            "GITLAB_OAUTH_CLIENT_SECRET",
+            "GITLAB_BASE_URL",
             # P9 webhook receiver HMAC secret. Required by
             # ``POST /api/v1/github/webhook`` on the dashboard
             # service (compose substitution at startup); empty is
@@ -88,5 +95,17 @@ class DeployConfig:
             # dashboard. Leave unset in production deployments —
             # GitHub posts straight to the public dashboard URL.
             "POLYMATHERA_SMEE_FORWARDING_URL",
+            # Dev-mode license seeding: comma-separated
+            # ``<installation_id>:<plan>`` pairs. Lifted into the
+            # dashboard container's env so the lifespan seeder reads
+            # it (see ``auth/license_service.seed_dev_licenses``).
+            "COLONY_DEV_LICENSED_INSTALLATIONS",
+            # Fernet key for at-rest secrets encryption — currently
+            # used only by ``tenants.bot_token_encrypted`` (GitLab
+            # GAT / Bitbucket workspace token storage; PR 6).
+            # Dashboard service only for now; PR 7+ exports to
+            # ray-head/worker when agents need to decrypt for
+            # non-GitHub bot-cred mint.
+            "COLONY_SECRETS_FERNET_KEY",
         ]
     )

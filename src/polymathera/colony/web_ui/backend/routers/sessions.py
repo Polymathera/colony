@@ -332,6 +332,48 @@ async def create_session(
 
     request = request or CreateSessionRequest()
 
+    # Validate the X-Colony-Id the frontend asked us to scope under
+    # actually exists in postgres for this user's tenant. Without
+    # this gate, a stale browser localStorage entry (e.g. left over
+    # from before ``colony-env down --volumes`` wiped the DB) would
+    # silently create a "ghost" session in a colony id that no
+    # longer exists, leaving the session agent unable to bootstrap
+    # (NoSuchPathError on the clone dir, chat messages stranded in
+    # the wrong scope's blackboard, etc.).
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        get_colony_id, get_tenant_id,
+    )
+    requested_colony_id = get_colony_id() or ""
+    requested_tenant_id = get_tenant_id() or ""
+    if not requested_colony_id or not requested_tenant_id:
+        return CreateSessionResponse(
+            session_id="", status="error",
+            message=(
+                "X-Colony-Id header + tenant context required. "
+                "Re-sign-in if you just redeployed."
+            ),
+        )
+    if colony._db_pool is not None:
+        from ..auth import service as auth_service
+        owned = await auth_service.list_colonies(
+            colony._db_pool, requested_tenant_id,
+        )
+        if not any(c["colony_id"] == requested_colony_id for c in owned):
+            logger.warning(
+                "create_session: rejected X-Colony-Id=%s for "
+                "tenant=%s (no such colony — stale browser cache?)",
+                requested_colony_id, requested_tenant_id,
+            )
+            return CreateSessionResponse(
+                session_id="", status="error",
+                message=(
+                    f"Colony {requested_colony_id!r} is not visible "
+                    f"to you. Pick a real colony from the dropdown "
+                    f"(your browser may be remembering a colony from "
+                    f"a previous deployment — refresh the page)."
+                ),
+            )
+
     try:
         from polymathera.colony.agents.sessions.models import SessionMetadata
         metadata = SessionMetadata(name=request.name) if request.name else None

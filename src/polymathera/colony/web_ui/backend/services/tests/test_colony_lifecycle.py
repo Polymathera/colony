@@ -38,12 +38,13 @@ async def test_provision_colony_inserts_and_bootstraps(
     colony = SimpleNamespace(_db_pool=object())
     result = await colony_lifecycle.provision_colony(
         colony, tenant_id="tenant_abc", name="Workspace 1",
-        description="hi", is_default=False,
+        description="hi",
     )
 
     create.assert_awaited_once_with(
         colony._db_pool, tenant_id="tenant_abc", name="Workspace 1",
-        description="hi", is_default=False,
+        description="hi",
+        vcs_repo_id=None, vcs_repo_full_name=None, default_branch=None,
     )
     bootstrap.assert_awaited_once_with(
         colony, tenant_id="tenant_abc", colony_id="colony_xyz",
