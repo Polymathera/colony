@@ -43,6 +43,9 @@ export interface SessionSummary {
   state: string;
   created_at: number;
   run_count: number;
+  // P8-0: "user" for chat sessions, "system" for the per-colony
+  // colony-singleton host (always-on, no user attached).
+  session_kind?: string;
 }
 
 export interface RunSummary {

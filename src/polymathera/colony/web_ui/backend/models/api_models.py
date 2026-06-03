@@ -65,6 +65,11 @@ class SessionSummary(BaseModel):
     state: str = ""
     created_at: float = 0.0
     run_count: int = 0
+    # P8-0 discriminator: ``"user"`` for chat sessions, ``"system"``
+    # for the per-colony colony-singleton host. Surfaced so the
+    # Traces tab can visually distinguish them when
+    # ``?include_system=true`` is in play.
+    session_kind: str = "user"
 
 
 class RunSummary(BaseModel):

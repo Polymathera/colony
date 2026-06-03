@@ -153,11 +153,12 @@ class ColonyConnection:
         return self._connected
 
     async def _get_handle(self, name_attr: str) -> Any:
-        """Get a cached deployment handle using colony.system helpers.
+        """Get a cached deployment handle.
 
-        Uses get_deployment_names() to resolve the actual deployment name,
-        then serving.get_deployment() to get the handle. Retries on failure
-        since deployments may not be ready when the dashboard starts.
+        Raises ValueError if the named deployment isn't registered yet
+        — callers that need to wait for cluster readiness should poll
+        the deployment's own ``is_ready`` endpoint (see
+        ``services/colony_lifecycle.py::_wait_for_session_manager_ready``).
         """
         if name_attr in self._handle_cache:
             return self._handle_cache[name_attr]

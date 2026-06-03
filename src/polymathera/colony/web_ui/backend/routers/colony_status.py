@@ -11,7 +11,8 @@ explicitly deferred.
 All reads are server-side joins against ``interaction_log`` (the
 write-through table P8b/P10/P11 InteractionLog extensions populate).
 The dashboard's db_pool is the same one that mirrors the events, so
-the routes don't need a Ray Serve round-trip.
+the routes don't need a deployment round-trip into the colony serving
+framework.
 """
 
 from __future__ import annotations

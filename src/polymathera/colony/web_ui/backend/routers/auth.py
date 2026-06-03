@@ -100,22 +100,36 @@ async def signup(
     db = _get_db_pool(colony)
 
     try:
-        result = await auth_service.create_user(db, request.username, request.password)
+        user = await auth_service.create_user(db, request.username, request.password)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
+    # Land the user's default colony through the single
+    # colony-lifecycle entry point so the per-colony system
+    # ``SessionAgent`` bootstrap runs alongside the SQL insert. See
+    # ``services/colony_lifecycle.py`` for why direct
+    # ``auth_service.create_colony`` calls are not allowed.
+    from ..services.colony_lifecycle import provision_colony
+    default_colony = await provision_colony(
+        colony,
+        tenant_id=user["tenant_id"],
+        name="Default",
+        description="Auto-created default workspace",
+        is_default=True,
+    )
+
     # Generate tokens and set cookies
     access_token = auth_service.create_access_token(
-        result["user_id"], result["tenant_id"], request.username,
+        user["user_id"], user["tenant_id"], request.username,
     )
-    refresh_token = auth_service.create_refresh_token(result["user_id"])
+    refresh_token = auth_service.create_refresh_token(user["user_id"])
     _set_auth_cookies(response, access_token, refresh_token)
 
     return AuthResponse(
-        user_id=result["user_id"],
+        user_id=user["user_id"],
         username=request.username,
-        tenant_id=result["tenant_id"],
-        default_colony_id=result["colony_id"],
+        tenant_id=user["tenant_id"],
+        default_colony_id=default_colony["colony_id"],
         message="Account created",
     )
 

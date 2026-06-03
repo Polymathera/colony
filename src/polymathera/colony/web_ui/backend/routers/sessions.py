@@ -181,6 +181,7 @@ async def list_sessions(
                 state=str(_get(s, "state", "")),
                 created_at=_get(s, "created_at", 0.0),
                 run_count=len(_get(s, "runs", []) or []),
+                session_kind=str(_get(s, "session_kind", "user")),
             )
             for s in sessions
         ]

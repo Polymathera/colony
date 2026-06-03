@@ -78,14 +78,21 @@ def decode_token(token: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 async def create_user(db_pool, username: str, password: str) -> dict[str, str]:
-    """Create a new user with a default colony.
+    """Create a new user + its tenant row.
 
-    Returns dict with user_id, tenant_id, colony_id.
-    Raises ValueError if username already exists.
+    Returns ``{"user_id": ..., "tenant_id": ...}``. The caller is
+    responsible for landing the user's default colony via
+    :func:`services.colony_lifecycle.provision_colony` — this
+    function intentionally does NOT create one inline so that every
+    colony in the system funnels through the single colony-lifecycle
+    helper that also bootstraps the per-colony system ``SessionAgent``.
+    Earlier versions inserted a default colony here, which silently
+    skipped the bootstrap and left colony-singleton capabilities dead.
+
+    Raises ``ValueError`` if the username already exists.
     """
     user_id = f"user_{uuid.uuid4().hex[:12]}"
     tenant_id = user_id  # tenant_id = user_id for v1
-    colony_id = f"colony_{uuid.uuid4().hex[:12]}"
     pw_hash = hash_password(password)
 
     async with db_pool.acquire() as conn:
@@ -109,14 +116,9 @@ async def create_user(db_pool, username: str, password: str) -> dict[str, str]:
                 "INSERT INTO users (id, username, password_hash, tenant_id) VALUES ($1, $2, $3, $4)",
                 user_id, username, pw_hash, tenant_id,
             )
-            # Create default colony
-            await conn.execute(
-                "INSERT INTO colonies (id, name, tenant_id, description, is_default) VALUES ($1, $2, $3, $4, $5)",
-                colony_id, "Default", tenant_id, "Auto-created default workspace", True,
-            )
 
-    logger.info("Created user %s (tenant=%s) with default colony %s", username, tenant_id, colony_id)
-    return {"user_id": user_id, "tenant_id": tenant_id, "colony_id": colony_id}
+    logger.info("Created user %s (tenant=%s)", username, tenant_id)
+    return {"user_id": user_id, "tenant_id": tenant_id}
 
 
 async def authenticate_user(db_pool, username: str, password: str) -> dict[str, str] | None:
@@ -165,14 +167,20 @@ async def get_user_by_id(db_pool, user_id: str) -> dict[str, Any] | None:
 
 async def create_colony(
     db_pool, tenant_id: str, name: str, description: str = "",
+    *, is_default: bool = False,
 ) -> dict[str, str]:
-    """Create a new colony for a tenant."""
+    """SQL-layer colony insert. Do NOT call directly from routers —
+    go through :func:`services.colony_lifecycle.provision_colony` so
+    the system-session bootstrap runs. See that module's docstring
+    for the rationale.
+    """
     colony_id = f"colony_{uuid.uuid4().hex[:12]}"
 
     async with db_pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO colonies (id, name, tenant_id, description) VALUES ($1, $2, $3, $4)",
-            colony_id, name, tenant_id, description,
+            "INSERT INTO colonies (id, name, tenant_id, description, is_default) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            colony_id, name, tenant_id, description, is_default,
         )
 
     return {"colony_id": colony_id, "name": name, "tenant_id": tenant_id}

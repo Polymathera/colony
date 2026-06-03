@@ -8,11 +8,34 @@ import type {
   SessionActionResponse,
 } from "../types";
 
-export function useSessions(tenantId?: string) {
-  const params = tenantId ? `?tenant_id=${tenantId}` : "";
+export interface UseSessionsOptions {
+  tenantId?: string;
+  // When true, include colony-singleton system sessions
+  // (``session_kind="system"``) in the response. Backend default is
+  // false (chat-UI views hide them); the Traces tab opts in to
+  // surface them for observability. See routers/sessions.py.
+  includeSystem?: boolean;
+}
+
+export function useSessions(options: UseSessionsOptions | string = {}) {
+  // Back-compat: the legacy signature passed ``tenantId`` as a bare
+  // string. Preserve it so existing callers keep working unchanged.
+  const opts: UseSessionsOptions =
+    typeof options === "string" ? { tenantId: options } : options;
+  const { tenantId, includeSystem = false } = opts;
+
+  const search = new URLSearchParams();
+  if (tenantId) search.set("tenant_id", tenantId);
+  if (includeSystem) search.set("include_system", "true");
+  const qs = search.toString();
+  const path = qs ? `/sessions/?${qs}` : "/sessions/";
+
   return useQuery({
-    queryKey: ["sessions", tenantId],
-    queryFn: () => apiFetch<SessionSummary[]>(`/sessions/${params}`),
+    // Distinct query key so the system-included view doesn't share
+    // a cache entry with the default chat-UI view — otherwise either
+    // surface would clobber the other on refetch.
+    queryKey: ["sessions", { tenantId, includeSystem }],
+    queryFn: () => apiFetch<SessionSummary[]>(path),
   });
 }
 

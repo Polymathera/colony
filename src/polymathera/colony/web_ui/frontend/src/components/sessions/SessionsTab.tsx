@@ -27,6 +27,18 @@ const sessionColumns = [
     className: "font-mono text-xs",
     render: (row: SessionSummary) => row.session_id.slice(0, 12) + "...",
   },
+  {
+    key: "session_kind",
+    header: "Kind",
+    render: (row: SessionSummary) => {
+      const kind = row.session_kind ?? "user";
+      return (
+        <Badge variant={kind === "system" ? "info" : "default"}>
+          {kind}
+        </Badge>
+      );
+    },
+  },
   { key: "tenant_id", header: "Tenant" },
   {
     key: "state",
@@ -75,7 +87,12 @@ const runColumns = [
 ];
 
 export function SessionsTab() {
-  const sessions = useSessions();
+  // Traces is the observability surface — surface system sessions
+  // (the per-colony colony-singleton hosts) alongside user chat
+  // sessions. The chat-UI Sidebar / LandingPage stick with the
+  // default (system sessions hidden) so they don't pollute the
+  // user-facing session list.
+  const sessions = useSessions({ includeSystem: true });
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
   const runs = useSessionRuns(selectedSessionId);
 

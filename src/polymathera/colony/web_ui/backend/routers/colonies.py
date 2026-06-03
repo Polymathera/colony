@@ -55,34 +55,22 @@ async def create_colony(
     user: dict[str, Any] = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> ColonyInfo:
-    """Create a new colony (workspace)."""
-    db = _get_db_pool(colony)
-    result = await auth_service.create_colony(
-        db, user["tenant_id"], request.name, request.description,
+    """Create a new colony (workspace).
+
+    Funnels through :func:`provision_colony` — the single colony
+    creation entry point that pairs the SQL insert with the
+    per-colony system ``SessionAgent`` bootstrap. See
+    ``services/colony_lifecycle.py`` for the rationale.
+    """
+    _get_db_pool(colony)  # 503 early if the db pool is missing
+    from ..services.colony_lifecycle import provision_colony
+    result = await provision_colony(
+        colony,
+        tenant_id=user["tenant_id"],
+        name=request.name,
+        description=request.description,
+        is_default=False,
     )
-
-    # P8-0: bootstrap the system session for the new colony so
-    # colony-singleton capabilities are alive immediately (no dashboard
-    # restart required). Idempotent; the dashboard's lifespan walker
-    # will no-op on this colony next startup. Best-effort — the colony
-    # row is already persisted, so a singleton-bootstrap failure does
-    # not invalidate the create response. The error is logged and the
-    # next lifespan or create_colony call retries.
-    from ..chat.system_session import ensure_system_session_for_colony
-    try:
-        await ensure_system_session_for_colony(
-            colony,
-            tenant_id=result["tenant_id"],
-            colony_id=result["colony_id"],
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "create_colony: system-session bootstrap failed for "
-            "colony %s; colony-singleton capabilities will not be "
-            "running until the next dashboard restart.",
-            result["colony_id"],
-        )
-
     return ColonyInfo(**result)
 
 

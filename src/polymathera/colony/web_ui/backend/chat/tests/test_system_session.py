@@ -2,7 +2,8 @@
 system-session bootstrap module.
 
 The full bootstrap path exercises the live ``SessionManagerDeployment``
-(Ray Serve actor); these tests pin only the pure orchestration logic
+(a Polymathera serving deployment — Ray Core actor under the hood,
+NOT Ray Serve); these tests pin only the pure orchestration logic
 in the module — that the helper hits the right manager endpoints in
 the right order, skips spawn when the session already has an agent,
 and walks Postgres colonies in the cross-tenant case.

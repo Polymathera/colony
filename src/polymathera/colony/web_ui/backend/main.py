@@ -115,10 +115,10 @@ async def lifespan(app: FastAPI):
         # P8-0: bootstrap a system session per colony. Always-on host
         # for colony-singleton capabilities (P8: GitHub inbound +
         # InteractionLog; P9+ webhook + mention routing). Idempotent;
-        # called again from ``routers.colonies.create_colony`` after a
-        # new colony lands so fresh colonies get their system session
-        # without a dashboard restart. Best-effort — a single colony's
-        # failure does NOT prevent the dashboard from starting.
+        # called again from ``services.colony_lifecycle.provision_colony``
+        # after a new colony lands so fresh colonies get their system
+        # session without a dashboard restart. Best-effort — a single
+        # colony's failure does NOT prevent the dashboard from starting.
         from .chat.system_session import (
             ensure_system_sessions_for_all_colonies,
         )
