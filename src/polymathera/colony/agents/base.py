@@ -45,6 +45,10 @@ from .blueprint import (
     ActionPolicyBlueprint,
     AgentBlueprint,
 )
+from .metadata_parameters import (
+    AgentMetadataValidationError,
+    ParameterSpec,
+)
 from .blackboard import EnhancedBlackboard, BlackboardEvent
 from .blackboard.types import KeyPatternFilter, EventFilter
 from .sessions.models import AgentRun, AgentRunConfig, AgentRunEvent, RunStatus, RunResourceUsage
@@ -226,7 +230,21 @@ class AgentCapability(ABC):
     Subclasses can override:
     - `stream_events_to_queue()`: Stream capability events to action policy (default uses ``input_patterns``)
     - `get_result_future()`: Get future for capability's task result
+
+    Subclasses MAY declare the ``metadata.parameters`` keys they read
+    via the :attr:`AGENT_METADATA_PARAMS` ClassVar. The base
+    :meth:`initialize` applies declared defaults for optional specs
+    and validates that required specs are populated — failing fast
+    at agent-init time with a clean error rather than later in a
+    leaf consumer (see ``metadata_parameters.py`` for the design).
     """
+
+    # Declarative spec of the ``metadata.parameters`` keys this
+    # capability reads. The default empty tuple makes legacy
+    # capabilities a no-op at validation time. See
+    # ``polymathera.colony.agents.metadata_parameters`` for the full
+    # mechanics — scope semantics, inheritance, registry.
+    AGENT_METADATA_PARAMS: ClassVar[tuple[ParameterSpec, ...]] = ()
 
     def __init__(
         self,
@@ -740,8 +758,80 @@ class AgentCapability(ABC):
                     await super().initialize()  # Auto-registers log_result hook
                     # ... additional initialization
             ```
+
+        After hook installation, applies declared defaults for
+        optional :attr:`AGENT_METADATA_PARAMS` specs and validates
+        that required specs are populated on the agent's
+        ``metadata.parameters``. Detached-mode capabilities (no
+        owning agent) skip both passes.
         """
         self.install_hook_handlers()
+        self._apply_agent_metadata_param_defaults()
+        self._validate_agent_metadata_params()
+
+    def _apply_agent_metadata_param_defaults(self) -> None:
+        """Materialise declared optional-spec defaults onto
+        ``agent.metadata.parameters``.
+
+        For each spec on ``AGENT_METADATA_PARAMS`` that carries a
+        ``default`` or ``default_factory`` and whose key is absent on
+        the agent's parameters dict, writes the resolved default.
+        Lets consumers drop their inline ``params.get(key, fallback)``
+        ladders — the default is materialised once at init.
+
+        No-op in detached mode (no owning agent → no metadata to
+        write to) and when the capability declares no specs.
+        """
+        if self._agent is None:
+            return
+        specs = type(self).AGENT_METADATA_PARAMS
+        if not specs:
+            return
+        params = self._agent.metadata.parameters
+        for spec in specs:
+            if spec.required:
+                continue
+            if params.get(spec.name) is not None:
+                continue
+            params[spec.name] = spec.resolve_default()
+
+    def _validate_agent_metadata_params(self) -> None:
+        """Raise :class:`AgentMetadataValidationError` if any
+        required spec on ``AGENT_METADATA_PARAMS`` is missing from
+        ``agent.metadata.parameters``.
+
+        Runs AFTER :meth:`_apply_agent_metadata_param_defaults`, so
+        optional specs with declared defaults always satisfy the
+        gate. A failure points at the spawn pipeline — COLONY /
+        SESSION-scoped keys flow via
+        ``AgentPoolCapability.create_agent`` (the central inheritance
+        gate); CALLER-scoped keys are the spawn caller's
+        responsibility.
+
+        No-op in detached mode and when the capability declares no
+        specs.
+        """
+        if self._agent is None:
+            return
+        specs = type(self).AGENT_METADATA_PARAMS
+        if not specs:
+            return
+        params = self._agent.metadata.parameters
+        missing = sorted(
+            spec.name for spec in specs
+            if spec.required and params.get(spec.name) is None
+        )
+        if missing:
+            raise AgentMetadataValidationError(
+                f"{type(self).__name__}: required metadata parameters "
+                f"missing: {missing!r}. COLONY/SESSION-scoped keys "
+                f"flow from the parent via "
+                f"AgentPoolCapability.create_agent — check that the "
+                f"parent's metadata.parameters carries them. "
+                f"CALLER-scoped keys must be supplied by the spawn "
+                f"caller (e.g. by ``spawn_mission``'s "
+                f"``mission_params`` argument)."
+            )
 
     async def resolve_value(
         self,
@@ -2010,6 +2100,15 @@ class Agent(BaseModel):
             # Only receive events, no actions exposed
             self.add_capability(validation_cap, events_only=True)
         """
+        # Auto-thread the live app name onto the capability so its
+        # own code can reach for ``self._app_name`` without it being
+        # None — the bind/spawn pipeline doesn't pass ``app_name`` as
+        # a constructor kwarg, so capabilities mounted via
+        # ``capability_blueprints`` ALL had ``self._app_name = None``
+        # before this.
+        if not capability._app_name:
+            capability._app_name = serving.get_my_app_name()
+
         # Store action filter parameters for ActionDispatcher to use
         # _action_include_filter: set of action keys to include, or None for all
         # _action_exclude_filter: set of action keys to exclude
@@ -4118,7 +4217,7 @@ class AgentManagerBase:
         Bridges the agent loop exit to the session system so that
         ``AgentRun.status`` reflects the actual outcome.
         """
-        run_id = getattr(agent.metadata, "run_id", None)
+        run_id = agent.metadata.run_id
         if not run_id or run_id == "default":
             return
 

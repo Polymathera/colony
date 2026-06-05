@@ -418,6 +418,7 @@ async def create_session(
             )
             from polymathera.colony.design_monorepo import (
                 design_monorepo_capability_blueprints,
+                DesignMonorepoCapabilityBase,
             )
             from polymathera.colony.agents.scopes import BlackboardScope
             from polymathera.colony.agents.patterns.planning.streams import (
@@ -659,17 +660,18 @@ async def create_session(
                     ),
                 ),
                 parameters={
-                    "available_missions": {},
-                    # ``available_tools`` is populated dynamically by
-                    # :meth:`SessionOrchestratorCapability._refresh_available_tools`
-                    # from the L4 design monorepo's
-                    # ``.colony/tool-registry.json`` catalog. We seed
-                    # an empty dict here so planner-prompt rendering
-                    # works during the brief window between agent
-                    # construction and the first refresh.
-                    "available_tools": {},
-                    "session_id": session_id,
-                    "repl_guidance_override": (
+                    # SESSION-scoped keys live on
+                    # ``SessionOrchestratorCapability.AGENT_METADATA_PARAMS``;
+                    # we seed an empty dict + the REPL override here so
+                    # the planner-prompt rendering works during the
+                    # brief window between agent construction and the
+                    # first ``_refresh_available_*`` pass. ``session_id``
+                    # is NOT seeded — it's a typed property on
+                    # ``AgentMetadata`` (via syscontext), never a
+                    # parameters key.
+                    SessionOrchestratorCapability.AVAILABLE_MISSIONS_KEY: {},
+                    SessionOrchestratorCapability.AVAILABLE_TOOLS_KEY: {},
+                    SessionOrchestratorCapability.REPL_GUIDANCE_OVERRIDE_KEY: (
                         "## REPL\n\n"
                         "You have a Python REPL. Use `await run(\"action_key\", ...)` to "
                         "execute capability actions. Use `results[\"key\"] = value` to "
@@ -681,7 +683,7 @@ async def create_session(
                     # lazy-clone the repo into the per-agent working
                     # directory on first access. ``None`` when the
                     # colony has no design monorepo configured yet.
-                    "design_monorepo_url": (
+                    DesignMonorepoCapabilityBase._DESIGN_MONOREPO_URL_KEY: (
                         await auth_service.get_design_monorepo(
                             colony._db_pool,
                             colony_id=get_colony_id() or "",
@@ -694,7 +696,7 @@ async def create_session(
                     # into the schema return ``commit_principal=colony``
                     # / ``commit_co_author=user`` for fresh colonies;
                     # operator overrides via the landing page.
-                    "git_attribution": (
+                    DesignMonorepoCapabilityBase._GIT_ATTRIBUTION_KEY: (
                         await auth_service.get_git_attribution(
                             colony._db_pool,
                             colony_id=get_colony_id() or "",
@@ -712,7 +714,7 @@ async def create_session(
                     # Every field is ``None`` until the operator wires
                     # the corresponding piece; downstream readers
                     # handle the unset case explicitly.
-                    "github_identity": _resolve_github_identity(
+                    GitHubCapability.GITHUB_IDENTITY_KEY: _resolve_github_identity(
                         await auth_service.get_tenant_github_installation(
                             colony._db_pool,
                             tenant_id=user.get("tenant_id", ""),

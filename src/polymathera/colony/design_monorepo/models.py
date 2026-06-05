@@ -651,12 +651,24 @@ class FileStat(BaseModel):
 
 
 class FileContent(BaseModel):
-    """Result of :meth:`read_file` — bounded full-file read."""
+    """Result of :meth:`read_file` — bounded full-file read.
+
+    Missing-file case: ``exists=False`` with ``content=""`` /
+    ``total_bytes=0``. Callers (especially LLM planners that
+    can't catch exceptions cleanly in the REPL) branch on
+    ``exists`` instead of installing a try/except for ENOENT —
+    same pattern as :class:`FileStat`.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     path: str
-    content: str
+    exists: bool = True
+    """``False`` when the file did not exist at the requested
+    path (or wasn't a regular file). The other fields then carry
+    empty/zero values."""
+
+    content: str = ""
     truncated: bool = False
     """``True`` when the file exceeded ``max_bytes`` and ``content`` is
     the prefix only."""

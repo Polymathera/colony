@@ -145,17 +145,23 @@ class InteractionLogCapability(ColonySingletonCapabilityBase):
 
         await super().initialize()
 
-        params = (
-            getattr(self._agent.metadata, "parameters", None) or {}
-        ) if self._agent is not None else {}
-        self._tenant_id = params.get("tenant_id")
-        self._colony_id = params.get("colony_id")
+        # Read tenant + colony from the agent's syscontext-derived
+        # typed properties — both are captured at metadata
+        # construction time by ``AgentMetadata``'s
+        # ``default_factory=serving.require_execution_context``
+        # (the system-session bootstrap runs blueprint construction
+        # inside ``colony.user_execution_context``).
+        if self._agent is None:
+            self._tenant_id = ""
+            self._colony_id = ""
+        else:
+            self._tenant_id = self._agent.metadata.tenant_id
+            self._colony_id = self._agent.metadata.colony_id
         if not self._tenant_id or not self._colony_id:
-            self._quiesced_reason = "no_tenant_or_colony_in_metadata"
+            self._quiesced_reason = "no_tenant_or_colony_in_syscontext"
             logger.warning(
                 "InteractionLogCapability: tenant_id/colony_id absent "
-                "from agent metadata.parameters; write-through "
-                "DISABLED.",
+                "from agent syscontext; write-through DISABLED.",
             )
             return
 

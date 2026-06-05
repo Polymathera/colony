@@ -861,6 +861,31 @@ class GitFileStorage:
         # its own ``await self.get_root_path()`` line.
         await self.get_root_path()
 
+        # Bootstrap GitHub credentials for the current tenant before
+        # the clone, IF the URL targets github.com. This is the dashboard /
+        # VCM-process equivalent of the agent-process credential helper
+        # bootstrap that runs in ``DesignMonorepoCapabilityBase.initialize``.
+        # Without it, ``Repo.clone_from`` falls through to git's
+        # interactive prompt → ``fatal: could not read Username for
+        # 'https://github.com'`` → :class:`GitAuthError`. The credential
+        # helper is process-singleton and idempotent — repeated calls
+        # for the same tenant no-op after the first install.
+        if origin_url.startswith(("https://github.com/", "git@github.com:")):
+            try:
+                from ..ray_utils import serving
+                from ..git_credentials import (
+                    ensure_git_credentials_for_tenant_id,
+                )
+                tenant_id = serving.get_tenant_id() or ""
+                await ensure_git_credentials_for_tenant_id(tenant_id)
+            except Exception:  # noqa: BLE001 — never block the clone
+                logger.exception(
+                    "clone_or_retrieve_repository: best-effort GitHub "
+                    "credential bootstrap failed for %s; clone will "
+                    "fall through to git's auth surface.",
+                    origin_url,
+                )
+
         source_path = self._get_repo_path(origin_url)
         replica_path = Path(f"{source_path}_{replica_id}")
 

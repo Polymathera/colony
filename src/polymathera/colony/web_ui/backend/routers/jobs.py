@@ -211,7 +211,6 @@ async def _run_job(
             origin="dashboard_job",
         ):
             from polymathera.colony.agents import AgentMetadata, AgentHandle
-            from polymathera.colony.agents import AgentSelfConcept
 
             # Use the merged mission registry — builtins + the
             # ``polymathera.mission_types`` entry-point group — so a
@@ -259,14 +258,25 @@ async def _run_job(
                 coord_key = f"coordinator_{mission.coordinator_version}"
                 coord_class = reg.get(coord_key, reg.get("coordinator_v2", ""))
 
-                self_concept_config = reg.get("self_concept", {})
+                # Stamp the runtime ``AgentSelfConcept`` from the
+                # spec-side ``MissionSelfConcept`` via the shared
+                # helper used by ``spawn_mission`` too — single
+                # source of truth for the bridge so the two spawn
+                # paths can't drift on what ``agent_id`` / ``name``
+                # to plant on the coordinator.
+                from polymathera.colony.agents.configs import (
+                    build_coordinator_self_concept,
+                )
+
                 metadata = AgentMetadata(
                     role=f"{reg['label']} coordinator",
                     run_id=run_id,
                     session_id=session_id,
                     goals=[f"Run {reg['label']} mission"],
                     max_iterations=mission.max_iterations,
-                    self_concept=AgentSelfConcept(**self_concept_config) if self_concept_config else None,
+                    self_concept=build_coordinator_self_concept(
+                        reg, mission_type=mission.type,
+                    ),
                     parameters={
                         "max_agents": mission.max_agents,
                         "quality_threshold": mission.quality_threshold,

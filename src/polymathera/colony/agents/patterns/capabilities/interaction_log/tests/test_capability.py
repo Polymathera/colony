@@ -218,27 +218,28 @@ async def test_on_github_event_swallows_insert_failure(
     await cap._on_github_event(_make_event(key, {"title": "x"}), None)
 
 
-async def test_initialize_quiesces_without_tenant_metadata() -> None:
-    """No tenant_id/colony_id in agent metadata → quiesced + no db_pool
-    acquired. Mirrors GitHubInboundCapability's behaviour."""
+async def test_initialize_quiesces_without_tenant_syscontext() -> None:
+    """No tenant_id/colony_id on agent syscontext → quiesced + no
+    db_pool acquired. Mirrors GitHubInboundCapability's behaviour."""
 
     fake_agent = SimpleNamespace(
-        metadata=SimpleNamespace(parameters={}),  # no tenant/colony
+        # Empty tenant/colony — mirrors the shape ``AgentMetadata``
+        # exposes (typed properties delegating to syscontext).
+        metadata=SimpleNamespace(
+            tenant_id="", colony_id="", parameters={},
+        ),
     )
     cap = InteractionLogCapability(
         agent=fake_agent, scope_id="test_scope", db_pool=MagicMock(),
     )
     # Bypass AgentCapability.initialize() which needs more wiring.
-    # Manually replicate the body's metadata-read + quiesce check.
-    params = (
-        getattr(cap._agent.metadata, "parameters", None) or {}
-    )
-    cap._tenant_id = params.get("tenant_id")
-    cap._colony_id = params.get("colony_id")
+    # Manually replicate the body's syscontext-read + quiesce check.
+    cap._tenant_id = cap._agent.metadata.tenant_id
+    cap._colony_id = cap._agent.metadata.colony_id
     if not cap._tenant_id or not cap._colony_id:
-        cap._quiesced_reason = "no_tenant_or_colony_in_metadata"
+        cap._quiesced_reason = "no_tenant_or_colony_in_syscontext"
 
-    assert cap._quiesced_reason == "no_tenant_or_colony_in_metadata"
+    assert cap._quiesced_reason == "no_tenant_or_colony_in_syscontext"
 
 
 # ---------------------------------------------------------------------------

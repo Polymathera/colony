@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 
 
 def _build_system_session_agent_metadata(
-    *, session_id: str, tenant_id: str, colony_id: str,
+    *, session_id: str,
 ) -> AgentMetadata:
     """Trimmed ``AgentMetadata`` for the system session.
 
@@ -88,8 +88,6 @@ def _build_system_session_agent_metadata(
             ),
         ),
         parameters={
-            "tenant_id": tenant_id,
-            "colony_id": colony_id,
             "session_kind": "system",
         },
         action_policy_config={
@@ -105,8 +103,6 @@ def _build_system_session_agent_metadata(
 def build_system_session_agent_blueprint(
     *,
     session_id: str,
-    tenant_id: str,
-    colony_id: str,
 ) -> Any:
     """Build the trimmed ``SessionAgent.bind`` blueprint for a system
     session.
@@ -133,7 +129,7 @@ def build_system_session_agent_blueprint(
     """
 
     metadata = _build_system_session_agent_metadata(
-        session_id=session_id, tenant_id=tenant_id, colony_id=colony_id,
+        session_id=session_id,
     )
     return SessionAgent.bind(
         agent_type=SessionAgent.model_fields["agent_type"].default,
@@ -234,8 +230,6 @@ async def ensure_system_session_for_colony(
 
             blueprint = build_system_session_agent_blueprint(
                 session_id=session_id,
-                tenant_id=tenant_id,
-                colony_id=colony_id,
             )
             # The blueprint spawn must run inside a session-scoped
             # execution context so the agent's scope_id resolves

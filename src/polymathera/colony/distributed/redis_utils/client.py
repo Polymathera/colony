@@ -601,21 +601,24 @@ class RedisClient:
             self._last_health_check = time.time()
 
     async def _attempt_recovery(self):
-        """Attempt to recover from unhealthy state."""
+        """Attempt to recover from unhealthy state.
+
+        Recovery now drops every per-loop pool and lets the next access
+        through ``_redis_pool()`` rebuild them, then pings to verify.
+        """
+
         try:
             # Record recovery attempt
             self.metrics.REDIS_HEALTH_CHECK.labels(
                 status="recovery_attempt", namespace=self.config.namespace
             ).inc()
 
-            # Close all connections
-            await self.redis.close()  # TODO - FIXME - There is no self.redis attribute.
+            # Close + clear per-loop pools; subsequent access rebuilds
+            # them via ``_redis_pool()`` on first use.
+            await self._close_all_loop_pools()
 
-            # Reinitialize Redis client
-            self.redis_pool = self._init_redis_pool_with_persistence()
-            self.redis = Redis(connection_pool=self.redis_pool)  # TODO - FIXME - There is no self.redis attribute.
-
-            # Verify connection
+            # Verify connection — ``execute_with_semaphore`` rebuilds
+            # the pool for the current loop on demand.
             await self.execute_with_semaphore(lambda redis: redis.ping())
 
             self._healthy = True
@@ -638,18 +641,41 @@ class RedisClient:
             await self._perform_health_check()
         return self._healthy
 
+    async def _close_all_loop_pools(self) -> None:
+        """Close every per-loop ConnectionPool and clear bookkeeping.
+
+        Best-effort: individual ``aclose()`` failures are logged but
+        don't abort the loop — teardown must release the rest of the
+        pools regardless. Used by :meth:`cleanup` (full teardown) and
+        :meth:`_attempt_recovery` (force-rebuild on next access).
+        """
+        for loop_id, pool in list(self._loop_pools.items()):
+            try:
+                await pool.aclose()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "RedisClient pool aclose failed for loop %s: %s",
+                    loop_id, e,
+                )
+        self._loop_pools.clear()
+        self._loop_semaphores.clear()
+
     async def cleanup(self) -> None:
-        """Cleanup resources."""
-        try:
-            await self.redis.flushdb()  # TODO - FIXME - There is no self.redis attribute.
-            await self.redis.aclose()
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
+        """Release every Redis connection pool this client owns.
+
+        Does not perform ``flushdb()`` — which would have wiped every key
+        in the database, which is wrong cleanup semantics
+        (cleanup releases resources; it doesn't delete data).
+        """
+
+        await self._close_all_loop_pools()
 
     async def memory_usage(self) -> int:
         """Get Redis memory usage in bytes."""
         try:
-            info = await self.redis.info("memory")  # TODO - FIXME - There is no self.redis attribute.
+            info = await self.execute_with_semaphore(
+                lambda redis: redis.info("memory"),
+            )
             return int(info["used_memory"])
         except Exception as e:
             logger.error(f"Failed to get Redis memory usage: {e}")

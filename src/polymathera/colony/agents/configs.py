@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..distributed.config import (
     ConfigComponent,
@@ -22,6 +22,7 @@ from ..distributed.config import (
     register_polymathera_config,
     tier_metadata,
 )
+from .metadata_parameters import ParameterScope, ParameterSpec
 from .sandbox_images import DockerImageSpec, ScriptSpec  # noqa: F401 — re-exported below
 
 
@@ -72,8 +73,37 @@ class MissionSpec(BaseModel):
     worker: str = ""
     coordinator_capabilities: list[str] = Field(default_factory=list)
     worker_capabilities: list[str] = Field(default_factory=list)
-    extra_metadata_keys: list[str] = Field(default_factory=list)
+    # CALLER-scoped parameters the spawn caller (LLM planner via
+    # ``spawn_mission``, or REST handler via ``/api/jobs/submit``)
+    # must supply in ``mission_params``. Replaces the legacy
+    # ``extra_metadata_keys: list[str]`` field — the typed form
+    # carries descriptions (rendered into the planner prompt by
+    # ``SessionOrchestratorCapability._refresh_available_missions``),
+    # defaults (Pydantic-style — required iff no default of any
+    # kind), and structural shape that makes drift visible at
+    # registry-load time. COLONY/SESSION-scoped needs are properties
+    # of the mounted capabilities — declared on the capability's
+    # ``AGENT_METADATA_PARAMS`` ClassVar — and flow automatically
+    # via the inheritance gate in ``AgentPoolCapability.create_agent``.
+    # See ``colony/agent_metadata_parameter_spec_plan.md``.
+    caller_parameters: list[ParameterSpec] = Field(default_factory=list)
     self_concept: MissionSelfConcept
+
+    @model_validator(mode="after")
+    def _caller_parameters_are_caller_scoped(self) -> "MissionSpec":
+        offenders = [
+            p.name for p in self.caller_parameters
+            if p.scope is not ParameterScope.CALLER
+        ]
+        if offenders:
+            raise ValueError(
+                f"MissionSpec {self.label!r}: caller_parameters entries "
+                f"must have scope=CALLER, got non-CALLER for {offenders!r}. "
+                f"COLONY/SESSION-scoped needs belong on the mounted "
+                f"capabilities' AGENT_METADATA_PARAMS, not on the mission "
+                f"spec."
+            )
+        return self
 
 
 # Built-in missions shipped by colony. CPS and other extensions add more via
@@ -118,7 +148,27 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "GroundingCapability",
             "DynamicGameCapability",  # via HypothesisGameAgent base class
         ],
-        "extra_metadata_keys": ["changes", "change_description"],
+        "caller_parameters": [
+            {
+                "name": "changes",
+                "scope": "caller",
+                "description": (
+                    "List of changed files / regions to analyse — "
+                    "the unit of work for impact propagation."
+                ),
+                "json_type": "array",
+                "default": None,
+            },
+            {
+                "name": "change_description",
+                "scope": "caller",
+                "description": (
+                    "Free-text explanation of the changes. Hint to "
+                    "the worker LLMs when ranking impact severity."
+                ),
+                "default": None,
+            },
+        ],
         "self_concept": {
             "description": (
                 "Coordinates change impact analysis across a codebase by spawning "
@@ -158,7 +208,18 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "ProgramSlicingCapability",
             "MergeCapability",
         ],
-        "extra_metadata_keys": ["slice_criteria"],
+        "caller_parameters": [
+            {
+                "name": "slice_criteria",
+                "scope": "caller",
+                "description": (
+                    "Target variable / expression / statement(s) the "
+                    "slice is computed against. The minimal subset "
+                    "criterion."
+                ),
+                "default": None,
+            },
+        ],
         "self_concept": {
             "description": (
                 "Coordinates program slicing by distributing slice criteria across "
@@ -196,7 +257,19 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "ComplianceAnalysisCapability",
             "MergeCapability",
         ],
-        "extra_metadata_keys": ["compliance_types"],
+        "caller_parameters": [
+            {
+                "name": "compliance_types",
+                "scope": "caller",
+                "description": (
+                    "List of compliance dimensions to check — e.g. "
+                    "license / regulatory / security. Empty / absent "
+                    "lets the coordinator infer the relevant set."
+                ),
+                "json_type": "array",
+                "default": None,
+            },
+        ],
         "self_concept": {
             "description": (
                 "Coordinates compliance analysis by distributing license, regulatory, "
@@ -237,7 +310,18 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "MergeCapability",
             "DynamicGameCapability",
         ],
-        "extra_metadata_keys": ["granularity"],
+        "caller_parameters": [
+            {
+                "name": "granularity",
+                "scope": "caller",
+                "description": (
+                    "Resolution at which intent is inferred — e.g. "
+                    "per-function / per-module / per-file. Selects "
+                    "the worker's analysis grain."
+                ),
+                "default": None,
+            },
+        ],
         "self_concept": {
             "description": (
                 "Coordinates intent inference by distributing analysis across workers "
@@ -278,7 +362,18 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "MergeCapability",
             "DynamicGameCapability",
         ],
-        "extra_metadata_keys": ["formalism"],
+        "caller_parameters": [
+            {
+                "name": "formalism",
+                "scope": "caller",
+                "description": (
+                    "Formalism level for the inferred contracts — "
+                    "e.g. informal prose / Hoare-style triples / Z. "
+                    "Picks the worker's output target."
+                ),
+                "default": None,
+            },
+        ],
         "self_concept": {
             "description": (
                 "Coordinates contract inference by distributing function analysis "
@@ -312,7 +407,7 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
         "worker_capabilities": [
             "ClusterAnalyzerCapability",
         ],
-        "extra_metadata_keys": [],
+        "caller_parameters": [],
         "self_concept": {
             "description": (
                 "Coordinates general-purpose code structure analysis by spawning "
@@ -357,12 +452,56 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "ToolBuilder",
         ],
         "worker_capabilities": [],
-        "extra_metadata_keys": [
-            "mode",
-            "repo",
-            "roadmap_path",
-            "user_github_login",
-            "direction",
+        "caller_parameters": [
+            {
+                "name": "mode",
+                "scope": "caller",
+                "description": (
+                    "Which sub-action to run: 'bootstrap' (initial "
+                    "roadmap from design context), 'refresh' "
+                    "(bidirectional ROADMAP.md ↔ GitHub sync), "
+                    "'assignments' (propose colony/user routing "
+                    "per open roadmap-linked issue). No default — "
+                    "the planner must pick."
+                ),
+                "json_type": "string",
+            },
+            {
+                "name": "repo",
+                "scope": "caller",
+                "description": (
+                    "GitHub full_name (owner/repo). When absent, "
+                    "the action resolves to the colony's design "
+                    "monorepo at use time."
+                ),
+                "default": None,
+            },
+            {
+                "name": "roadmap_path",
+                "scope": "caller",
+                "description": "Relative path to ROADMAP.md inside the repo.",
+                "default": "docs/ROADMAP.md",
+            },
+            {
+                "name": "user_github_login",
+                "scope": "caller",
+                "description": (
+                    "Override the OAuth-verified user login on "
+                    "``github_identity`` when proposing user-side "
+                    "task assignments. Almost always absent — "
+                    "the coordinator reads from agent metadata."
+                ),
+                "default": None,
+            },
+            {
+                "name": "direction",
+                "scope": "caller",
+                "description": (
+                    "'refresh' mode only: 'both' (default) | "
+                    "'roadmap_to_github' | 'github_to_roadmap'."
+                ),
+                "default": "both",
+            },
         ],
         "self_concept": {
             "description": (
@@ -431,6 +570,62 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
 def _builtin_missions() -> dict[str, MissionSpec]:
     """Build typed defaults from ``_BUILTIN_MISSIONS``."""
     return {key: MissionSpec(**value) for key, value in _BUILTIN_MISSIONS.items()}
+
+
+def build_coordinator_self_concept(
+    registry_entry: "MissionSpec | dict[str, Any]",
+    *,
+    mission_type: str,
+) -> "AgentSelfConcept | None":
+    """Stamp a runtime :class:`AgentSelfConcept` from a mission entry's
+    spec-side :class:`MissionSelfConcept`.
+
+    The two shapes are deliberately distinct: the **spec** side
+    (``MissionSelfConcept``, ``extra="forbid"``) carries the static
+    description / goals / constraints declared on the mission
+    registry entry; the **runtime** side
+    (:class:`polymathera.colony.agents.self_concept.AgentSelfConcept`)
+    additionally requires ``agent_id`` and ``name`` plus the broader
+    bag of fields :class:`ConsciousnessCapability` populates over
+    the agent's lifetime.
+
+    Bridging the two is the single fragile step every mission-spawn
+    site has to get right. This helper centralises it so both the
+    chat-side ``spawn_mission`` and the REST-side ``jobs.start_run``
+    use the same convention — ``agent_id=""`` (blank for
+    ConsciousnessCapability to overwrite at init) and ``name`` =
+    the mission's ``label`` (with ``mission_type`` as fallback when
+    the entry has no label). Avoids the bug class where one call
+    site stamps the name and the other forgets.
+
+    Returns ``None`` when the registry entry carries no
+    ``self_concept`` — both consumers pass that straight through to
+    ``AgentMetadata.self_concept`` (which is ``Optional``).
+
+    Accepts either the typed :class:`MissionSpec` (the
+    ``MissionRegistryConfig`` path) or the legacy raw dict form
+    (the ``_BUILTIN_MISSIONS`` + entry-point group paths) — both
+    in-tree call sites still index entries as plain dicts.
+    """
+
+    # Lazy import — ``self_concept`` lives in a sibling module that
+    # imports nothing from here, so a module-top import would invert
+    # an otherwise clean dependency direction without buying anything.
+    from .self_concept import AgentSelfConcept
+
+    if isinstance(registry_entry, MissionSpec):
+        spec_self_concept = registry_entry.self_concept.model_dump()
+        label = registry_entry.label
+    else:
+        spec_self_concept = dict(registry_entry.get("self_concept") or {})
+        label = registry_entry.get("label") or ""
+    if not spec_self_concept:
+        return None
+    return AgentSelfConcept(
+        agent_id="",
+        name=label or mission_type,
+        **spec_self_concept,
+    )
 
 
 @register_polymathera_config(path="mission_registry")

@@ -1203,6 +1203,15 @@ class REPLCapability(AgentCapability):
 # =============================================================================
 
 
+REPL_GUIDANCE_OVERRIDE_KEY = "repl_guidance_override"
+"""Public key constant for the SESSION-scoped ``metadata.parameters``
+entry that overrides :func:`get_repl_guidance`'s default Markdown
+block. The writer (``SessionOrchestratorCapability``) declares the
+typed ``ParameterSpec`` for this key and imports this constant
+rather than re-typing the literal — single source of truth lives
+here with the reader."""
+
+
 def get_repl_guidance(repl: PolicyPythonREPL) -> str:
     """Get REPL guidance for LLM planner.
 
@@ -1219,7 +1228,9 @@ def get_repl_guidance(repl: PolicyPythonREPL) -> str:
     """
     from ...models import AgentMetadata
     metadata: AgentMetadata = repl.agent.metadata
-    guidance_override = metadata.parameters.get("repl_guidance_override", None)
+    guidance_override = metadata.parameters.get(
+        REPL_GUIDANCE_OVERRIDE_KEY, None,
+    )
     if guidance_override:
         return guidance_override
 

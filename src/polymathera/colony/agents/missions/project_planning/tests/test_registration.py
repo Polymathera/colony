@@ -98,16 +98,24 @@ def test_project_planning_self_concept_names_the_three_modes() -> None:
     assert "propose_task_assignments" in goals_blob
 
 
-def test_project_planning_declares_expected_extra_metadata_keys() -> None:
-    """``extra_metadata_keys`` documents the mission_params the
-    coordinator's planner reads. ``mode`` is non-optional; the
-    others are mode-specific but still planner-relevant."""
+def test_project_planning_declares_expected_caller_parameters() -> None:
+    """``caller_parameters`` documents the mission_params the
+    coordinator's planner reads. ``mode`` is required (no default);
+    the other four entries are optional with declared defaults so
+    the planner can omit them when the colony-level resolution
+    fits."""
 
     spec = _builtin_missions()["project_planning"]
-    assert "mode" in spec.extra_metadata_keys
-    assert "repo" in spec.extra_metadata_keys
-    assert "roadmap_path" in spec.extra_metadata_keys
-    assert "user_github_login" in spec.extra_metadata_keys
+    by_name = {p.name: p for p in spec.caller_parameters}
+    assert set(by_name) == {
+        "mode", "repo", "roadmap_path", "user_github_login", "direction",
+    }
+    # ``mode`` is the only required CALLER param.
+    assert by_name["mode"].required is True
+    # The other four carry declared defaults (Pydantic-style:
+    # required iff no default of any kind).
+    for optional in ("repo", "roadmap_path", "user_github_login", "direction"):
+        assert by_name[optional].required is False
 
 
 def test_project_planning_lists_action_surfaces_in_coordinator_capabilities() -> None:

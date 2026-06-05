@@ -204,6 +204,15 @@ async def test_create_agent_uses_l4_fallback_for_l4_coordinator(
         agent = MagicMock()
         agent.agent_id = "parent"
         agent.syscontext = MagicMock()
+        # Pin a real (empty) AgentMetadata so the central inheritance
+        # gate in create_agent reads a plain dict for parent_params
+        # rather than an auto-vivified MagicMock attribute (which
+        # would leak MagicMock values into the spawned child's
+        # metadata.parameters and break the real Agent.bind() that
+        # this test exercises end-to-end).
+        agent.metadata = AgentMetadata(
+            tenant_id="t", parent_agent_id="parent",
+        )
         agent.spawn_child_agents = AsyncMock(return_value=[
             MagicMock(child_agent_id="child_xyz"),
         ])
@@ -244,6 +253,11 @@ async def test_create_agent_works_without_repo_state_provider(
         agent = MagicMock()
         agent.agent_id = "parent"
         agent.syscontext = MagicMock()
+        # See the previous test for why a real (empty) AgentMetadata
+        # is wired here instead of relying on MagicMock auto-vivification.
+        agent.metadata = AgentMetadata(
+            tenant_id="t", parent_agent_id="parent",
+        )
         agent.spawn_child_agents = AsyncMock(return_value=[
             MagicMock(child_agent_id="child_xyz"),
         ])
@@ -256,3 +270,222 @@ async def test_create_agent_works_without_repo_state_provider(
         )
 
     assert result["created"] is True
+
+
+# ---------------------------------------------------------------------------
+# The central COLONY/SESSION-scoped parameter inheritance gate.
+#
+# Pins the contract that ``create_agent`` automatically threads
+# colony/session-scoped ``metadata.parameters`` keys from the parent
+# to the spawned child. Without this gate every spawn site (in the
+# chat path, in the REST path, in any future path) would have to copy
+# ``design_monorepo_url`` / ``git_attribution`` / ``github_identity``
+# by hand — exactly the bug class
+# ``colony/agent_metadata_parameter_spec_plan.md`` formalises out.
+
+
+@pytest.fixture
+def _stub_param_registry(monkeypatch):
+    """Build an isolated registry containing two COLONY-scoped keys,
+    one SESSION-scoped, one CALLER-scoped, and one AGENT-scoped;
+    patch the accessor ``create_agent`` calls so the test is not
+    coupled to which real capabilities happen to be imported."""
+
+    from polymathera.colony.agents import metadata_parameters as mp
+
+    reg = mp.MetadataParameterRegistry()
+    reg.register(mp.ParameterSpec(
+        name="design_monorepo_url",
+        scope=mp.ParameterScope.COLONY, description="x",
+    ))
+    reg.register(mp.ParameterSpec(
+        name="github_identity",
+        scope=mp.ParameterScope.COLONY, description="x",
+        json_type="object",
+    ))
+    reg.register(mp.ParameterSpec(
+        name="available_tools",
+        scope=mp.ParameterScope.SESSION, description="x",
+        json_type="object", default_factory=dict,
+    ))
+    reg.register(mp.ParameterSpec(
+        name="mode",
+        scope=mp.ParameterScope.CALLER, description="x",
+    ))
+    reg.register(mp.ParameterSpec(
+        name="agent_local",
+        scope=mp.ParameterScope.AGENT, description="x",
+    ))
+    monkeypatch.setattr(mp, "get_metadata_parameter_registry", lambda: reg)
+    return reg
+
+
+def _spy_parent_agent(parent_params: dict) -> MagicMock:
+    """Build a parent agent mock whose ``metadata.parameters`` is the
+    given dict (a real dict, not a MagicMock auto-vivified attr —
+    so the inheritance gate reads the seeded values, not auto-
+    children)."""
+
+    agent = MagicMock()
+    agent.agent_id = "parent"
+    agent.syscontext = MagicMock()
+    # IMPORTANT: assign a real AgentMetadata so the gate's
+    # ``getattr(self.agent.metadata, "parameters", None)`` returns a
+    # plain dict rather than an auto-MagicMock.
+    agent.metadata = AgentMetadata(
+        tenant_id="t", parent_agent_id="parent",
+    )
+    agent.metadata.parameters = parent_params
+    agent.spawn_child_agents = AsyncMock(return_value=[
+        MagicMock(child_agent_id="child_xyz"),
+    ])
+    agent.get_capability_by_type = lambda _t: None
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_create_agent_inherits_colony_scoped_params(
+    _stub_param_registry,
+) -> None:
+    """COLONY-scoped keys flow parent→child even when the caller's
+    ``metadata`` dict carries no parameters."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        parent_params = {
+            "design_monorepo_url": "https://github.com/acme/mono.git",
+            "github_identity": {"tenant_installation_id": "100"},
+        }
+        agent = _spy_parent_agent(parent_params)
+        cap = AgentPoolCapability(agent=agent)
+        cap._resolve_class = MagicMock(return_value=MagicMock(
+            bind=MagicMock(return_value=MagicMock()),
+        ))
+
+        await cap.create_agent(
+            agent_type="polymathera.colony.agents.base.Agent",
+            metadata={"tenant_id": "t", "parent_agent_id": "parent"},
+        )
+
+    forwarded = cap._resolve_class.return_value.bind.call_args.kwargs["metadata"]
+    assert forwarded.parameters["design_monorepo_url"] == (
+        "https://github.com/acme/mono.git"
+    )
+    assert forwarded.parameters["github_identity"] == {
+        "tenant_installation_id": "100",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_agent_inherits_session_scoped_params(
+    _stub_param_registry,
+) -> None:
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        parent_params = {"available_tools": {"foo": "bar"}}
+        agent = _spy_parent_agent(parent_params)
+        cap = AgentPoolCapability(agent=agent)
+        cap._resolve_class = MagicMock(return_value=MagicMock(
+            bind=MagicMock(return_value=MagicMock()),
+        ))
+
+        await cap.create_agent(
+            agent_type="polymathera.colony.agents.base.Agent",
+            metadata={"tenant_id": "t", "parent_agent_id": "parent"},
+        )
+
+    forwarded = cap._resolve_class.return_value.bind.call_args.kwargs["metadata"]
+    assert forwarded.parameters["available_tools"] == {"foo": "bar"}
+
+
+@pytest.mark.asyncio
+async def test_create_agent_does_not_inherit_caller_or_agent_scoped_params(
+    _stub_param_registry,
+) -> None:
+    """CALLER-scoped keys would silently rebind the child's intent if
+    inherited; AGENT-scoped keys would alias per-agent state across
+    the spawn boundary. Both MUST stay on the parent."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        parent_params = {"mode": "bootstrap", "agent_local": "abc"}
+        agent = _spy_parent_agent(parent_params)
+        cap = AgentPoolCapability(agent=agent)
+        cap._resolve_class = MagicMock(return_value=MagicMock(
+            bind=MagicMock(return_value=MagicMock()),
+        ))
+
+        await cap.create_agent(
+            agent_type="polymathera.colony.agents.base.Agent",
+            metadata={"tenant_id": "t", "parent_agent_id": "parent"},
+        )
+
+    forwarded = cap._resolve_class.return_value.bind.call_args.kwargs["metadata"]
+    assert "mode" not in forwarded.parameters
+    assert "agent_local" not in forwarded.parameters
+
+
+@pytest.mark.asyncio
+async def test_create_agent_child_wins_on_collision(
+    _stub_param_registry,
+) -> None:
+    """The LLM planner deliberately rebinding ``design_monorepo_url``
+    (e.g. a mission probing a different repo) keeps the child's
+    value; the parent's value is NOT silently overwritten."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        parent_params = {"design_monorepo_url": "https://acme/mono.git"}
+        agent = _spy_parent_agent(parent_params)
+        cap = AgentPoolCapability(agent=agent)
+        cap._resolve_class = MagicMock(return_value=MagicMock(
+            bind=MagicMock(return_value=MagicMock()),
+        ))
+
+        await cap.create_agent(
+            agent_type="polymathera.colony.agents.base.Agent",
+            metadata={
+                "tenant_id": "t", "parent_agent_id": "parent",
+                "parameters": {
+                    "design_monorepo_url": "https://acme/probe.git",
+                },
+            },
+        )
+
+    forwarded = cap._resolve_class.return_value.bind.call_args.kwargs["metadata"]
+    assert forwarded.parameters["design_monorepo_url"] == (
+        "https://acme/probe.git"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_agent_inherit_scoped_params_false_opts_out(
+    _stub_param_registry,
+) -> None:
+    """Programmatic callers can opt out via the
+    ``inherit_scoped_params=False`` kwarg (peeled out of
+    ``agent_kwargs`` so it doesn't appear in the LLM-visible
+    signature). Used by intentionally-detached spawns."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        parent_params = {"design_monorepo_url": "https://acme/mono.git"}
+        agent = _spy_parent_agent(parent_params)
+        cap = AgentPoolCapability(agent=agent)
+        cap._resolve_class = MagicMock(return_value=MagicMock(
+            bind=MagicMock(return_value=MagicMock()),
+        ))
+
+        await cap.create_agent(
+            agent_type="polymathera.colony.agents.base.Agent",
+            metadata={"tenant_id": "t", "parent_agent_id": "parent"},
+            inherit_scoped_params=False,
+        )
+
+    forwarded = cap._resolve_class.return_value.bind.call_args.kwargs["metadata"]
+    assert "design_monorepo_url" not in forwarded.parameters

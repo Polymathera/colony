@@ -86,7 +86,18 @@ def _opm_meg_entry() -> dict[str, Any]:
         "worker": "test.opm_meg.AtomicPhysicsAgent",
         "coordinator_capabilities": ["OPMMEGAnalysisCapability"],
         "worker_capabilities": ["AtomicPhysicsCapability"],
-        "extra_metadata_keys": ["budget_id", "design_repo_path"],
+        "caller_parameters": [
+            {
+                "name": "budget_id", "scope": "caller",
+                "description": "Noise-budget tree id.",
+                "default": None,
+            },
+            {
+                "name": "design_repo_path", "scope": "caller",
+                "description": "Sub-path within the design monorepo.",
+                "default": None,
+            },
+        ],
         "self_concept": {
             "description": "OPM-MEG noise-floor design coordinator.",
             "goals": ["Reconcile physics-worker results into budget tree."],

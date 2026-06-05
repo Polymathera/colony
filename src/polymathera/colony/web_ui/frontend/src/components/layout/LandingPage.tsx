@@ -33,8 +33,29 @@ export function LandingPage({
     .sort((a, b) => b.created_at - a.created_at)
     .slice(0, 5);
 
+  // The session button has two distinct precondition failures we
+  // were previously collapsing into a single "Waiting for cluster…"
+  // label: (a) no colony is active (discovery returned zero, or the
+  // operator hasn't picked one yet); (b) the cluster's deployments
+  // aren't ready. Name the actual blocker so the operator knows
+  // whether to wait on infra or to pick/create a colony.
+  const clusterInfraReady =
+    health.isSuccess && !!health.data?.deployments_ready;
+  const sessionButtonLabel = !activeColonyId
+    ? "Pick or create a colony first"
+    : !clusterInfraReady
+      ? "Waiting for cluster…"
+      : "New Session";
+
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-8">
+    // ``overflow-y-auto`` because the stack (colonies, GitHub
+    // installation, GitHub identity, colony status with activity,
+    // actions, recent sessions) routinely exceeds viewport height.
+    // ``justify-start`` + ``py-8`` replaces ``justify-center`` so the
+    // top of the stack is reachable when it overflows. ``min-h-0``
+    // lets the flex child shrink so the scrollbar attaches here
+    // instead of escaping to the page root.
+    <div className="flex h-full min-h-0 flex-col items-center gap-8 overflow-y-auto py-8">
       {/* Logo */}
       <div className="text-center">
         <h1
@@ -103,7 +124,7 @@ export function LandingPage({
           disabled={!clusterReady}
           className="rounded-lg bg-primary px-6 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          <Plus size={16} className="inline -mt-0.5" /> {clusterReady ? "New Session" : "Waiting for cluster..."}
+          <Plus size={16} className="inline -mt-0.5" /> {sessionButtonLabel}
         </button>
       </div>
 

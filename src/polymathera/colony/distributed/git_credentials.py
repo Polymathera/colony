@@ -41,9 +41,12 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import httpx
+
+if TYPE_CHECKING:
+    from ..agents.models import AgentMetadata
 
 from ..agents.patterns.capabilities._github.auth import (
     GitHubAppAuth,
@@ -284,7 +287,7 @@ async def ensure_git_credentials_for_installation(
 
 
 async def ensure_git_credentials_from_agent_metadata(
-    agent_metadata: Any,
+    agent_metadata: "AgentMetadata",
 ) -> None:
     """Agent-side wrapper around
     :func:`ensure_git_credentials_for_installation` that pulls the
@@ -294,15 +297,77 @@ async def ensure_git_credentials_from_agent_metadata(
     :func:`auth_service.get_tenant_github_installation`). Same
     silent-no-op behaviour."""
 
-    params = getattr(agent_metadata, "parameters", None) or {}
-    gh_identity = params.get("github_identity") or {}
+    from ..agents.patterns.capabilities.github import GitHubCapability
+    gh_identity = agent_metadata.parameters.get(
+        GitHubCapability.GITHUB_IDENTITY_KEY,
+    ) or {}
     installation_id = gh_identity.get("tenant_installation_id")
+    await ensure_git_credentials_for_installation(installation_id)
+
+
+async def ensure_git_credentials_for_tenant_id(tenant_id: str | None) -> None:
+    """Look up the tenant's GitHub App installation_id from the
+    ``tenants`` table and bootstrap credentials.
+
+    Used by tenant-context-aware clone primitives that don't have
+    direct access to the auth service (e.g.
+    ``distributed/stores/git.py::clone_or_retrieve_repository``,
+    which runs in the VCM/dashboard process and is invoked from
+    chains that only have the tenant id from
+    :func:`serving.require_execution_context`). Silent no-op when
+    ``tenant_id`` is falsy or the DB lookup yields no installation
+    (matches the rest of the credential-bootstrap surface — git ops
+    then surface their own ``GitAuthError`` with the operator
+    remediation hint).
+
+    Single-statement SQL inlined here rather than importing from
+    ``web_ui.backend.auth.service`` so the ``distributed/`` layer
+    keeps its independence from ``web_ui/``.
+    """
+
+    if not tenant_id:
+        return
+
+    try:
+        from ..agents.utils.postgres import get_agent_db_pool
+    except Exception:  # noqa: BLE001 — defensive; this path is best-effort
+        logger.exception(
+            "git_credentials: could not import get_agent_db_pool; "
+            "tenant-credentialed clones will fall back to GitAuthError.",
+        )
+        return
+
+    try:
+        pool = await get_agent_db_pool()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "git_credentials: could not acquire agent db pool; "
+            "tenant-credentialed clones will fall back to GitAuthError.",
+        )
+        return
+
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT github_installation_id FROM tenants WHERE id = $1",
+                tenant_id,
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "git_credentials: tenant lookup failed for %s; "
+            "tenant-credentialed clones will fall back to GitAuthError.",
+            tenant_id,
+        )
+        return
+
+    installation_id = row[0] if row is not None else None
     await ensure_git_credentials_for_installation(installation_id)
 
 
 __all__ = (
     "GitCredentialsManager",
     "ensure_git_credentials_for_installation",
+    "ensure_git_credentials_for_tenant_id",
     "ensure_git_credentials_from_agent_metadata",
     "write_credentials_file",
 )

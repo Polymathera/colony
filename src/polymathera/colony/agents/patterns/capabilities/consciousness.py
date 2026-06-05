@@ -170,8 +170,7 @@ class ConsciousnessCapability(AgentCapability):
             metadata: dict[str, Any] = {}
             if hasattr(self.agent, "get_capability_names"):
                 metadata["capabilities"] = self.agent.get_capability_names()
-            if hasattr(self.agent, "metadata"):
-                metadata["goals"] = getattr(self.agent.metadata, "goals", [])
+            metadata["goals"] = self.agent.metadata.goals
             self._self_concept = await self._create_default_self_concept(
                 agent_id=self.agent.agent_id,
                 agent_type=agent_type,

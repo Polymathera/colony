@@ -25,6 +25,16 @@ from polymathera.colony.agents.patterns.capabilities.critique import CriticCapab
 from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraphCapability
 from polymathera.colony.agents.blackboard import EnhancedBlackboard, BlackboardEvent
 from polymathera.colony.agents.base import Agent, AgentCapability, AgentMetadata
+from polymathera.colony.agents.metadata_parameters import (
+    ParameterScope,
+    ParameterSpec,
+)
+from ..basic.coordinator import (
+    BATCHING_POLICY_KEY,
+    BATCHING_POLICY_SPEC,
+    JOB_QUOTA_KEY,
+    JOB_QUOTA_SPEC,
+)
 from polymathera.colony.agents.patterns.actions import action_executor
 from polymathera.colony.agents.patterns.games.negotiation.capabilities import NegotiationIssue, Offer, calculate_pareto_efficiency
 from polymathera.colony.agents.patterns.games.coalition_formation import find_optimal_coalition_structure
@@ -322,6 +332,34 @@ class ImpactMergePolicy(MergePolicy[ChangeImpactReport]):
         return caps or {"baseline_impact"}
 
 
+# Module-level shared key constants + specs for the impact-mission
+# parameters BOTH the coordinator AND the page-analyzer worker read.
+# Declaring once here keeps the two capability classes in lockstep
+# and avoids registry conflicts on re-registration with drifted text.
+PREFETCH_DEPTH_KEY = "prefetch_depth"
+PREFETCH_TEST_PAGES_KEY = "prefetch_test_pages"
+
+PREFETCH_DEPTH_SPEC = ParameterSpec(
+    name=PREFETCH_DEPTH_KEY,
+    scope=ParameterScope.CALLER,
+    description=(
+        "Max hop count for the FeedbackLoopPredictor's page prefetch "
+        "— how many edges out from a worker's current page to warm "
+        "into the working set."
+    ),
+    json_type="integer", default=2,
+)
+PREFETCH_TEST_PAGES_SPEC = ParameterSpec(
+    name=PREFETCH_TEST_PAGES_KEY,
+    scope=ParameterScope.CALLER,
+    description=(
+        "Whether to also warm test-paired pages when prefetching the "
+        "impact-source page's neighbours."
+    ),
+    json_type="boolean", default=True,
+)
+
+
 class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     """Capability implementing core impact analysis coordination logic.
 
@@ -346,6 +384,57 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
     5. Produces unified impact report with recommendations
     """
 
+    # CALLER-scoped metadata.parameters keys this coordinator reads
+    # (mostly via ``self.agent.metadata.parameters.get(...)``). The
+    # legacy ``impact`` mission supplies them through its
+    # ``caller_parameters`` block — keys here MUST match those names
+    # so the runtime values align. Defaults baked into the specs
+    # are the same fallbacks the legacy ``params.get(key, default)``
+    # call sites used.
+    # Shared with the worker (``ChangeImpactAnalysisCapability``) —
+    # use the module-level specs to keep both classes in lockstep.
+    PREFETCH_DEPTH_KEY = PREFETCH_DEPTH_KEY
+    PREFETCH_TEST_PAGES_KEY = PREFETCH_TEST_PAGES_KEY
+    MAX_AGENTS_KEY = "max_agents"
+    # Shared with the basic coordinator — same conceptual spec.
+    BATCHING_POLICY_KEY = BATCHING_POLICY_KEY
+    QUALITY_THRESHOLD_KEY = "quality_threshold"
+    MAX_ITERATIONS_KEY = "max_iterations"
+    JOB_QUOTA_KEY = JOB_QUOTA_KEY
+
+    AGENT_METADATA_PARAMS = (
+        PREFETCH_DEPTH_SPEC,
+        PREFETCH_TEST_PAGES_SPEC,
+        ParameterSpec(
+            name=MAX_AGENTS_KEY, scope=ParameterScope.CALLER,
+            description=(
+                "Hard cap on concurrent impact-analysis worker "
+                "agents the coordinator will spawn."
+            ),
+            json_type="integer", default=10,
+        ),
+        BATCHING_POLICY_SPEC,
+        ParameterSpec(
+            name=QUALITY_THRESHOLD_KEY, scope=ParameterScope.CALLER,
+            description=(
+                "Minimum aggregate confidence the unified impact "
+                "report must meet before the coordinator exits the "
+                "synthesis loop."
+            ),
+            json_type="number", default=0.7,
+        ),
+        ParameterSpec(
+            name=MAX_ITERATIONS_KEY, scope=ParameterScope.CALLER,
+            description=(
+                "Maximum synthesis iterations before the coordinator "
+                "stops re-aggregating impact reports. Distinct from "
+                "``AgentMetadata.max_iterations`` (planner-loop cap) "
+                "— this one bounds the synthesis sub-loop only."
+            ),
+            json_type="integer", default=3,
+        ),
+        JOB_QUOTA_SPEC,
+    )
 
     def __init__(
         self,
@@ -400,9 +489,9 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         self.max_depth: int = 5  # Max depth for impact propagation
         self._current_changes: list[CodeChange] = []  # Changes being analyzed
         # Get configuration from agent metadata
-        self.prefetch_depth = self.agent.metadata.parameters.get("prefetch_depth", 2)
-        self.prefetch_test_pages = self.agent.metadata.parameters.get("prefetch_test_pages", True)
-        self.max_agents = self.agent.metadata.parameters.get("max_agents", 10)
+        self.prefetch_depth = self.agent.metadata.parameters.get(self.PREFETCH_DEPTH_KEY, 2)
+        self.prefetch_test_pages = self.agent.metadata.parameters.get(self.PREFETCH_TEST_PAGES_KEY, True)
+        self.max_agents = self.agent.metadata.parameters.get(self.MAX_AGENTS_KEY, 10)
 
     def get_action_group_description(self) -> str:
         pages_info = f"{len(self.pending_pages)} pending pages" if self.pending_pages else "no pending pages"
@@ -435,7 +524,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
         # NOTE: Impact analysis uses custom scoring that includes centrality weighting,
         # which is not supported by the standard BatchingPolicy. The policy is provided
         # for future integration but spawn_next_batch() currently uses custom logic.
-        batching_policy_config = self.agent.metadata.parameters.get("batching_policy", {})
+        batching_policy_config = self.agent.metadata.parameters.get(self.BATCHING_POLICY_KEY, {})
         self.batching_policy: BatchingPolicy = self._create_batching_policy(batching_policy_config)
 
         # Initialize page graph capability for standardized graph operations
@@ -634,7 +723,7 @@ class ChangeImpactAnalysisCoordinatorCapability(AgentCapability):
             await self.working_set_cap.release_pages(page_ids=list(completed_pages))
 
         # Spawn next batch if there are pending pages
-        max_agents = self.agent.metadata.parameters.get("max_agents", 10)
+        max_agents = self.agent.metadata.parameters.get(self.MAX_AGENTS_KEY, 10)
         if self.pending_pages and len(self.page_agents) < max_agents:
             await self.spawn_next_batch(self._current_changes[0].description if self._current_changes else "")
 
@@ -1122,10 +1211,10 @@ Respond with status (supported/refuted/uncertain), confidence (0-1), and reasoni
                     parent_agent_id=self.agent.agent_id,
                     parameters={
                         "page_id": page_id,
-                        "quality_threshold": self.agent.metadata.parameters.get("quality_threshold", 0.7),
-                        "max_iterations": self.agent.metadata.parameters.get("max_iterations", 3),
-                        "prefetch_depth": self.agent.metadata.parameters.get("prefetch_depth", 2),
-                        "prefetch_test_pages": self.agent.metadata.parameters.get("prefetch_test_pages", True),
+                        "quality_threshold": self.agent.metadata.parameters.get(self.QUALITY_THRESHOLD_KEY, 0.7),
+                        "max_iterations": self.agent.metadata.parameters.get(self.MAX_ITERATIONS_KEY, 3),
+                        "prefetch_depth": self.agent.metadata.parameters.get(self.PREFETCH_DEPTH_KEY, 2),
+                        "prefetch_test_pages": self.agent.metadata.parameters.get(self.PREFETCH_TEST_PAGES_KEY, True),
                         # Pass actual changes, not just description
                         "changes": changes_data,
                         "change_description": change_description,
@@ -1521,7 +1610,10 @@ class ChangeImpactAnalysisCoordinator(Agent):
     async def initialize(self) -> None:
         """Initialize coordinator and attach capability."""
 
-        job_quota = self.metadata.parameters.get("job_quota", self.metadata.parameters.get("max_agents", 10) * 5)
+        _Cap = ChangeImpactAnalysisCoordinatorCapability
+        job_quota = self.metadata.parameters.get(_Cap.JOB_QUOTA_KEY) or (
+            self.metadata.parameters.get(_Cap.MAX_AGENTS_KEY, 10) * 5
+        )
 
         # Consciousness stream — generic catch-all so the coordinator's
         # LLM planner can see its worker-spawning + critique +

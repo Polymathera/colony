@@ -497,7 +497,14 @@ def load_config_from_yaml(path: str) -> TestConfig:
         # Extract mission-specific keys into parameters
         mission_type = a.get("type", "basic")
         if mission_type in registry:
-            for key in registry[mission_type].get("extra_metadata_keys", []):
+            # ``caller_parameters`` is the CALLER-scoped declaration of
+            # mission_params. Walk the spec names; pop matching keys
+            # out of the raw YAML entry into ``params`` so the
+            # coordinator finds them on ``metadata.parameters``.
+            # Schema enforcement is handled by ``MissionSpec.model_validate``
+            # at registry-load time — here we just iterate the names.
+            for spec in registry[mission_type].get("caller_parameters", []):
+                key = spec["name"] if isinstance(spec, dict) else spec.name
                 if key in a:
                     params[key] = a.pop(key)
         # Standard fields
@@ -726,7 +733,8 @@ paging:
 #   extra_capabilities, planning_params
 #
 # Mission-specific fields are extracted into metadata.parameters automatically.
-# Each mission type declares its own keys in MISSION_REGISTRY["extra_metadata_keys"]:
+# Each mission type declares its own keys in MISSION_REGISTRY["caller_parameters"]
+# (a list of typed ParameterSpec entries — name + description + default).
 #   impact:     changes, change_description
 #   slicing:    slice_criteria
 #   compliance: compliance_types
@@ -2427,11 +2435,23 @@ def describe(
         border_style="dim",
     ))
 
-    # Extra metadata keys
-    extra_keys = reg.get("extra_metadata_keys", [])
-    if extra_keys:
+    # CALLER-scoped mission_params, each rendered with its description
+    # so the operator sees what the LLM planner will see.
+    caller_params = reg.get("caller_parameters", [])
+    if caller_params:
+        rendered = []
+        for spec in caller_params:
+            if isinstance(spec, dict):
+                name = spec["name"]
+                desc = spec.get("description", "")
+            else:
+                name = spec.name
+                desc = spec.description
+            rendered.append(f"{name} — {desc}" if desc else name)
         console.print(
-            f"\n[dim]Mission-specific parameters: {', '.join(extra_keys)}[/dim]"
+            f"\n[dim]Mission-specific parameters:\n  - "
+            + "\n  - ".join(rendered)
+            + "[/dim]"
         )
 
 

@@ -16,6 +16,10 @@ from pydantic import BaseModel, Field
 import time
 
 from polymathera.colony.agents.base import Agent, AgentState, AgentCapability
+from polymathera.colony.agents.metadata_parameters import (
+    ParameterScope,
+    ParameterSpec,
+)
 from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.models import (
     Action,
@@ -53,12 +57,122 @@ from polymathera.colony.agents.patterns.capabilities.batching import (
 logger = logging.getLogger(__name__)
 
 
+# Module-level shared key + spec for ``cache_boost_factor``. Read by
+# the coordinator AND by the cluster-analyzer workers (both v1 and
+# v2) — declaring once here keeps the registry idempotent on the
+# multiple capability classes that all declare this key.
+CACHE_BOOST_FACTOR_KEY = "cache_boost_factor"
+
+CACHE_BOOST_FACTOR_SPEC = ParameterSpec(
+    name=CACHE_BOOST_FACTOR_KEY,
+    scope=ParameterScope.CALLER,
+    description=(
+        "Multiplier the cache-affine router applies to a replica's "
+        "score when the candidate page's working set is already "
+        "loaded there. Read by the coordinator's planner AND by the "
+        "cluster-analyzer worker's query router."
+    ),
+    json_type="number", default=1.5,
+)
+
+# Shared batching-policy spec — read by BOTH the basic coordinator
+# AND the impact coordinator. Same conceptual shape (a dict of
+# policy config for cache-aware spawn scheduling); cross-mission
+# reuse is intentional. Declared here so both classes register the
+# same spec.
+BATCHING_POLICY_KEY = "batching_policy"
+
+BATCHING_POLICY_SPEC = ParameterSpec(
+    name=BATCHING_POLICY_KEY, scope=ParameterScope.CALLER,
+    description=(
+        "Batching-policy config dict for cache-aware spawn "
+        "scheduling — e.g. "
+        "``{'type': 'overlap', 'overlap_threshold': 0.7}``. "
+        "Empty dict falls back to the framework defaults."
+    ),
+    json_type="object", default_factory=dict,
+)
+
+# Shared with the impact coordinator — both coordinators cap their
+# working-set with this key, but with DIFFERENT default values
+# (basic: 50; impact: ``max_agents * 5``). The shared spec is
+# declared with ``default=None`` so apply-defaults doesn't pre-fill
+# either coordinator's value; the per-site readers keep their own
+# fallback via ``params.get(key) or <default>``.
+JOB_QUOTA_KEY = "job_quota"
+
+JOB_QUOTA_SPEC = ParameterSpec(
+    name=JOB_QUOTA_KEY, scope=ParameterScope.CALLER,
+    description=(
+        "Maximum pages allowed in the coordinator's working set at "
+        "any time. Caller-supplied; if absent, each coordinator "
+        "applies its own per-mission default at read time (basic: "
+        "50; impact: ``max_agents * 5``)."
+    ),
+    json_type="integer", default=None,
+)
+
+
 class BaseCodeAnalysisCoordinatorCapability(AgentCapability, ABC):
     """Capability implementing core coordinator logic.
 
     Keeps Agent subclasses thin by providing @action_executor methods for
     spawning, monitoring, and synthesis.
     """
+
+    # CALLER-scoped metadata.parameters keys this coordinator (+ its V2
+    # subclass) reads via ``self.agent.metadata.parameters.get(...)``.
+    # Inherited by ``CodeAnalysisCoordinatorCapability`` +
+    # ``CodeAnalysisCoordinatorV2Capability``.
+    JOB_QUOTA_KEY = JOB_QUOTA_KEY
+    BATCHING_POLICY_KEY = BATCHING_POLICY_KEY
+    OVERLAP_THRESHOLD_KEY = "overlap_threshold"
+    BATCH_SIZE_KEY = "batch_size"
+    MAX_CLUSTER_SIZE_KEY = "max_cluster_size"
+    MIN_CLUSTER_SIZE_KEY = "min_cluster_size"
+    GOAL_KEY = "goal"
+    # Shared with the cluster-analyzer workers via the module-level
+    # constant — keep both lockstep so the registry's conflict-on-
+    # disagreement policy doesn't trip.
+    CACHE_BOOST_FACTOR_KEY = CACHE_BOOST_FACTOR_KEY
+
+    AGENT_METADATA_PARAMS = (
+        JOB_QUOTA_SPEC,
+        BATCHING_POLICY_SPEC,
+        ParameterSpec(
+            name=OVERLAP_THRESHOLD_KEY, scope=ParameterScope.CALLER,
+            description=(
+                "Minimum working-set overlap (0..1) two pages need "
+                "to share before they're considered for cache-affine "
+                "batching."
+            ),
+            json_type="number", default=0.3,
+        ),
+        ParameterSpec(
+            name=BATCH_SIZE_KEY, scope=ParameterScope.CALLER,
+            description="Pages per spawned-worker batch.",
+            json_type="integer", default=5,
+        ),
+        ParameterSpec(
+            name=MAX_CLUSTER_SIZE_KEY, scope=ParameterScope.CALLER,
+            description="Upper bound on cluster size for partitioning.",
+            json_type="integer", default=10,
+        ),
+        ParameterSpec(
+            name=MIN_CLUSTER_SIZE_KEY, scope=ParameterScope.CALLER,
+            description="Lower bound on cluster size for partitioning.",
+            json_type="integer", default=2,
+        ),
+        ParameterSpec(
+            name=GOAL_KEY, scope=ParameterScope.CALLER,
+            description=(
+                "Free-text analysis goal threaded into worker LLM "
+                "prompts to bias their focus."
+            ),
+            json_type="string", default="code analysis",
+        ),
+        CACHE_BOOST_FACTOR_SPEC,
+    )
 
     def __init__(
         self,
@@ -525,7 +639,7 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
         # TODO: The page graph is dynamic. Should be loaded when needed.
         # await self.agent.load_page_graph()
 
-        job_quota = self.agent.metadata.parameters.get("job_quota", 50)  # Max pages in working set
+        job_quota = (self.agent.metadata.parameters.get(self.JOB_QUOTA_KEY) or 50)  # Max pages in working set
 
         # Initialize working set manager
         self.working_set_cap: WorkingSetCapability = self.agent.get_capability_by_type(WorkingSetCapability)
@@ -539,7 +653,7 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
 
         # Initialize batching policy for cache-aware batch selection
         # Can be overridden via agent metadata or by subclasses
-        batching_policy_config = self.agent.metadata.parameters.get("batching_policy", {})
+        batching_policy_config = self.agent.metadata.parameters.get(self.BATCHING_POLICY_KEY, {})
         self.batching_policy: BatchingPolicy = self._create_batching_policy(batching_policy_config)
 
         # Initialize result capability for cluster-wide result visibility
@@ -581,8 +695,8 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
             Configured BatchingPolicy instance
         """
         policy_type = config.get("type", "hybrid")
-        overlap_threshold = config.get("overlap_threshold", self.agent.metadata.parameters.get("overlap_threshold", 0.3))
-        batch_size = config.get("batch_size", self.agent.metadata.parameters.get("batch_size", 5))
+        overlap_threshold = config.get("overlap_threshold", self.agent.metadata.parameters.get(self.OVERLAP_THRESHOLD_KEY, 0.3))
+        batch_size = config.get("batch_size", self.agent.metadata.parameters.get(self.BATCH_SIZE_KEY, 5))
         max_concurrent = config.get("max_concurrent", 10)
 
         if policy_type == "clustering":
@@ -617,8 +731,8 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
             all_clusters: list[PageCluster] = []
             page_storage = await self.agent.get_page_storage()
             async for cluster in page_storage.get_all_clusters(
-                max_cluster_size=self.agent.metadata.parameters.get("max_cluster_size", 10),
-                min_cluster_size=self.agent.metadata.parameters.get("min_cluster_size", 2)
+                max_cluster_size=self.agent.metadata.parameters.get(self.MAX_CLUSTER_SIZE_KEY, 10),
+                min_cluster_size=self.agent.metadata.parameters.get(self.MIN_CLUSTER_SIZE_KEY, 2)
             ):
                 all_clusters.append(cluster)
 
@@ -640,7 +754,7 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
             await self.working_set_cap.initialize_from_policy(
                 available_pages=all_page_ids,
                 run_context=RunContext(
-                    analysis_goal=self.agent.metadata.parameters.get("goal", "code analysis"),
+                    analysis_goal=self.agent.metadata.parameters.get(self.GOAL_KEY, "code analysis"),
                 )
             )
 
@@ -713,7 +827,7 @@ class CodeAnalysisCoordinatorV2Capability(BaseCodeAnalysisCoordinatorCapability)
                     parameters={
                         "cluster": cluster.model_dump(),
                         "query_router_type": "cache_aware",
-                        "cache_boost_factor": self.agent.metadata.parameters.get("cache_boost_factor", 1.5),
+                        "cache_boost_factor": self.agent.metadata.parameters.get(self.CACHE_BOOST_FACTOR_KEY, 1.5),
                     }
                 ),
                 label=role,

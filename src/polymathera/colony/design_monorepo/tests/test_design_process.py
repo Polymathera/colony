@@ -191,7 +191,13 @@ async def test_load_design_context_delegates_to_shared_impl(
     fake_bb.write = AsyncMock()
     cap._colony_blackboard = fake_bb
 
-    result = await cap.load_design_context(refresh=False)
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        Ring, execution_context,
+    )
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c1", session_id="s",
+    ):
+        result = await cap.load_design_context(refresh=False)
 
     # Same shape as materialize_design_context.
     assert set(result.keys()) >= {
@@ -243,7 +249,13 @@ async def test_load_design_context_renewer_cancelled_on_stop(
     fake_bb.write = AsyncMock()
     cap._colony_blackboard = fake_bb
 
-    await cap.load_design_context(refresh=False, include_kuzu=False)
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        Ring, execution_context,
+    )
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c1", session_id="s",
+    ):
+        await cap.load_design_context(refresh=False, include_kuzu=False)
     assert cap._design_context_renewer is not None
 
     await cap.stop()

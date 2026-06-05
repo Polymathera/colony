@@ -20,15 +20,68 @@ from typing import Any
 from overrides import override
 
 from polymathera.colony.agents.base import Agent, AgentCapability, AgentHandle
+from polymathera.colony.agents.metadata_parameters import (
+    ParameterScope,
+    ParameterSpec,
+)
 from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.models import AgentMetadata, AgentSuspensionState, RunContext, PolicyREPL
 from polymathera.colony.agents.blackboard import BlackboardEvent
 from polymathera.colony.agents.blackboard.protocol import ActionPolicyLifecycleProtocol
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult, PROCESSED
 from polymathera.colony.agents.patterns.actions import action_executor
+from polymathera.colony.agents.patterns.actions.repl import (
+    REPL_GUIDANCE_OVERRIDE_KEY,
+)
 from .chat_protocol import SessionChatProtocol
 
 logger = logging.getLogger(__name__)
+
+
+def _render_caller_parameters(
+    caller_parameters: list[Any],
+) -> list[dict[str, Any]]:
+    """Project a mission entry's ``caller_parameters`` list into the
+    JSON-friendly shape the LLM planner reads from
+    ``metadata.parameters['available_missions'][<m>]['mission_params']``.
+
+    Accepts both ``ParameterSpec`` instances (the typed form on
+    ``MissionSpec.caller_parameters``) and plain dicts (raw
+    registry entries before model_validate). Tolerating both lets
+    the L4-discovered mission path (which keeps entries as dicts in
+    the L4 cache) and the colony-builtin path (which has them as
+    typed specs once routed through ``MissionSpec``) share the same
+    projector.
+
+    Each rendered entry carries ``name`` / ``description`` /
+    ``required`` / ``json_type`` / ``default`` so the planner sees
+    a signature, not bare strings.
+    """
+
+    rendered: list[dict[str, Any]] = []
+    for spec in caller_parameters:
+        if isinstance(spec, dict):
+            name = spec["name"]
+            description = spec.get("description", "")
+            json_type = spec.get("json_type", "string")
+            has_default = "default" in spec or "default_factory" in spec
+            default = spec.get("default") if has_default else None
+        else:
+            name = spec.name
+            description = spec.description
+            json_type = spec.json_type
+            has_default = not spec.required
+            default = spec.default if has_default else None
+        entry: dict[str, Any] = {
+            "name": name,
+            "description": description,
+            "json_type": json_type,
+            "required": not has_default,
+        }
+        if has_default:
+            entry["default"] = default
+        rendered.append(entry)
+    return rendered
 
 
 class SessionOrchestratorCapability(AgentCapability):
@@ -51,6 +104,61 @@ class SessionOrchestratorCapability(AgentCapability):
     #: traffic. Single source of truth — the chat router and any other
     #: consumer reach this constant rather than repeating the literal.
     DEFAULT_NAMESPACE = "session_chat"
+
+    # Key constants for the SESSION-scoped planner-loop state this
+    # capability owns and refreshes. Read by ``_refresh_available_*``
+    # writers + by every consumer (REPL, system-prompt builder).
+    # ``REPL_GUIDANCE_OVERRIDE_KEY`` lives at the reader site (the REPL
+    # action module — see ``patterns/actions/repl.py``) and is
+    # re-exported here for the spec; importing from the reader keeps a
+    # single source of truth without creating a web_ui→agents inversion.
+    AVAILABLE_MISSIONS_KEY = "available_missions"
+    AVAILABLE_TOOLS_KEY = "available_tools"
+    REPL_GUIDANCE_OVERRIDE_KEY = REPL_GUIDANCE_OVERRIDE_KEY
+
+    AGENT_METADATA_PARAMS = (
+        ParameterSpec(
+            name=AVAILABLE_MISSIONS_KEY,
+            scope=ParameterScope.SESSION,
+            description=(
+                "Per-session map of {mission_type: {label, description, "
+                "coordinator_class, worker_class, mission_params}} the "
+                "LLM planner reads from the system prompt when picking "
+                "a ``spawn_mission`` target. Rebuilt at every user "
+                "message by ``_refresh_available_missions`` as the "
+                "union of ``get_mission_registry()`` and the L4 "
+                "design-monorepo mission cache."
+            ),
+            json_type="object",
+            default_factory=dict,
+        ),
+        ParameterSpec(
+            name=AVAILABLE_TOOLS_KEY,
+            scope=ParameterScope.SESSION,
+            description=(
+                "Per-session map of {tool_capability_fqn: ToolEntry} "
+                "the LLM planner reads to know which tools the agent "
+                "can mount on a freshly-spawned worker via "
+                "``AgentPoolCapability.create_agent``. Rebuilt from the "
+                "L4 design monorepo's ``.colony/tool-registry.json`` "
+                "by ``_refresh_available_tools``."
+            ),
+            json_type="object",
+            default_factory=dict,
+        ),
+        ParameterSpec(
+            name=REPL_GUIDANCE_OVERRIDE_KEY,
+            scope=ParameterScope.SESSION,
+            description=(
+                "Optional Markdown block that overrides the default "
+                "REPL guidance section of the planner's system prompt. "
+                "Used by chat sessions to tailor the REPL contract for "
+                "session-driven planning (vs the worker-driven default)."
+            ),
+            json_type="string",
+            default=None,
+        ),
+    )
 
     def __init__(
         self,
@@ -235,20 +343,27 @@ class SessionOrchestratorCapability(AgentCapability):
                     )
                 merged[key] = entry
 
-        # Project to the four-field shape the planner reads. Mirrors
-        # ``sessions.py:create_session``'s comprehension verbatim — if
-        # that shape changes there, change here too (single source of
-        # truth audit).
+        # Project to the planner-visible shape: the four core fields
+        # plus the CALLER-scoped ``mission_params`` signature so the
+        # planner sees per-mission expectations (name + description +
+        # optionality) rather than having to guess from prose.
+        # ``caller_parameters`` entries are rendered as plain dicts
+        # for prompt readability — the registry validates them via
+        # ``MissionSpec`` at load time, so by this point they're
+        # well-formed.
         available = {
             atype: {
                 "label": reg["label"],
                 "description": reg.get("description", ""),
                 "coordinator_class": reg.get("coordinator_v2", ""),
                 "worker_class": reg.get("worker", ""),
+                "mission_params": _render_caller_parameters(
+                    reg.get("caller_parameters", []),
+                ),
             }
             for atype, reg in merged.items()
         }
-        self._agent.metadata.parameters["available_missions"] = available
+        self._agent.metadata.parameters[self.AVAILABLE_MISSIONS_KEY] = available
 
     def _refresh_available_tools(self) -> None:
         """Rebuild ``self.agent.metadata.parameters["available_tools"]``
@@ -289,7 +404,7 @@ class SessionOrchestratorCapability(AgentCapability):
                     "capability": entry.capability,
                     "capability_fqn": entry.capability_fqn,
                 }
-        self._agent.metadata.parameters["available_tools"] = available
+        self._agent.metadata.parameters[self.AVAILABLE_TOOLS_KEY] = available
 
     async def _relay_policy_lifecycle_to_chat(self) -> None:
         """Subscribe to policy lifecycle events on the agent's primary
@@ -355,18 +470,13 @@ class SessionOrchestratorCapability(AgentCapability):
         )
 
         try:
-            from polymathera.colony.agents.blackboard import EnhancedBlackboard
-
-            human_bb = EnhancedBlackboard(
-                app_name=self._app_name,
+            human_bb = await self.get_blackboard(
                 scope_id=get_scope_prefix(
                     BlackboardScope.SESSION,
                     namespace=HumanApprovalCapability.DEFAULT_NAMESPACE,
                 ),
                 enable_events=True,
-                backend_type=None,
             )
-            await human_bb.initialize()
             self._human_approval_blackboard = human_bb
             chat_bb = await self.get_blackboard()
         except Exception as e:
@@ -706,8 +816,9 @@ class SessionOrchestratorCapability(AgentCapability):
                 registered mission; mismatch raises ``ValueError``.
             mission_params: Optional domain-specific parameters
                 threaded into the coordinator's
-                ``metadata.parameters``. Use this for mission-
-                declared ``extra_metadata_keys``.
+                ``metadata.parameters``. Pass values matching the
+                mission's declared ``caller_parameters`` (rendered
+                into the system prompt as ``mission_params``).
             max_iterations: Reasoning-loop cap for the coordinator
                 (default 20).
 
@@ -727,7 +838,6 @@ class SessionOrchestratorCapability(AgentCapability):
             AgentPoolCapability,
         )
         from polymathera.colony.agents.models import AgentMetadata
-        from polymathera.colony.agents.self_concept import AgentSelfConcept
 
         # 1) Look up the mission in the LIVE registry — the chat-side
         # static snapshot can lag if a mission was added since the
@@ -765,21 +875,36 @@ class SessionOrchestratorCapability(AgentCapability):
                 ),
             }
 
-        # 2) Build the coordinator's metadata. self_concept comes
-        # from the mission registry; mission_params are forwarded
-        # verbatim into ``metadata.parameters`` so the coordinator's
-        # planner sees them.
-        self_concept_config = reg.get("self_concept") or {}
-        params = dict(mission_params or {})
+        # 2) Build the coordinator's metadata.
+        #
+        # * ``self_concept`` — stamped by the shared
+        #   :func:`build_coordinator_self_concept` helper (single
+        #   source of truth for the
+        #   ``MissionSelfConcept`` → ``AgentSelfConcept`` bridge;
+        #   both this call site and the REST ``jobs.start_run``
+        #   route through it).
+        # * ``parameters`` — just the LLM-supplied mission_params
+        #   plus the ``mission_type`` tag. COLONY / SESSION-scoped
+        #   keys (``design_monorepo_url``, ``git_attribution``,
+        #   ``github_identity``, …) are no longer threaded here —
+        #   the central inheritance gate in
+        #   ``AgentPoolCapability.create_agent`` walks them off this
+        #   SessionAgent's metadata using the typed
+        #   ``AGENT_METADATA_PARAMS`` registry, so every spawn
+        #   anywhere in the codebase gets them automatically.
+        from polymathera.colony.agents.configs import (
+            build_coordinator_self_concept,
+        )
+
+        params: dict[str, Any] = dict(mission_params or {})
         params.setdefault("mission_type", mission_type)
         coord_metadata = AgentMetadata(
             role=f"{reg.get('label', mission_type)} coordinator",
             session_id=self.agent.metadata.session_id,
             goals=[f"Run {reg.get('label', mission_type)} mission"],
             max_iterations=max_iterations,
-            self_concept=(
-                AgentSelfConcept(**self_concept_config)
-                if self_concept_config else None
+            self_concept=build_coordinator_self_concept(
+                reg, mission_type=mission_type,
             ),
             parameters=params,
         )

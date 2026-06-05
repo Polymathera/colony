@@ -29,6 +29,8 @@ from typing import Any, ClassVar, TYPE_CHECKING
 from overrides import override
 
 from ..agents.base import Agent, AgentCapability
+from ..agents.metadata_parameters import ParameterScope, ParameterSpec
+from ..agents.scopes import ScopeUtils
 from ..agents.blackboard import BlackboardEvent, ConvergenceQuiescenceProtocol
 from ..agents.blackboard.protocol import (
     DesignContextMappedProtocol,
@@ -213,6 +215,62 @@ class DesignMonorepoCapabilityBase(AgentCapability):
     is suspended and resumed, the client opens fresh on the next call.
     """
 
+    # Key constants for the COLONY-scoped metadata.parameters entries
+    # every design-monorepo capability reads. Single source of truth —
+    # the ``AGENT_METADATA_PARAMS`` ParameterSpecs reference these
+    # names, and consumers throughout the class (``design_monorepo_url``
+    # property, ``_lazy_clone_from_agent_metadata``,
+    # ``_resolve_attribution``, ``_default_manifest_bootstrap``) read
+    # ``params.get(_DESIGN_MONOREPO_URL_KEY)`` / ``_GIT_ATTRIBUTION_KEY``.
+    # If you rename either string, only one site changes.
+    _DESIGN_MONOREPO_URL_KEY = "design_monorepo_url"
+    _GIT_ATTRIBUTION_KEY = "git_attribution"
+
+    # Colony-scoped metadata parameters every design-monorepo capability
+    # reads. Declared on the base — all four subclasses
+    # (``RepoStateProvider``, ``DesignCheckpointer``, ``ToolBuilder``,
+    # ``ProjectAuthoringCapability``) inherit via the class attribute,
+    # and ``DesignProcessCapability`` (subclass of
+    # ``BranchScopedCapabilityBase``) picks it up the same way.
+    #
+    # Both keys are declared OPTIONAL — a colony may legitimately have
+    # no design monorepo configured yet (the "Set design monorepo on
+    # the landing page" UX flow), and ``commit_principal`` /
+    # ``commit_co_author`` have sensible framework defaults. The
+    # central inheritance gate in ``AgentPoolCapability.create_agent``
+    # flows whatever the parent has; absent → leave absent.
+    AGENT_METADATA_PARAMS = (
+        ParameterSpec(
+            name=_DESIGN_MONOREPO_URL_KEY,
+            scope=ParameterScope.COLONY,
+            description=(
+                "Origin URL of the design monorepo. "
+                "``_lazy_clone_from_agent_metadata`` reads this on "
+                "first ``_client_sync`` to materialise the per-agent "
+                "clone under ``/mnt/shared/agents/<agent>/clones/``. "
+                "Absent (colony has no design monorepo configured) "
+                "leaves the capability detached — actions that need "
+                "a clone surface ``DesignMonorepoError`` with the "
+                "remediation hint."
+            ),
+            default=None,
+        ),
+        ParameterSpec(
+            name=_GIT_ATTRIBUTION_KEY,
+            scope=ParameterScope.COLONY,
+            description=(
+                "Per-colony commit attribution config — "
+                "``commit_principal`` (colony | user) + "
+                "``commit_co_author`` (colony | user | None). Read by "
+                "``_resolve_attribution`` for every commit the "
+                "capability authors. Framework defaults apply when "
+                "the dict is empty."
+            ),
+            json_type="object",
+            default_factory=dict,
+        ),
+    )
+
     def __init__(
         self,
         agent: Agent | None = None,
@@ -387,8 +445,9 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         # active branch + active commit.
         from git import Repo
         repo = await asyncio.to_thread(Repo, str(repo_root))
-        params = getattr(self._agent.metadata, "parameters", None) or {} \
-            if self._agent is not None else {}
+        params = (
+            self._agent.metadata.parameters if self._agent is not None else {}
+        )
         origin_url = params.get(self._DESIGN_MONOREPO_URL_KEY, "")
         try:
             branch = repo.active_branch.name
@@ -406,10 +465,19 @@ class DesignMonorepoCapabilityBase(AgentCapability):
                 vcm_handle=vcm_handle,
             )
 
-        # Colony-level scope id — same convention ``ScopeUtils`` uses
-        # for the dashboard's VCM mapping. ``materialize_design_context_sources``
-        # composes ``"{base}:design_context.{row.name}"`` per row.
-        base_scope_id = f"design_monorepo:{origin_url or 'local'}:{branch}"
+        # Colony-prefixed scope id. ``VCMManager._local_scope_key``
+        # validates that every mmap target starts with the canonical
+        # ``polymathera:tenant:T:colony:C`` prefix that ``ScopeUtils``
+        # produces, so we MUST route construction through the helper
+        # — handwritten strings drift and trip the validator (see
+        # 2026-06-05 regression where ``base_scope_id`` started with
+        # ``design_monorepo:`` instead and every mmap call failed).
+        # ``materialize_design_context_sources`` composes
+        # ``"{base}:design_context.{row.name}"`` per row.
+        base_scope_id = (
+            f"{ScopeUtils.get_colony_level_scope()}"
+            f":design_monorepo:{origin_url or 'local'}:{branch}"
+        )
 
         report = await materialize_design_context_sources(
             vcm_handle=vcm_handle,
@@ -518,8 +586,6 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         state under the new branch."""
         return self._client_sync().active_branch
 
-    _DESIGN_MONOREPO_URL_KEY = "design_monorepo_url"
-
     @property
     def has_design_monorepo_url(self) -> bool:
         """True iff this capability has an L4 design-monorepo URL
@@ -538,8 +604,7 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         """The L4 design-monorepo URL configured on this capability's agent metadata."""
         if self._agent is None:
             return None
-        params = getattr(self._agent.metadata, "parameters", None) or {}
-        return params.get(self._DESIGN_MONOREPO_URL_KEY)
+        return self._agent.metadata.parameters.get(self._DESIGN_MONOREPO_URL_KEY)
 
     def ensure_materialized(self) -> bool:
         """Trigger the lazy clone if the per-agent working tree has
@@ -593,8 +658,9 @@ class DesignMonorepoCapabilityBase(AgentCapability):
 
         if self._agent is None:
             return
-        params = getattr(self._agent.metadata, "parameters", None) or {}
-        url = params.get(self._DESIGN_MONOREPO_URL_KEY)
+        url = self._agent.metadata.parameters.get(
+            self._DESIGN_MONOREPO_URL_KEY,
+        )
         if not url:
             return
         from git import Repo  # local import — gitpython is in the design_monorepo extra
@@ -634,6 +700,48 @@ class DesignMonorepoCapabilityBase(AgentCapability):
     async def _client_async(self) -> DesignMonorepoClient:
         return await asyncio.to_thread(self._client_sync)
 
+    def _refresh_against_origin(self) -> None:
+        """Best-effort ``git fetch origin && git reset --hard
+        origin/<branch>`` so the agent's clone reflects the operator's
+        latest pushed state. Called by :meth:`_load_design_context_impl`
+        (and any other base-side action that wants to honour upstream
+        edits) — same intent as the dashboard's
+        ``_refresh_cache_clone``, scoped to the per-agent clone.
+
+        Failures (no ``origin``, network blip, detached HEAD) log a
+        warning and return — the caller proceeds with whatever state
+        the clone is currently in. Pushing a hard-reset failure to
+        the LLM is worse UX than ingesting from a slightly-stale
+        clone.
+        """
+        from git import Repo
+
+        try:
+            repo = Repo(str(self._working_dir))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("refresh: not a git repo (%s)", e)
+            return
+        try:
+            origin = repo.remote("origin")
+        except ValueError:
+            return  # local-only bootstrap — nothing to fetch
+        try:
+            origin.fetch(prune=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("refresh: fetch failed (%s); using cached state", e)
+            return
+        try:
+            branch = repo.active_branch.name
+        except TypeError:
+            return  # detached HEAD
+        try:
+            repo.git.reset("--hard", f"origin/{branch}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "refresh: reset --hard origin/%s failed (%s); "
+                "using cached state", branch, e,
+            )
+
     def _manifest(self) -> DesignMonorepoManifest:
         return self._client_sync().manifest
 
@@ -659,12 +767,8 @@ class DesignMonorepoCapabilityBase(AgentCapability):
             )
         agent = self.agent  # raises in detached mode, but we returned above
         role = "agent"
-        try:
-            md = getattr(agent, "metadata", None)
-            if md is not None and getattr(md, "role", None):
-                role = str(md.role)
-        except Exception:  # noqa: BLE001
-            pass
+        if agent.metadata.role:
+            role = str(agent.metadata.role)
         colony_id = getattr(agent, "colony_id", "default") or "default"
         return AgentIdentity(
             agent_id=agent.agent_id,
@@ -684,8 +788,6 @@ class DesignMonorepoCapabilityBase(AgentCapability):
     # the co-author lands as a ``Co-Authored-By:`` trailer.
     #
     # Defaults are ``principal=colony, co_author=user``.
-
-    _GIT_ATTRIBUTION_KEY = "git_attribution"
 
     def _resolve_attribution(
         self, *, agent_email_domain: str | None = None,
@@ -711,16 +813,17 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         if agent_email_domain is None:
             agent_email_domain = self._manifest().agent_email_domain
 
-        params: dict[str, Any] = {}
-        if self._agent is not None:
-            params = getattr(self._agent.metadata, "parameters", None) or {}
+        params: dict[str, Any] = (
+            self._agent.metadata.parameters if self._agent is not None else {}
+        )
         cfg = params.get(self._GIT_ATTRIBUTION_KEY) or {}
         principal_label = cfg.get("commit_principal") or "colony"
         co_author_label = cfg.get("commit_co_author")
         # Per-user identity moved to ``github_identity`` in P1 of
         # ``colony/github_identity_fix_plan.md`` (OAuth-verified on
         # the user profile; populated by session-create in P4).
-        gh_identity = params.get("github_identity") or {}
+        from ..agents.patterns.capabilities.github import GitHubCapability
+        gh_identity = params.get(GitHubCapability.GITHUB_IDENTITY_KEY) or {}
         user_name = gh_identity.get("git_user_name")
         user_email = gh_identity.get("git_user_email")
 
@@ -730,12 +833,8 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         if self._agent is not None:
             agent_id = getattr(self._agent, "agent_id", None)
             colony_id = getattr(self._agent, "colony_id", "default") or "default"
-            try:
-                md = getattr(self._agent, "metadata", None)
-                if md is not None and getattr(md, "role", None):
-                    role = str(md.role)
-            except Exception:  # noqa: BLE001
-                pass
+            if self._agent.metadata.role:
+                role = str(self._agent.metadata.role)
 
         def _safe_resolve(label: str | None) -> CommitIdentity | None:
             if not label:
@@ -1500,48 +1599,6 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
             refresh=refresh, include_kuzu=include_kuzu,
         )
 
-    def _refresh_against_origin(self) -> None:
-        """Best-effort ``git fetch origin && git reset --hard
-        origin/<branch>`` so the agent's clone reflects the
-        operator's latest pushed state. Used by
-        :meth:`ingest_repo_map_literature` (and any future read-side
-        action that wants to honour upstream edits) — same intent as
-        the dashboard's ``_refresh_cache_clone``, scoped to the
-        per-agent clone.
-
-        Failures (no ``origin``, network blip, detached HEAD) log a
-        warning and return — the caller proceeds with whatever state
-        the clone is currently in. Pushing a hard-reset failure to
-        the LLM is worse UX than ingesting from a slightly-stale
-        clone.
-        """
-        from git import Repo
-
-        try:
-            repo = Repo(str(self._working_dir))
-        except Exception as e:  # noqa: BLE001
-            logger.warning("refresh: not a git repo (%s)", e)
-            return
-        try:
-            origin = repo.remote("origin")
-        except ValueError:
-            return  # local-only bootstrap — nothing to fetch
-        try:
-            origin.fetch(prune=True)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("refresh: fetch failed (%s); using cached state", e)
-            return
-        try:
-            branch = repo.active_branch.name
-        except TypeError:
-            return  # detached HEAD
-        try:
-            repo.git.reset("--hard", f"origin/{branch}")
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "refresh: reset --hard origin/%s failed (%s); "
-                "using cached state", branch, e,
-            )
 
     # ---- L1-F read-side companions to ProjectAuthoringCapability ----
 
@@ -1703,10 +1760,16 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
     def _read_file_sync(
         self, abs_p: Path, requested_path: str, max_bytes: int,
     ) -> FileContent:
+        # ENOENT / not-a-regular-file: return ``exists=False`` rather
+        # than raising. LLM planners can't easily catch exceptions
+        # raised inside the REPL; returning a typed null lets them
+        # branch cleanly (mirrors ``stat_path``'s contract). Bootstrap
+        # flows (where files legitimately don't exist yet) depend on
+        # this — see ``project_planning`` mission. (Previously, this
+        # raised, which made the coordinator's planner thrash and
+        # spawn duplicate workers.)
         if not abs_p.is_file():
-            raise DesignMonorepoError(
-                f"read_file: not a regular file: {requested_path}",
-            )
+            return FileContent(path=requested_path, exists=False)
         if max_bytes <= 0:
             raise DesignMonorepoError(
                 f"read_file: max_bytes must be positive (got {max_bytes})",
@@ -1822,10 +1885,13 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
         pattern: str | None,
         max_entries: int,
     ) -> list[FileEntry]:
+        # Missing-directory: return an empty list rather than raising.
+        # Same rationale as ``read_file``'s ``exists=False`` — LLM
+        # planners branch on the result rather than catching an
+        # exception. Bootstrap flows (where the target dir hasn't
+        # been created yet) depend on this.
         if not abs_p.is_dir():
-            raise DesignMonorepoError(
-                f"list_directory: not a directory: {abs_p}",
-            )
+            return []
         if max_entries <= 0:
             raise DesignMonorepoError(
                 f"list_directory: max_entries must be positive (got "
@@ -3028,8 +3094,9 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
 
         url = ""
         if self._agent is not None:
-            params = getattr(self._agent.metadata, "parameters", None) or {}
-            url = params.get(self._DESIGN_MONOREPO_URL_KEY, "") or ""
+            url = self._agent.metadata.parameters.get(
+                self._DESIGN_MONOREPO_URL_KEY, "",
+            ) or ""
 
         return DesignMonorepoManifest(
             tenant=tenant,
@@ -3056,12 +3123,8 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
             )
         agent = self.agent
         role = "agent"
-        try:
-            md = getattr(agent, "metadata", None)
-            if md is not None and getattr(md, "role", None):
-                role = str(md.role)
-        except Exception:  # noqa: BLE001
-            pass
+        if agent.metadata.role:
+            role = str(agent.metadata.role)
         colony_id = getattr(agent, "colony_id", "default") or "default"
         return AgentIdentity(
             agent_id=agent.agent_id,

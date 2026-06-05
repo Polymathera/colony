@@ -2027,8 +2027,10 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         # the Connect GitHub flow on their profile.
         user_login: str | None = None
         if self._agent is not None:
-            params = getattr(self._agent.metadata, "parameters", None) or {}
-            gh_identity = params.get("github_identity") or {}
+            from ..agents.patterns.capabilities.github import GitHubCapability
+            gh_identity = self._agent.metadata.parameters.get(
+                GitHubCapability.GITHUB_IDENTITY_KEY,
+            ) or {}
             user_login = gh_identity.get("user_github_login")
 
         # ``repo`` is resolved after the sibling check so the

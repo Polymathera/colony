@@ -128,17 +128,19 @@ async def get_agent_hierarchy(
                 if info is None:
                     nodes.append(AgentHierarchyNode(agent_id=agent_id))
                     continue
-                metadata = getattr(info, "metadata", None)
+                # ``AgentRegistrationInfo.metadata`` is non-Optional
+                # (default_factory=AgentMetadata) — always present.
+                metadata = info.metadata
                 nodes.append(AgentHierarchyNode(
                     agent_id=agent_id,
                     agent_type=getattr(info, "agent_type", ""),
                     state=str(getattr(info, "state", "")),
-                    role=getattr(metadata, "role", None) if metadata else None,
-                    parent_agent_id=getattr(metadata, "parent_agent_id", None) if metadata else None,
+                    role=metadata.role,
+                    parent_agent_id=metadata.parent_agent_id,
                     capability_names=getattr(info, "capability_names", []),
                     bound_pages=getattr(info, "bound_pages", []),
-                    tenant_id=getattr(metadata, "tenant_id", "") if metadata else "",
-                    colony_id=getattr(metadata, "colony_id", "") if metadata else "",
+                    tenant_id=metadata.tenant_id,
+                    colony_id=metadata.colony_id,
                 ))
             return nodes
         except Exception as e:

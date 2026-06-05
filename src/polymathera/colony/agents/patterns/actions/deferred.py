@@ -135,16 +135,12 @@ class DeferredClosure(Generic[R], ABC):
         self.tool_name: str = getattr(spec, "name", cls.__name__)
         # run_id snapshot via the public surface: gate on
         # ``is_detached`` (public boolean), then read via the public
-        # ``agent`` property + ``agent.metadata.run_id`` — the same
-        # convention :class:`AgentTracingFacility` uses
-        # (``getattr(self.agent.metadata, "run_id", None)`` at
-        # observability/facility.py). Empty string when detached or
-        # when no run_id has been set on the agent's metadata.
+        # ``agent`` property + ``agent.metadata.run_id``. Empty string
+        # when detached or when no run_id has been set on the
+        # syscontext.
         self.run_id: str = ""
         if not getattr(capability, "is_detached", True):
-            self.run_id = (
-                getattr(capability.agent.metadata, "run_id", "") or ""
-            )
+            self.run_id = capability.agent.metadata.run_id or ""
         # Transient capability reference — used by :meth:`compile`
         # to extract sub-closures and/or read additional capability
         # state. Cleared by :meth:`compile` so the closure is

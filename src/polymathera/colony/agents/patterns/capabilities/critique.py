@@ -22,6 +22,7 @@ import asyncio
 from ...models import Action, ActionResult, PolicyREPL, AgentSuspensionState
 from ..models import Reflection, Critique
 from ...base import Agent, AgentCapability
+from ...metadata_parameters import ParameterScope, ParameterSpec
 from ...scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from ..actions import action_executor
 from ..events import event_handler, EventProcessingResult, PROCESSED
@@ -316,6 +317,54 @@ class CriticCapability(AgentCapability):
     - Plannable actions for requesting critique from peers/parents via @action_executor
     """
 
+    # COLONY-scoped: operators wire in :class:`CritiquePolicy` instances
+    # per agent-relationship type at deployment time. All four are
+    # optional — missing slots fall back to default critique behaviour
+    # in the relevant action surface. ``json_type="object"`` because
+    # the value is a structured policy object (round-trip serialised
+    # by the registry's plain projector).
+    AGENT_METADATA_PARAMS = (
+        ParameterSpec(
+            name="critique_policy_self",
+            scope=ParameterScope.COLONY,
+            description=(
+                "CritiquePolicy applied when an agent critiques its "
+                "own output. Cheapest of the four — runs in-process."
+            ),
+            json_type="object",
+            default=None,
+        ),
+        ParameterSpec(
+            name="critique_policy_child",
+            scope=ParameterScope.COLONY,
+            description=(
+                "CritiquePolicy applied when an agent critiques a "
+                "child agent it spawned."
+            ),
+            json_type="object",
+            default=None,
+        ),
+        ParameterSpec(
+            name="critique_policy_peer",
+            scope=ParameterScope.COLONY,
+            description=(
+                "CritiquePolicy applied when an agent critiques a "
+                "peer's output (cross-process request/response)."
+            ),
+            json_type="object",
+            default=None,
+        ),
+        ParameterSpec(
+            name="critique_policy_parent",
+            scope=ParameterScope.COLONY,
+            description=(
+                "CritiquePolicy applied when an agent critiques its "
+                "parent's output."
+            ),
+            json_type="object",
+            default=None,
+        ),
+    )
 
     def __init__(
         self,

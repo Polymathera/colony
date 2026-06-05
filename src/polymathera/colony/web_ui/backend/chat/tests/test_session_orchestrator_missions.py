@@ -395,9 +395,25 @@ async def test_spawn_mission_dispatches_to_create_agent(
         return {"agent_id": "child_abc123", "label": None, "created": True}
     fake_pool.create_agent = _capture_create
 
+    # The session has colony-scoped params on its metadata, but
+    # spawn_mission deliberately does NOT thread them onto the
+    # child's metadata — the central inheritance gate in
+    # ``AgentPoolCapability.create_agent`` does that. This test
+    # asserts spawn_mission's narrow contract; the inheritance
+    # behaviour is pinned separately by
+    # ``test_create_agent_inherits_colony_scoped_params`` (and
+    # siblings) in ``tests/test_agent_pool.py``.
     metadata = SimpleNamespace(parameters={
-        "design_monorepo_url": "x",
+        "design_monorepo_url": "https://github.com/acme/monorepo.git",
+        "git_attribution": {
+            "commit_principal": "colony", "commit_co_author": "user",
+        },
+        "github_identity": {
+            "tenant_installation_id": "100",
+            "user_github_login": "alice",
+        },
         "available_missions": {},
+        "available_tools": {"foo": "bar"},
     }, session_id="sess_test")
     cap._agent = SimpleNamespace(
         agent_id="session_agent_xyz",
@@ -412,10 +428,11 @@ async def test_spawn_mission_dispatches_to_create_agent(
             "description": "Spin up the OPM-MEG coordinator.",
             "coordinator_v2": "opm_meg_coordinator.OPMMEGCoordinator",
             "worker": "polymathera.cps.x.AtomicPhysicsAgent",
+            # Real registry entries are ``MissionSelfConcept``-shaped
+            # (extra="forbid", description/goals/constraints only).
+            # ``spawn_mission`` is responsible for stamping the
+            # ``agent_id`` and ``name`` that ``AgentSelfConcept`` requires.
             "self_concept": {
-                "agent_id": "",
-                "name": "OPM-MEG Coordinator",
-                "role": "noise-floor design coordinator",
                 "description": "Drives the OPM-MEG mission.",
                 "goals": ["close the noise budget"],
                 "constraints": ["cite every prediction"],
@@ -439,13 +456,34 @@ async def test_spawn_mission_dispatches_to_create_agent(
     sent = captured["kwargs"]
     assert sent["agent_type"] == "opm_meg_coordinator.OPMMEGCoordinator"
     sent_metadata = sent["metadata"]
-    # The mission's self_concept reached the coordinator's metadata.
+    # The mission's self_concept reached the coordinator's metadata,
+    # with ``agent_id`` blanked for ConsciousnessCapability and
+    # ``name`` defaulted to the registry label.
     assert sent_metadata.self_concept is not None
-    assert sent_metadata.self_concept.name == "OPM-MEG Coordinator"
+    assert sent_metadata.self_concept.name == "OPM-MEG Noise-Floor"
+    assert sent_metadata.self_concept.agent_id == ""
+    assert sent_metadata.self_concept.description == "Drives the OPM-MEG mission."
+    assert sent_metadata.self_concept.goals == ["close the noise budget"]
+    assert sent_metadata.self_concept.constraints == ["cite every prediction"]
     # mission_params merged into metadata.parameters; mission_type tag
     # added by the action so the coordinator can self-identify.
     assert sent_metadata.parameters["noise_floor_target_fT_rt_hz"] == 12.0
     assert sent_metadata.parameters["mission_type"] == "opm_meg"
+    # spawn_mission's narrow contract is: only mission_params +
+    # mission_type. Colony/session-scoped keys from the parent's
+    # metadata are the inheritance gate's responsibility (in
+    # ``AgentPoolCapability.create_agent``), not spawn_mission's —
+    # so they MUST NOT appear in what spawn_mission sends to the
+    # pool. Pins that separation so the band-aid (a hardcoded
+    # tuple in spawn_mission) can't sneak back.
+    for k in (
+        "design_monorepo_url", "git_attribution", "github_identity",
+        "available_missions", "available_tools",
+    ):
+        assert k not in sent_metadata.parameters, (
+            f"spawn_mission must not thread {k!r} onto the child's "
+            f"metadata.parameters — the inheritance gate owns that."
+        )
 
 
 @pytest.mark.asyncio

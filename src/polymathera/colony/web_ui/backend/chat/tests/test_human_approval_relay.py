@@ -160,6 +160,134 @@ async def test_tolerates_non_dict_payload(_exec_ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pub/sub channel invariant — the relay's blackboard MUST share the
+# same ``(app_name, scope_id)`` pair as any publisher in the same scope.
+# 2026-06-05 regression: the relay was constructed with
+# ``app_name=self._app_name`` where the capability's ``self._app_name``
+# was ``None`` (the .bind() pipeline doesn't auto-thread it), producing
+# a pub/sub channel literally prefixed with ``"None:"``. The coordinator
+# published to the real ``<app_name>:`` channel and the relay never
+# saw any request, so the user never saw any approval in chat and the
+# coordinator polled ``get_response`` forever.
+
+
+async def test_relay_blackboard_has_real_app_name_not_capability_field(
+    _exec_ctx,
+) -> None:
+    """The relay MUST NOT publish/subscribe on
+    ``f"{None}:blackboard:events:{scope_id}"``. It must use the
+    SessionAgent's live app name so it matches every other publisher
+    in the same scope.
+
+    Structural assertion via AST (comments ignored): the relay's
+    code MUST NOT reference ``self._app_name`` or instantiate
+    ``EnhancedBlackboard`` directly — it must route through
+    ``self.get_blackboard``, which delegates to
+    ``Agent.get_blackboard`` (which knows the live app name).
+    """
+    import ast
+    import inspect
+    import textwrap
+    from polymathera.colony.web_ui.backend.chat.session_agent import (
+        SessionOrchestratorCapability,
+    )
+
+    source = inspect.getsource(
+        SessionOrchestratorCapability._relay_human_approval_to_chat,
+    )
+    # ``inspect.getsource`` preserves the class-body indentation;
+    # ``ast.parse`` needs a top-level-aligned statement.
+    tree = ast.parse(textwrap.dedent(source))
+
+    forbidden_attr_refs = []
+    forbidden_ctor_calls = []
+    for node in ast.walk(tree):
+        # `self._app_name` reads
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            and node.attr == "_app_name"
+        ):
+            forbidden_attr_refs.append(ast.unparse(node))
+        # `EnhancedBlackboard(...)` calls
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = (
+                func.id if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute)
+                else None
+            )
+            if name == "EnhancedBlackboard":
+                forbidden_ctor_calls.append(ast.unparse(node)[:60])
+
+    assert not forbidden_attr_refs, (
+        "_relay_human_approval_to_chat references "
+        f"self._app_name: {forbidden_attr_refs!r}. That field is "
+        "None for capabilities mounted via the .bind() pipeline, "
+        "producing a 'None:blackboard:events:<scope>' pub/sub "
+        "channel that no real publisher uses. Route through "
+        "self.get_blackboard(scope_id=...) instead."
+    )
+    assert not forbidden_ctor_calls, (
+        "_relay_human_approval_to_chat manually constructs an "
+        f"EnhancedBlackboard: {forbidden_ctor_calls!r}. That "
+        "bypasses Agent.get_blackboard's app_name resolution. "
+        "Use self.get_blackboard(scope_id=...) instead."
+    )
+
+
+async def test_relay_and_publisher_resolve_to_same_app_name(_exec_ctx) -> None:
+    """End-to-end channel-match check: an agent with a real
+    ``app_name`` exposes ``get_blackboard(scope_id=...)`` that
+    yields a blackboard with the SAME ``app_name`` a publisher
+    would use. If this drifts (e.g. the SessionAgent's relay starts
+    using ``self._app_name=None`` again), the relay and publisher
+    end up on different Redis pub/sub channels."""
+    from unittest.mock import AsyncMock
+
+    cap = SessionOrchestratorCapability(
+        agent=None, scope=BlackboardScope.SESSION,
+        capability_key="orch", app_name="explicit_app_for_test",
+    )
+    # Stand-in agent with a working ``get_blackboard``. Mirrors what
+    # ``Agent.get_blackboard`` does: produces a blackboard tagged
+    # with the agent's app name regardless of ``self._app_name`` on
+    # the capability.
+    agent_app_name = "polymathera-cps-smoke"
+
+    async def _agent_get_bb(scope_id, backend_type=None, enable_events=True):
+        bb = EnhancedBlackboard(
+            app_name=agent_app_name, scope_id=scope_id,
+            backend_type="memory", enable_events=False,
+        )
+        await bb.initialize()
+        return bb
+
+    cap._agent = SimpleNamespace(
+        agent_id="session_agent_xyz", get_blackboard=_agent_get_bb,
+    )
+
+    relay_bb = await cap.get_blackboard(
+        scope_id=get_scope_prefix(
+            BlackboardScope.SESSION,
+            namespace="human_approval",
+        ),
+        enable_events=True,
+    )
+
+    # The publisher (e.g. coordinator's HumanApprovalCapability)
+    # would use the agent's app_name too. The CHANNEL identity is
+    # (app_name, scope_id) — both must match.
+    assert relay_bb.app_name == agent_app_name, (
+        f"Relay blackboard app_name {relay_bb.app_name!r} "
+        f"!= agent app_name {agent_app_name!r}. The relay would "
+        f"subscribe to a different Redis pub/sub channel than any "
+        f"publisher in the same scope; events would be dropped."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Scope discipline
 # ---------------------------------------------------------------------------
 

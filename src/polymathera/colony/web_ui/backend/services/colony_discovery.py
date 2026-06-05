@@ -111,6 +111,7 @@ async def discover_colonies_for_tenant(
     )
 
     new_colony_ids: list[str] = []
+    markers_seen = 0
     for repo in repos:
         try:
             # Probe for ``.colony/`` first so the upsert below records
@@ -142,6 +143,7 @@ async def discover_colonies_for_tenant(
 
             if not has_marker:
                 continue
+            markers_seen += 1
 
             # Application-level "already discovered" gate — see
             # plan §4.3 for why this is NOT a SQL UNIQUE constraint.
@@ -183,6 +185,36 @@ async def discover_colonies_for_tenant(
                 "tenant=%s repo=%s; continuing with next repo",
                 tenant_id, repo.full_name,
             )
+
+    # ``repo_path_exists`` collapses GitHub's 404 to ``has_marker=False``,
+    # which conflates "no .colony/ in this repo" with "user-OAuth token
+    # was issued without effective Contents:Read for this installation".
+    # The second case is a known GitHub Apps eventual-consistency
+    # quirk: user-permissions added to the App propagate to existing
+    # OAuth tokens lazily, so the first sign-in after an App config
+    # change (or after a long dormant period) can issue a
+    # permission-light token even though /user/installations/{id}/
+    # repositories returns 200 for the same repo. Sign-out + sign-in
+    # mints a fresh code that picks up the current permissions.
+    #
+    # Warn loudly when the walker sees repos but zero markers — the
+    # silent ``discovered_colonies=0`` summary was previously the only
+    # signal and sent operators (and Claude) hunting for the wrong
+    # cause.
+    if repos and markers_seen == 0:
+        logger.warning(
+            "discover_colonies_for_tenant: tenant=%s vcs_org=%s "
+            "scanned %d repo(s), found ZERO .colony/ markers. If you "
+            "expected a .colony/ directory in any of these repos, this "
+            "is most likely the GitHub OAuth user-permission "
+            "propagation lag — ask the operator to sign out and back "
+            "in to refresh the token. (Less likely: the App's "
+            "user-permissions don't include Contents:Read, or the "
+            "repos genuinely don't have .colony/.) "
+            "repos_seen=%s",
+            tenant_id, tenant_ref.vcs_org_login, len(repos),
+            [r.full_name for r in repos[:10]],
+        )
 
     return new_colony_ids
 

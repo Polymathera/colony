@@ -244,12 +244,24 @@ async def test_materialize_design_context_end_to_end(
     fake_bb.write = AsyncMock()
     state_provider._colony_blackboard = fake_bb
 
+    # ``_load_design_context_impl`` now builds the colony-prefixed
+    # scope id via ``ScopeUtils.get_colony_level_scope()`` (so the
+    # VCM's ``_local_scope_key`` validation accepts it). That helper
+    # requires a live ``execution_context``; wrap the call so the
+    # ContextVar resolves.
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        Ring, execution_context,
+    )
+
     # Default include_kuzu=True — focus this test on the VCM path
     # by opting out of path-1; the path-1 wiring is exercised in
     # ``test_materialize_design_context_kuzu_path_ingests_into_graph``.
-    result = await state_provider.materialize_design_context(
-        refresh=False, include_kuzu=False,
-    )
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c1", session_id="s",
+    ):
+        result = await state_provider.materialize_design_context(
+            refresh=False, include_kuzu=False,
+        )
 
     # ---- response shape ----
     assert set(result["mapped"]) == {"docs", "hypos"}
@@ -394,9 +406,15 @@ async def test_materialize_design_context_kuzu_path_ingests_into_graph(
     fake_bb.write = AsyncMock()
     state_provider._colony_blackboard = fake_bb
 
-    result = await state_provider.materialize_design_context(
-        refresh=False, include_kuzu=True,
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        Ring, execution_context,
     )
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c1", session_id="s",
+    ):
+        result = await state_provider.materialize_design_context(
+            refresh=False, include_kuzu=True,
+        )
 
     # Each matching file got ingested with the design_context URI.
     assert fake_ingestor.ingest_file.await_count == 2
@@ -497,9 +515,15 @@ async def test_materialize_design_context_kuzu_partial_on_some_file_failures(
     fake_bb.write = AsyncMock()
     state_provider._colony_blackboard = fake_bb
 
-    result = await state_provider.materialize_design_context(
-        refresh=False, include_kuzu=True,
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        Ring, execution_context,
     )
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c1", session_id="s",
+    ):
+        result = await state_provider.materialize_design_context(
+            refresh=False, include_kuzu=True,
+        )
 
     kuzu_row = next(r for r in result["rows"] if r["path"] == "kuzu")
     assert kuzu_row["status"] == "partial"

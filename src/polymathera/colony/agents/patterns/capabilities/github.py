@@ -27,6 +27,7 @@ from overrides import override
 import httpx
 
 from ...base import AgentCapability
+from ...metadata_parameters import ParameterScope, ParameterSpec
 from ...blackboard.protocol import GitHubEventProtocol
 from ...models import AgentSuspensionState
 from ...scopes import BlackboardScope, get_scope_prefix
@@ -254,6 +255,39 @@ class GitHubCapability(AgentCapability):
         app_name: ``serving`` application name override.
     """
 
+    # Key constant for the COLONY-scoped per-tenant + per-user identity
+    # block. Single source of truth — the ``AGENT_METADATA_PARAMS``
+    # spec below references this name, and cross-file consumers
+    # (``design_monorepo/capabilities.py::_resolve_attribution`` /
+    # ``design_monorepo/process.py::propose_task_assignments`` /
+    # ``distributed/git_credentials.py``) import + use this constant
+    # rather than re-typing the string.
+    GITHUB_IDENTITY_KEY = "github_identity"
+
+    # Colony-scoped metadata parameter the capability reads in
+    # ``_build_live_client`` to mint a per-tenant installation token.
+    # Optional with an empty-dict default — sessions for tenants
+    # that haven't completed the GitHub-App-installation flow yet
+    # surface the missing-installation-id error at the first live
+    # action, not at init (matching the existing UX).
+    AGENT_METADATA_PARAMS = (
+        ParameterSpec(
+            name=GITHUB_IDENTITY_KEY,
+            scope=ParameterScope.COLONY,
+            description=(
+                "{tenant_installation_id, user_github_login, "
+                "user_github_id, git_user_email, git_user_name}. "
+                "``tenant_installation_id`` is read by "
+                "``_build_live_client`` to mint REST tokens scoped "
+                "to this tenant. The per-user fields are read by "
+                "``propose_task_assignments`` and the "
+                "design-monorepo trio's commit-attribution path."
+            ),
+            json_type="object",
+            default_factory=dict,
+        ),
+    )
+
     _CLAIMED_BY_LABEL_PREFIX = "claimed-by:"
 
     def __init__(
@@ -338,8 +372,9 @@ class GitHubCapability(AgentCapability):
 
         installation_id = self._installation_id
         if not installation_id and self._agent is not None:
-            params = getattr(self._agent.metadata, "parameters", None) or {}
-            gh_identity = params.get("github_identity") or {}
+            gh_identity = self._agent.metadata.parameters.get(
+                self.GITHUB_IDENTITY_KEY,
+            ) or {}
             installation_id = gh_identity.get("tenant_installation_id")
 
         if not installation_id:

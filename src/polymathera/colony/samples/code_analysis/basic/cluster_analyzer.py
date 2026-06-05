@@ -18,6 +18,30 @@ from collections import defaultdict
 from overrides import override
 
 from polymathera.colony.agents.base import Agent, AgentState, AgentCapability
+from .cluster_analyzer_v2 import (
+    ATTENTION_POLICY_TYPE_KEY,
+    ATTENTION_POLICY_TYPE_SPEC,
+    CLUSTER_KEY,
+    CLUSTER_SPEC,
+    CONFIG_KEY,
+    CONFIG_SPEC,
+    QUERY_ROUTER_TYPE_KEY,
+    QUERY_ROUTER_TYPE_SPEC,
+    TOP_K_CLUSTERS_KEY,
+    TOP_K_CLUSTERS_SPEC,
+    TOP_N_PAGES_KEY,
+    TOP_N_PAGES_OVERALL_KEY,
+    TOP_N_PAGES_OVERALL_SPEC,
+    TOP_N_PAGES_PER_CLUSTER_KEY,
+    TOP_N_PAGES_PER_CLUSTER_SPEC,
+    TOP_N_PAGES_SPEC,
+    WORKING_SET_KEY,
+    WORKING_SET_SPEC,
+)
+from .coordinator import (
+    CACHE_BOOST_FACTOR_KEY,
+    CACHE_BOOST_FACTOR_SPEC,
+)
 from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.models import (
     AgentSuspensionState,
@@ -37,6 +61,34 @@ logger = logging.getLogger(__name__)
 class ClusterAnalyzerCapability(AgentCapability):
     """Capability providing cluster analysis action executors.
     """
+
+    # Same CALLER-scoped key set as :class:`ClusterAnalyzerCapabilityV2`
+    # — the v1 FSM and v2 reasoning-loop variants accept identical
+    # spawn-time configuration. Specs are module-level shared so the
+    # registry sees identical entries when both classes register.
+    CLUSTER_KEY = CLUSTER_KEY
+    ATTENTION_POLICY_TYPE_KEY = ATTENTION_POLICY_TYPE_KEY
+    TOP_K_CLUSTERS_KEY = TOP_K_CLUSTERS_KEY
+    TOP_N_PAGES_PER_CLUSTER_KEY = TOP_N_PAGES_PER_CLUSTER_KEY
+    TOP_N_PAGES_OVERALL_KEY = TOP_N_PAGES_OVERALL_KEY
+    TOP_N_PAGES_KEY = TOP_N_PAGES_KEY
+    QUERY_ROUTER_TYPE_KEY = QUERY_ROUTER_TYPE_KEY
+    WORKING_SET_KEY = WORKING_SET_KEY
+    CONFIG_KEY = CONFIG_KEY
+    CACHE_BOOST_FACTOR_KEY = CACHE_BOOST_FACTOR_KEY
+
+    AGENT_METADATA_PARAMS = (
+        CLUSTER_SPEC,
+        ATTENTION_POLICY_TYPE_SPEC,
+        TOP_K_CLUSTERS_SPEC,
+        TOP_N_PAGES_PER_CLUSTER_SPEC,
+        TOP_N_PAGES_OVERALL_SPEC,
+        TOP_N_PAGES_SPEC,
+        QUERY_ROUTER_TYPE_SPEC,
+        WORKING_SET_SPEC,
+        CONFIG_SPEC,
+        CACHE_BOOST_FACTOR_SPEC,
+    )
 
     def __init__(
         self,
@@ -61,10 +113,10 @@ class ClusterAnalyzerCapability(AgentCapability):
         """Initialize cluster analyzer."""
         await super().initialize()
 
-        parameters = self.agent.metadata.parameters or {}
+        parameters = self.agent.metadata.parameters
 
         # Get cluster info
-        cluster_data = parameters.get("cluster")
+        cluster_data = parameters.get(self.CLUSTER_KEY)
         if not cluster_data:
             raise ValueError("Missing cluster in metadata")
 
@@ -82,16 +134,16 @@ class ClusterAnalyzerCapability(AgentCapability):
 
         self.query_router = await create_page_query_router2(
             agent=self,
-            attention_policy_type=parameters.get("attention_policy_type", "hierarchical"),
-            top_k_clusters=parameters.get("top_k_clusters", 5),
-            top_n_pages_per_cluster=parameters.get("top_n_pages_per_cluster", 3),
-            top_n_pages_overall=parameters.get("top_n_pages_overall", 10),
-            top_n_pages=parameters.get("top_n_pages", 10),
+            attention_policy_type=parameters.get(self.ATTENTION_POLICY_TYPE_KEY, "hierarchical"),
+            top_k_clusters=parameters.get(self.TOP_K_CLUSTERS_KEY, 5),
+            top_n_pages_per_cluster=parameters.get(self.TOP_N_PAGES_PER_CLUSTER_KEY, 3),
+            top_n_pages_overall=parameters.get(self.TOP_N_PAGES_OVERALL_KEY, 10),
+            top_n_pages=parameters.get(self.TOP_N_PAGES_KEY, 10),
             cluster_id=self.cluster.cluster_id if self.cluster else None,
-            router_type=parameters.get("query_router_type", "hierarchical"),
+            router_type=parameters.get(self.QUERY_ROUTER_TYPE_KEY, "hierarchical"),
             page_keys=self.page_keys if self.page_keys else None,
-            working_set=parameters.get("working_set", set()),
-            cache_boost_factor=parameters.get("cache_boost_factor", 1.5)
+            working_set=parameters.get(self.WORKING_SET_KEY, set()),
+            cache_boost_factor=parameters.get(self.CACHE_BOOST_FACTOR_KEY, 1.5),
         )
 
         logger.info(

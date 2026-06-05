@@ -14,6 +14,7 @@ import time
 from overrides import override
 
 from polymathera.colony.agents.base import Agent, AgentCapability
+from .cluster_analyzer_v2 import CONFIG_KEY, CONFIG_SPEC
 from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.models import AgentSuspensionState
 from polymathera.colony.cluster.models import InferenceResponse
@@ -57,6 +58,16 @@ class PageAnalyzerCapability(AgentCapability):
     3. Stop
     """
 
+    # Shared with the cluster-analyzer workers via the module-level
+    # ``CONFIG_SPEC`` in ``cluster_analyzer_v2`` — both basic-mission
+    # workers read the same ``config`` key with analyzer-specific
+    # typed shapes.
+    CONFIG_KEY = CONFIG_KEY
+
+    AGENT_METADATA_PARAMS = (
+        CONFIG_SPEC,
+    )
+
     def __init__(
         self,
         agent: Agent,
@@ -93,7 +104,7 @@ class PageAnalyzerCapability(AgentCapability):
         """Analyze the single bound page and produce compact summary."""
         # Load configuration from metadata
         from .config import PageAnalyzerConfig
-        config_data = self.agent.metadata.parameters.get("config", {})
+        config_data = self.agent.metadata.parameters.get(self.CONFIG_KEY, {})
         config = PageAnalyzerConfig(**config_data)
 
         # Request page load

@@ -145,7 +145,8 @@ paging:
 #   extra_capabilities, planning_params
 #
 # Mission-specific fields are extracted into metadata.parameters automatically.
-# Each mission type declares its own keys in MISSION_REGISTRY["extra_metadata_keys"]:
+# Each mission type declares its own keys in MISSION_REGISTRY["caller_parameters"]
+# (a typed list of ParameterSpec entries — name + description + default):
 #   impact:     changes, change_description
 #   slicing:    slice_criteria
 #   compliance: compliance_types

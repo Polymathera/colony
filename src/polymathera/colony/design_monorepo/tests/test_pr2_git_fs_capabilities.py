@@ -131,6 +131,29 @@ async def test_read_file_rejects_outside_tree(
         await state_provider.read_file(".git/HEAD")
 
 
+async def test_read_file_returns_exists_false_when_missing(
+    bootstrapped_repo: DesignMonorepoClient,
+    state_provider: RepoStateProvider,
+) -> None:
+    """LLM planners (running in a sandbox REPL) can't catch raised
+    exceptions cleanly. ``read_file`` on a missing path returns
+    ``FileContent(exists=False, content='', total_bytes=0)`` so the
+    planner branches on the result instead of trying to wrap each
+    call in try/except. The bootstrap path of ``project_planning``
+    relies on this — coordinator was thrashing with duplicate
+    spawns when ``docs/ROADMAP.md`` was missing pre-2026-06-05."""
+    res = await state_provider.read_file("docs/does-not-exist.md")
+    assert res.exists is False
+    assert res.content == ""
+    assert res.total_bytes == 0
+    assert res.path == "docs/does-not-exist.md"
+    # Existing files still come back with exists=True.
+    (bootstrapped_repo.working_dir / "extant.md").write_text("hi", encoding="utf-8")
+    res2 = await state_provider.read_file("extant.md")
+    assert res2.exists is True
+    assert res2.content == "hi"
+
+
 async def test_read_lines_head_and_tail(
     bootstrapped_repo: DesignMonorepoClient,
     state_provider: RepoStateProvider,
@@ -188,6 +211,17 @@ async def test_list_directory_skips_dotgit_and_dotcolony(
     for entry in entries:
         assert not entry.path.startswith(".git/")
         assert not entry.path.startswith(".colony/")
+
+
+async def test_list_directory_returns_empty_when_missing(
+    state_provider: RepoStateProvider,
+) -> None:
+    """Mirrors ``read_file``'s ``exists=False`` contract — missing
+    directory returns an empty list rather than raising, so LLM
+    planners can branch on length without a try/except. Bootstrap
+    flows (target directory not yet created) depend on this."""
+    entries = await state_provider.list_directory("docs/nope")
+    assert entries == []
 
 
 async def test_stat_path_existing_and_missing(

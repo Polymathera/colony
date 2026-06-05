@@ -78,7 +78,7 @@ class AgentTracingFacility(TracingFacility):
         self._start_wall = now_wall
 
         # Extract run_id from metadata
-        run_id = getattr(self.agent.metadata, "run_id", None)
+        run_id = self.agent.metadata.run_id
         if run_id and run_id != "default":
             self.set_run_id(run_id)
 
@@ -104,7 +104,7 @@ class AgentTracingFacility(TracingFacility):
             input_summary={
                 "agent_type": self.agent.agent_type,
                 "capability_names": self.agent.get_capability_names(),
-                "parent_agent_id": getattr(self.agent.metadata, "parent_agent_id", None),
+                "parent_agent_id": self.agent.metadata.parent_agent_id,
                 "bound_pages": list(self.agent.bound_pages) if hasattr(self.agent, "bound_pages") else [],
             },
         )
@@ -145,14 +145,9 @@ class AgentTracingFacility(TracingFacility):
         agent starts), so it's always available when hooks fire.  Falls back to
         agent_id only if metadata.session_id is the default placeholder.
         """
-        session_id = None
-        metadata = getattr(self.agent, "metadata", None)
-        if metadata is not None:
-            sid = getattr(metadata, "session_id", None)
-            if sid and sid != "default":
-                session_id = sid
-        if session_id:
-            trace_id = session_id
+        sid = self.agent.metadata.session_id
+        if sid and sid != "default":
+            trace_id = sid
         else:
             trace_id = getattr(self.agent, "agent_id", "unknown")
         logger.info("AgentTracingFacility resolved trace_id=%s (agent=%s)", trace_id, self.agent.agent_id)

@@ -57,6 +57,10 @@ from polymathera.colony.agents.patterns import (
 from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
 from polymathera.colony.agents.blackboard import EnhancedBlackboard, CausalityTimeline, BlackboardEvent
 from polymathera.colony.agents.base import Agent, AgentCapability
+from polymathera.colony.agents.metadata_parameters import (
+    ParameterScope,
+    ParameterSpec,
+)
 from polymathera.colony.agents.blackboard.protocol import DependencyQueryProtocol, ImpactAnalysisProtocol
 from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.patterns.actions import action_executor
@@ -685,6 +689,58 @@ class ChangeImpactAnalysisCapability(AgentCapability):
     Also uses FeedbackLoopPredictor for cache-aware prefetching.
     """
 
+    # CALLER-scoped metadata.parameters keys the worker reads at init.
+    # ``page_id`` / ``change_description`` / ``changes`` are
+    # worker-private (set per-page by the coordinator at spawn).
+    # ``prefetch_depth`` / ``prefetch_test_pages`` are shared with the
+    # coordinator capability — imported below to keep the registry
+    # idempotent on re-registration.
+    PAGE_ID_KEY = "page_id"
+    CHANGE_DESCRIPTION_KEY = "change_description"
+    CHANGES_KEY = "changes"
+
+    # Lazy import: ``.coordinator`` imports from this module in turn,
+    # so the module-level circular-import is avoided by doing the
+    # reference at class-body evaluation time (which runs after both
+    # modules have finished loading their top-level names).
+    from .coordinator import (
+        PREFETCH_DEPTH_KEY,
+        PREFETCH_DEPTH_SPEC,
+        PREFETCH_TEST_PAGES_KEY,
+        PREFETCH_TEST_PAGES_SPEC,
+    )
+
+    AGENT_METADATA_PARAMS = (
+        ParameterSpec(
+            name=PAGE_ID_KEY, scope=ParameterScope.CALLER,
+            description=(
+                "VCM page id this worker analyses. The coordinator "
+                "stamps one page_id per spawned worker."
+            ),
+            json_type="string", default=None,
+        ),
+        ParameterSpec(
+            name=CHANGE_DESCRIPTION_KEY, scope=ParameterScope.CALLER,
+            description=(
+                "Free-text narrative the worker's LLM uses to bias "
+                "impact severity ranking. From the impact mission's "
+                "``caller_parameters``."
+            ),
+            json_type="string", default=None,
+        ),
+        ParameterSpec(
+            name=CHANGES_KEY, scope=ParameterScope.CALLER,
+            description=(
+                "List of ``CodeChange`` dicts describing the actual "
+                "diff this worker reasons about. From the impact "
+                "mission's ``caller_parameters``."
+            ),
+            json_type="array", default_factory=list,
+        ),
+        PREFETCH_DEPTH_SPEC,
+        PREFETCH_TEST_PAGES_SPEC,
+    )
+
     def __init__(
         self,
         agent: Agent,
@@ -719,16 +775,17 @@ class ChangeImpactAnalysisCapability(AgentCapability):
         self.blackboard = await self.get_blackboard()
 
         # Load configuration from agent metadata
-        self.page_id = self.agent.metadata.parameters.get("page_id")
-        self.change_description = self.agent.metadata.parameters.get("change_description")
-        changes_data = self.agent.metadata.parameters.get("changes", [])
+        params = self.agent.metadata.parameters
+        self.page_id = params.get(self.PAGE_ID_KEY)
+        self.change_description = params.get(self.CHANGE_DESCRIPTION_KEY)
+        changes_data = params.get(self.CHANGES_KEY, [])
         self.changes = [CodeChange(**c) if isinstance(c, dict) else c for c in changes_data]
 
         # Initialize feedback predictor for cache-aware prefetching
         self.feedback_predictor = FeedbackLoopPredictor(
             agent=self.agent,
-            prefetch_depth=self.agent.metadata.parameters.get("prefetch_depth", 2),
-            prefetch_test_pages=self.agent.metadata.parameters.get("prefetch_test_pages", True)
+            prefetch_depth=params.get(self.PREFETCH_DEPTH_KEY, 2),
+            prefetch_test_pages=params.get(self.PREFETCH_TEST_PAGES_KEY, True),
         )
 
         logger.info(f"ChangeImpactAnalysisCapability initialized for page {self.page_id}")

@@ -250,7 +250,9 @@ class EnhancedBlackboard:
         """Initialize enhanced blackboard.
 
         Args:
-            app_name: Application name for namespacing
+            app_name: Application name for namespacing. MUST be a
+                non-empty string — every Redis key + pub/sub channel
+                is prefixed with ``f"{app_name}:blackboard:..."``.
             scope_id: Scope identifier for SHARED/GLOBAL scopes
             access_policy: Policy for access control
             eviction_policy: Policy for evicting entries when memory is constrained
@@ -261,6 +263,19 @@ class EnhancedBlackboard:
             max_event_queue_size: Maximum size of event queue
             max_entries: Maximum number of entries (None = unlimited)
         """
+        if not app_name or not isinstance(app_name, str):
+            raise ValueError(
+                "EnhancedBlackboard requires a non-empty string "
+                f"app_name; got {app_name!r}. "
+                "Capabilities should construct blackboards via "
+                "``self.get_blackboard(scope_id=...)`` — that routes "
+                "through ``Agent.get_blackboard`` which resolves the "
+                "live app name from the agent context. "
+                "Out-of-agent callers (dashboard routes, etc.) must "
+                "pass an explicit ``app_name`` from a known-good "
+                "source (``colony.app_name``, "
+                "``serving.get_my_app_name()``, etc.)."
+            )
         self.app_name = app_name
         self.scope_id = scope_id
 

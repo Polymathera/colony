@@ -201,6 +201,13 @@ class AgentPoolCapability(AgentCapability):
             - label: Label if specified
             - created: Whether creation succeeded
         """
+        # Programmatic opt-out of the COLONY/SESSION scoped parameter
+        # inheritance below — peeled out of ``agent_kwargs`` (rather
+        # than declared as a named kwarg) so the LLM planner's view
+        # of this action's signature stays unchanged. Defaults to
+        # True; only intentionally-detached spawns need False.
+        inherit_scoped_params = agent_kwargs.pop("inherit_scoped_params", True)
+
         try:
             # Inherit syscontext from parent when not explicitly set.
             # LLM-driven callers naturally pass ``metadata`` as a JSON
@@ -216,6 +223,28 @@ class AgentPoolCapability(AgentCapability):
                 )
             elif isinstance(metadata, dict):
                 metadata = AgentMetadata(**metadata)
+
+            # Inherit COLONY + SESSION scoped ``metadata.parameters``
+            # keys from this agent (the parent) into the child's
+            # ``metadata.parameters``. The single central inheritance
+            # gate — every spawn anywhere in the codebase routes
+            # through this action, so capabilities that read these
+            # keys (DesignProcessCapability, GitHubCapability, etc.)
+            # find them on the child without any spawn-site-specific
+            # wiring. Caller wins on collision (a deliberate rebind
+            # in ``mission_params`` or the metadata dict is honoured).
+            # See ``agents/metadata_parameters.py`` for the scope
+            # taxonomy and inheritance semantics.
+            if inherit_scoped_params:
+                from ...metadata_parameters import (
+                    get_metadata_parameter_registry,
+                    inherit_scoped_parameters,
+                )
+                metadata.parameters = inherit_scoped_parameters(
+                    child_params=metadata.parameters,
+                    parent_params=self.agent.metadata.parameters,
+                    registry=get_metadata_parameter_registry(),
+                )
             # Resolve agent class from fully qualified path. Fall back
             # to the L1-A discovered-agent registry when importlib
             # cannot find the module — that's the path L4 coordinator

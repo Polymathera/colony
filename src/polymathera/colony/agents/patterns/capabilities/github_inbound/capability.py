@@ -124,19 +124,24 @@ class GitHubInboundCapability(ColonySingletonCapabilityBase):
 
         await super().initialize()
 
-        # Pull tenant + colony from the system-session metadata
-        # (populated by ``web_ui/backend/chat/system_session.py``).
-        params = (
-            getattr(self._agent.metadata, "parameters", None) or {}
-        ) if self._agent is not None else {}
-        self._tenant_id = params.get("tenant_id")
-        self._colony_id = params.get("colony_id")
+        # Pull tenant + colony from the agent's syscontext-derived
+        # typed properties on AgentMetadata. The system-session
+        # bootstrap wraps blueprint construction in
+        # ``colony.user_execution_context(tenant_id=..., colony_id=...)``
+        # so ``AgentMetadata.syscontext`` captures both at metadata
+        # construction time; ``metadata.tenant_id`` / ``.colony_id``
+        # then resolve to those values for the agent's lifetime.
+        if self._agent is None:
+            self._tenant_id = ""
+            self._colony_id = ""
+        else:
+            self._tenant_id = self._agent.metadata.tenant_id
+            self._colony_id = self._agent.metadata.colony_id
         if not self._tenant_id or not self._colony_id:
-            self._quiesced_reason = "no_tenant_or_colony_in_metadata"
+            self._quiesced_reason = "no_tenant_or_colony_in_syscontext"
             logger.warning(
                 "GitHubInboundCapability: tenant_id/colony_id absent "
-                "from agent metadata.parameters; poll loop NOT "
-                "started.",
+                "from agent syscontext; poll loop NOT started.",
             )
             return
 

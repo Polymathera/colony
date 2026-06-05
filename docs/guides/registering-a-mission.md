@@ -45,7 +45,21 @@ def my_mission_entry() -> dict[str, Any]:
         "worker": "my_package.worker.MyWorker",
         "coordinator_capabilities": ["MyCoordinatorCapability"],
         "worker_capabilities": ["MyWorkerCapability"],
-        "extra_metadata_keys": ["target_path"],
+        # CALLER-scoped mission_params the LLM planner must supply.
+        # Each entry is a typed ParameterSpec — name + description +
+        # optional default + json_type. Pydantic-style optionality:
+        # required iff no default. Replaces the legacy
+        # ``extra_metadata_keys: list[str]`` bare-strings list.
+        "caller_parameters": [
+            {
+                "name": "target_path",
+                "scope": "caller",
+                "description": (
+                    "Workspace-relative path the mission operates on."
+                ),
+                "default": None,
+            },
+        ],
         "self_concept": {
             "description": "Coordinates ...",
             "goals": ["..."],
@@ -76,7 +90,7 @@ def mission_entry() -> dict[str, Any]:
         "worker": "<worker_module>.<WorkerClass>",
         "coordinator_capabilities": [...],
         "worker_capabilities": [...],
-        "extra_metadata_keys": [...],
+        "caller_parameters": [...],   # list[ParameterSpec] — see Path A example
         "self_concept": {...},
     }
 ```
@@ -87,7 +101,7 @@ Coordinator class strings (`coordinator_v1` / `coordinator_v2`) typically refere
 
 ## Shared schema, shared discipline
 
-Both paths validate against the same [`MissionSpec`](../../src/polymathera/colony/agents/configs.py) (`extra="forbid"`). The required fields are: `label`, `description`, `coordinator_v1`, `coordinator_v2`, `worker`, `self_concept` (with at least a `description`). The list fields (`coordinator_capabilities`, `worker_capabilities`, `extra_metadata_keys`) default to empty. `self_concept.goals` and `self_concept.constraints` default to empty.
+Both paths validate against the same [`MissionSpec`](../../src/polymathera/colony/agents/configs.py) (`extra="forbid"`). The required fields are: `label`, `description`, `coordinator_v1`, `coordinator_v2`, `worker`, `self_concept` (with at least a `description`). The list fields (`coordinator_capabilities`, `worker_capabilities`, `caller_parameters`) default to empty. `self_concept.goals` and `self_concept.constraints` default to empty. `caller_parameters` entries are `ParameterSpec`-validated (see [`metadata_parameters.py`](../../src/polymathera/colony/agents/metadata_parameters.py)) and must declare `scope=CALLER`; COLONY/SESSION-scoped needs belong on the mounted capabilities' `AGENT_METADATA_PARAMS`, not on the mission spec.
 
 Drift across paths is impossible at registration time: a renamed field, a typo, a removed key — any of them fails `MissionSpec.model_validate()` and the entry is skipped, logged with the validation error so the author can fix it.
 
@@ -158,7 +172,7 @@ What `spawn_mission` does internally:
 
 1. Re-reads the **live** merged registry (`get_mission_registry()` ∪ `RepoStateProvider.discovered_extensions.missions`). A mission added mid-session via L1-E becomes spawnable on the next chat turn — the action does not rely on the static snapshot baked into `metadata.parameters["available_missions"]`.
 2. Reads `coordinator_v2` (falling back to `coordinator_v1` if absent) as the class to spawn.
-3. Builds [`AgentMetadata`](../../src/polymathera/colony/agents/models.py) populated from the mission entry's `self_concept` plus any caller-supplied `mission_params` (the entry's `extra_metadata_keys` describes which params a given mission expects).
+3. Builds [`AgentMetadata`](../../src/polymathera/colony/agents/models.py) populated from the mission entry's `self_concept` plus any caller-supplied `mission_params` (the entry's `caller_parameters` declares which params a given mission expects, with name + description + default — rendered into the planner's prompt as a typed signature).
 4. Calls `AgentPoolCapability.create_agent(agent_type=<coordinator_v2>, metadata=<above>)`.
 5. Returns `{"agent_id", "mission_type", "coordinator_class", "created", "label"}`, with an `error` field on failure.
 

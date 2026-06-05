@@ -20,6 +20,14 @@ from overrides import override
 from polymathera.colony.agents.scopes import ScopeUtils, BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.blackboard.protocol import BasicAnalysisProtocol
 from polymathera.colony.agents.base import Agent, AgentCapability
+from polymathera.colony.agents.metadata_parameters import (
+    ParameterScope,
+    ParameterSpec,
+)
+from .coordinator import (
+    CACHE_BOOST_FACTOR_KEY,
+    CACHE_BOOST_FACTOR_SPEC,
+)
 from polymathera.colony.agents.models import (
     ActionType,
     ActionResult,
@@ -48,10 +56,116 @@ from .config import ClusterAnalyzerConfig
 logger = logging.getLogger(__name__)
 
 
+# Module-level shared key constants + ParameterSpecs for keys both
+# this V2 capability AND the older :class:`ClusterAnalyzerCapability`
+# (in ``cluster_analyzer.py``) read. Declaring once here keeps the
+# typed-parameter registry's conflict-on-disagreement policy happy
+# when both capabilities register the same key.
+CLUSTER_KEY = "cluster"
+ATTENTION_POLICY_TYPE_KEY = "attention_policy_type"
+TOP_K_CLUSTERS_KEY = "top_k_clusters"
+TOP_N_PAGES_PER_CLUSTER_KEY = "top_n_pages_per_cluster"
+TOP_N_PAGES_OVERALL_KEY = "top_n_pages_overall"
+TOP_N_PAGES_KEY = "top_n_pages"
+QUERY_ROUTER_TYPE_KEY = "query_router_type"
+WORKING_SET_KEY = "working_set"
+CONFIG_KEY = "config"
+
+CLUSTER_SPEC = ParameterSpec(
+    name=CLUSTER_KEY, scope=ParameterScope.CALLER,
+    description=(
+        "Serialised ``PageCluster`` dict the worker hydrates and "
+        "operates on. Required — the coordinator stamps one cluster "
+        "per worker; absence raises at init."
+    ),
+    json_type="object", default=None,
+)
+ATTENTION_POLICY_TYPE_SPEC = ParameterSpec(
+    name=ATTENTION_POLICY_TYPE_KEY, scope=ParameterScope.CALLER,
+    description=(
+        "Attention-policy style for the worker's query router — "
+        "currently 'hierarchical' (default) or 'flat'."
+    ),
+    json_type="string", default="hierarchical",
+)
+TOP_K_CLUSTERS_SPEC = ParameterSpec(
+    name=TOP_K_CLUSTERS_KEY, scope=ParameterScope.CALLER,
+    description="Top-K clusters the hierarchical attention policy considers.",
+    json_type="integer", default=5,
+)
+TOP_N_PAGES_PER_CLUSTER_SPEC = ParameterSpec(
+    name=TOP_N_PAGES_PER_CLUSTER_KEY, scope=ParameterScope.CALLER,
+    description="Top-N pages per cluster surfaced to the worker's planner.",
+    json_type="integer", default=3,
+)
+TOP_N_PAGES_OVERALL_SPEC = ParameterSpec(
+    name=TOP_N_PAGES_OVERALL_KEY, scope=ParameterScope.CALLER,
+    description="Top-N pages cap across all clusters.",
+    json_type="integer", default=10,
+)
+TOP_N_PAGES_SPEC = ParameterSpec(
+    name=TOP_N_PAGES_KEY, scope=ParameterScope.CALLER,
+    description="Top-N pages the flat policy considers.",
+    json_type="integer", default=10,
+)
+QUERY_ROUTER_TYPE_SPEC = ParameterSpec(
+    name=QUERY_ROUTER_TYPE_KEY, scope=ParameterScope.CALLER,
+    description="Query-router idiom — 'hierarchical' (default) or 'flat'.",
+    json_type="string", default="hierarchical",
+)
+WORKING_SET_SPEC = ParameterSpec(
+    name=WORKING_SET_KEY, scope=ParameterScope.CALLER,
+    description=(
+        "Initial working set passed to the query router for "
+        "cache-affine scoring. Default empty set."
+    ),
+    json_type="array", default_factory=set,
+)
+CONFIG_SPEC = ParameterSpec(
+    name=CONFIG_KEY, scope=ParameterScope.CALLER,
+    description=(
+        "Serialised analyzer-specific config dict (request priority, "
+        "retry policy, etc.). The exact typed shape depends on the "
+        "analyzer reading it — ``ClusterAnalyzerConfig`` for the "
+        "cluster workers, ``PageAnalyzerConfig`` for the page "
+        "worker. Both consumers parse from this same key."
+    ),
+    json_type="object", default_factory=dict,
+)
+
 
 class ClusterAnalyzerCapabilityV2(AgentCapability):
     """Capability providing cluster analysis action executors.
     """
+
+    # CALLER-scoped metadata.parameters keys this worker reads at
+    # init. All key constants + ParameterSpecs are declared at module
+    # level above and shared with the older v1
+    # :class:`ClusterAnalyzerCapability`; ``cache_boost_factor`` is
+    # additionally shared with the coordinator capability.
+    CLUSTER_KEY = CLUSTER_KEY
+    ATTENTION_POLICY_TYPE_KEY = ATTENTION_POLICY_TYPE_KEY
+    TOP_K_CLUSTERS_KEY = TOP_K_CLUSTERS_KEY
+    TOP_N_PAGES_PER_CLUSTER_KEY = TOP_N_PAGES_PER_CLUSTER_KEY
+    TOP_N_PAGES_OVERALL_KEY = TOP_N_PAGES_OVERALL_KEY
+    TOP_N_PAGES_KEY = TOP_N_PAGES_KEY
+    QUERY_ROUTER_TYPE_KEY = QUERY_ROUTER_TYPE_KEY
+    WORKING_SET_KEY = WORKING_SET_KEY
+    CONFIG_KEY = CONFIG_KEY
+    CACHE_BOOST_FACTOR_KEY = CACHE_BOOST_FACTOR_KEY
+
+    AGENT_METADATA_PARAMS = (
+        CLUSTER_SPEC,
+        ATTENTION_POLICY_TYPE_SPEC,
+        TOP_K_CLUSTERS_SPEC,
+        TOP_N_PAGES_PER_CLUSTER_SPEC,
+        TOP_N_PAGES_OVERALL_SPEC,
+        TOP_N_PAGES_SPEC,
+        QUERY_ROUTER_TYPE_SPEC,
+        WORKING_SET_SPEC,
+        CONFIG_SPEC,
+        CACHE_BOOST_FACTOR_SPEC,
+    )
 
     def __init__(
         self,
@@ -81,10 +195,10 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
         """Initialize ClusterAnalyzerCapabilityV2."""
         await super().initialize()
 
-        parameters = self.agent.metadata.parameters or {}
+        parameters = self.agent.metadata.parameters
 
         # Get cluster — needed by query router below
-        cluster_data = parameters.get("cluster")
+        cluster_data = parameters.get(self.CLUSTER_KEY)
         if not cluster_data:
             raise ValueError("Missing cluster in metadata")
         self.cluster = PageCluster(**cluster_data)
@@ -106,20 +220,20 @@ class ClusterAnalyzerCapabilityV2(AgentCapability):
         # Query router — depends on self.cluster and self.page_keys
         self.query_router = await create_page_query_router2(
             agent=self,
-            attention_policy_type=parameters.get("attention_policy_type", "hierarchical"),
-            top_k_clusters=parameters.get("top_k_clusters", 5),
-            top_n_pages_per_cluster=parameters.get("top_n_pages_per_cluster", 3),
-            top_n_pages_overall=parameters.get("top_n_pages_overall", 10),
-            top_n_pages=parameters.get("top_n_pages", 10),
+            attention_policy_type=parameters.get(self.ATTENTION_POLICY_TYPE_KEY, "hierarchical"),
+            top_k_clusters=parameters.get(self.TOP_K_CLUSTERS_KEY, 5),
+            top_n_pages_per_cluster=parameters.get(self.TOP_N_PAGES_PER_CLUSTER_KEY, 3),
+            top_n_pages_overall=parameters.get(self.TOP_N_PAGES_OVERALL_KEY, 10),
+            top_n_pages=parameters.get(self.TOP_N_PAGES_KEY, 10),
             cluster_id=self.cluster.cluster_id,
-            router_type=parameters.get("query_router_type", "hierarchical"),
+            router_type=parameters.get(self.QUERY_ROUTER_TYPE_KEY, "hierarchical"),
             page_keys=self.page_keys or None,
-            working_set=parameters.get("working_set", set()),
-            cache_boost_factor=parameters.get("cache_boost_factor", 1.5)
+            working_set=parameters.get(self.WORKING_SET_KEY, set()),
+            cache_boost_factor=parameters.get(self.CACHE_BOOST_FACTOR_KEY, 1.5),
         )
 
         # Load configuration from metadata
-        config_data = parameters.get("config", {})
+        config_data = parameters.get(self.CONFIG_KEY, {})
         self.config = ClusterAnalyzerConfig(**config_data)
 
         # Get or create ResultCapability for cluster-wide result visibility

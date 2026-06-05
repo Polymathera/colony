@@ -44,7 +44,18 @@ export function ColoniesSection({
   activeColonyId, onSelectColony,
 }: ColoniesSectionProps) {
   const colonies = useColonies();
+  const repos = useDiscoverableRepos();
   const [creating, setCreating] = useState(false);
+
+  // When the sign-in walker saw repos under the tenant's installation
+  // but flagged none of them as having ``.colony/``, the most common
+  // explanation is the GitHub OAuth user-permission propagation lag
+  // (see ``services/colony_discovery.py`` for the back-end warning).
+  // Surface the hint inline on the empty-state so operators don't
+  // have to dig into dashboard logs to find the workaround.
+  const reposSeenButNoMarkers =
+    (repos.data ?? []).length > 0 &&
+    (repos.data ?? []).every((r) => !r.has_colony_marker);
 
   return (
     <div className="w-full max-w-md">
@@ -83,8 +94,19 @@ export function ColoniesSection({
           />
         ))}
         {colonies.data && colonies.data.length === 0 && (
-          <div className="px-4 py-3 text-xs text-muted-foreground">
-            No colonies yet — click "New colony" to create one.
+          <div className="px-4 py-3 text-xs text-muted-foreground space-y-2">
+            <div>No colonies yet — click "New colony" to create one.</div>
+            {reposSeenButNoMarkers && (
+              <div className="text-amber-600 dark:text-amber-400">
+                Scanned {(repos.data ?? []).length} repo(s) under your
+                tenant but found no <code>.colony/</code> markers. If
+                you expect one of these repos to be auto-discovered,
+                sign out and back in to refresh the GitHub permissions
+                on your OAuth token — a known eventual-consistency
+                quirk of GitHub Apps can issue a permission-light
+                token on the first sign-in.
+              </div>
+            )}
           </div>
         )}
       </div>
