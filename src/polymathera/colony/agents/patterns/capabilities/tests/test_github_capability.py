@@ -675,7 +675,8 @@ def test_action_executors_are_registered():
         "get_pr_diff", "create_pull_request",
         "comment_on_pr", "review_pr", "get_pr_checks",
         # projects + coordination
-        "list_project_items", "add_issue_to_project",
+        "list_project_items", "list_projects_for_repo",
+        "add_issue_to_project",
         "claim_unassigned_issue", "release_claim",
         # P5d: identity + assignment
         "whoami", "assign_issue",

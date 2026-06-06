@@ -33,6 +33,21 @@ def _make_repo(root: Path) -> None:
     sentinel.write_text("init\n", encoding="utf-8")
     repo.index.add([str(sentinel)])
     repo.index.commit("init")
+    # A bare sibling acts as ``origin`` so the commit+push helper
+    # exercises the real push code path in tests.
+    # ``_commit_and_push_roadmap_file`` requires an origin (the
+    # production contract: a roadmap that only lives in the
+    # ephemeral per-agent clone is a bug); the bare repo lets the
+    # tests assert on the pushed SHA without standing up a GitHub
+    # mock or hitting the network. Idempotent: some fixtures re-init
+    # the repo on the same ``root`` to mutate seed state, so we
+    # tolerate an existing origin.
+    bare = root.parent / f"{root.name}.git"
+    if not bare.exists():
+        git.Repo.init(bare, bare=True, initial_branch="main")
+    if "origin" not in [r.name for r in repo.remotes]:
+        repo.create_remote("origin", str(bare))
+    repo.git.push("origin", "main")
 
 
 def _make_capability(

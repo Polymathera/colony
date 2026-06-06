@@ -428,7 +428,12 @@ async def create_session(
                 ActionKeySubstringFilter,
                 SuccessfulActionFilter,
             )
-            from polymathera.colony.distributed.ray_utils.serving.context import get_tenant_id, get_colony_id
+            from polymathera.colony.distributed.ray_utils.serving.context import (
+                ExecutionContext,
+                Ring,
+                get_tenant_id,
+                get_colony_id,
+            )
 
             # ``available_missions`` is populated dynamically by
             # :meth:`SessionOrchestratorCapability._refresh_available_missions`
@@ -442,9 +447,39 @@ async def create_session(
             # construction and ``initialize()``'s refresh — the value
             # is overwritten on first refresh.
 
+            # AgentMetadata's ``syscontext`` field defaults to
+            # ``require_execution_context()``, which captures whatever
+            # is in the contextvar at construction time. The FastAPI
+            # AuthMiddleware sets ``tenant_id`` + ``colony_id`` on the
+            # request context but NOT ``session_id`` (the session is
+            # being CREATED here). The matching
+            # ``user_execution_context(session_id=...)`` block below
+            # only takes effect for ``AgentHandle.from_blueprint`` —
+            # by then the metadata is already frozen with a syscontext
+            # whose ``session_id`` is empty.
+            #
+            # Build the syscontext explicitly so the SessionAgent's
+            # ``metadata.session_id`` returns the real session id.
+            # Without this, the tracing facility's trace_id resolver
+            # (``AgentTracingFacility.get_trace_id``) falls back to
+            # ``agent_id`` and the SessionAgent's spans land in a
+            # disjoint trace tree from every other agent it spawns
+            # in this session.
+            #
+            # NOTE: the prior ``session_id=session_id`` kwarg below
+            # was silently dropped — ``session_id`` is a read-only
+            # ``@property`` on ``AgentMetadata`` (delegating to
+            # ``syscontext.session_id``), not a writable field.
+            session_syscontext = ExecutionContext(
+                ring=Ring.USER,
+                tenant_id=get_tenant_id(),
+                colony_id=get_colony_id(),
+                session_id=session_id,
+                origin="dashboard_session_create",
+            )
             agent_metadata = AgentMetadata(
                 role="session_orchestrator",
-                session_id=session_id,
+                syscontext=session_syscontext,
                 goals=[
                     "Orchestrate user interactions within this session",
                     "Interpret user intent and decide whether to respond directly or spawn mission agents",

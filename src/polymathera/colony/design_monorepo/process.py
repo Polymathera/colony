@@ -406,32 +406,112 @@ def _render_issue_body_for_task(
     return "\n".join(parts)
 
 
-def _commit_roadmap_file(
+class _CommitFailed(RuntimeError):
+    """Local commit step failed — nothing landed on the remote."""
+
+
+class _PushFailed(RuntimeError):
+    """Local commit succeeded but the push to origin did not.
+
+    ``commit_sha`` is populated so the caller can surface the local
+    SHA in the response and the operator can recover manually."""
+
+    def __init__(self, message: str, *, commit_sha: str) -> None:
+        super().__init__(message)
+        self.commit_sha = commit_sha
+
+
+def _commit_and_push_roadmap_file(
     *, repo_root: Path, roadmap_relpath: str, message: str,
 ) -> str:
-    """Stage + commit the roadmap file on the per-agent clone.
+    """Stage, commit, and push the roadmap file on the per-agent clone.
     Returns the new commit SHA.
+
+    Bundles commit + push in a single helper so the two call sites
+    (``bootstrap_roadmap_from_objectives``, ``sync_roadmap_with_
+    github``) can't drift apart — the roadmap is only useful on the
+    remote (the per-agent clone is ephemeral), so a "commit but don't
+    push" outcome is a bug, not a valid state.
 
     Uses ``gitpython`` directly (rather than going through
     ``DesignCheckpointer.fork_design`` → ``merge_design``) because
     the bootstrap is a single conceptual change — the operator
     invoked it explicitly and reviews the resulting commit via
-    normal git workflow. The full fork/PR flow is the right shape
-    for the bidirectional sync in P5c.
+    normal git workflow.
+
+    Raises :class:`_CommitFailed` for staging/commit errors (nothing
+    on the remote) and :class:`_PushFailed` (carrying ``commit_sha``)
+    for push errors. The two failure modes have different operator
+    remediation paths, so the caller surfaces them as distinct
+    ``error`` categories in the action return.
+
+    Authentication: pushing to github.com is wired through the
+    per-tenant App installation token via
+    :func:`ensure_git_credentials_from_agent_metadata` — already
+    invoked by ``DesignMonorepoCapabilityBase.initialize()`` for
+    non-read-only mounts, so no extra plumbing is needed here.
 
     Sync (designed for ``asyncio.to_thread``).
     """
 
     import git
 
-    repo = git.Repo(str(repo_root))
-    repo.index.add([roadmap_relpath])
-    if not repo.is_dirty(index=True, working_tree=False):
-        # Nothing staged → no commit; report HEAD so the caller can
-        # surface "no-op".
-        return repo.head.commit.hexsha
-    commit = repo.index.commit(message)
-    return commit.hexsha
+    try:
+        repo = git.Repo(str(repo_root))
+        repo.index.add([roadmap_relpath])
+        if not repo.is_dirty(index=True, working_tree=False):
+            # Nothing staged → no new commit. Still push HEAD so a
+            # previous in-clone commit that never reached the remote
+            # gets a second chance. ``commit_sha`` falls back to HEAD.
+            commit_sha = repo.head.commit.hexsha
+        else:
+            commit_sha = repo.index.commit(message).hexsha
+    except Exception as exc:  # noqa: BLE001
+        raise _CommitFailed(str(exc)) from exc
+
+    try:
+        try:
+            branch_name = repo.active_branch.name
+        except TypeError as exc:
+            # Detached HEAD — cannot push a symbolic ref.
+            raise _PushFailed(
+                "HEAD is detached; cannot push the roadmap commit. "
+                "Switch to a branch and re-run.",
+                commit_sha=commit_sha,
+            ) from exc
+
+        try:
+            origin = repo.remote("origin")
+        except ValueError as exc:
+            raise _PushFailed(
+                f"no ``origin`` remote configured on {repo_root}: {exc}",
+                commit_sha=commit_sha,
+            ) from exc
+
+        push_info = origin.push(
+            refspec=f"HEAD:refs/heads/{branch_name}",
+        )
+        # ``gitpython`` returns a list of PushInfo; any ERROR or
+        # REJECTED flag means the push didn't land even when the call
+        # returned normally (no Python exception).
+        from git import PushInfo
+        bad = [
+            pi for pi in push_info
+            if pi.flags & (PushInfo.ERROR | PushInfo.REJECTED)
+        ]
+        if bad:
+            raise _PushFailed(
+                "; ".join(
+                    pi.summary.strip() or repr(pi.flags) for pi in bad
+                ),
+                commit_sha=commit_sha,
+            )
+    except _PushFailed:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _PushFailed(str(exc), commit_sha=commit_sha) from exc
+
+    return commit_sha
 
 
 def _render_roadmap_markdown(proposal: dict[str, Any]) -> str:
@@ -1585,21 +1665,35 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         commit_sha = ""
         try:
             commit_sha = await asyncio.to_thread(
-                _commit_roadmap_file,
+                _commit_and_push_roadmap_file,
                 repo_root=repo_root,
                 roadmap_relpath=roadmap_path,
                 message=msg,
             )
-        except Exception as exc:  # noqa: BLE001
+        except _CommitFailed as exc:
             logger.exception(
                 "bootstrap_roadmap_from_objectives: ROADMAP.md "
-                "committed-to-disk but git commit failed",
+                "written to disk but git commit failed",
             )
             return {
                 "dry_run": False,
                 "proposal": proposal,
                 "roadmap_written": roadmap_path,
                 "error": "commit_failed",
+                "message": str(exc),
+            }
+        except _PushFailed as exc:
+            logger.exception(
+                "bootstrap_roadmap_from_objectives: ROADMAP.md "
+                "committed locally (sha=%s) but push to origin failed",
+                exc.commit_sha,
+            )
+            return {
+                "dry_run": False,
+                "proposal": proposal,
+                "roadmap_written": roadmap_path,
+                "commit_sha": exc.commit_sha,
+                "error": "push_failed",
                 "message": str(exc),
             }
 
@@ -1913,7 +2007,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 }
             try:
                 commit_sha = await asyncio.to_thread(
-                    _commit_roadmap_file,
+                    _commit_and_push_roadmap_file,
                     repo_root=repo_root,
                     roadmap_relpath=roadmap_path,
                     message=(
@@ -1923,7 +2017,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                         "sync_roadmap_with_github)"
                     ),
                 )
-            except Exception as exc:  # noqa: BLE001
+            except _CommitFailed as exc:
                 logger.exception(
                     "sync_roadmap_with_github: ROADMAP.md written but "
                     "git commit failed",
@@ -1936,6 +2030,23 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     "issue_failures": issue_failures,
                     "roadmap_written": True,
                     "error": "commit_failed",
+                    "message": str(exc),
+                }
+            except _PushFailed as exc:
+                logger.exception(
+                    "sync_roadmap_with_github: ROADMAP.md committed "
+                    "locally (sha=%s) but push to origin failed",
+                    exc.commit_sha,
+                )
+                return {
+                    "dry_run": False,
+                    "direction": direction,
+                    "diff": diff,
+                    "issues_created": issues_created,
+                    "issue_failures": issue_failures,
+                    "roadmap_written": True,
+                    "commit_sha": exc.commit_sha,
+                    "error": "push_failed",
                     "message": str(exc),
                 }
 

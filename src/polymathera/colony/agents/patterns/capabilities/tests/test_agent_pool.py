@@ -79,7 +79,7 @@ async def test_create_agent_passes_through_typed_metadata_unchanged(
             bind=MagicMock(return_value=MagicMock())
         ))
 
-        original = AgentMetadata(tenant_id="t", parent_agent_id="parent")
+        original = AgentMetadata(parent_agent_id="parent")
         await cap.create_agent(
             agent_type="polymathera.colony.agents.base.Agent",
             metadata=original,
@@ -211,7 +211,7 @@ async def test_create_agent_uses_l4_fallback_for_l4_coordinator(
         # metadata.parameters and break the real Agent.bind() that
         # this test exercises end-to-end).
         agent.metadata = AgentMetadata(
-            tenant_id="t", parent_agent_id="parent",
+            parent_agent_id="parent",
         )
         agent.spawn_child_agents = AsyncMock(return_value=[
             MagicMock(child_agent_id="child_xyz"),
@@ -256,7 +256,7 @@ async def test_create_agent_works_without_repo_state_provider(
         # See the previous test for why a real (empty) AgentMetadata
         # is wired here instead of relying on MagicMock auto-vivification.
         agent.metadata = AgentMetadata(
-            tenant_id="t", parent_agent_id="parent",
+            parent_agent_id="parent",
         )
         agent.spawn_child_agents = AsyncMock(return_value=[
             MagicMock(child_agent_id="child_xyz"),
@@ -333,7 +333,7 @@ def _spy_parent_agent(parent_params: dict) -> MagicMock:
     # ``getattr(self.agent.metadata, "parameters", None)`` returns a
     # plain dict rather than an auto-MagicMock.
     agent.metadata = AgentMetadata(
-        tenant_id="t", parent_agent_id="parent",
+        parent_agent_id="parent",
     )
     agent.metadata.parameters = parent_params
     agent.spawn_child_agents = AsyncMock(return_value=[
