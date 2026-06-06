@@ -2449,7 +2449,7 @@ def describe(
                 desc = spec.description
             rendered.append(f"{name} — {desc}" if desc else name)
         console.print(
-            f"\n[dim]Mission-specific parameters:\n  - "
+            "\n[dim]Mission-specific parameters:\n  - "
             + "\n  - ".join(rendered)
             + "[/dim]"
         )
