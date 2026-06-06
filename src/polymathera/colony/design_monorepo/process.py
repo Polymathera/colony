@@ -422,7 +422,12 @@ class _PushFailed(RuntimeError):
 
 
 def _commit_and_push_roadmap_file(
-    *, repo_root: Path, roadmap_relpath: str, message: str,
+    *,
+    repo_root: Path,
+    roadmap_relpath: str,
+    message: str,
+    author: "Any | None" = None,
+    committer: "Any | None" = None,
 ) -> str:
     """Stage, commit, and push the roadmap file on the per-agent clone.
     Returns the new commit SHA.
@@ -438,6 +443,16 @@ def _commit_and_push_roadmap_file(
     the bootstrap is a single conceptual change — the operator
     invoked it explicitly and reviews the resulting commit via
     normal git workflow.
+
+    ``author`` / ``committer`` are ``git.Actor`` objects resolved by
+    the caller (typically via
+    :meth:`DesignMonorepoCapabilityBase._commit_attribution` →
+    ``CommitIdentity.actor()``). When ``None``, gitpython falls back
+    to the container's git config — which on Ray workers is
+    ``ray@<hostname>``, an opaque-to-the-operator default. Production
+    callers MUST pass both so commits get the colony's
+    UI-configured principal (the GitHub App's bot identity,
+    typically).
 
     Raises :class:`_CommitFailed` for staging/commit errors (nothing
     on the remote) and :class:`_PushFailed` (carrying ``commit_sha``)
@@ -465,7 +480,12 @@ def _commit_and_push_roadmap_file(
             # gets a second chance. ``commit_sha`` falls back to HEAD.
             commit_sha = repo.head.commit.hexsha
         else:
-            commit_sha = repo.index.commit(message).hexsha
+            # gitpython's ``Repo.index.commit`` accepts ``author`` and
+            # ``committer`` ``git.Actor`` instances; falls through to
+            # the local git config when either is ``None``.
+            commit_sha = repo.index.commit(
+                message, author=author, committer=committer,
+            ).hexsha
     except Exception as exc:  # noqa: BLE001
         raise _CommitFailed(str(exc)) from exc
 
@@ -1005,7 +1025,18 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         *,
         working_dir: Path | str | None = None,
         clone_scope_id: str | None = None,
-        read_only: bool = True,
+        # ``read_only=False`` because the tier-2 actions on this
+        # class (``bootstrap_roadmap_from_objectives``,
+        # ``sync_roadmap_with_github``) write ROADMAP.md, commit,
+        # and push. The previous ``read_only=True`` default routed
+        # the working_dir through the shared-clone path
+        # (``/mnt/shared/shared_clones/<scope_id>/``) which is
+        # node-wide read-only by design — every mutating action
+        # then crashed on a NoSuchPathError because the per-agent
+        # shared path never gets populated. Read-only callers that
+        # only invoke tier-1 query actions can opt back in
+        # explicitly.
+        read_only: bool = False,
         capability_key: str | None = None,
         app_name: str | None = None,
     ) -> None:
@@ -1575,16 +1606,15 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             existing_issues=existing_issues,
         )
         try:
-            from polymathera.colony.knowledge.deps import (
-                build_default_llm_callable,
+            response = await asyncio.wait_for(
+                self._agent.infer(
+                    prompt=prompt,
+                    max_tokens=llm_max_tokens,
+                    temperature=llm_temperature,
+                ),
+                timeout=llm_timeout_s,
             )
-            llm_callable = build_default_llm_callable(
-                max_tokens=llm_max_tokens,
-                temperature=llm_temperature,
-            )
-            raw = await asyncio.wait_for(
-                llm_callable(prompt), timeout=llm_timeout_s,
-            )
+            raw = response.generated_text
         except asyncio.TimeoutError:
             return {
                 "dry_run": dry_run,
@@ -1662,13 +1692,21 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             or "Bootstrap roadmap from design-context objectives "
             "(via DesignProcessCapability.bootstrap_roadmap_from_objectives)"
         )
+        # Resolve the colony's UI-configured principal + Co-Authored-By
+        # trailer, then thread the principal's git.Actor into the
+        # helper so the commit author/committer reflect the bot
+        # identity rather than the Ray container's default user.
+        principal, decorated_msg = self._commit_attribution(msg)
+        actor = principal.actor()
         commit_sha = ""
         try:
             commit_sha = await asyncio.to_thread(
                 _commit_and_push_roadmap_file,
                 repo_root=repo_root,
                 roadmap_relpath=roadmap_path,
-                message=msg,
+                message=decorated_msg,
+                author=actor,
+                committer=actor,
             )
         except _CommitFailed as exc:
             logger.exception(
@@ -2005,17 +2043,29 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     "error": "roadmap_write_failed",
                     "message": str(exc),
                 }
+            # Resolve the colony's UI-configured principal + the
+            # Co-Authored-By trailer (Q3 of
+            # ``project_planning_followups.md``: every roadmap commit
+            # must carry the bot identity, not the Ray container's
+            # default user).
+            sync_msg = (
+                commit_message
+                or "Sync roadmap with GitHub issues "
+                "(via DesignProcessCapability."
+                "sync_roadmap_with_github)"
+            )
+            sync_principal, sync_decorated_msg = self._commit_attribution(
+                sync_msg,
+            )
+            sync_actor = sync_principal.actor()
             try:
                 commit_sha = await asyncio.to_thread(
                     _commit_and_push_roadmap_file,
                     repo_root=repo_root,
                     roadmap_relpath=roadmap_path,
-                    message=(
-                        commit_message
-                        or "Sync roadmap with GitHub issues "
-                        "(via DesignProcessCapability."
-                        "sync_roadmap_with_github)"
-                    ),
+                    message=sync_decorated_msg,
+                    author=sync_actor,
+                    committer=sync_actor,
                 )
             except _CommitFailed as exc:
                 logger.exception(
@@ -2247,7 +2297,6 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         # ---------- step 4: classify --------------------------------
         proposals: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
-        llm_callable = None
         for candidate in candidates:
             sid = candidate["stable_id"]
             issue = candidate["issue"]
@@ -2277,38 +2326,21 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             reason = "explicit colony:assignee marker"
             if assignee is None:
                 # LLM fallback.
-                if llm_callable is None:
-                    try:
-                        from polymathera.colony.knowledge.deps import (
-                            build_default_llm_callable,
-                        )
-                        llm_callable = build_default_llm_callable(
-                            max_tokens=llm_max_tokens,
-                            temperature=llm_temperature,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.exception(
-                            "propose_task_assignments: failed to build "
-                            "LLM callable",
-                        )
-                        skipped.append({
-                            "stable_id": sid,
-                            "issue_number": issue_number,
-                            "title": title,
-                            "current_assignees": current_assignees,
-                            "reason": "llm_unavailable",
-                            "detail": str(exc),
-                        })
-                        continue
                 prompt = _build_assignment_classification_prompt(
                     milestone_title=milestone_title,
                     task_title=title,
                     task_description=body,
                 )
                 try:
-                    raw = await asyncio.wait_for(
-                        llm_callable(prompt), timeout=llm_timeout_s,
+                    response = await asyncio.wait_for(
+                        self._agent.infer(
+                            prompt=prompt,
+                            max_tokens=llm_max_tokens,
+                            temperature=llm_temperature,
+                        ),
+                        timeout=llm_timeout_s,
                     )
+                    raw = response.generated_text
                 except asyncio.TimeoutError:
                     skipped.append({
                         "stable_id": sid,

@@ -299,10 +299,39 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         if working_dir is None:
             # Resolve a per-agent (or shared read-only) clone path under
             # ``/mnt/shared`` so the layout survives Ray actor restarts.
+            #
+            # Scope selection: when the caller supplied an explicit
+            # ``clone_scope_id``, honour it verbatim — they know best.
+            # Otherwise the fallback depends on ``read_only``:
+            #
+            # - Writable (per-agent) clones use ``self.scope_id`` so
+            #   each agent gets its own working tree under
+            #   ``/mnt/shared/agents/<agent_id>/clones/<scope_id>/``.
+            #   AgentCapability's default ``self.scope_id`` is agent-
+            #   level, which matches the per-agent path semantics.
+            # - Read-only (shared) clones live at
+            #   ``/mnt/shared/shared_clones/<scope_id>/``, one per
+            #   node, shared across every read-only consumer. An
+            #   agent-level ``scope_id`` is wrong here — each agent
+            #   would get its own "shared" path that nobody populates,
+            #   producing NoSuchPathError the first time any code
+            #   opens it. Fall back to the colony-level scope so the
+            #   shared clone is genuinely shared across agents in the
+            #   same colony / repo / branch combination.
             from .clones import resolve_clone_path
+            if clone_scope_id is not None:
+                resolved_scope_id = clone_scope_id
+            elif read_only:
+                from ..agents.scopes import ScopeUtils
+                resolved_scope_id = (
+                    ScopeUtils.get_colony_level_scope()
+                    or self.scope_id
+                )
+            else:
+                resolved_scope_id = self.scope_id
             resolved = resolve_clone_path(
                 agent=agent,
-                scope_id=clone_scope_id or self.scope_id,
+                scope_id=resolved_scope_id,
                 read_only=read_only,
             )
             self._working_dir = resolved

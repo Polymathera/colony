@@ -254,11 +254,11 @@ class DesignMonorepoClient:
         or the manifest is missing.
         """
 
-        from git import InvalidGitRepositoryError, Repo
+        from git import InvalidGitRepositoryError, NoSuchPathError, Repo
 
         try:
             repo = Repo(str(working_dir))
-        except InvalidGitRepositoryError as exc:
+        except (InvalidGitRepositoryError, NoSuchPathError) as exc:
             raise DesignMonorepoError(
                 f"{working_dir} is not a git repository.",
             ) from exc

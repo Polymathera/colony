@@ -125,6 +125,7 @@ nav:
     - Web Dashboard: guides/web-dashboard.md
     - Capability Operator Setup: guides/capability-setup.md
     - Registering a Mission: guides/registering-a-mission.md
+    - Action Policy Dimensions: guides/action-policy-dimensions.md
     - Git Commit Attribution: guides/git-attribution.md
     - Protected Branches & Approval: guides/protected-branches.md
     - Publishing & CI/CD: guides/publishing.md

@@ -58,8 +58,26 @@ def _make_capability(
     design_monorepo_url: str | None = "https://github.com/acme/proj.git",
 ) -> DesignProcessCapability:
     _make_repo(tmp_path)
-    agent = MagicMock() if github is not None else None
-    if agent is not None:
+    # Always set up a MagicMock agent now that the action paths route
+    # through ``self._agent.infer`` (Q6) — the github-less branch
+    # below just skips the capability registry seeding so tests that
+    # don't care about github don't need to thread a stub through.
+    agent = MagicMock()
+    # Real dict for parameters so ``params.get("github_identity")``
+    # returns a real value (defaulting to None when not configured)
+    # rather than the recursive-MagicMock attribute trap. P8 of
+    # ``colony/github_identity_fix_plan.md`` reads from here.
+    # ``design_monorepo_url`` defaults to a github.com URL so
+    # ``_resolve_github_repo`` returns ``acme/proj`` — pass
+    # ``design_monorepo_url=None`` to exercise the no-repo error
+    # path.
+    params: dict[str, Any] = {
+        "github_identity": {"user_github_login": user_github_login},
+    }
+    if design_monorepo_url is not None:
+        params["design_monorepo_url"] = design_monorepo_url
+    agent.metadata.parameters = params
+    if github is not None:
         # Simulate the agent's capability registry returning our
         # fake GitHubCapability when DesignProcessCapability calls
         # ``self._agent.get_capability(GitHubCapability)``.
@@ -69,20 +87,16 @@ def _make_capability(
             if any(isinstance(github, cls) for _ in [None])
             else None
         )
-        # Real dict for parameters so ``params.get("github_identity")``
-        # returns a real value (defaulting to None when not configured)
-        # rather than the recursive-MagicMock attribute trap. P8 of
-        # ``colony/github_identity_fix_plan.md`` reads from here.
-        # ``design_monorepo_url`` defaults to a github.com URL so
-        # ``_resolve_github_repo`` returns ``acme/proj`` — pass
-        # ``design_monorepo_url=None`` to exercise the no-repo error
-        # path.
-        params: dict[str, Any] = {
-            "github_identity": {"user_github_login": user_github_login},
-        }
-        if design_monorepo_url is not None:
-            params["design_monorepo_url"] = design_monorepo_url
-        agent.metadata.parameters = params
+    else:
+        # No github sibling — make every lookup the design-process
+        # action's _sibling_github_capability tries explicitly return
+        # None so the "no sibling" branch fires deterministically.
+        # MagicMock auto-creates attributes on access, so leaving
+        # ``capability_by_class`` unset would return another
+        # MagicMock and the lookup would treat it as a real sibling.
+        agent._capabilities = {}
+        agent.get_capability = lambda _cls: None
+        agent.capability_by_class = None
     cap = DesignProcessCapability(
         agent=agent, scope_id="test", working_dir=tmp_path,
     )
@@ -843,10 +857,18 @@ def _seed_design_context_repo(tmp_path: Path) -> None:
     Includes a row marked ``is_roadmap: true`` so
     :meth:`DesignProcessCapability._resolve_roadmap_path` resolves to
     ``ROADMAP.md`` — the same convention the production guide
-    recommends and what the bootstrap action writes into."""
+    recommends and what the bootstrap action writes into.
+
+    Also seeds a minimal ``.colony/manifest.json`` so the bootstrap
+    action's commit-attribution path (Q3 of
+    [project_planning_followups]: ``self._commit_attribution`` reads
+    the manifest's ``agent_email_domain`` to build the per-agent
+    committer email) doesn't trip on the missing file. Production
+    repos always have a manifest; this matches that state."""
 
     _make_repo(tmp_path)
     (tmp_path / ".colony").mkdir()
+    _seed_minimal_manifest(tmp_path)
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "objectives.md").write_text(
         "# Objectives\nMaximise sensitivity.\n", encoding="utf-8",
@@ -865,16 +887,55 @@ def _seed_design_context_repo(tmp_path: Path) -> None:
     )
 
 
-def _stub_llm_callable(response_json: str) -> Any:
-    """Build a ``build_default_llm_callable``-shaped wrapper that
-    returns the canned ``response_json`` without touching the live
-    LLMCluster. Patched into the deps module by tests via monkeypatch."""
+def _seed_minimal_manifest(tmp_path: Path) -> None:
+    """Write a minimal ``.colony/manifest.json`` to ``tmp_path``.
 
-    def _builder(*, max_tokens: int, temperature: float):
-        async def _llm(_prompt: str) -> str:
-            return response_json
-        return _llm
-    return _builder
+    The bootstrap + sync actions now route through
+    ``_commit_attribution`` (Q3 fix) which reads the manifest's
+    ``agent_email_domain``. The minimal payload below pins every
+    required field at its schema default so the rest of the manifest
+    machinery (protected-branch globs, LFS config, ...) stays at
+    defaults too."""
+
+    import json as _json
+    manifest_path = tmp_path / ".colony" / "manifest.json"
+    manifest_path.parent.mkdir(exist_ok=True)
+    manifest_path.write_text(
+        _json.dumps({
+            "program": "test-program",
+            "target_system": "test-system",
+            "design_repo_url": "https://github.com/acme/proj.git",
+            "tenant": "test-tenant",
+            "colony": "test-colony",
+        }),
+        encoding="utf-8",
+    )
+
+
+def _stub_agent_infer(
+    cap: Any, response_text: str,
+) -> None:
+    """Stub ``cap._agent.infer`` to return an ``InferenceResponse``-
+    shaped object whose ``generated_text`` is ``response_text``.
+
+    Replaces the previous ``build_default_llm_callable`` monkeypatch
+    pattern (Q6 of [project_planning_followups]: the production
+    code now routes through ``self._agent.infer`` so the tracing
+    facility's INFER-span hook fires). Tests of the LLM-fed actions
+    stub the agent's infer rather than the cluster handle.
+    """
+
+    response = MagicMock()
+    response.generated_text = response_text
+    cap._agent.infer = AsyncMock(return_value=response)
+
+
+def _stub_agent_infer_raises(cap: Any, exc: BaseException) -> None:
+    """Stub ``cap._agent.infer`` so every call raises ``exc``. Used
+    by the timeout / call-failed branches of the bootstrap +
+    propose_task_assignments tests."""
+
+    cap._agent.infer = AsyncMock(side_effect=exc)
 
 
 async def test_bootstrap_dry_run_returns_proposal_without_writing(
@@ -891,12 +952,7 @@ async def test_bootstrap_dry_run_returns_proposal_without_writing(
         '{"milestones": [{"title": "M1", "description": "first",'
         '"tasks": [{"title": "build", "description": "do it"}]}]}'
     )
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_llm_callable(response),
-    )
-
+    _stub_agent_infer(cap, response)
     result = await cap.bootstrap_roadmap_from_objectives()
     assert result["dry_run"] is True
     assert result["error"] == ""
@@ -956,12 +1012,7 @@ async def test_bootstrap_apply_writes_roadmap_commits_and_creates_issues(
         ']}'
         ']}'
     )
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_llm_callable(response),
-    )
-
+    _stub_agent_infer(cap, response)
     result = await cap.bootstrap_roadmap_from_objectives(dry_run=False)
     assert result["error"] == ""
     assert result["dry_run"] is False
@@ -1023,12 +1074,7 @@ async def test_bootstrap_apply_records_issue_failures_without_failing_overall(
         '{"title": "task B", "description": "do B"}'
         ']}]}'
     )
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_llm_callable(response),
-    )
-
+    _stub_agent_infer(cap, response)
     result = await cap.bootstrap_roadmap_from_objectives(dry_run=False)
     assert result["error"] == ""
     assert result["stats"]["issues_created_count"] == 1
@@ -1055,12 +1101,7 @@ async def test_bootstrap_apply_no_github_sibling_writes_roadmap_skips_issues(
         '{"milestones": [{"title": "M1", "description": "",'
         '"tasks": [{"title": "task", "description": "do it"}]}]}'
     )
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_llm_callable(response),
-    )
-
+    _stub_agent_infer(cap, response)
     result = await cap.bootstrap_roadmap_from_objectives(dry_run=False)
     assert result["error"] == ""
     assert (tmp_path / "ROADMAP.md").is_file()
@@ -1078,12 +1119,7 @@ async def test_bootstrap_returns_clear_error_on_llm_parse_failure(
     _seed_design_context_repo(tmp_path)
     cap = _make_capability(tmp_path, github=_make_github_stub())
 
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_llm_callable("definitely not JSON"),
-    )
-
+    _stub_agent_infer(cap, "definitely not JSON")
     result = await cap.bootstrap_roadmap_from_objectives(dry_run=False)
     assert result["error"] == "llm_proposal_parse_failed"
     assert "definitely not JSON" in result["raw_excerpt"]
@@ -1101,15 +1137,14 @@ async def test_bootstrap_returns_clear_error_on_llm_timeout(
     _seed_design_context_repo(tmp_path)
     cap = _make_capability(tmp_path, github=_make_github_stub())
 
-    def _builder(*, max_tokens: int, temperature: float):
-        async def _hang(_prompt: str) -> str:
-            await _asyncio.sleep(10.0)
-            return "{}"
-        return _hang
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable", _builder,
-    )
+    # Q6: production now uses ``self._agent.infer``, so we stub its
+    # call to hang for longer than the action's ``llm_timeout_s``.
+    async def _hang(*, prompt: str, **_kwargs):
+        await _asyncio.sleep(10.0)
+        response = MagicMock()
+        response.generated_text = "{}"
+        return response
+    cap._agent.infer = AsyncMock(side_effect=_hang)
 
     result = await cap.bootstrap_roadmap_from_objectives(
         dry_run=True, llm_timeout_s=0.05,
@@ -1137,12 +1172,7 @@ async def test_bootstrap_create_issue_calls_carry_target_project_id(
         '{"milestones": [{"title": "M", "description": "",'
         '"tasks": [{"title": "t", "description": ""}]}]}'
     )
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_llm_callable(response),
-    )
-
+    _stub_agent_infer(cap, response)
     await cap.bootstrap_roadmap_from_objectives(
         dry_run=False, target_project_id="PVT_OPERATOR",
     )
@@ -1477,6 +1507,7 @@ def _seed_roadmap_repo(
 
     _make_repo(tmp_path)
     (tmp_path / ".colony").mkdir()
+    _seed_minimal_manifest(tmp_path)
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "x.md").write_text("# X\n", encoding="utf-8")
     (tmp_path / ".colony" / "repo_map.yaml").write_text(
@@ -1794,11 +1825,15 @@ async def test_sync_create_issue_failures_surface_in_response(
 # ---------------------------------------------------------------------------
 
 
-def _stub_assignment_llm_callable(
+def _stub_assignment_agent_infer(
+    cap: Any,
     by_title: dict[str, dict[str, str]] | None = None,
     default: dict[str, str] | None = None,
-) -> Any:
-    """LLM callable shaped like the one P5d's action builds.
+) -> None:
+    """Stub ``cap._agent.infer`` per-prompt for the assignment
+    classification path (Q6 migration: production now routes the
+    classification LLM call through ``self._agent.infer`` so the
+    span hook fires).
 
     Pattern-matches needles in ``by_title`` against the prompt's
     ``Task:`` line *only* (not the full prompt — the system prompt
@@ -1812,16 +1847,19 @@ def _stub_assignment_llm_callable(
 
     fallback = default or {"assignee": "colony", "reason": "default"}
 
-    def _builder(*, max_tokens: int, temperature: float):
-        async def _llm(prompt: str) -> str:
-            m = _re.search(r"^Task:\s*(.+?)$", prompt, _re.MULTILINE)
-            task_title = m.group(1).strip() if m else ""
-            for needle, payload in (by_title or {}).items():
-                if needle in task_title:
-                    return _json.dumps(payload)
-            return _json.dumps(fallback)
-        return _llm
-    return _builder
+    async def _infer(*, prompt: str, **_kwargs):
+        m = _re.search(r"^Task:\s*(.+?)$", prompt, _re.MULTILINE)
+        task_title = m.group(1).strip() if m else ""
+        for needle, payload in (by_title or {}).items():
+            if needle in task_title:
+                response = MagicMock()
+                response.generated_text = _json.dumps(payload)
+                return response
+        response = MagicMock()
+        response.generated_text = _json.dumps(fallback)
+        return response
+
+    cap._agent.infer = AsyncMock(side_effect=_infer)
 
 
 def _stub_github_with_assignment(
@@ -1905,15 +1943,10 @@ async def test_propose_task_assignments_skips_already_assigned_by_default(
             "assignees": [], "milestone": "M1",
         },
     ])
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_assignment_llm_callable(default={
-            "assignee": "colony", "reason": "default",
-        }),
-    )
-
     cap = _make_capability(tmp_path, github=github)
+    _stub_assignment_agent_infer(cap, default={
+            "assignee": "colony", "reason": "default",
+        })
     result = await cap.propose_task_assignments(
     )
     assert len(result["proposals"]) == 1
@@ -1939,15 +1972,10 @@ async def test_propose_task_assignments_reassign_existing_includes_all(
             "assignees": ["bob"], "milestone": "M1",
         },
     ])
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_assignment_llm_callable(default={
-            "assignee": "colony", "reason": "default",
-        }),
-    )
-
     cap = _make_capability(tmp_path, github=github)
+    _stub_assignment_agent_infer(cap, default={
+            "assignee": "colony", "reason": "default",
+        })
     result = await cap.propose_task_assignments(
         reassign_existing=True,
     )
@@ -1969,15 +1997,10 @@ async def test_propose_task_assignments_dry_run_does_not_call_assign(
             "assignees": [], "milestone": "M1",
         },
     ])
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_assignment_llm_callable(default={
-            "assignee": "user", "reason": "default",
-        }),
-    )
-
     cap = _make_capability(tmp_path, github=github)
+    _stub_assignment_agent_infer(cap, default={
+            "assignee": "user", "reason": "default",
+        })
     result = await cap.propose_task_assignments(
     )
     assert result["dry_run"] is True
@@ -2009,19 +2032,14 @@ async def test_propose_task_assignments_apply_collects_partial_failures(
             2: {"ok": False, "message": "user does not exist"},
         },
     )
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        # ``colony`` so each proposal has a resolvable login (the
-        # App-bot whoami returns). ``user`` proposals would otherwise
-        # be ``user_unassignable=True`` here (no per-user OAuth on the
-        # fake agent) and the partial-failure path wouldn't fire.
-        _stub_assignment_llm_callable(default={
-            "assignee": "colony", "reason": "default",
-        }),
-    )
-
     cap = _make_capability(tmp_path, github=github)
+    # ``colony`` so each proposal has a resolvable login (the
+    # App-bot whoami returns). ``user`` proposals would otherwise
+    # be ``user_unassignable=True`` here (no per-user OAuth on the
+    # fake agent) and the partial-failure path wouldn't fire.
+    _stub_assignment_agent_infer(cap, default={
+        "assignee": "colony", "reason": "default",
+    })
     result = await cap.propose_task_assignments(
         dry_run=False,
     )
@@ -2050,15 +2068,10 @@ async def test_propose_task_assignments_segregates_untracked_issues(
             "assignees": [], "milestone": None,
         },
     ])
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_assignment_llm_callable(default={
-            "assignee": "colony", "reason": "default",
-        }),
-    )
-
     cap = _make_capability(tmp_path, github=github)
+    _stub_assignment_agent_infer(cap, default={
+            "assignee": "colony", "reason": "default",
+        })
     result = await cap.propose_task_assignments(
     )
     assert len(result["proposals"]) == 1
@@ -2111,17 +2124,8 @@ async def test_propose_task_assignments_handles_llm_parse_failures(
             "assignees": [], "milestone": "M1",
         },
     ])
-    from polymathera.colony.knowledge import deps as kdeps_mod
-
-    def _builder(*, max_tokens, temperature):  # noqa: ARG001
-        async def _llm(_prompt):
-            return "not json at all"
-        return _llm
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable", _builder,
-    )
-
     cap = _make_capability(tmp_path, github=github)
+    _stub_agent_infer(cap, "not json at all")
     result = await cap.propose_task_assignments(
     )
     assert len(result["proposals"]) == 0
@@ -2554,6 +2558,7 @@ async def test_bootstrap_writes_to_configured_roadmap_path(
 
     _make_repo(tmp_path)
     (tmp_path / ".colony").mkdir()
+    _seed_minimal_manifest(tmp_path)
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "objectives.md").write_text(
         "# Objectives\nMaximise sensitivity.\n", encoding="utf-8",
@@ -2578,12 +2583,7 @@ async def test_bootstrap_writes_to_configured_roadmap_path(
         '{"milestones": [{"title": "M", "description": "",'
         '"tasks": [{"title": "t", "description": ""}]}]}'
     )
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_llm_callable(response),
-    )
-
+    _stub_agent_infer(cap, response)
     result = await cap.bootstrap_roadmap_from_objectives(dry_run=False)
     assert result["error"] == ""
     assert result["roadmap_written"] == "docs/roadmap.md"
@@ -2610,14 +2610,10 @@ async def test_propose_tolerates_missing_roadmap_row(
             "assignees": [], "milestone": "M1",
         },
     ])
-    from polymathera.colony.knowledge import deps as kdeps_mod
-    monkeypatch.setattr(
-        kdeps_mod, "build_default_llm_callable",
-        _stub_assignment_llm_callable(default={
-            "assignee": "colony", "reason": "default",
-        }),
-    )
     cap = _make_capability(tmp_path, github=github)
+    _stub_assignment_agent_infer(cap, default={
+        "assignee": "colony", "reason": "default",
+    })
     result = await cap.propose_task_assignments()
     assert result["error"] == ""
     assert len(result["proposals"]) == 1

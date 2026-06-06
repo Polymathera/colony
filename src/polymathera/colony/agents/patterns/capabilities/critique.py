@@ -148,15 +148,14 @@ class LLMCritiquePolicy(CritiquePolicy):
     Simple, fast policy: use LLM to evaluate output against context.
     """
 
-    def __init__(self, agent: Agent, llm_cluster_handle: Any, max_tokens=1000):
-        """Initialize with LLM cluster handle.
+    def __init__(self, agent: Agent, max_tokens: int = 1000):
+        """Initialize with the owning agent.
 
         Args:
             agent: The agent instance
-            llm_cluster_handle: Handle to LLMCluster deployment
+            max_tokens: Maximum number of tokens for LLM response
         """
         super().__init__(agent)
-        self.llm_cluster = llm_cluster_handle
         self.max_tokens = max_tokens
 
     async def critique_output(
@@ -207,22 +206,18 @@ As a peer reviewer, evaluate:
     "reasoning": "explanation of critique"
 }}"""
 
-        # Use LLM to critique
-        from ....cluster.models import InferenceRequest
-
-        request = InferenceRequest(
-            request_id=f"critique-{context.producer_id}",
+        # Use the agent's infer surface so the tracing facility's
+        # INFER-span hook fires (token usage, cost, prompt + response
+        # captured against the critiquing agent's trace).
+        response = await self.agent.infer(
             prompt=prompt,
-            syscontext=self.agent.syscontext,
-            context_page_ids=[],
             max_tokens=self.max_tokens,
         )
 
-        response = await self.llm_cluster.infer(request)
-
         # Parse response
+        text = response.generated_text
         try:
-            critique_data = json.loads(response.text)
+            critique_data = json.loads(text)
             return Critique(**critique_data)
         except (json.JSONDecodeError, ValueError):
             # Fallback: low quality if can't parse
@@ -230,7 +225,7 @@ As a peer reviewer, evaluate:
                 quality_score=0.3,
                 requires_revision=True,
                 suggestions=["Could not parse LLM critique response"],
-                reasoning=f"LLM response: {response.text[:200]}"
+                reasoning=f"LLM response: {text[:200]}"
             )
 
 
