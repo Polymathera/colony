@@ -1351,6 +1351,28 @@ class GitHubCapability(AgentCapability):
     }
     """.strip()
 
+    # List Projects v2 boards attached to a specific repo. Used by the
+    # dashboard's colony-create / colony-settings flow to render a
+    # picker so the operator can attach a project to a colony (the
+    # selected project's node id becomes ``default_project_id`` on
+    # the colony's ``GitHubCapability`` and on every new issue's
+    # ``addProjectV2ItemById`` mutation).
+    _LIST_REPO_PROJECTS = """
+    query($owner: String!, $name: String!, $first: Int!) {
+      repository(owner: $owner, name: $name) {
+        projectsV2(first: $first, query: "is:open") {
+          nodes {
+            id
+            title
+            number
+            url
+            closed
+          }
+        }
+      }
+    }
+    """.strip()
+
     # Idempotent server-side: re-adding the same content to a project
     # returns the existing item id rather than erroring. The mutation
     # accepts the project's GraphQL node id + the content's GraphQL
@@ -1457,6 +1479,72 @@ class GitHubCapability(AgentCapability):
         return _ok(
             project_title=node.get("title"),
             items=items, count=len(items),
+        )
+
+    @action_executor()
+    async def list_projects_for_repo(
+        self,
+        *,
+        repo: str | None = None,
+        max_results: int = 25,
+    ) -> dict[str, Any]:
+        """List open Projects v2 attached to ``repo``.
+
+        Returns
+        ``{"ok": True, "projects": [{"node_id", "title", "number",
+        "url"}], "count": int}``. Used by the dashboard's colony
+        management UI to populate the project picker. ``repo`` is in
+        the ``owner/name`` form; falls back to the capability's
+        ``default_repo`` when omitted.
+
+        Closed projects are filtered server-side via
+        ``projectsV2(query: "is:open")`` so the picker only shows
+        actionable boards. Bounded at ``max_results`` (default 25) —
+        callers that need more should paginate via a future
+        ``after`` cursor.
+        """
+
+        target_repo = repo or self._default_repo
+        if not target_repo or "/" not in target_repo:
+            return _err(
+                "repo must be in 'owner/name' form (got "
+                f"{target_repo!r})",
+                projects=[],
+            )
+        owner, name = target_repo.split("/", 1)
+
+        client, err = await self._ensure_client()
+        if client is None:
+            return _err(err or "", projects=[])
+        try:
+            data = await client.graphql(
+                self._LIST_REPO_PROJECTS,
+                variables={
+                    "owner": owner, "name": name, "first": max_results,
+                },
+            )
+        except Exception as e:
+            return self._shape_error(e) | {"projects": []}
+        repo_node = (data or {}).get("repository") or {}
+        nodes = ((repo_node.get("projectsV2") or {}).get("nodes") or [])
+        # Defensive: even with ``query: "is:open"`` GitHub has
+        # historically returned closed entries when the index is
+        # behind. Drop them client-side so the picker never offers a
+        # project the operator can't write to.
+        projects = [
+            {
+                "node_id": n.get("id"),
+                "title": n.get("title") or "",
+                "number": n.get("number"),
+                "url": n.get("url"),
+            }
+            for n in nodes
+            if n and n.get("id") and not n.get("closed")
+        ]
+        return _ok(
+            repo=target_repo,
+            projects=projects,
+            count=len(projects),
         )
 
     async def _add_to_project_v2(

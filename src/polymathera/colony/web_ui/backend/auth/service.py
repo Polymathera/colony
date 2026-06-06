@@ -641,6 +641,61 @@ async def set_git_attribution(
     }
 
 
+async def get_colony_github_project(
+    db_pool, *, colony_id: str, tenant_id: str,
+) -> dict[str, str] | None:
+    """Return ``{node_id, title}`` for the colony's attached GitHub
+    Project (v2), or ``None`` when the operator hasn't picked one.
+
+    The Project's GraphQL node id is what every newly-created issue
+    gets stamped with (via
+    ``GitHubCapability.create_issue(project_id=...)``); the title is
+    a UI cache so the picker can show the human-readable name without
+    a GraphQL round-trip on every render.
+    """
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT github_project_node_id, github_project_title "
+            "FROM colonies WHERE id = $1 AND tenant_id = $2",
+            colony_id, tenant_id,
+        )
+    if row is None or row["github_project_node_id"] is None:
+        return None
+    return {
+        "node_id": row["github_project_node_id"],
+        "title": row["github_project_title"] or "",
+    }
+
+
+async def set_colony_github_project(
+    db_pool, *,
+    colony_id: str,
+    tenant_id: str,
+    node_id: str | None,
+    title: str | None,
+) -> dict[str, str | None]:
+    """Persist the colony's attached GitHub Project. Pass
+    ``node_id=None`` (with ``title=None``) to clear the attachment.
+
+    Raises :class:`KeyError` when the colony does not exist or
+    belongs to a different tenant.
+    """
+
+    async with db_pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE colonies SET github_project_node_id = $1, "
+            "github_project_title = $2 "
+            "WHERE id = $3 AND tenant_id = $4",
+            node_id, title, colony_id, tenant_id,
+        )
+    if result == "UPDATE 0":
+        raise KeyError(
+            f"colony {colony_id!r} not found for tenant {tenant_id!r}",
+        )
+    return {"node_id": node_id, "title": title}
+
+
 # ---------------------------------------------------------------------------
 # User — per-user OAuth-verified VCS identity
 # ---------------------------------------------------------------------------

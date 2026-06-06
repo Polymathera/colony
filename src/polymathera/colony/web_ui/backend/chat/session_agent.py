@@ -898,9 +898,17 @@ class SessionOrchestratorCapability(AgentCapability):
 
         params: dict[str, Any] = dict(mission_params or {})
         params.setdefault("mission_type", mission_type)
+        # The coordinator runs in this SessionAgent's runtime, so
+        # the syscontext default_factory captures the right session
+        # context (the SessionAgent itself is spawned inside a
+        # ``user_execution_context(session_id=...)`` block in
+        # ``routers/sessions.py::create_session``). The prior
+        # ``session_id=self.agent.metadata.session_id`` kwarg was
+        # silently dropped — ``session_id`` is a read-only @property
+        # delegating to ``syscontext.session_id``, not a writable
+        # field.
         coord_metadata = AgentMetadata(
             role=f"{reg.get('label', mission_type)} coordinator",
-            session_id=self.agent.metadata.session_id,
             goals=[f"Run {reg.get('label', mission_type)} mission"],
             max_iterations=max_iterations,
             self_concept=build_coordinator_self_concept(

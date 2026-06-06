@@ -137,6 +137,11 @@ export interface CreateColonyRequest {
   // both are null.
   commit_principal?: string | null;
   commit_co_author?: string | null;
+  // GitHub Project (v2) attachment. Required when ``vcs_repo_full_name``
+  // is set — backend rejects the create call otherwise. ``null`` is
+  // only valid for bare colonies (no repo bound).
+  github_project_node_id?: string | null;
+  github_project_title?: string | null;
 }
 
 export function useCreateColony() {

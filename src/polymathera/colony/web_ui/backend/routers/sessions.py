@@ -353,26 +353,68 @@ async def create_session(
                 "Re-sign-in if you just redeployed."
             ),
         )
-    if colony._db_pool is not None:
-        from ..auth import service as auth_service
-        owned = await auth_service.list_colonies(
-            colony._db_pool, requested_tenant_id,
+    if colony._db_pool is None:
+        # Without the database we can't validate the colony, look up
+        # the design-monorepo URL, or check the GitHub Project gate.
+        # Refusing is safer than spawning a SessionAgent that would
+        # crash on first DB-backed action with a confusing error.
+        return CreateSessionResponse(
+            session_id="", status="error",
+            message=(
+                "Auth database is not available — sessions cannot be "
+                "created. Check ``RDS_*`` env on the dashboard service."
+            ),
         )
-        if not any(c["colony_id"] == requested_colony_id for c in owned):
-            logger.warning(
-                "create_session: rejected X-Colony-Id=%s for "
-                "tenant=%s (no such colony — stale browser cache?)",
-                requested_colony_id, requested_tenant_id,
-            )
-            return CreateSessionResponse(
-                session_id="", status="error",
-                message=(
-                    f"Colony {requested_colony_id!r} is not visible "
-                    f"to you. Pick a real colony from the dropdown "
-                    f"(your browser may be remembering a colony from "
-                    f"a previous deployment — refresh the page)."
-                ),
-            )
+
+    from ..auth import service as auth_service
+    owned = await auth_service.list_colonies(
+        colony._db_pool, requested_tenant_id,
+    )
+    if not any(c["colony_id"] == requested_colony_id for c in owned):
+        logger.warning(
+            "create_session: rejected X-Colony-Id=%s for "
+            "tenant=%s (no such colony — stale browser cache?)",
+            requested_colony_id, requested_tenant_id,
+        )
+        return CreateSessionResponse(
+            session_id="", status="error",
+            message=(
+                f"Colony {requested_colony_id!r} is not visible "
+                f"to you. Pick a real colony from the dropdown "
+                f"(your browser may be remembering a colony from "
+                f"a previous deployment — refresh the page)."
+            ),
+        )
+
+    # Refuse session-create when the colony has no GitHub Project
+    # attached. Every issue Colony creates against the colony's
+    # monorepo is auto-attached to this project (it's threaded
+    # into ``GitHubCapability.bind`` as ``default_project_id``
+    # below); without one, issues land free-floating, which the
+    # operator explicitly does not want. The colony-create flow
+    # is supposed to gate this — the check here is defense in
+    # depth so a colony provisioned through an older code path
+    # or via the API directly can't slip through.
+    colony_project = await auth_service.get_colony_github_project(
+        colony._db_pool,
+        colony_id=requested_colony_id,
+        tenant_id=requested_tenant_id,
+    )
+    if colony_project is None:
+        logger.info(
+            "create_session: refused — colony=%s tenant=%s has "
+            "no GitHub Project attached",
+            requested_colony_id, requested_tenant_id,
+        )
+        return CreateSessionResponse(
+            session_id="", status="error",
+            message=(
+                "This colony has no GitHub Project attached. "
+                "Open the colony settings, pick a Project from "
+                "the list (or create one on the repo's GitHub "
+                "page first if none exist), then retry."
+            ),
+        )
 
     try:
         from polymathera.colony.agents.sessions.models import SessionMetadata
@@ -477,6 +519,29 @@ async def create_session(
                 session_id=session_id,
                 origin="dashboard_session_create",
             )
+
+            # ``session_default_repo`` is used in two places:
+            #   - threaded as ``GitHubCapability.bind(default_repo=...)``
+            #     so the LLM planner doesn't need to repeat the
+            #     ``repo=`` kwarg on every action;
+            #   - already threaded via ``parameters[design_monorepo_url]``
+            #     for the design-monorepo capability trio.
+            # Resolved once here in the canonical ``owner/repo`` shape
+            # the capability expects (NOT the full clone URL).
+            session_monorepo = await auth_service.get_design_monorepo(
+                colony._db_pool,
+                colony_id=requested_colony_id,
+                tenant_id=requested_tenant_id,
+            ) or {}
+            session_default_repo: str | None = None
+            if session_monorepo.get("origin_url"):
+                from polymathera.colony.design_monorepo.process import (
+                    parse_owner_repo_from_url,
+                )
+                session_default_repo = parse_owner_repo_from_url(
+                    session_monorepo["origin_url"],
+                )
+
             agent_metadata = AgentMetadata(
                 role="session_orchestrator",
                 syscontext=session_syscontext,
@@ -788,7 +853,20 @@ async def create_session(
                     # surfaces a clean error instead of crashing the
                     # agent. Operators enable it via env vars or the
                     # Settings UI (planned).
-                    GitHubCapability.bind(scope=BlackboardScope.SESSION),
+                    #
+                    # ``default_project_id`` is the colony's attached
+                    # GitHub Project (v2) node id — every new issue
+                    # ``GitHubCapability.create_issue`` mints gets
+                    # auto-attached to this project. ``default_repo``
+                    # is the same monorepo every Colony action defaults
+                    # to so the LLM planner doesn't have to thread
+                    # ``repo=...`` on every action. Both are resolved
+                    # upfront (see the lookup block above the spawn).
+                    GitHubCapability.bind(
+                        scope=BlackboardScope.SESSION,
+                        default_project_id=colony_project["node_id"],
+                        default_repo=session_default_repo,
+                    ),
                     # Design-monorepo capability trio (state, checkpointing,
                     # tool building) — per-agent clones under
                     # /mnt/shared/agents/<agent_id>/clones/<scope_id>/.

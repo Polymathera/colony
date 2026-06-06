@@ -6,17 +6,20 @@ tools, and communication.
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from enum import Enum
-from typing import Any, Literal, AsyncContextManager
+from typing import Any, ClassVar, Literal, AsyncContextManager
 from abc import ABC, abstractmethod
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 from ..distributed.state_management import SharedState
 from ..distributed.ray_utils import serving
 from .self_concept import AgentSelfConcept
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -2632,6 +2635,128 @@ class AgentMetadata(BaseModel):
     @property
     def run_id(self) -> str:
         return self.syscontext.run_id
+
+    # ``tenant_id`` / ``colony_id`` / ``session_id`` / ``run_id`` are
+    # read-only @properties that delegate to ``syscontext``. Pydantic
+    # would silently drop them as unknown kwargs at construction
+    # (``model_config`` default is ``extra="ignore"``), which masked
+    # bug 2 from the project-planning trace investigation: the
+    # SessionAgent was constructed with ``session_id=session_id`` and
+    # the kwarg was silently dropped — the agent then ran with an
+    # empty ``syscontext.session_id``, the tracing facility fell
+    # back to using ``agent_id`` as the trace_id, and every
+    # coordinator the SessionAgent spawned ended up in a disjoint
+    # trace tree.
+    #
+    # Rather than letting that recur at every new construction site,
+    # reject the bad kwargs loudly. Callers must build an explicit
+    # ``ExecutionContext`` and pass it as ``syscontext=...``. The
+    # error message points at the right shape so the next developer
+    # doesn't trip on the same property-vs-field confusion.
+    # ``ClassVar`` annotation so pydantic treats this as a class
+    # constant (not a model field or ``ModelPrivateAttr`` — both
+    # would break the validator below; the private-attr form makes
+    # ``cls._CONTEXT_KWARG_NAMES`` return the descriptor, not the
+    # tuple).
+    _CONTEXT_KWARG_NAMES: ClassVar[tuple[str, ...]] = (
+        "tenant_id", "colony_id", "session_id", "run_id",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_silently_dropped_context_kwargs(
+        cls, data: Any,
+    ) -> Any:
+        if not isinstance(data, dict):
+            return data
+        offenders = sorted(
+            k for k in cls._CONTEXT_KWARG_NAMES if k in data
+        )
+        if offenders:
+            offender_list = ", ".join(offenders)
+            raise ValueError(
+                f"AgentMetadata({offender_list}=...) is not "
+                "supported — these are read-only @properties that "
+                "delegate to ``syscontext``. Build an explicit "
+                "``ExecutionContext`` and pass it as "
+                "``syscontext=ExecutionContext(...)``. Example: "
+                "``AgentMetadata(syscontext=ExecutionContext("
+                "ring=Ring.USER, tenant_id=..., colony_id=..., "
+                "session_id=..., origin=...), ...)``. See "
+                "``routers/sessions.py::create_session`` for a "
+                "production reference."
+            )
+        return data
+
+    @classmethod
+    def from_data(
+        cls,
+        *,
+        caller: str | None = None,
+        **kwargs: Any,
+    ) -> AgentMetadata:
+        """Construct an :class:`AgentMetadata` from a payload sourced
+        from outside the typed Python boundary — most commonly a JSON
+        dict the LLM emitted at the REPL and spread via ``**``.
+
+        Why this exists separately from ``AgentMetadata(**kwargs)``:
+
+        - The constructor's
+          :meth:`_reject_silently_dropped_context_kwargs` validator
+          loudly rejects any ``tenant_id`` / ``colony_id`` /
+          ``session_id`` / ``run_id`` at the top level so typed
+          Python code can't accidentally pass them (they're read-only
+          @properties delegating to ``syscontext`` — the constructor
+          would silently drop them otherwise, which masked real
+          bugs).
+        - LLM-driven callers don't get that contract. The REPL
+          serialises whatever the planner emits, and the planner
+          will happily include ``tenant_id`` thinking it's a field.
+          Failing the spawn with a pydantic ``ValueError`` on every
+          such call is a worse failure mode than silently stripping
+          the keys — the syscontext default_factory captures the
+          parent's context, so the LLM's intent ("inherit tenant
+          identity from the spawn site") is what actually happens
+          anyway.
+
+        This helper bridges the two: strip the context keys with a
+        WARN log naming the caller, then forward the cleaned payload
+        through the typed constructor (which still enforces every
+        other invariant).
+
+        Args:
+            caller: Free-form identifier (e.g. capability + action,
+                spawn-site agent_id) included in the WARN log so the
+                operator can locate the source of sloppy payloads.
+                Falls back to "unspecified" when omitted.
+            **kwargs: The dict payload (typically a ``**spread`` of
+                the LLM-emitted metadata dict).
+
+        Returns:
+            A typed :class:`AgentMetadata`. The returned instance's
+            ``tenant_id`` / ``colony_id`` / ``session_id`` /
+            ``run_id`` come from ``syscontext`` (constructor's
+            default_factory captures the active execution context),
+            NOT from the kwargs — even if the LLM passed them.
+        """
+
+        stripped = [
+            k for k in cls._CONTEXT_KWARG_NAMES if k in kwargs
+        ]
+        if stripped:
+            cleaned: dict[str, Any] = {
+                k: v for k, v in kwargs.items() if k not in stripped
+            }
+            logger.warning(
+                "AgentMetadata.from_data: dropped read-only "
+                "context keys %s from untrusted payload — these "
+                "inherit from the active syscontext and cannot be "
+                "set per-call. Caller=%s.",
+                stripped, caller or "unspecified",
+            )
+        else:
+            cleaned = kwargs
+        return cls(**cleaned)
 
     def update(self, **kwargs) -> None:
         """Update metadata fields."""

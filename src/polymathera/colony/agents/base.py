@@ -3235,7 +3235,7 @@ class Agent(BaseModel):
             ```python
             handle = (await self.spawn_child_agents(
                 blueprints=[GroundingAgent.bind(
-                    metadata=AgentMetadata(session_id="s1", role="grounding"),
+                    metadata=AgentMetadata(role="grounding"),  # syscontext inherited
                     capability_blueprints=[GroundingCapability.bind()],
                 )],
                 return_handles=True,

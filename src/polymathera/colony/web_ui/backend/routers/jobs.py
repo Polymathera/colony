@@ -268,10 +268,23 @@ async def _run_job(
                     build_coordinator_self_concept,
                 )
 
+                # AgentMetadata's syscontext default_factory captures
+                # whatever ``with execution_context(...)`` is in scope
+                # — the outer block at line 207 sets tenant/colony/
+                # session/origin, but ``run_id`` is mission-scoped (it
+                # was minted at line 239, after the context entered).
+                # Inherit the outer context and stamp run_id explicitly
+                # so the coordinator's tracing facility groups its
+                # spans under the right run.
+                import dataclasses
+                from polymathera.colony.distributed.ray_utils.serving.context import (
+                    require_execution_context,
+                )
                 metadata = AgentMetadata(
                     role=f"{reg['label']} coordinator",
-                    run_id=run_id,
-                    session_id=session_id,
+                    syscontext=dataclasses.replace(
+                        require_execution_context(), run_id=run_id,
+                    ),
                     goals=[f"Run {reg['label']} mission"],
                     max_iterations=mission.max_iterations,
                     self_concept=build_coordinator_self_concept(

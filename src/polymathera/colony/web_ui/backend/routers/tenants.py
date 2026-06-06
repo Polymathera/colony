@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..auth import service as auth_service
@@ -39,6 +39,27 @@ class DiscoverableRepo(BaseModel):
     # provider isn't currently registered (operator missing OAuth
     # creds) — the UI falls back to ``vcs_repo_full_name`` display.
     clone_url: str | None = None
+
+
+class DiscoverableProject(BaseModel):
+    node_id: str
+    title: str
+    number: int | None = None
+    url: str | None = None
+
+
+class DiscoverableProjectsResponse(BaseModel):
+    repo: str
+    projects: list[DiscoverableProject] = Field(default_factory=list)
+    error: str | None = Field(
+        default=None,
+        description=(
+            "Provider-side error surfaced verbatim when projects "
+            "cannot be listed (no tenant App installation configured, "
+            "App missing project read scope, etc.). ``None`` on a "
+            "clean read even if the list is empty."
+        ),
+    )
 
 
 class TenantGitHubInstallation(BaseModel):
@@ -115,6 +136,66 @@ async def list_discoverable_repos(
                 clone_url = None
         out.append(DiscoverableRepo(**r, clone_url=clone_url))
     return out
+
+
+@router.get(
+    "/tenants/me/discoverable-projects",
+    response_model=DiscoverableProjectsResponse,
+)
+async def list_tenant_discoverable_projects(
+    repo: str = Query(
+        description=(
+            "Repository full name in ``owner/name`` form. The picker "
+            "on the '+ New Colony' form supplies this from the repo "
+            "the operator just chose; the per-colony settings UI "
+            "uses ``GET /colonies/{id}/discoverable-projects`` "
+            "instead (no need to re-resolve owner/name there)."
+        ),
+    ),
+    user: dict[str, Any] = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> DiscoverableProjectsResponse:
+    """List open Projects v2 boards on ``repo``.
+
+    Used by the colony-create flow: the operator picks a repo, the
+    UI calls this route to populate the project picker, and:
+
+    - 0 projects → UI surfaces "create one on GitHub first" + keeps
+      Create disabled.
+    - ≥1 projects → operator picks one, Create is enabled.
+
+    Auth: per-tenant App installation token. The operator's OAuth
+    token is not used — projects are tenant-scoped, not user-scoped.
+    """
+
+    db = _get_db_pool(colony)
+    if "/" not in repo:
+        raise HTTPException(
+            status_code=400,
+            detail="repo must be in 'owner/name' form",
+        )
+    owner, name = repo.split("/", 1)
+    if not owner or not name:
+        raise HTTPException(
+            status_code=400,
+            detail="repo must be in 'owner/name' form",
+        )
+
+    from ..services.github_projects import (
+        list_open_projects_for_repo, _ProjectsLookupFailed,
+    )
+    try:
+        rows = await list_open_projects_for_repo(
+            db, tenant_id=user["tenant_id"], owner=owner, name=name,
+        )
+    except _ProjectsLookupFailed as exc:
+        return DiscoverableProjectsResponse(
+            repo=repo, projects=[], error=str(exc),
+        )
+    return DiscoverableProjectsResponse(
+        repo=repo,
+        projects=[DiscoverableProject(**r) for r in rows],
+    )
 
 
 @router.get(

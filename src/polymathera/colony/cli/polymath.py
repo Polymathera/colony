@@ -1492,10 +1492,14 @@ async def run_integration_test(
 
         # Build metadata for the coordinator
         self_concept_config = reg.get("self_concept", {})
+        # ``run_id`` / ``session_id`` are inherited from the
+        # outer ``with execution_context(...)`` wrapping the whole
+        # CLI run (polymath.py main: ``run_integration_test``), so
+        # the syscontext default_factory captures them. The prior
+        # ``run_id=`` / ``session_id=`` kwargs here were silently
+        # dropped (read-only @properties on AgentMetadata).
         metadata = AgentMetadata(
             role=f"{reg['label']} coordinator",
-            run_id=config.run_id,
-            session_id=config.session_id,
             goals=[f"Run {reg['label']} on {config.repo_id}"],
             max_iterations=mission.max_iterations,
             self_concept=AgentSelfConcept(

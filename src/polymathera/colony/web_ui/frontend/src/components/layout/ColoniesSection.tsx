@@ -22,7 +22,12 @@ import {
   type ColonyInfo,
 } from "@/api/hooks/useAuth";
 import {
+  useColonyDiscoverableProjects,
+  useColonyGitHubProject,
   useDiscoverableRepos,
+  useSetColonyGitHubProject,
+  useTenantDiscoverableProjects,
+  type DiscoverableProject,
   type DiscoverableRepo,
 } from "@/api/hooks/useGitHubIdentity";
 import {
@@ -53,9 +58,10 @@ export function ColoniesSection({
   // (see ``services/colony_discovery.py`` for the back-end warning).
   // Surface the hint inline on the empty-state so operators don't
   // have to dig into dashboard logs to find the workaround.
+  const reposList: DiscoverableRepo[] = repos.data ?? [];
   const reposSeenButNoMarkers =
-    (repos.data ?? []).length > 0 &&
-    (repos.data ?? []).every((r) => !r.has_colony_marker);
+    reposList.length > 0 &&
+    reposList.every((r) => !r.has_colony_marker);
 
   return (
     <div className="w-full max-w-md">
@@ -125,6 +131,9 @@ function NewColonyForm({
   const [description, setDescription] = useState("");
   // Repo binding — empty string = "no repo (bare colony, set later)".
   const [repoChoice, setRepoChoice] = useState<string>("");
+  // GitHub Project (v2) — empty string = "not picked yet". Required
+  // when a repo is bound (the backend rejects the create otherwise).
+  const [projectChoice, setProjectChoice] = useState<string>("");
   // Commit attribution — defaults match the backend schema defaults.
   const [principal, setPrincipal] = useState("colony");
   const [coAuthor, setCoAuthor] = useState("user");
@@ -134,6 +143,22 @@ function NewColonyForm({
   const picked: DiscoverableRepo | undefined = (repos.data ?? []).find(
     (r) => r.vcs_repo_id === repoChoice,
   );
+
+  // Project picker is driven by the picked repo. Pre-repo and for
+  // bare colonies (no repo selected), the picker stays hidden and
+  // ``projectChoice`` is irrelevant.
+  const projects = useTenantDiscoverableProjects(
+    picked?.vcs_repo_full_name ?? null,
+  );
+  const projectList: DiscoverableProject[] = projects.data?.projects ?? [];
+  const pickedProject: DiscoverableProject | undefined =
+    projectList.find((p) => p.node_id === projectChoice);
+
+  // Reset the project pick whenever the repo changes — the previous
+  // pick belongs to a different repo's project list.
+  useEffect(() => {
+    setProjectChoice("");
+  }, [repoChoice]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -149,6 +174,8 @@ function NewColonyForm({
         default_branch: picked?.default_branch ?? null,
         commit_principal: principal.trim() || "colony",
         commit_co_author: coAuthor.trim() || null,
+        github_project_node_id: pickedProject?.node_id ?? null,
+        github_project_title: pickedProject?.title ?? null,
       });
       onCreated(created.colony_id);
       onClose();
@@ -206,6 +233,53 @@ function NewColonyForm({
           ))}
         </select>
       </label>
+      {/* GitHub Project (v2) — only relevant when a repo is bound.
+          Lists the open Projects v2 boards attached to the picked
+          repo; the backend rejects colony-create when a repo is
+          bound but no project is picked. When the repo has zero
+          projects, surface a directive error so the operator knows
+          they must create one on the repo's GitHub page before
+          retrying. */}
+      {picked && (
+        <label className="flex flex-col gap-1">
+          <span className="text-[10px] text-muted-foreground">
+            GitHub Project (required)
+          </span>
+          {projects.isLoading ? (
+            <select
+              disabled
+              className="px-2 py-1 rounded border bg-background text-sm"
+            >
+              <option>Loading projects…</option>
+            </select>
+          ) : projects.data?.error ? (
+            <div className="text-xs text-red-500 px-1">
+              {projects.data.error}
+            </div>
+          ) : projectList.length === 0 ? (
+            <div className="text-xs text-amber-600 dark:text-amber-400 px-1">
+              No open Projects on{" "}
+              <code>{picked.vcs_repo_full_name}</code>. Open the
+              repo's "Projects" tab on GitHub and create one, then
+              re-open this form.
+            </div>
+          ) : (
+            <select
+              value={projectChoice}
+              onChange={(e) => setProjectChoice(e.target.value)}
+              className="px-2 py-1 rounded border bg-background text-sm"
+            >
+              <option value="">(Pick a project…)</option>
+              {projectList.map((p) => (
+                <option key={p.node_id} value={p.node_id}>
+                  {p.title}
+                  {p.number != null ? ` (#${p.number})` : ""}
+                </option>
+              ))}
+            </select>
+          )}
+        </label>
+      )}
       {/* Commit attribution — well-known values: user / colony /
           agent. Free-form for forward-compat with custom agent labels. */}
       <div className="flex gap-2">
@@ -235,7 +309,17 @@ function NewColonyForm({
       <div className="flex gap-2">
         <button
           type="submit"
-          disabled={!name.trim() || create.isPending}
+          // When a repo is bound, the backend rejects the create
+          // unless a project is picked (or the repo simply has none,
+          // in which case the empty-list branch above already hides
+          // the picker and surfaces "create one on GitHub first").
+          // Mirror the gate client-side so the operator can't fire
+          // a doomed POST.
+          disabled={
+            !name.trim()
+            || create.isPending
+            || (!!picked && !pickedProject)
+          }
           className="px-3 py-1 rounded bg-primary text-primary-foreground text-xs disabled:opacity-50"
         >
           {create.isPending ? "Creating…" : "Create"}
@@ -308,11 +392,14 @@ function ColonyRow({
           colonyId={colony.colony_id}
           onSelectColony={onSelectColony}
         />
+        <GitHubProjectField
+          colonyId={colony.colony_id}
+          onSelectColony={onSelectColony}
+        />
         <GitAttributionField
           colonyId={colony.colony_id}
           onSelectColony={onSelectColony}
         />
-        {/* TODO(per-colony-field-3): future slot. */}
       </div>
     </div>
   );
@@ -460,6 +547,149 @@ function DesignMonorepoField({
       </button>
       {savedAt !== null && (
         <span className="text-[10px] text-emerald-400">Saved.</span>
+      )}
+    </div>
+  );
+}
+
+
+function GitHubProjectField({
+  colonyId, onSelectColony,
+}: {
+  colonyId: string;
+  onSelectColony: (colonyId: string) => void;
+}) {
+  // Per-colony GitHub Project (v2) attachment. Shown as a single
+  // read-only line ("Project: <title>" or "Not configured"), with
+  // an inline edit form that toggles open. The picker is the same
+  // shape as the "+ New Colony" form's project picker — open
+  // projects on the colony's monorepo, with the empty-list state
+  // surfaced as a directive error.
+  //
+  // The discoverable-projects query is lazy: ``enabled`` is gated
+  // on ``editing`` so we don't burn a GraphQL call (and a fresh
+  // installation-token mint) on every render of the colony list.
+  const cfg = useColonyGitHubProject(colonyId);
+  const set = useSetColonyGitHubProject(colonyId);
+  const [editing, setEditing] = useState(false);
+  const [draftNodeId, setDraftNodeId] = useState<string>("");
+  const projects = useColonyDiscoverableProjects(colonyId, editing);
+  const projectList: DiscoverableProject[] =
+    projects.data?.projects ?? [];
+  const draftProject: DiscoverableProject | undefined =
+    projectList.find((p) => p.node_id === draftNodeId);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  const startEdit = () => {
+    onSelectColony(colonyId);
+    setDraftNodeId(cfg.data?.node_id ?? "");
+    setEditing(true);
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!draftNodeId) return;
+    try {
+      await set.mutateAsync({
+        node_id: draftNodeId,
+        title: draftProject?.title ?? null,
+      });
+      cfg.refetch();
+      setEditing(false);
+      setSavedAt(Date.now());
+    } catch {
+      // useSetColonyGitHubProject exposes the error; rendered below.
+    }
+  };
+
+  useEffect(() => {
+    if (savedAt === null) return;
+    const t = setTimeout(() => setSavedAt(null), 2500);
+    return () => clearTimeout(t);
+  }, [savedAt]);
+
+  const display = cfg.data?.title || cfg.data?.node_id || null;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+        <span className="truncate">
+          <span className="font-medium">GitHub Project:</span>{" "}
+          {display ? (
+            <span className="text-foreground">{display}</span>
+          ) : (
+            <span className="italic text-amber-600 dark:text-amber-400">
+              Not configured — sessions are blocked until set.
+            </span>
+          )}
+        </span>
+        <button
+          type="button"
+          onClick={startEdit}
+          className="text-primary hover:underline flex items-center gap-0.5 shrink-0"
+        >
+          <Pencil size={10} /> Edit
+          {savedAt !== null && (
+            <span className="ml-1 text-emerald-500">Saved</span>
+          )}
+        </button>
+      </div>
+      {editing && (
+        <form onSubmit={submit} className="flex flex-col gap-2 mt-1">
+          {projects.isLoading ? (
+            <select
+              disabled
+              className="px-2 py-1 rounded border bg-background text-xs"
+            >
+              <option>Loading projects…</option>
+            </select>
+          ) : projects.data?.error ? (
+            <div className="text-xs text-red-500 px-1">
+              {projects.data.error}
+            </div>
+          ) : projectList.length === 0 ? (
+            <div className="text-xs text-amber-600 dark:text-amber-400 px-1">
+              No open Projects on this colony's monorepo. Create one
+              on the repo's GitHub Projects tab, then retry.
+            </div>
+          ) : (
+            <select
+              value={draftNodeId}
+              onChange={(e) => setDraftNodeId(e.target.value)}
+              className="px-2 py-1 rounded border bg-background text-xs"
+              autoFocus
+            >
+              <option value="">(Pick a project…)</option>
+              {projectList.map((p) => (
+                <option key={p.node_id} value={p.node_id}>
+                  {p.title}
+                  {p.number != null ? ` (#${p.number})` : ""}
+                </option>
+              ))}
+            </select>
+          )}
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={!draftNodeId || set.isPending}
+              className="px-3 py-1 rounded bg-primary text-primary-foreground text-xs disabled:opacity-50"
+            >
+              {set.isPending ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditing(false)}
+              className="px-3 py-1 rounded border text-xs"
+            >
+              Cancel
+            </button>
+          </div>
+          {set.error && (
+            <div className="text-xs text-red-500">
+              {(set.error as Error).message}
+            </div>
+          )}
+        </form>
       )}
     </div>
   );

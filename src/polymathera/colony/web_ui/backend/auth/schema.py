@@ -160,6 +160,19 @@ CREATE TABLE IF NOT EXISTS colonies (
     -- lives on ``users``; this row only carries the policy knobs.
     commit_principal        TEXT NOT NULL DEFAULT 'colony',
     commit_co_author        TEXT DEFAULT 'user',
+    -- GitHub Projects v2 attachment. ``github_project_node_id`` is
+    -- the GraphQL node id Colony stamps on every newly-created issue
+    -- (via ``GitHubCapability.create_issue(project_id=...)``) and
+    -- threads as ``default_project_id`` into ``GitHubCapability.bind``
+    -- at session-create time. ``github_project_title`` is a UI cache
+    -- so the picker can show the human-readable name without an
+    -- extra GraphQL round-trip; the operator can re-sync via the
+    -- "discover projects" route if the title drifts. Both NULL when
+    -- the operator hasn't picked a project yet — session-create
+    -- refuses to spawn until one is set, so the colony is unusable
+    -- in that state by design.
+    github_project_node_id  TEXT,
+    github_project_title    TEXT,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 """

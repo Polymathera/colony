@@ -222,7 +222,13 @@ class AgentPoolCapability(AgentCapability):
                     parent_agent_id=self.agent.agent_id,
                 )
             elif isinstance(metadata, dict):
-                metadata = AgentMetadata(**metadata)
+                metadata = AgentMetadata.from_data(
+                    caller=(
+                        f"AgentPoolCapability.create_agent "
+                        f"(parent={self.agent.agent_id})"
+                    ),
+                    **metadata,
+                )
 
             # Inherit COLONY + SESSION scoped ``metadata.parameters``
             # keys from this agent (the parent) into the child's

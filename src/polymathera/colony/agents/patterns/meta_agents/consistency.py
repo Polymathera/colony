@@ -18,7 +18,7 @@ Programming Model (AgentHandle Pattern):
 # Spawn consistency agent with handle
 handle = (await owner.spawn_child_agents(
     blueprints=[ConsistencyAgent.bind(
-        metadata=AgentMetadata(session_id="s1"),
+        metadata=AgentMetadata(),  # syscontext inherited from caller
         capability_blueprints=[ConsistencyCapability.bind()],
     )],
     return_handles=True,

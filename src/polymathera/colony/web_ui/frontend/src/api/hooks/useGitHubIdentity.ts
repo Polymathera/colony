@@ -83,3 +83,112 @@ export function useDiscoverableRepos() {
   });
 }
 
+
+// ----------------------------------------------------------------------
+// Per-colony GitHub Project (v2) attachment
+// ----------------------------------------------------------------------
+
+export interface DiscoverableProject {
+  node_id: string;
+  title: string;
+  number: number | null;
+  url: string | null;
+}
+
+export interface DiscoverableProjectsResponse {
+  repo: string;
+  projects: DiscoverableProject[];
+  error: string | null;
+}
+
+/**
+ * Open Projects v2 boards on the colony's design monorepo.
+ *
+ * Used by the colony settings UI to populate the project picker.
+ * Returns the full response — when ``error`` is non-null, the UI
+ * should render the error message inline (App permission missing,
+ * monorepo URL not set, repo not on github.com).
+ *
+ * Caller passes ``enabled=false`` to hold the request until the
+ * picker is actually open (avoids a wasted GraphQL round-trip on
+ * every render of the colony list).
+ */
+export function useColonyDiscoverableProjects(
+  colony_id: string | null,
+  enabled: boolean = true,
+) {
+  return useQuery({
+    queryKey: ["colony", colony_id, "discoverable-projects"],
+    queryFn: () =>
+      apiFetch<DiscoverableProjectsResponse>(
+        `/colonies/${colony_id}/discoverable-projects`,
+      ),
+    enabled: enabled && !!colony_id,
+    retry: false,
+    staleTime: 30 * 1000,
+  });
+}
+
+
+/**
+ * Open Projects v2 boards on an arbitrary repo (``owner/name``).
+ *
+ * Used by the "+ New Colony" form to populate the project picker
+ * after the operator picks a repo but before the colony exists.
+ * The colony-level variant above can't be used pre-colony.
+ *
+ * Pass ``repo=null`` to disable the query (e.g. before any repo is
+ * picked).
+ */
+export function useTenantDiscoverableProjects(repo: string | null) {
+  return useQuery({
+    queryKey: ["tenant", "discoverable-projects", repo],
+    queryFn: () =>
+      apiFetch<DiscoverableProjectsResponse>(
+        `/tenants/me/discoverable-projects?repo=${encodeURIComponent(repo!)}`,
+      ),
+    enabled: !!repo && repo.includes("/"),
+    retry: false,
+    staleTime: 30 * 1000,
+  });
+}
+
+
+export interface ColonyGitHubProjectConfig {
+  node_id: string | null;
+  title: string | null;
+}
+
+export function useColonyGitHubProject(colony_id: string | null) {
+  return useQuery({
+    queryKey: ["colony", colony_id, "github-project"],
+    queryFn: () =>
+      apiFetch<ColonyGitHubProjectConfig>(
+        `/colonies/${colony_id}/github-project`,
+      ),
+    enabled: !!colony_id,
+    retry: false,
+    staleTime: 60 * 1000,
+  });
+}
+
+
+export function useSetColonyGitHubProject(colony_id: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { node_id: string; title: string | null }) =>
+      apiFetch<ColonyGitHubProjectConfig>(
+        `/colonies/${colony_id}/github-project`,
+        {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({
+        queryKey: ["colony", colony_id, "github-project"],
+      });
+    },
+  });
+}
+

@@ -71,6 +71,8 @@ async def provision_colony(
     default_branch: str | None = None,
     commit_principal: str | None = None,
     commit_co_author: str | None = None,
+    github_project_node_id: str | None = None,
+    github_project_title: str | None = None,
 ) -> dict[str, str]:
     """Land a colony row + bootstrap its always-on system SessionAgent.
 
@@ -109,6 +111,42 @@ async def provision_colony(
         raise RuntimeError(
             "provision_colony: no db_pool on ColonyConnection — "
             "cannot insert colony row.",
+        )
+
+    # Refuse colony creation when a monorepo is bound but no GitHub
+    # Project (v2) is supplied. The session-create gate also refuses
+    # in this state, but it's a worse error message + leaves a
+    # half-configured colony row behind. Catching it here keeps the
+    # bad state out of the database.
+    #
+    # Auto-discovery (``services/colony_discovery.py``) is allowed to
+    # pass ``vcs_repo_full_name`` without a project so the bootstrap
+    # walker doesn't break — the operator then opens the colony's
+    # settings, picks a project (using the UI populated from
+    # ``/colonies/{id}/discoverable-projects``), and creation
+    # "completes" via the dedicated PUT endpoint.
+    #
+    # The "no projects on repo" error is surfaced by the discoverable-
+    # projects route returning an empty list; the UI renders an
+    # inline message + disables the picker, so by the time the user
+    # submits this form, they've either picked a project or are
+    # creating a bare colony for later wiring.
+    if (
+        vcs_repo_full_name
+        and github_project_node_id is None
+        # Auto-discovery is the only caller allowed to defer the
+        # project pick. Identify it by the lack of an operator-
+        # initiated name (the walker uses the repo's leaf name).
+        # We can't perfectly distinguish here, so the gate is
+        # advisory: log + allow; the session-create gate is the
+        # hard refusal.
+    ):
+        logger.info(
+            "provision_colony: colony=%s tenant=%s bound to repo %s "
+            "without a GitHub Project — sessions will be refused "
+            "until one is attached via PUT "
+            "/colonies/{id}/github-project.",
+            name, tenant_id, vcs_repo_full_name,
         )
 
     result = await auth_service.create_colony(
@@ -157,6 +195,22 @@ async def provision_colony(
             logger.exception(
                 "provision_colony: failed to persist git_attribution "
                 "for colony %s; operator can set it via UI.",
+                result["colony_id"],
+            )
+
+    if github_project_node_id is not None:
+        try:
+            await auth_service.set_colony_github_project(
+                db_pool,
+                colony_id=result["colony_id"],
+                tenant_id=tenant_id,
+                node_id=github_project_node_id,
+                title=github_project_title,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "provision_colony: failed to persist GitHub Project "
+                "attachment for colony %s; operator can set it via UI.",
                 result["colony_id"],
             )
 

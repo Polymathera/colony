@@ -32,6 +32,10 @@ import logging
 from typing import Any
 
 from polymathera.colony.agents import AgentHandle, AgentMetadata
+from polymathera.colony.distributed.ray_utils.serving.context import (
+    ExecutionContext,
+    Ring,
+)
 from polymathera.colony.agents.patterns.capabilities.github_inbound import (
     GitHubInboundCapability,
 )
@@ -52,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 
 def _build_system_session_agent_metadata(
-    *, session_id: str,
+    *, tenant_id: str, colony_id: str, session_id: str,
 ) -> AgentMetadata:
     """Trimmed ``AgentMetadata`` for the system session.
 
@@ -61,11 +65,26 @@ def _build_system_session_agent_metadata(
     chat path threads in. The system session is not a chat session.
     Downstream readers that hit a missing key tolerate ``None``; this
     metadata is intentionally minimal.
+
+    The caller passes ``tenant_id`` + ``colony_id`` + ``session_id``
+    explicitly so we can build the syscontext without relying on
+    whatever ``with execution_context(...)`` block happens to be in
+    scope at construction time. The bootstrap path enters two nested
+    contexts (one without session_id around session-create, one with
+    session_id around the agent spawn), so an implicit syscontext
+    snapshot can land in either; explicit construction is the
+    durable shape.
     """
 
     return AgentMetadata(
         role="colony_system_session",
-        session_id=session_id,
+        syscontext=ExecutionContext(
+            ring=Ring.USER,
+            tenant_id=tenant_id,
+            colony_id=colony_id,
+            session_id=session_id,
+            origin="colony_system_session",
+        ),
         goals=[
             "Host always-on colony-singleton capabilities for this colony",
         ],
@@ -102,6 +121,8 @@ def _build_system_session_agent_metadata(
 
 def build_system_session_agent_blueprint(
     *,
+    tenant_id: str,
+    colony_id: str,
     session_id: str,
 ) -> Any:
     """Build the trimmed ``SessionAgent.bind`` blueprint for a system
@@ -129,6 +150,8 @@ def build_system_session_agent_blueprint(
     """
 
     metadata = _build_system_session_agent_metadata(
+        tenant_id=tenant_id,
+        colony_id=colony_id,
         session_id=session_id,
     )
     return SessionAgent.bind(
@@ -229,6 +252,8 @@ async def ensure_system_session_for_colony(
                 return session_id
 
             blueprint = build_system_session_agent_blueprint(
+                tenant_id=tenant_id,
+                colony_id=colony_id,
                 session_id=session_id,
             )
             # The blueprint spawn must run inside a session-scoped

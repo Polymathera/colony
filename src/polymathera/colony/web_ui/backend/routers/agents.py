@@ -298,9 +298,22 @@ async def spawn_agent(
             cap_cls = resolve_class(cap_path)
             cap_blueprints.append(cap_cls.bind())
 
-        # Build metadata
+        # Build metadata. The request body carries ``session_id``
+        # explicitly, but the FastAPI request's execution context
+        # (set by AuthMiddleware) only has ``tenant_id`` + ``colony_id``
+        # — not ``session_id``. Build the syscontext explicitly so
+        # the spawned agent's ``metadata.session_id`` returns the
+        # right value (the tracing facility keys trace_id off it).
+        import dataclasses
+        from polymathera.colony.distributed.ray_utils.serving.context import (
+            require_execution_context,
+        )
         metadata = AgentMetadata(
-            session_id=request.session_id,
+            syscontext=dataclasses.replace(
+                require_execution_context(),
+                session_id=request.session_id,
+                origin="dashboard_spawn_agent",
+            ),
             parameters=request.metadata,
         )
 
