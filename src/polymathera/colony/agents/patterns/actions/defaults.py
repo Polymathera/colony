@@ -18,17 +18,49 @@ async def create_default_action_policy(agent: Agent, **kwargs) -> ActionPolicy:
         )
         from ..planning.context import PlanningContextBuilder
 
+        # Every dimension of the constrained code-gen design space is
+        # overridable via the kwargs bag (which itself flows from the
+        # agent's ``action_policy_blueprints`` dict — already
+        # cloudpickle-safe and resolved through
+        # ``Blueprint.local_instance``). Previously these were
+        # hardcoded and silently ignored any overrides — a class-
+        # level footgun that broke ``runtime_guardrail`` mounting in
+        # particular (see mission-and-action-guardrails plan, step
+        # 5). ``kwargs.get(..., factory())`` lets callers override
+        # any one dimension without restating the rest, and
+        # consistently keeps the previous default for unset
+        # dimensions.
+        code_generator = kwargs.get(
+            "code_generator", FreeFormCodeGenerator(),
+        )
+        code_validators = kwargs.get(
+            "code_validators",
+            [
+                APIKnowledgeBaseValidator(agent),
+                ImportWhitelistValidator(),
+                IterationShapeValidator(),
+            ],
+        )
+        skill_library = kwargs.get(
+            "skill_library", InMemorySkillLibrary(),
+        )
+        recovery_strategy = kwargs.get(
+            "recovery_strategy", DeterministicRecovery(),
+        )
+        runtime_guardrail = kwargs.get(
+            "runtime_guardrail", NoGuardrail(),
+        )
         return await create_code_generation_action_policy(
             agent=agent,
             action_map=kwargs.get("action_map", None),
             action_providers=kwargs.get("action_providers", []),
             io=kwargs.get("io"),
             context_builder=PlanningContextBuilder(agent),
-            code_generator=FreeFormCodeGenerator(),
-            code_validators=[APIKnowledgeBaseValidator(agent), ImportWhitelistValidator(), IterationShapeValidator()],
-            skill_library=InMemorySkillLibrary(),
-            recovery_strategy=DeterministicRecovery(),
-            runtime_guardrail=NoGuardrail(),
+            code_generator=code_generator,
+            code_validators=code_validators,
+            skill_library=skill_library,
+            recovery_strategy=recovery_strategy,
+            runtime_guardrail=runtime_guardrail,
             max_retries=kwargs.get("max_retries", 2),
             code_timeout=kwargs.get("code_timeout", 30.0),
             max_code_iterations=kwargs.get("max_code_iterations", 50),

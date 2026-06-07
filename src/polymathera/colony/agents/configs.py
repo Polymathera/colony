@@ -10,7 +10,8 @@ re-exported there so existing call sites keep indexing it as a plain
 
 from __future__ import annotations
 
-from typing import Any
+from enum import Enum
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -39,6 +40,259 @@ class MissionSelfConcept(BaseModel):
     description: str
     goals: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Mission execution policy — declarative guardrails the spawn gate
+# enforces deterministically. See
+# ``colony/mission_and_action_guardrails_plan.md`` (Part 1) for the
+# motivation. The schema lives here so both the static registry
+# (``MissionSpec.execution_policy``) and the per-coordinator
+# ``MISSION_EXECUTION_POLICY`` ClassVar share one source of truth.
+# ---------------------------------------------------------------------------
+
+
+class MissionConcurrencyScope(str, Enum):
+    """Boundary at which ``max_concurrent_instances`` is counted.
+
+    Picked per-mission. Matches the existing scope vocabulary used by
+    ``BlackboardScope`` / ``ScopeUtils`` so the same scope names work
+    across the codebase.
+    """
+
+    GLOBAL  = "global"
+    TENANT  = "tenant"
+    COLONY  = "colony"
+    SESSION = "session"
+    AGENT   = "agent"
+
+
+class MissionExecutionPolicy(BaseModel):
+    """Declarative spawn-gate + lifecycle constraints for one mission.
+
+    Read by ``SessionOrchestratorCapability.spawn_mission`` and
+    ``AgentPoolCapability.create_agent`` BEFORE the agent system
+    instantiates the coordinator. Every field has a conservative
+    default so coordinators that do not declare a policy keep the
+    pre-policy semantics (single instance per parent agent, no
+    auto-chained modes, no cost cap, etc.).
+
+    The recommended source of truth is a
+    ``MISSION_EXECUTION_POLICY: ClassVar[MissionExecutionPolicy]`` on
+    the coordinator class. The registry's ``MissionSpec.execution_policy``
+    overrides the ClassVar when set, so operators can tighten caps
+    (e.g. lower ``max_llm_cost_usd``) without subclassing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # --- concurrency ---------------------------------------------------
+    max_concurrent_instances: int | None = Field(
+        default=1,
+        description=(
+            "Maximum number of in-flight coordinator instances per "
+            "``concurrency_scope``. ``None`` = unbounded; ``1`` = "
+            "singleton. Default ``1`` matches the existing 'unique "
+            "child role' framework guard."
+        ),
+    )
+    concurrency_scope: MissionConcurrencyScope = Field(
+        default=MissionConcurrencyScope.AGENT,
+        description=(
+            "Boundary the spawn gate counts ``max_concurrent_instances`` "
+            "against. ``AGENT`` matches the legacy guard."
+        ),
+    )
+    on_concurrency_violation: Literal[
+        "reject", "queue", "preempt_oldest", "return_existing",
+    ] = Field(
+        default="reject",
+        description=(
+            "Action when a new spawn would exceed the cap. "
+            "``return_existing`` is the right shape for idempotent "
+            "missions; ``reject`` is the safe default for everything "
+            "else."
+        ),
+    )
+
+    # --- preemption ----------------------------------------------------
+    preemptible: bool = Field(
+        default=False,
+        description=(
+            "When True, the scheduler may cancel this mission to free "
+            "room for a higher-priority spawn. Default False — the "
+            "mission runs to natural completion or explicit cancel."
+        ),
+    )
+    preemption_grace_seconds: float = Field(
+        default=10.0,
+        ge=0.0,
+        description=(
+            "Seconds to wait for a clean shutdown after a preemption "
+            "signal before the runtime hard-cancels the coordinator."
+        ),
+    )
+
+    # --- interruption --------------------------------------------------
+    interruptible: bool = Field(
+        default=True,
+        description=(
+            "When True, the operator can cancel the mission mid-flight "
+            "via a chat message. When False, the mission rejects cancel "
+            "requests until it reaches a safe boundary."
+        ),
+    )
+    cancel_propagates_to_children: bool = Field(
+        default=True,
+        description=(
+            "When True, cancelling this mission also cancels every "
+            "child agent it spawned. Off only for missions that need "
+            "to leave their children running (rare)."
+        ),
+    )
+
+    # --- chaining / sequencing -----------------------------------------
+    chains_with_modes: list[str] | None = Field(
+        default=None,
+        description=(
+            "When set, declares 'this mission's modes auto-chain "
+            "internally — do NOT spawn one coordinator per mode'. The "
+            "spawn gate rejects subsequent spawns of the same mission "
+            "type whose ``mission_params['mode']`` differs only by an "
+            "already-running mode in the same scope. The exact list of "
+            "mode strings declared here is what the gate matches "
+            "against."
+        ),
+    )
+
+    # --- dependencies + ordering ---------------------------------------
+    requires_mission_complete: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Mission-type names that must have reached terminal state "
+            "in the same scope before this one can spawn. Used for the "
+            "'bootstrap before assignments' pattern when modes are NOT "
+            "chained internally."
+        ),
+    )
+
+    # --- resource gates ------------------------------------------------
+    max_runtime_seconds: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Hard wall-clock cap. ``None`` = no cap.",
+    )
+    max_llm_cost_usd: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Hard LLM budget cap in USD. ``None`` = no cap.",
+    )
+    max_iterations: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Hard cap on coordinator planner iterations. ``None`` = "
+            "fall back to ``AgentMetadata.max_iterations``."
+        ),
+    )
+
+    # --- idempotency / reentrance --------------------------------------
+    idempotent: bool = Field(
+        default=False,
+        description=(
+            "Re-running with the same ``mission_params`` is safe. When "
+            "True, the spawn gate may return the existing run's handle "
+            "instead of spawning a new one (subject to "
+            "``on_concurrency_violation``)."
+        ),
+    )
+    reentrant: bool = Field(
+        default=False,
+        description=(
+            "The mission can spawn a sub-mission of its own type. "
+            "Default False guards against unbounded recursion when an "
+            "LLM planner re-invokes itself."
+        ),
+    )
+
+    # --- approval gates ------------------------------------------------
+    requires_human_approval_before: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Action-key prefixes that MUST be preceded by a "
+            "``request_human_approval`` → ``approval_granted`` round "
+            "in the same run. Enforced by ``ApprovalRequiredGuardrail`` "
+            "(Part 2 of the guardrails plan)."
+        ),
+    )
+
+    # --- side-effect scope (advisory; informs UI + dry-run) ------------
+    mutates_remote: bool = Field(
+        default=False,
+        description=(
+            "True when the mission touches external services (GitHub "
+            "REST, etc.). UI hint only."
+        ),
+    )
+    mutates_local_only: bool = Field(
+        default=False,
+        description=(
+            "True when the mission only edits the per-agent clone "
+            "without ever pushing or calling external services."
+        ),
+    )
+    pure: bool = Field(
+        default=False,
+        description=(
+            "True when the mission has no side effects (read-only "
+            "queries, analyses)."
+        ),
+    )
+
+    # --- cooldown ------------------------------------------------------
+    cooldown_seconds_after_completion: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Rate-limit consecutive spawns of the same mission in the "
+            "same scope by N seconds."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _side_effect_flags_are_consistent(
+        self,
+    ) -> "MissionExecutionPolicy":
+        truthy = [
+            name for name in ("mutates_remote", "mutates_local_only", "pure")
+            if getattr(self, name)
+        ]
+        if len(truthy) > 1:
+            raise ValueError(
+                f"MissionExecutionPolicy: at most one of "
+                f"``mutates_remote`` / ``mutates_local_only`` / "
+                f"``pure`` may be True; got {truthy!r}.",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _chains_with_modes_entries_are_non_empty(
+        self,
+    ) -> "MissionExecutionPolicy":
+        if self.chains_with_modes is None:
+            return self
+        if not self.chains_with_modes:
+            raise ValueError(
+                "MissionExecutionPolicy.chains_with_modes: empty list "
+                "is ambiguous — use ``None`` to disable the gate.",
+            )
+        offenders = [m for m in self.chains_with_modes if not m]
+        if offenders:
+            raise ValueError(
+                "MissionExecutionPolicy.chains_with_modes: every entry "
+                "must be a non-empty mode string.",
+            )
+        return self
 
 
 class MissionSpec(BaseModel):
@@ -88,6 +342,14 @@ class MissionSpec(BaseModel):
     # See ``colony/agent_metadata_parameter_spec_plan.md``.
     caller_parameters: list[ParameterSpec] = Field(default_factory=list)
     self_concept: MissionSelfConcept
+    # Optional spawn-gate policy override. When ``None`` (the default),
+    # the resolved policy is whatever the coordinator class declares
+    # via its ``MISSION_EXECUTION_POLICY`` ClassVar — or the
+    # ``MissionExecutionPolicy()`` default factory if the class
+    # doesn't declare one either. Operators set this to tighten caps
+    # (e.g. ``max_llm_cost_usd``) without subclassing the coordinator.
+    # See ``colony/mission_and_action_guardrails_plan.md`` Part 1.
+    execution_policy: MissionExecutionPolicy | None = None
 
     @model_validator(mode="after")
     def _caller_parameters_are_caller_scoped(self) -> "MissionSpec":
@@ -572,6 +834,56 @@ def _builtin_missions() -> dict[str, MissionSpec]:
     return {key: MissionSpec(**value) for key, value in _BUILTIN_MISSIONS.items()}
 
 
+def resolve_mission_execution_policy(
+    spec: "MissionSpec | dict[str, Any] | None",
+    coordinator_class: type | None,
+) -> MissionExecutionPolicy:
+    """Single resolution point for the in-flight policy on a mission.
+
+    Precedence:
+
+    1. ``spec.execution_policy`` (when ``spec`` is a typed
+       :class:`MissionSpec` and the field is set) — operator override
+       from the registry config.
+    2. ``coordinator_class.MISSION_EXECUTION_POLICY`` ClassVar — the
+       coordinator's declared default.
+    3. ``MissionExecutionPolicy()`` defaults — pre-policy semantics
+       (one instance per parent agent, no auto-chaining, no caps).
+
+    Accepts ``spec`` as either a :class:`MissionSpec` or a plain dict
+    (the legacy ``MISSION_REGISTRY`` shape — call sites that haven't
+    migrated yet pass the dict verbatim). When ``spec`` is a dict, the
+    ``execution_policy`` key is read and coerced through the model;
+    typed callers should pass the typed spec to skip the coercion.
+
+    ``coordinator_class`` may be ``None`` for missions registered
+    without a class reference (rare; older test fixtures); the
+    function falls through to the schema default in that case.
+    """
+
+    # Layer 1: operator override on the registry entry.
+    if isinstance(spec, MissionSpec) and spec.execution_policy is not None:
+        return spec.execution_policy
+    if isinstance(spec, dict):
+        override = spec.get("execution_policy")
+        if isinstance(override, MissionExecutionPolicy):
+            return override
+        if isinstance(override, dict):
+            return MissionExecutionPolicy(**override)
+
+    # Layer 2: coordinator's declared default.
+    declared = getattr(
+        coordinator_class, "MISSION_EXECUTION_POLICY", None,
+    )
+    if isinstance(declared, MissionExecutionPolicy):
+        return declared
+
+    # Layer 3: schema defaults — singleton per agent, no chaining,
+    # no caps. Matches pre-policy semantics so unannotated missions
+    # keep working.
+    return MissionExecutionPolicy()
+
+
 def build_coordinator_self_concept(
     registry_entry: "MissionSpec | dict[str, Any]",
     *,
@@ -886,6 +1198,8 @@ async def _get_component_or_default(path: str, cls: type[ConfigComponent]):
 
 __all__ = (
     "MISSION_REGISTRY",
+    "MissionConcurrencyScope",
+    "MissionExecutionPolicy",
     "MissionRegistryConfig",
     "MissionSelfConcept",
     "MissionSpec",
@@ -896,9 +1210,11 @@ __all__ = (
     "ScriptSpec",
     "DockerImageRegistryConfig",
     "WebSearchConfig",
+    "build_coordinator_self_concept",
     "get_chroma_config",
     "get_github_auth_config",
     "get_plugins_config",
     "get_sandbox_image_registry_config",
     "get_web_search_config",
+    "resolve_mission_execution_policy",
 )

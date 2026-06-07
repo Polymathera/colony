@@ -41,15 +41,70 @@ from __future__ import annotations
 import ast
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ...base import Agent, AgentCapability
     from ...models import ActionResult, PlanExecutionContext
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Call history record — the shared data shape every RuntimeGuardrail reads.
+# ============================================================================
+
+
+@dataclass
+class CallRecord:
+    """One entry in ``CodeGenerationActionPolicy._call_history``.
+
+    Replaces the previous ``list[str]`` shape so guardrails can make
+    args-aware decisions (e.g. "did get_agent_status get called for
+    THIS agent_id?") rather than only matching on action-key
+    substrings.
+
+    Status semantics:
+
+    - ``"pending"`` — record was created at admit time but the action
+      hasn't returned yet. Rare for guardrail reads since check()
+      runs BEFORE dispatch; the field exists so the policy can
+      pre-create the record at admit time without lying about status.
+    - ``"ok"`` / ``"error"`` — terminal states populated when the
+      dispatch returns.
+    - ``"blocked"`` — the guardrail itself refused the call. Lets
+      downstream guardrails distinguish "the LLM tried X but a gate
+      stopped it" from "the LLM never tried X".
+
+    ``result`` carries a small snapshot of the action's return value
+    so guardrails can inspect the OUTCOME of prior calls — e.g.
+    ``ApprovalRequiredGuardrail`` keys off
+    ``HumanApprovalCapability.get_response`` returning
+    ``{"choice": "Approve"}``. Capped at
+    :data:`_CALL_RECORD_RESULT_PREVIEW_BYTES` so a single big LLM
+    payload can't blow the per-iteration history budget; guardrails
+    that need the full payload should query the span store, not
+    ``call_history``.
+    """
+
+    action_key: str
+    params: dict[str, Any]
+    start_wall: float = field(default_factory=time.time)
+    end_wall: float | None = None
+    status: Literal["pending", "ok", "error", "blocked"] = "pending"
+    error: str | None = None
+    result: Any = None
+
+
+_CALL_RECORD_RESULT_PREVIEW_BYTES = 4096
+"""Per-call truncation cap on ``CallRecord.result``. 4 KiB easily fits
+typed envelopes like ``{request_id, choice, decided_by, decided_at}``
+that guardrails inspect, while keeping the policy's in-memory
+history bounded across long-running coordinators."""
 
 
 # ============================================================================
@@ -777,7 +832,7 @@ class RuntimeGuardrail(ABC):
         self,
         action_key: str,
         params: dict[str, Any],
-        call_history: list[str],
+        call_history: list[CallRecord],
     ) -> GuardrailDecision:
         """Check whether an action is allowed.
 
@@ -787,8 +842,13 @@ class RuntimeGuardrail(ABC):
         Args:
             action_key: The action being dispatched.
             params: The action parameters.
-            call_history: List of action keys already called in this
-                code execution (in order).
+            call_history: Per-call records of every dispatched action
+                so far in this code-generation iteration, in order.
+                Each item is a :class:`CallRecord` carrying the
+                action key, params, timing, and terminal status.
+                Guardrails that only need action keys read
+                ``c.action_key``; guardrails that need args-aware
+                matching read ``c.params``.
 
         Returns:
             GuardrailDecision with allowed/reason/suggestion.
@@ -867,14 +927,287 @@ class TemporalOrderGuardrail(RuntimeGuardrail):
     async def check(self, action_key, params, call_history):
         for before, after in self._rules:
             if after.lower() in action_key.lower():
-                # Check if "before" has been called
-                if not any(before.lower() in h.lower() for h in call_history):
+                # Check if "before" has been called. ``call_history``
+                # is now ``list[CallRecord]``; read ``c.action_key``
+                # to do the same substring match the legacy
+                # ``list[str]`` shape supported.
+                if not any(
+                    before.lower() in c.action_key.lower()
+                    for c in call_history
+                ):
                     return GuardrailDecision(
                         allowed=False,
                         reason=f"'{action_key}' requires '{before}' to be called first.",
                         suggestion=f"Call an action matching '{before}' before '{action_key}'.",
                     )
 
+        return GuardrailDecision(allowed=True)
+
+
+# ============================================================================
+# New guardrail subclasses introduced by the action-preconditions plan
+# (``colony/mission_and_action_guardrails_plan.md`` Part 2).
+# ============================================================================
+
+
+@dataclass(frozen=True)
+class ArgsAwareOrderingRule:
+    """One rule for :class:`ArgsAwareTemporalOrderGuardrail`.
+
+    Each rule answers "before dispatching the target_action, was the
+    required_prior action called recently (and, optionally, with
+    matching params)?". The ``applies_when`` predicate gates whether
+    this rule even fires against the proposed call — letting bare
+    ``respond_to_user("Hi!")`` calls skip a status-check rule whose
+    only purpose is to gate references to agent_ids.
+
+    All fields are picklable so the rule survives
+    ``cloudpickle``-based actor spawn paths the framework relies on.
+    """
+
+    # The action_key being considered for dispatch. Matched with
+    # ``in`` substring against the proposed action_key — same shape
+    # as the legacy ``TemporalOrderGuardrail``'s matching semantics.
+    target_action: str
+
+    # Predicate over the proposed action's params. Returns True iff
+    # the rule applies. Defaults to "always applies" via ``None``.
+    applies_when: Callable[[dict[str, Any]], bool] | None = None
+
+    # The action_key that must have been called BEFORE the target.
+    # Matched with ``in`` substring against ``CallRecord.action_key``.
+    required_prior: str = ""
+
+    # Bound on how far back the prior call may be. ``max_age_calls``
+    # bounds by history-index distance; ``max_age_seconds`` bounds by
+    # wall-clock. Either may be ``None`` for no bound. When both are
+    # set, the more recent bound wins (the prior call must satisfy
+    # both — i.e. recent in BOTH senses).
+    max_age_calls: int | None = None
+    max_age_seconds: float | None = None
+
+    # Optional predicate over (prior_record.params, target_params)
+    # to require args-level matching (e.g. same agent_id). Returns
+    # True iff this prior record satisfies the rule. ``None`` accepts
+    # any prior call matching ``required_prior``.
+    prior_params_match: (
+        Callable[[dict[str, Any], dict[str, Any]], bool] | None
+    ) = None
+
+    # Hint sent back to the LLM on violation (rendered into
+    # ``GuardrailDecision.suggestion``). Should name the fix in
+    # action terms so the next planner iteration can fix it cheaply.
+    suggestion: str = ""
+
+
+class ArgsAwareTemporalOrderGuardrail(RuntimeGuardrail):
+    """Generalisation of :class:`TemporalOrderGuardrail` that:
+
+    - Reads the args of the proposed call to decide whether the rule
+      applies (``applies_when``), so single-purpose gates don't fire
+      on unrelated calls.
+    - Optionally requires the prior call's params to match the
+      target's (``prior_params_match``), so "called X for some other
+      agent" doesn't count as a recent X for THIS agent.
+    - Bounds the recency window by call count and/or wall-clock.
+
+    All rule predicates run synchronously inside the async ``check``
+    — they're expected to be cheap (regex, list lookup, dict
+    comparison). Heavy work belongs in a dedicated guardrail
+    (e.g. :class:`LLMJudgedGuardrail`, future).
+    """
+
+    def __init__(self, rules: Sequence[ArgsAwareOrderingRule]):
+        self._rules = tuple(rules)
+
+    async def check(self, action_key, params, call_history):
+        now = time.time()
+        for rule in self._rules:
+            if rule.target_action.lower() not in action_key.lower():
+                continue
+            if rule.applies_when is not None and not rule.applies_when(
+                params,
+            ):
+                continue
+            if not rule.required_prior:
+                continue
+            # Look for a satisfying prior call within the recency
+            # window. ``call_history`` is in admit-order; walk from
+            # the tail so the most-recent match is found first.
+            window_start_idx = (
+                max(0, len(call_history) - rule.max_age_calls)
+                if rule.max_age_calls is not None else 0
+            )
+            window = call_history[window_start_idx:]
+            satisfied = False
+            for record in reversed(window):
+                if (
+                    rule.required_prior.lower()
+                    not in record.action_key.lower()
+                ):
+                    continue
+                if (
+                    rule.max_age_seconds is not None
+                    and (now - record.start_wall) > rule.max_age_seconds
+                ):
+                    continue
+                if (
+                    rule.prior_params_match is not None
+                    and not rule.prior_params_match(record.params, params)
+                ):
+                    continue
+                satisfied = True
+                break
+            if not satisfied:
+                return GuardrailDecision(
+                    allowed=False,
+                    reason=(
+                        f"'{action_key}' requires a recent "
+                        f"'{rule.required_prior}' call matching its "
+                        f"args; none in the last "
+                        f"{rule.max_age_calls or len(call_history)} "
+                        f"call(s)."
+                    ),
+                    suggestion=rule.suggestion or (
+                        f"Call an action matching "
+                        f"'{rule.required_prior}' before "
+                        f"'{action_key}'."
+                    ),
+                )
+        return GuardrailDecision(allowed=True)
+
+
+_DEFAULT_APPROVE_CHOICES = frozenset({
+    "approve", "approved", "yes", "granted", "accept", "accepted",
+})
+
+
+def _default_is_approval_granted(record: CallRecord) -> bool:
+    """Match :class:`HumanApprovalCapability`'s native shape: a
+    successful ``get_response`` call whose ``result.choice`` falls in
+    :data:`_DEFAULT_APPROVE_CHOICES` (case-insensitive).
+
+    The chat-UI's Approval modal POSTs the operator's choice into
+    ``HumanApprovalCapability``; the capability surfaces it via the
+    next ``get_response`` poll's result. No separate
+    ``approval_granted`` action is emitted, so this predicate keys
+    off the result envelope directly rather than the action key.
+    Custom flows that need a different shape can override via
+    :class:`ApprovalRequiredGuardrail`'s ``is_approval_granted``
+    constructor kwarg.
+    """
+
+    if record.status != "ok":
+        return False
+    if "get_response" not in record.action_key.lower():
+        return False
+    result = record.result
+    if not isinstance(result, dict):
+        return False
+    choice = result.get("choice")
+    if not isinstance(choice, str):
+        return False
+    return choice.lower() in _DEFAULT_APPROVE_CHOICES
+
+
+class ApprovalRequiredGuardrail(RuntimeGuardrail):
+    """Block actions whose key prefixes are gated behind a human
+    approval round.
+
+    Reads ``approval_required_action_prefixes`` and treats any prior
+    call satisfying ``is_approval_granted`` as the unblock signal.
+    The default matcher (:func:`_default_is_approval_granted`) keys
+    off :class:`HumanApprovalCapability`'s ``get_response`` returning
+    a positive choice; custom approval flows can pass a predicate
+    over :class:`CallRecord` to match a different shape (e.g. a
+    direct ``approval_granted`` action, or a result-envelope field
+    other than ``choice``).
+
+    ``request_human_approval`` itself is not a substitute: issuing
+    the request is not the same as the operator approving it.
+
+    Cross-references the mission's
+    :attr:`MissionExecutionPolicy.requires_human_approval_before`
+    field; the typical mounting site reads that list at agent
+    construction time and passes it in here.
+    """
+
+    def __init__(
+        self,
+        approval_required_action_prefixes: Sequence[str],
+        *,
+        is_approval_granted: (
+            Callable[["CallRecord"], bool] | None
+        ) = None,
+    ):
+        self._gated = tuple(approval_required_action_prefixes)
+        self._is_granted = (
+            is_approval_granted or _default_is_approval_granted
+        )
+
+    async def check(self, action_key, params, call_history):
+        gated = next(
+            (
+                prefix for prefix in self._gated
+                if prefix.lower() in action_key.lower()
+            ),
+            None,
+        )
+        if gated is None:
+            return GuardrailDecision(allowed=True)
+        # ``dry_run=True`` proposals never mutate side effects; the
+        # approval gate only blocks the apply path. Mission flows
+        # always carry ``dry_run`` as a kwarg per the project-
+        # planning convention; if the kwarg is absent, default to
+        # "this is an apply call" and gate.
+        dry_run = params.get("dry_run")
+        if dry_run is True:
+            return GuardrailDecision(allowed=True)
+        if any(self._is_granted(c) for c in call_history):
+            return GuardrailDecision(allowed=True)
+        return GuardrailDecision(
+            allowed=False,
+            reason=(
+                f"'{action_key}' is gated behind human approval "
+                f"(matched prefix '{gated}'); no successful "
+                f"approval signal in this iteration."
+            ),
+            suggestion=(
+                "Call ``request_human_approval`` with the proposal "
+                "first, poll ``get_response`` until the operator "
+                "answers ``Approve``, THEN re-run the action with "
+                "``dry_run=False``."
+            ),
+        )
+
+
+class CompositeGuardrail(RuntimeGuardrail):
+    """Apply N guardrails in order; the first non-allowed decision
+    short-circuits.
+
+    The natural shape for agents with multiple gating concerns
+    (e.g. SessionAgent needs both the status-claim gate AND the
+    approval gate AND the capability-boundary gate). Composes at
+    the policy-config level so individual actions stay
+    decoration-free — see the action-policy-dimensions guide for
+    the broader rationale.
+    """
+
+    def __init__(self, *guardrails: RuntimeGuardrail):
+        if not guardrails:
+            raise ValueError(
+                "CompositeGuardrail requires at least one inner "
+                "guardrail; use NoGuardrail() if you mean 'allow all'."
+            )
+        self._inner: tuple[RuntimeGuardrail, ...] = tuple(guardrails)
+
+    async def check(self, action_key, params, call_history):
+        for guardrail in self._inner:
+            decision = await guardrail.check(
+                action_key, params, call_history,
+            )
+            if not decision.allowed:
+                return decision
         return GuardrailDecision(allowed=True)
 
 

@@ -934,21 +934,31 @@ class SessionOrchestratorCapability(AgentCapability):
                     "spawn_mission requires it for dispatch."
                 ),
             }
-        result = await pool.create_agent(
+        # Funnel through the mission spawn-gate
+        # (``admit_and_spawn``), which both this chat path AND the
+        # REST ``routers/jobs.py::_run_job`` path share. The gate
+        # consults the cluster-shared :class:`MissionExecutionLedger`
+        # (Redis-backed via ``StateManager``) so concurrency caps,
+        # ``chains_with_modes``, etc. enforce uniformly across
+        # workers — the ``AgentPoolCapability.create_agent`` primitive
+        # stays mission-unaware. Return shape is exactly what the
+        # helper produces, so the LLM has one stable schema to
+        # branch on: ``created`` + optional ``mission_gate``
+        # ("return_existing" | "rejected") + ``reason`` /
+        # ``suggested_action`` on the gate paths.
+        from polymathera.colony.agents.missions.execution_ledger import (
+            admit_and_spawn,
+        )
+        mode = params.get("mode")
+        return await admit_and_spawn(
+            parent_agent=self.agent,
+            pool=pool,
             agent_type=coord_class,
             metadata=coord_metadata,
+            mission_type=mission_type,
+            mode=str(mode) if mode is not None else None,
+            label=reg.get("label", ""),
         )
-        # ``create_agent`` returns ``{"agent_id", "label", "created",
-        # ["error"]}``. Re-shape to the spawn_mission contract so the
-        # LLM can branch on a stable schema.
-        return {
-            "agent_id": result.get("agent_id"),
-            "mission_type": mission_type,
-            "coordinator_class": coord_class,
-            "created": bool(result.get("created")),
-            "label": reg.get("label", ""),
-            **({"error": result["error"]} if result.get("error") else {}),
-        }
 
     @action_executor()
     async def respond_to_user(

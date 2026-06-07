@@ -156,6 +156,12 @@ class AgentPoolCapability(AgentCapability):
             return {}
         return dict(snapshot.agents)
 
+    def resolve_agent_class(self, agent_type: str) -> type:
+        """Resolve an agent class from a fully qualified name, with fallback to the L4-discovered agent registry. See :meth:`_resolve_class` and:meth:`_l4_agent_registry` for details."""
+        return self._resolve_class(
+            agent_type, fallback_registry=self._l4_agent_registry(),
+        )
+
     # === Action Executors ===
 
     @action_executor()
@@ -261,9 +267,7 @@ class AgentPoolCapability(AgentCapability):
             # auto-mount them in their own ``initialize()`` (the
             # OPMMEGCoordinator pattern), so callers pass FQ paths to
             # installed capabilities OR omit the list entirely.
-            agent_cls = self._resolve_class(
-                agent_type, fallback_registry=self._l4_agent_registry(),
-            )
+            agent_cls = self.resolve_agent_class(agent_type)
 
             # Resolve capability class names to blueprints
             capability_blueprints = []

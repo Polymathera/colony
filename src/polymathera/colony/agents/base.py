@@ -1959,6 +1959,33 @@ class Agent(BaseModel):
     action_policy_state: ActionPolicyExecutionState | None = Field(default=None)
     action_policy: ActionPolicy | None = None
 
+    # Generic stop-lifecycle hook list. Spawn-time callers attach
+    # cleanup work that needs to fire whenever this agent stops —
+    # cross-cutting concerns the agent itself shouldn't have to
+    # know about (mission spawn-gate slot release, billing /
+    # accounting, telemetry close-out, custom audit emission, …).
+    # Each callback receives ``(agent, stop_reason)`` and is
+    # invoked by :meth:`Agent.stop` AFTER state has flipped to
+    # STOPPED. Callbacks fire in registration order; exceptions are
+    # logged and swallowed so one misbehaving callback can't block
+    # the others.
+    #
+    # Each callback must be cloudpickle-safe — the list travels
+    # through ``AgentBlueprint`` to the Ray worker. The
+    # ``exclude=True`` keeps Pydantic from trying to JSON-serialise
+    # the callables (which would fail); cloudpickle handles them
+    # via the same channel as ``action_policy_blueprints``.
+    stop_callbacks: list[Any] = Field(
+        default_factory=list,
+        exclude=True,
+        description=(
+            "Cleanup callbacks fired by Agent.stop. Generic "
+            "lifecycle hook used by spawn-time orchestrators "
+            "(mission ledger, etc.) to install per-spawn cleanup "
+            "without polluting Agent with their concerns."
+        ),
+    )
+
     child_agents: dict[str, str] = Field(default_factory=dict)  # role -> agent_id
 
     # Private attributes (not serialized, use PrivateAttr for Pydantic v2)
@@ -2749,6 +2776,23 @@ class Agent(BaseModel):
         self._running = False
         self.action_policy_state = None
         # TODO: Should notify parent agent if any?
+
+        # Fire stop_callbacks AFTER state has flipped to STOPPED so
+        # callbacks observe the terminal state, not the in-progress
+        # one. Errors in one callback don't block the others — they
+        # log and the next callback still runs. This is the generic
+        # lifecycle-hook surface; Agent stays free of any specific
+        # cleanup concerns (mission spawn-gate, billing, audit,
+        # …) — those install themselves at spawn time via
+        # ``stop_callbacks=[…]`` on the blueprint.
+        for callback in list(self.stop_callbacks):
+            try:
+                await callback(self, reason)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Stop callback raised for agent %s — continuing "
+                    "with the remaining callbacks.", self.agent_id,
+                )
 
     @hookable
     async def suspend(

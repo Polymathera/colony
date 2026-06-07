@@ -37,6 +37,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import json
 import logging
 import time
 from typing import Any
@@ -64,6 +65,8 @@ from .policies import (
 from ..planning.context import PlanningContextBuilder
 from ....distributed.hooks import hookable
 from .code_constraints import (
+    CallRecord,
+    _CALL_RECORD_RESULT_PREVIEW_BYTES,
     CodeGenerator,
     FreeFormCodeGenerator,
     CodeValidator,
@@ -745,7 +748,13 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self._error_history: list[dict[str, str]] = []
         self._recovered_code: str | None = None
         self._consecutive_failures: int = 0
-        self._call_history: list[str] = []
+        # ``CallRecord`` carries action_key + params + timing + status
+        # so args-aware guardrails (e.g. ``ArgsAwareTemporalOrderGuardrail``)
+        # can match the prior call's args, not just its key. Code
+        # paths that only want the action keys read ``c.action_key``
+        # — see ``_build_codegen_step_summary`` for the canonical
+        # example.
+        self._call_history: list[CallRecord] = []
         self._run_call_trace: list[dict[str, Any]] = []
         self._had_internal_failures: bool = False
         self._internal_errors: list[str] = []
@@ -1211,7 +1220,37 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     self._internal_errors.append(result.error or "unknown error")
 
                 resolved_action_key = str(action.action_type)
-                self._call_history.append(resolved_action_key)
+                # Truncate the result snapshot to keep the in-memory
+                # history bounded. Big payloads (LLM responses, large
+                # JSON envelopes) are visible to guardrails only via
+                # the truncated view; full payloads remain in the
+                # span store.
+                preview_bytes = (
+                    _CALL_RECORD_RESULT_PREVIEW_BYTES
+                )
+                output = result.output
+                if isinstance(output, (dict, list)):
+                    try:
+                        preview = json.loads(
+                            json.dumps(output)[:preview_bytes],
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        preview = str(output)[:preview_bytes]
+                elif output is None:
+                    preview = None
+                elif isinstance(output, str):
+                    preview = output[:preview_bytes]
+                else:
+                    preview = str(output)[:preview_bytes]
+                self._call_history.append(CallRecord(
+                    action_key=resolved_action_key,
+                    params=dict(params),
+                    end_wall=time.time(),
+                    status="ok" if result.success else "error",
+                    error=(result.error or "")[:200]
+                    if not result.success else None,
+                    result=preview,
+                ))
 
                 # Per-call trace for timeline view annotations.
                 # Stored both on the policy and in the REPL namespace so
@@ -1725,7 +1764,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 step_errors.append(result.result.error)
 
             summaries[step_id] = _build_codegen_step_summary(
-                actions_called=list(self._call_history),
+                actions_called=[c.action_key for c in self._call_history],
                 planning_action_keys=planning_action_keys,
                 had_failures=self._had_internal_failures,
                 repl_success=result.result.success if result.result else False,

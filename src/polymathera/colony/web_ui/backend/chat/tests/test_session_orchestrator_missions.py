@@ -50,6 +50,179 @@ def _exec_ctx():
         yield ctx
 
 
+# ---------------------------------------------------------------------------
+# Mission spawn-gate fixtures.
+#
+# ``spawn_mission`` routes through ``admit_and_spawn``, which fetches
+# the cluster-shared ledger via ``get_mission_execution_ledger``. In
+# tests we don't want a live Polymathera + Redis; route the helper to
+# an in-memory ledger so every test gets a deterministic, isolated
+# spawn-gate view. The fixture is autouse so it applies to every test
+# in this module — no test should observe ledger state leaking from
+# its predecessor.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _mission_ledger_stub(monkeypatch):
+    """Replace the cluster-shared ledger with a fresh in-memory ledger
+    per test. Returns the ledger so individual tests can inspect or
+    pre-seed it.
+
+    Also sets ``POLYMATHERA_SERVING_CURRENT_APP`` so
+    ``admit_and_spawn`` 's call to ``serving.get_my_app_name()``
+    succeeds — production runs inside a deployment context that
+    sets this env var; tests must mirror that contract explicitly
+    rather than letting the helper silently fall back to a default.
+    """
+
+    monkeypatch.setenv("POLYMATHERA_SERVING_CURRENT_APP", "test_app")
+
+    import asyncio
+    import importlib
+
+    from pydantic import BaseModel as _PydBM
+
+    ledger_mod = importlib.import_module(
+        "polymathera.colony.agents.missions.execution_ledger"
+    )
+    from polymathera.colony.distributed.state_management import StateManager
+    from polymathera.colony.distributed.stores.state_base import (
+        StateStorageBackend,
+        StateStorageBackendFactory,
+    )
+
+    class _Cfg(_PydBM):
+        pass
+
+    class _InMemBackend(StateStorageBackend):
+        def __init__(self) -> None:
+            self._store: dict[str, tuple[str, int]] = {}
+            self._lock = asyncio.Lock()
+
+        async def get_with_version(self, key):
+            async with self._lock:
+                return self._store.get(key, (None, 0))
+
+        async def compare_and_swap(self, key, value, version):
+            async with self._lock:
+                entry = self._store.get(key)
+                current = entry[1] if entry is not None else 0
+                if current != version:
+                    return False
+                self._store[key] = (value, version + 1)
+                return True
+
+        async def cleanup(self, key):
+            async with self._lock:
+                self._store.pop(key, None)
+
+    class _InMemFactory(StateStorageBackendFactory):
+        def __init__(self) -> None:
+            self.backend = _InMemBackend()
+
+        def create_backend(self, config):
+            return self.backend
+
+    sm = StateManager(
+        ledger_mod.MissionLedgerState,
+        state_key=ledger_mod.MissionLedgerState.get_state_key("test"),
+        config=_Cfg(),
+        factory=_InMemFactory(),
+    )
+
+    # Lazy-initialise the backend on first call so the fixture
+    # doesn't have to be ``async``. The first ``await
+    # ledger.try_admit`` from a test triggers ``sm.initialize()``
+    # via a small wrapper.
+    initialised = False
+
+    async def _ensure_initialised():
+        nonlocal initialised
+        if not initialised:
+            await sm.initialize()
+            initialised = True
+
+    fake_ledger = ledger_mod.MissionExecutionLedger(state_manager=sm)
+
+    # Wrap the ledger methods to ensure initialise-on-first-use so
+    # we don't push the async setup onto every test.
+    real_methods = {
+        name: getattr(fake_ledger, name) for name in (
+            "try_admit", "register", "release_reservation",
+            "unregister", "snapshot",
+        )
+    }
+
+    async def _wrap(name, *args, **kwargs):
+        await _ensure_initialised()
+        return await real_methods[name](*args, **kwargs)
+
+    for name in real_methods:
+        setattr(
+            fake_ledger, name,
+            (lambda nm: (
+                lambda *a, **kw: _wrap(nm, *a, **kw)
+            ))(name),
+        )
+
+    async def _get(app_name=None):
+        return fake_ledger
+
+    monkeypatch.setattr(
+        ledger_mod, "get_mission_execution_ledger", _get,
+    )
+    return fake_ledger
+
+
+class _SyntheticCoordinator:
+    """Stand-in coordinator class for spawn-gate integration tests.
+
+    Declares a :class:`MissionExecutionPolicy` with a one-instance
+    cap and ``chains_with_modes=["bootstrap", "refresh"]`` so the
+    full Q1 scenario can be reproduced against the orchestrator's
+    spawn path without needing the real ProjectPlanningCoordinator's
+    capability stack.
+    """
+
+    from polymathera.colony.agents.configs import (
+        MissionConcurrencyScope as _Scope,
+        MissionExecutionPolicy as _Policy,
+    )
+    MISSION_EXECUTION_POLICY = _Policy(
+        max_concurrent_instances=1,
+        concurrency_scope=_Scope.SESSION,
+        on_concurrency_violation="return_existing",
+        chains_with_modes=["bootstrap", "refresh"],
+    )
+
+
+def _make_pool_stub(*, created_agent_id: str = "child_xyz"):
+    """Fake :class:`AgentPoolCapability` exposing the surfaces
+    ``admit_and_spawn`` consults: ``resolve_agent_class`` and
+    ``create_agent``.
+
+    ``resolve_agent_class`` is mocked rather than letting MagicMock
+    auto-create it — otherwise the auto-created stub returns another
+    MagicMock instead of the real :class:`_SyntheticCoordinator`,
+    and the spawn-gate falls back to the default
+    :class:`MissionExecutionPolicy` (singleton per AGENT, no chains)
+    instead of the test's intended policy.
+    """
+
+    pool = MagicMock()
+    pool.resolve_agent_class = MagicMock(return_value=_SyntheticCoordinator)
+
+    async def _create(**_kwargs):
+        return {
+            "agent_id": created_agent_id,
+            "label": None,
+            "created": True,
+        }
+    pool.create_agent = _create
+    return pool
+
+
 def _make_cap(_exec_ctx):
     """Build a detached SessionOrchestratorCapability — same shape the
     sibling ``test_human_approval_relay`` fixture uses."""
@@ -632,3 +805,137 @@ def test_no_url_still_reads_discovered_extensions(
     # disk working tree is authoritative once it exists.
     provider.ensure_materialized.assert_called_once()
     assert set(avail) == {"stub_builtin", "from_disk"}
+
+
+# ---------------------------------------------------------------------------
+# Mission spawn-gate integration tests.
+#
+# These pin the contract that ``spawn_mission`` consults the cluster-
+# shared ledger BEFORE dispatching to the pool — moved here from
+# ``tests/test_agent_pool.py`` after the gate was lifted out of
+# ``AgentPoolCapability.create_agent`` to keep that primitive
+# mission-unaware. The pool now stays a generic agent-spawn
+# capability; the mission concept lives in the orchestrator surface.
+# ---------------------------------------------------------------------------
+
+
+def _attach_for_gate_test(cap, *, pool, session_id: str = "s1"):
+    """Mount the fake pool + the minimal agent shape ``admit_and_spawn``
+    needs (``agent_id``, ``metadata.session_id``)."""
+
+    from polymathera.colony.agents.patterns.capabilities.agent_pool import (
+        AgentPoolCapability,
+    )
+    cap._agent = SimpleNamespace(
+        agent_id="session_agent_xyz",
+        metadata=SimpleNamespace(
+            parameters={},
+            session_id=session_id, colony_id="c1", tenant_id="t1",
+        ),
+        get_capability_by_type=lambda t: pool if t is AgentPoolCapability else None,
+    )
+
+
+def _register_test_mission(monkeypatch, mission_type: str = "test_mission"):
+    from polymathera.colony.agents import mission_registry as mr
+    monkeypatch.setattr(mr, "get_mission_registry", lambda: {
+        mission_type: {
+            "label": "Test Mission",
+            "description": "Stub mission for gate-integration tests.",
+            "coordinator_v2": "synthetic.SyntheticCoordinator",
+            "worker": "synthetic.SyntheticWorker",
+            "self_concept": {
+                "description": "Synthetic coordinator.",
+                "goals": ["x"],
+                "constraints": [],
+            },
+        },
+    })
+
+
+@pytest.mark.asyncio
+async def test_spawn_mission_admits_first_spawn(
+    _exec_ctx, monkeypatch,
+) -> None:
+    """The first spawn of a mission lands a coordinator + registers
+    in the cluster-shared ledger."""
+
+    cap = _make_cap(_exec_ctx)
+    pool = _make_pool_stub(created_agent_id="child_first")
+    _attach_for_gate_test(cap, pool=pool)
+    _register_test_mission(monkeypatch)
+
+    result = await _run_spawn(
+        cap, mission_type="test_mission",
+        mission_params={"mode": "bootstrap"},
+    )
+    assert result["created"] is True
+    assert result["agent_id"] == "child_first"
+    assert "mission_gate" not in result
+
+
+@pytest.mark.asyncio
+async def test_spawn_mission_returns_existing_on_chained_mode(
+    _exec_ctx, monkeypatch,
+) -> None:
+    """Second spawn declaring a chained mode hands back the running
+    agent_id deterministically — no second coordinator spawned."""
+
+    cap = _make_cap(_exec_ctx)
+    pool = _make_pool_stub(created_agent_id="child_first")
+    _attach_for_gate_test(cap, pool=pool)
+    _register_test_mission(monkeypatch)
+
+    first = await _run_spawn(
+        cap, mission_type="test_mission",
+        mission_params={"mode": "bootstrap"},
+    )
+    assert first["created"] is True
+
+    second = await _run_spawn(
+        cap, mission_type="test_mission",
+        mission_params={"mode": "refresh"},
+    )
+    assert second["created"] is False
+    assert second["mission_gate"] == "return_existing"
+    assert second["agent_id"] == first["agent_id"]
+    assert "auto-chain" in second["reason"]
+
+
+@pytest.mark.asyncio
+async def test_spawn_mission_rejects_when_policy_says_reject(
+    _exec_ctx, monkeypatch,
+) -> None:
+    """A coordinator whose policy is
+    ``on_concurrency_violation=reject`` blocks the second spawn with
+    a typed rejection the LLM can branch on."""
+
+    from polymathera.colony.agents.configs import MissionExecutionPolicy
+
+    class _RejectingCoordinator:
+        MISSION_EXECUTION_POLICY = MissionExecutionPolicy(
+            max_concurrent_instances=1,
+            on_concurrency_violation="reject",
+        )
+
+    cap = _make_cap(_exec_ctx)
+    pool = _make_pool_stub(created_agent_id="child_first")
+    pool.resolve_agent_class = MagicMock(return_value=_RejectingCoordinator)
+    _attach_for_gate_test(cap, pool=pool)
+    _register_test_mission(monkeypatch)
+
+    first = await _run_spawn(
+        cap, mission_type="test_mission",
+        mission_params={},
+    )
+    assert first["created"] is True
+
+    second = await _run_spawn(
+        cap, mission_type="test_mission",
+        mission_params={},
+    )
+    assert second["created"] is False
+    assert second["mission_gate"] == "rejected"
+    assert second["agent_id"] is None
+    assert "currently in flight" in second["error"]
+    assert second["suggested_action"]

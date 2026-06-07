@@ -315,18 +315,84 @@ async def _run_job(
                 ]
 
                 agent_cls = resolve_class(coord_class)
+
+                # Mission spawn-gate. Consults the same cluster-shared
+                # ledger the chat path uses (see
+                # ``colony/agents/missions/execution_ledger.py``) so
+                # ``max_concurrent_instances`` / ``chains_with_modes``
+                # / ``return_existing`` enforce uniformly across both
+                # paths. REST jobs aren't owned by a SessionAgent, so
+                # we use the pool-agnostic ``admit_mission_spawn``
+                # entry point rather than ``admit_and_spawn``.
+                from polymathera.colony.agents.missions.execution_ledger import (
+                    AdmissionAllowed,
+                    AdmissionRejected,
+                    AdmissionReturnExisting,
+                    admit_mission_spawn,
+                    mission_stop_callback,
+                )
+                mode = mission.parameters.get("mode")
+                admission, reservation_id, ledger = await admit_mission_spawn(
+                    agent_cls=agent_cls,
+                    mission_type=mission.type,
+                    mode=str(mode) if mode is not None else None,
+                    syscontext=require_execution_context(),
+                    agent_id_for_agent_scope=f"rest_job_{job_id}",
+                    app_name=colony.app_name,
+                )
+                if isinstance(admission, AdmissionRejected):
+                    logger.warning(
+                        "REST job %s: mission %s rejected by spawn-gate"
+                        " — %s (%s)",
+                        job_id, mission.type, admission.reason,
+                        admission.suggested_action,
+                    )
+                    continue
+                if isinstance(admission, AdmissionReturnExisting):
+                    logger.warning(
+                        "REST job %s: mission %s already running as %s"
+                        " — skipping spawn (%s)",
+                        job_id, mission.type, admission.agent_id,
+                        admission.reason,
+                    )
+                    continue
+                assert isinstance(admission, AdmissionAllowed)
+
                 cap_blueprints = [resolve_class(path).bind() for path in capability_paths]
+                # Attach the generic ledger-unregister callback so
+                # the coordinator releases its bucket slot on
+                # termination — same shape the chat path's
+                # ``admit_and_spawn`` uses. The agent itself stays
+                # mission-unaware; ``Agent.stop`` just fires whatever
+                # callbacks the blueprint baked in.
                 bp = agent_cls.bind(
                     agent_type=coord_class,
                     metadata=metadata,
                     bound_pages=[],
                     capability_blueprints=cap_blueprints,
+                    stop_callbacks=[
+                        mission_stop_callback(colony.app_name),
+                    ],
                 )
 
-                handle = await AgentHandle.from_blueprint(
-                    agent_blueprint=bp,
-                    app_name=colony.app_name,
-                )
+                try:
+                    handle = await AgentHandle.from_blueprint(
+                        agent_blueprint=bp,
+                        app_name=colony.app_name,
+                    )
+                except Exception:
+                    # Spawn failure: release the slot so it isn't
+                    # leaked. Re-raise to let the outer error path
+                    # surface the original exception.
+                    if reservation_id is not None:
+                        await ledger.release_reservation(reservation_id)
+                    raise
+                if reservation_id is not None:
+                    await ledger.register(
+                        reservation_id=reservation_id,
+                        agent_id=handle.child_agent_id,
+                        mode=str(mode) if mode is not None else None,
+                    )
                 coordinator_handles.append((mission, handle))
 
             if not coordinator_handles:

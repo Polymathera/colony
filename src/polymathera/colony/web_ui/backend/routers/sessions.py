@@ -436,6 +436,9 @@ async def create_session(
             from polymathera.colony.agents import AgentMetadata, AgentHandle
             from polymathera.colony.agents.self_concept import AgentSelfConcept
             from ..chat import SessionAgent, SessionOrchestratorCapability
+            from ..chat.session_agent_guardrails import (
+                build_session_agent_runtime_guardrail,
+            )
             from polymathera.colony.agents.patterns.capabilities.agent_pool import AgentPoolCapability
             from polymathera.colony.agents.patterns.capabilities.consciousness import ConsciousnessCapability
             from polymathera.colony.agents.patterns.capabilities.vcm import VCMCapability
@@ -918,6 +921,17 @@ async def create_session(
                             ),
                         ),
                     ],
+                    # Hard guardrails mounted on the code-generation
+                    # action policy. See ``session_agent_guardrails``
+                    # for the rules + ``colony/mission_and_action_
+                    # guardrails_plan.md`` Part 2 for the design.
+                    # Travels through cloudpickle to the Ray worker
+                    # via the ``exclude=True`` field — module-level
+                    # named predicates keep the serialised graph
+                    # picklable.
+                    "runtime_guardrail": (
+                        build_session_agent_runtime_guardrail()
+                    ),
                 },
             )
 
