@@ -43,46 +43,9 @@ from polymathera.colony.agents.patterns.actions.code_constraints import (
 
 
 # Module-level so the regex compiles once and survives cloudpickle
-# round-trips by reference (the lambdas below capture the name, not
+# round-trips by reference (the closures below capture the name, not
 # the compiled object — cloudpickle handles that cleanly).
 _AGENT_ID_RE = re.compile(r"agent-[0-9a-f]+")
-
-
-# ---------------------------------------------------------------------------
-# Named predicates — preferred over lambdas inside the guardrail
-# instance for cloudpickle stability + readable error messages.
-# ---------------------------------------------------------------------------
-
-
-def _content_mentions_agent_id(params: dict[str, Any]) -> bool:
-    """Return True when the proposed ``respond_to_user`` content
-    references an ``agent-<hex>`` identifier. The status-claim gate
-    only fires for these calls; free-form responses pass through."""
-
-    content = params.get("content")
-    if not isinstance(content, str):
-        return False
-    return bool(_AGENT_ID_RE.search(content))
-
-
-def _prior_get_status_covers_target_agents(
-    prior_params: dict[str, Any],
-    target_params: dict[str, Any],
-) -> bool:
-    """Return True when the prior ``get_agent_status`` call's
-    ``agent_ids`` cover every ``agent-<hex>`` mention in the target
-    ``respond_to_user`` content. Same-agent matching prevents
-    "called get_agent_status for agent-X, claimed state for
-    agent-Y" loopholes."""
-
-    content = target_params.get("content")
-    if not isinstance(content, str):
-        return False
-    referenced = set(_AGENT_ID_RE.findall(content))
-    if not referenced:
-        return False
-    queried = set(prior_params.get("agent_ids") or [])
-    return referenced.issubset(queried)
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +73,20 @@ def build_session_agent_runtime_guardrail(
         approval gates in that order. The order matters: status-claim
         is the cheaper check and the more frequent failure mode in
         traces, so it fronts. Approval is the second line.
+
+    The status-claim predicate is built as a closure over a
+    one-element ``_speaker_ref`` dict so the SessionAgent's own
+    ``agent-<hex>`` id can be excluded from the "you referenced this
+    agent without status-checking it" check. The agent_id is not
+    known at build time (the agent is spawned later, gets its id
+    allocated at spawn); the code-generation policy calls
+    :meth:`RuntimeGuardrail.bind_speaker` after init, which writes the
+    id into ``_speaker_ref``. Per ``decompose_and_session_recovery_fixes_plan.md``
+    item 4: the live 2026-06-07 run blocked a ``respond_to_user``
+    that mentioned the SessionAgent's OWN id because the prior
+    ``get_agent_status`` only queried the coordinator's id; this
+    closure fixes that without touching every guardrail's check
+    signature.
     """
 
     if approval_required_action_prefixes is None:
@@ -119,9 +96,59 @@ def build_session_agent_runtime_guardrail(
             "DesignProcessCapability.propose_task_assignments",
         ]
 
+    speaker_ref: dict[str, str | None] = {"agent_id": None}
+
+    def _referenced_non_self_agent_ids(content: Any) -> set[str]:
+        """Extract every ``agent-<hex>`` mention in ``content`` minus
+        the speaker's own id (when known). Used by both ``applies_when``
+        and ``prior_params_match`` so the rule's gate AND its match
+        logic share the same "what counts as a non-self reference"
+        definition."""
+
+        if not isinstance(content, str):
+            return set()
+        referenced = set(_AGENT_ID_RE.findall(content))
+        speaker = speaker_ref["agent_id"]
+        if speaker:
+            referenced.discard(speaker)
+        return referenced
+
+    def _content_mentions_non_self_agent_id(
+        params: dict[str, Any],
+    ) -> bool:
+        """The rule's ``applies_when`` gate: fires only when the
+        proposed ``respond_to_user`` content references at least one
+        agent_id that ISN'T the speaker's own. A response that only
+        mentions the speaker (or none at all) bypasses the
+        status-check requirement entirely. Per item 4: the 2026-06-07
+        live run blocked a response that mentioned only the
+        SessionAgent's own id because the predicate didn't know who
+        the speaker was."""
+
+        return bool(_referenced_non_self_agent_ids(params.get("content")))
+
+    def _prior_get_status_covers_target_agents(
+        prior_params: dict[str, Any],
+        target_params: dict[str, Any],
+    ) -> bool:
+        """Return True when the prior ``get_agent_status`` call's
+        ``agent_ids`` cover every NON-SELF ``agent-<hex>`` mention
+        in the target ``respond_to_user`` content. Reuses the same
+        non-self extraction as ``applies_when`` for symmetry."""
+
+        referenced = _referenced_non_self_agent_ids(
+            target_params.get("content"),
+        )
+        if not referenced:
+            # ``applies_when`` should already have short-circuited;
+            # belt-and-braces if this is reached anyway.
+            return True
+        queried = set(prior_params.get("agent_ids") or [])
+        return referenced.issubset(queried)
+
     status_claim_rule = ArgsAwareOrderingRule(
         target_action="respond_to_user",
-        applies_when=_content_mentions_agent_id,
+        applies_when=_content_mentions_non_self_agent_id,
         required_prior="get_agent_status",
         max_age_calls=20,
         prior_params_match=_prior_get_status_covers_target_agents,
@@ -130,11 +157,22 @@ def build_session_agent_runtime_guardrail(
             "agent_id(s) you're about to reference, then respond. "
             "The spawn_mission return only tells you whether the "
             "coordinator was created — NOT whether it is running. "
-            "See docs/guides/action-policy-dimensions.md."
+            "References to your OWN agent_id don't need a status "
+            "check. See docs/guides/action-policy-dimensions.md."
         ),
     )
 
-    return CompositeGuardrail(
+    class _SessionAgentSpeakerAwareGuardrail(CompositeGuardrail):
+        """Plain composite + a ``bind_speaker`` that writes into the
+        predicate's closure mailbox."""
+
+        def bind_speaker(self, agent):
+            super().bind_speaker(agent)
+            speaker_ref["agent_id"] = (
+                agent.agent_id if agent is not None else None
+            )
+
+    return _SessionAgentSpeakerAwareGuardrail(
         ArgsAwareTemporalOrderGuardrail(rules=[status_claim_rule]),
         ApprovalRequiredGuardrail(
             approval_required_action_prefixes=(

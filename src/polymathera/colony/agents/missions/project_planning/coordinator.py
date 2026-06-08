@@ -92,10 +92,28 @@ class ProjectPlanningCoordinator(Agent):
                 "DesignProcessCapability.bootstrap_roadmap_from_objectives",
                 "DesignProcessCapability.sync_roadmap_with_github",
                 "DesignProcessCapability.propose_task_assignments",
+                # The decompose primitives are split:
+                # ``classify_issues_decomposability`` and
+                # ``propose_decompositions`` are READ-ONLY (no GitHub
+                # mutation) and don't need approval — the planner can
+                # call them freely to compose its strategy. Only the
+                # APPLY primitive ``create_decomposition`` is gated.
+                # Per ``decompose_and_session_recovery_fixes_plan.md``
+                # item 3's primitives-not-pipelines split.
+                "DesignProcessCapability.create_decomposition",
             ],
             mutates_remote=True,
             max_runtime_seconds=1800.0,  # 30 minutes
             max_llm_cost_usd=5.0,
+            # Honest budget for the propose → request_approval → idle
+            # poll → apply → report shape. The default of 20 is the
+            # right cap for one-shot reasoning agents but starves a
+            # mission that legitimately spends N iterations idle-polling
+            # for the operator's approval response. The structural fix
+            # is to stop counting idle-poll iterations (see
+            # ``colony/agent_loop_idle_wait_separation_plan.md``); until
+            # that lands, this number absorbs the polling tail.
+            max_iterations=50,
         )
     )
 

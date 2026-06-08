@@ -8,7 +8,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 from ..agents.base import Agent
 from ..agents.blackboard.protocol import (
@@ -31,6 +31,19 @@ from .capabilities import DesignMonorepoCapabilityBase
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Action-parameter enums — single source of truth read by both the
+# action's runtime guard (``get_args(...)`` at the top of each action
+# method) AND ``MissionSpec.caller_parameters[...].validates_against``
+# at registry-build time. If you broaden / narrow the accepted set,
+# update HERE; both sides re-read the literal automatically.
+# ---------------------------------------------------------------------------
+
+SyncDirection = Literal[
+    "bidirectional", "roadmap_to_github", "github_to_roadmap",
+]
+"""Accepted values for :meth:`DesignProcessCapability.sync_roadmap_with_github`'s
+``direction`` parameter."""
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +89,35 @@ _ASSIGNEE_MARKER_RE = re.compile(
 )
 
 ASSIGNEE_TARGETS: tuple[str, str] = ("colony", "user")
+
+
+# Decompose markers (P5e). When a parent issue is broken into N
+# sub-issues, the action stamps:
+#
+# - On the PARENT body: a single
+#   ``<!-- colony:decomposed-into: 12,34,56 -->`` marker plus
+#   one ``- [ ] #<n>`` checklist line per child. The marker lets
+#   round-trip discovery skip parents that already have a recorded
+#   decomposition; the checklist is the operator-visible affordance.
+# - On each CHILD body: a single
+#   ``<!-- colony:parent-of: <parent-number> -->`` marker. Lets
+#   future actions trace the lineage without re-parsing the parent.
+#
+# Both markers are line-anchored HTML comments so they round-trip
+# through GitHub's markdown renderer without leaking into the
+# rendered description.
+_DECOMPOSED_INTO_MARKER_PREFIX = "<!-- colony:decomposed-into:"
+_DECOMPOSED_INTO_MARKER_RE = re.compile(
+    r"<!--\s*colony:decomposed-into:\s*"
+    r"(?P<numbers>[0-9,\s]+?)\s*-->",
+    re.IGNORECASE,
+)
+
+_PARENT_OF_MARKER_PREFIX = "<!-- colony:parent-of:"
+_PARENT_OF_MARKER_RE = re.compile(
+    r"<!--\s*colony:parent-of:\s*(?P<parent>\d+)\s*-->",
+    re.IGNORECASE,
+)
 
 
 def parse_owner_repo_from_url(url: str) -> str | None:
@@ -989,6 +1031,369 @@ _DEFAULT_BOTTLENECK_RULE_PREDICATES = frozenset(
 )
 
 
+# ---------------------------------------------------------------------------
+# Decompose-mode helpers (P5e — composable primitives for the
+# project-planning ``decompose`` mission flow). Each primitive is
+# an ``@action_executor`` method the planner LLM composes; the
+# capability ships the action-plan SPACE, not a fixed pipeline.
+# See ``colony/decompose_and_session_recovery_fixes_plan.md`` item 3
+# and the [[primitives-not-pipelines]] memory.
+#
+# The structural ``_count_unchecked_checkboxes`` helper (and the
+# associated ``min_checkboxes`` threshold on the now-deleted
+# ``decompose_issues`` monolithic action) was removed: candidate
+# selection is now LLM-judged via the per-primitive
+# ``classify_issues_decomposability``, not a structural heuristic.
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_DECOMPOSITION_CRITERIA = (
+    "An issue is a decomposition candidate when it is too high-level, "
+    "too vague, too big to ship in one PR, or describes ongoing work "
+    "that should be tracked as a parent of focused sub-issues. An "
+    "issue is NOT a candidate when it is already narrowly scoped, is "
+    "a focused bug report, is documentation or discussion, or is an "
+    "ongoing-work-item that does not benefit from sub-issue tracking."
+)
+"""Operator-tunable default for the ``decomposition_criteria`` free-
+text param that's passed to the classifier / proposer primitives.
+Surfaced on the project_planning mission spec so the LLM planner
+sees the default semantics in its prompt; operators override per-call
+to tighten or loosen the judge."""
+
+
+# ---- classify_issues_decomposability prompt + parser --------------
+
+
+_DECOMPOSE_CLASSIFY_SYSTEM = (
+    "You are classifying GitHub issues for sub-issue decomposition. "
+    "For EACH issue below, decide whether it should be decomposed "
+    "into smaller sub-issues — according to the criteria the operator "
+    "supplied. Return a single JSON object (no prose, no markdown "
+    "fence) with this shape:\n\n"
+    '{"classifications": [\n'
+    '  {"number": <int>, "decomposable": <bool>, '
+    '"kind": "<short free-text label>", '
+    '"reason": "<1-3 sentences>"},\n'
+    "  ...\n"
+    "]}\n\n"
+    "Rules:\n"
+    "- One entry per input issue. Preserve the input order.\n"
+    "- ``kind`` is a short label you pick: anything that names the "
+    "judgement (e.g. ``too_high_level``, ``too_vague``, "
+    "``too_big_for_one_pr``, ``ongoing_work_item``, ``already_focused``, "
+    "``bug_report``, ``documentation``, etc.). Free-form — not a "
+    "closed enum — pick the label that best fits.\n"
+    "- ``reason`` quotes or summarises specifics from the issue body "
+    "that drove the judgement. Don't paraphrase the criteria back."
+)
+
+
+def _build_classify_decomposability_prompt(
+    *,
+    issues: list[dict[str, Any]],
+    decomposition_criteria: str,
+) -> str:
+    """Render the batch classification prompt. Each issue contributes
+    ``#<n>: <title>`` + the first ~1500 chars of its body."""
+
+    lines = [_DECOMPOSE_CLASSIFY_SYSTEM]
+    lines.append(f"\n## Operator criteria\n\n{decomposition_criteria}")
+    lines.append("\n## Issues to classify\n")
+    for issue in issues:
+        number = issue.get("number", "?")
+        title = issue.get("title", "") or ""
+        body = (issue.get("body") or "")[:1500]
+        lines.append(f"### #{number}: {title}\n")
+        lines.append(f"{body}\n")
+    lines.append(
+        "\nNow output the JSON classifications, in input order."
+    )
+    return "\n".join(lines)
+
+
+def _parse_classify_decomposability(
+    raw: str,
+    *,
+    expected_numbers: list[int],
+) -> list[dict[str, Any]] | None:
+    """Parse the classifier's response. Returns ``None`` on
+    structural failure (logged WARN). Each entry is normalised to
+    ``{number, decomposable, kind, reason}`` strings/bools. Entries
+    whose ``number`` isn't in ``expected_numbers`` are dropped; entries
+    are returned in the SAME order as ``expected_numbers`` (missing
+    entries are filled with a ``decomposable=False, kind="missing"``
+    placeholder so the caller always gets a parallel list)."""
+
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n", "", text)
+        text = text.removesuffix("```").strip()
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "classify_issues_decomposability: malformed JSON: %s "
+            "(first 200 chars: %r)", exc, text[:200],
+        )
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw_list = payload.get("classifications")
+    if not isinstance(raw_list, list):
+        return None
+
+    by_number: dict[int, dict[str, Any]] = {}
+    for entry in raw_list:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            number = int(entry.get("number"))
+        except (TypeError, ValueError):
+            continue
+        if number not in expected_numbers:
+            continue
+        decomposable = bool(entry.get("decomposable"))
+        kind = str(entry.get("kind") or "").strip() or "unclassified"
+        reason = str(entry.get("reason") or "").strip()
+        by_number[number] = {
+            "number": number,
+            "decomposable": decomposable,
+            "kind": kind,
+            "reason": reason,
+        }
+
+    return [
+        by_number.get(n, {
+            "number": n,
+            "decomposable": False,
+            "kind": "missing",
+            "reason": "LLM did not return a classification for this issue.",
+        })
+        for n in expected_numbers
+    ]
+
+
+# ---- propose_decompositions prompt + parser -----------------------
+
+
+_DECOMPOSE_PROPOSAL_SYSTEM = (
+    "You are decomposing one or more related GitHub issues into "
+    "smaller, independently-actionable sub-issues. For each parent "
+    "below, propose 2 to ``max_children_per_parent`` child sub-issues "
+    "that together fully cover the parent's scope. If MULTIPLE "
+    "parents are provided, treat them as a RELATED COHORT — children "
+    "across parents must NOT redundantly cover the same scope; "
+    "concerns that span multiple parents go in the top-level "
+    "``shared_concerns`` list as named candidate sibling issues "
+    "(the operator decides later whether to create them).\n\n"
+    "Output a single JSON object (no prose, no markdown fence):\n\n"
+    "{\n"
+    '  "parent_proposals": [\n'
+    "    {\n"
+    '      "parent_number": <int>,\n'
+    '      "children": [\n'
+    '        {"title": "<short imperative phrase>", '
+    '"body": "<acceptance criteria + context, 1-5 paragraphs>"},\n'
+    "        ...\n"
+    "      ],\n"
+    '      "reason": "<1-3 sentences on how this decomposition '
+    'covers the parent>"\n'
+    "    },\n"
+    "    ...\n"
+    "  ],\n"
+    '  "shared_concerns": ["<one sentence per concern>", ...]\n'
+    "}\n\n"
+    "Rules:\n"
+    "- Each child must be independently actionable — someone picking "
+    "it up should not need to read the parent or the other children "
+    "to make progress.\n"
+    "- Titles short, imperative, unique within the cohort.\n"
+    "- Bodies self-contained: restate the relevant context from the "
+    "parent inline; do NOT just write 'see parent issue'.\n"
+    "- Do not include the parent's existing checklist in the children; "
+    "the action layer wires the parent → children cross-link "
+    "separately.\n"
+    "- ``shared_concerns`` is empty when only ONE parent is provided "
+    "(no siblings to overlap with) or when no overlap was found."
+)
+
+
+def _build_decomposition_prompt(
+    *,
+    parent_issues: list[dict[str, Any]],
+    max_children_per_parent: int,
+    decomposition_criteria: str,
+) -> str:
+    """Render the batch decomposition prompt for N parents. For
+    ``N=1`` this is plain per-parent decomposition (``shared_concerns``
+    is empty by construction); for ``N>1`` the prompt invites the
+    LLM to dedupe scope across siblings."""
+
+    lines = [_DECOMPOSE_PROPOSAL_SYSTEM]
+    lines.append(
+        f"\nmax_children_per_parent = {max_children_per_parent}\n"
+    )
+    lines.append(f"\n## Operator criteria\n\n{decomposition_criteria}")
+    lines.append("\n## Parent issues to decompose\n")
+    for issue in parent_issues:
+        number = issue.get("number", "?")
+        title = issue.get("title", "") or ""
+        body = (issue.get("body") or "")[:3000]
+        lines.append(f"### Parent #{number}: {title}\n")
+        lines.append(f"{body}\n")
+    lines.append("\nNow output the JSON.")
+    return "\n".join(lines)
+
+
+def _parse_decomposition_proposal(
+    raw: str,
+    *,
+    expected_parents: list[int],
+    max_children_per_parent: int,
+) -> dict[str, Any] | None:
+    """Parse the proposer's response into the batch shape. Returns
+    ``None`` on structural failure (logged WARN). ``parent_proposals``
+    are returned in ``expected_parents`` order; missing parents land
+    as ``{children: [], reason: "missing"}`` placeholders so the
+    caller's index lines up. Children per parent capped at
+    ``max_children_per_parent``."""
+
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n", "", text)
+        text = text.removesuffix("```").strip()
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "propose_decompositions: malformed JSON: %s "
+            "(first 200 chars: %r)", exc, text[:200],
+        )
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw_proposals = payload.get("parent_proposals")
+    if not isinstance(raw_proposals, list):
+        return None
+
+    by_number: dict[int, dict[str, Any]] = {}
+    for entry in raw_proposals:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            parent_number = int(entry.get("parent_number"))
+        except (TypeError, ValueError):
+            continue
+        if parent_number not in expected_parents:
+            continue
+        children_raw = entry.get("children")
+        if not isinstance(children_raw, list):
+            continue
+        children: list[dict[str, str]] = []
+        seen_titles: set[str] = set()
+        for c in children_raw:
+            if not isinstance(c, dict):
+                continue
+            title = str(c.get("title") or "").strip()
+            body = str(c.get("body") or "").strip()
+            if not title or title in seen_titles or not body:
+                continue
+            seen_titles.add(title)
+            children.append({"title": title, "body": body})
+            if len(children) >= max_children_per_parent:
+                break
+        reason = str(entry.get("reason") or "").strip()
+        by_number[parent_number] = {
+            "parent_number": parent_number,
+            "children": children,
+            "reason": reason,
+        }
+
+    parent_proposals = [
+        by_number.get(n, {
+            "parent_number": n,
+            "children": [],
+            "reason": "LLM did not return a decomposition for this parent.",
+        })
+        for n in expected_parents
+    ]
+
+    shared_raw = payload.get("shared_concerns")
+    if isinstance(shared_raw, list):
+        shared_concerns = [
+            str(s).strip()
+            for s in shared_raw
+            if isinstance(s, (str, int, float)) and str(s).strip()
+        ]
+    else:
+        shared_concerns = []
+
+    return {
+        "parent_proposals": parent_proposals,
+        "shared_concerns": shared_concerns,
+    }
+
+
+def _render_child_body(
+    *,
+    parent_number: int,
+    parent_title: str,
+    child_body: str,
+) -> str:
+    """Wrap an LLM-proposed child body with the
+    ``<!-- colony:parent-of: <parent> -->`` marker + a ``Tracks
+    #<parent>`` line so the lineage round-trips on GitHub."""
+
+    return (
+        f"{_PARENT_OF_MARKER_PREFIX} {parent_number} "
+        f"{_ROADMAP_TASK_MARKER_SUFFIX}\n"
+        f"Tracks #{parent_number}: {parent_title}\n\n"
+        f"{child_body}\n"
+    )
+
+
+def _render_parent_body_with_children(
+    *,
+    original_body: str | None,
+    child_numbers: list[int],
+) -> str:
+    """Append a ``- [ ] #<child>`` checklist + the
+    ``<!-- colony:decomposed-into: ... -->`` marker to the parent
+    body so the operator (and future re-runs) can see the
+    decomposition.
+
+    Idempotent at the marker level: if the body already carries a
+    ``colony:decomposed-into`` marker, the OLD checklist + marker
+    are stripped first so the new render replaces them cleanly
+    (handles the case where the operator re-decomposes after
+    closing some children).
+    """
+
+    base = (original_body or "").rstrip()
+
+    # Strip any prior decomposition block (marker + everything from
+    # the line above it backward until the previous blank line).
+    if _DECOMPOSED_INTO_MARKER_RE.search(base):
+        # Split at the heading we always emit so we keep only the
+        # operator's original body.
+        marker_split = base.split(
+            "\n## Sub-issues (decomposed)\n", 1,
+        )
+        if len(marker_split) == 2:
+            base = marker_split[0].rstrip()
+
+    children_lines = "\n".join(f"- [ ] #{n}" for n in child_numbers)
+    marker_csv = ",".join(str(n) for n in child_numbers)
+    block = (
+        "\n\n## Sub-issues (decomposed)\n"
+        f"{_DECOMPOSED_INTO_MARKER_PREFIX} {marker_csv} "
+        f"{_ROADMAP_TASK_MARKER_SUFFIX}\n"
+        f"{children_lines}\n"
+    )
+    return f"{base}{block}"
+
+
 class DesignProcessCapability(DesignMonorepoCapabilityBase):
     """Workflow orchestration over the design-process state — the
     *how* of the team's work, complementing :class:`SystemDesignCapability`
@@ -1809,7 +2214,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
     async def sync_roadmap_with_github(
         self,
         *,
-        direction: str = "bidirectional",
+        direction: SyncDirection = "bidirectional",
         dry_run: bool = True,
         target_project_id: str | None = None,
         commit_message: str | None = None,
@@ -1855,16 +2260,15 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
 
         import time as _time
 
-        if direction not in (
-            "bidirectional", "roadmap_to_github", "github_to_roadmap",
-        ):
+        allowed_directions = get_args(SyncDirection)
+        if direction not in allowed_directions:
             return {
                 "dry_run": dry_run,
                 "direction": direction,
                 "error": "invalid_direction",
                 "message": (
                     f"direction={direction!r} unknown; pick one of "
-                    "bidirectional / roadmap_to_github / github_to_roadmap."
+                    + " / ".join(allowed_directions) + "."
                 ),
             }
 
@@ -2484,6 +2888,426 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 ),
             },
             "error": "",
+        }
+
+    # ---------------------------------------------------------------
+    # Decomposition primitives (P5e) — the composable replacement for
+    # the deleted ``decompose_issues`` monolithic pipeline. See
+    # ``colony/decompose_and_session_recovery_fixes_plan.md`` item 3
+    # and [[primitives-not-pipelines]]. The planner LLM composes
+    # these into whatever strategy fits the data: read all → classify
+    # all → propose joint → apply per-parent; or sample → classify →
+    # propose per-parent; etc. The action layer ships the SPACE; the
+    # agent picks the path.
+    # ---------------------------------------------------------------
+
+    @action_executor(
+        planning_summary=(
+            "Classify N GitHub issues for sub-issue decomposition in "
+            "ONE LLM call. Returns ``{ok, classifications: "
+            "[{number, decomposable, kind, reason}, ...]}`` in input "
+            "order. ``decomposition_criteria`` is operator-tunable "
+            "free-text describing what counts as 'decomposable'; "
+            "when None, the canonical default is used. ``kind`` is "
+            "an LLM-picked free-form label (e.g. ``too_high_level``, "
+            "``already_focused``, ``bug_report``), NOT a closed enum. "
+            "Batch the issues into one call when they fit in context; "
+            "split into multiple calls for very large repos."
+        ),
+    )
+    async def classify_issues_decomposability(
+        self,
+        *,
+        issue_numbers: list[int],
+        decomposition_criteria: str | None = None,
+        repo: str | None = None,
+        llm_max_tokens: int = 2048,
+        llm_temperature: float = 0.2,
+        llm_timeout_s: float = 60.0,
+    ) -> dict[str, Any]:
+        """LLM-judged classification primitive. The planner agent
+        decides how many and which issues to pass per call."""
+
+        if not issue_numbers:
+            return {"ok": True, "classifications": []}
+
+        github = self._sibling_github_capability()
+        if github is None:
+            return {
+                "ok": False,
+                "classifications": [],
+                "error": "no_github_capability",
+                "message": (
+                    "No GitHubCapability sibling found on the agent; "
+                    "classify_issues_decomposability requires one."
+                ),
+            }
+        repo = repo or self._resolve_github_repo()
+        if not repo:
+            return {
+                "ok": False,
+                "classifications": [],
+                **self._no_github_repo_error(),
+            }
+
+        # Hydrate the issue bodies one at a time via the existing
+        # GitHubCapability primitive. The planner can choose to
+        # call list_issues first to discover candidates and then
+        # pass a subset here.
+        issues: list[dict[str, Any]] = []
+        for number in issue_numbers:
+            resp = await github.get_issue(number, repo=repo)
+            if not resp.get("ok"):
+                continue
+            issue = resp.get("issue") or {}
+            issues.append({
+                "number": number,
+                "title": issue.get("title", ""),
+                "body": issue.get("body") or "",
+            })
+
+        criteria = decomposition_criteria or DEFAULT_DECOMPOSITION_CRITERIA
+        prompt = _build_classify_decomposability_prompt(
+            issues=issues, decomposition_criteria=criteria,
+        )
+        try:
+            response = await asyncio.wait_for(
+                self._agent.infer(
+                    prompt=prompt,
+                    max_tokens=llm_max_tokens,
+                    temperature=llm_temperature,
+                ),
+                timeout=llm_timeout_s,
+            )
+            raw = response.generated_text
+        except asyncio.TimeoutError:
+            return {
+                "ok": False,
+                "classifications": [],
+                "error": "llm_timeout",
+                "message": (
+                    f"Classifier LLM exceeded the {llm_timeout_s}s "
+                    f"timeout. Try a smaller batch."
+                ),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "classify_issues_decomposability: LLM call failed",
+            )
+            return {
+                "ok": False,
+                "classifications": [],
+                "error": "llm_call_failed",
+                "message": str(exc),
+            }
+        classifications = _parse_classify_decomposability(
+            raw, expected_numbers=[i["number"] for i in issues],
+        )
+        if classifications is None:
+            return {
+                "ok": False,
+                "classifications": [],
+                "error": "llm_proposal_parse_failed",
+                "message": (
+                    "Classifier output did not parse. Retry with a "
+                    "smaller batch or simpler criteria."
+                ),
+                "raw_excerpt": raw[:500] if raw else "",
+            }
+        return {"ok": True, "classifications": classifications}
+
+    @action_executor(
+        planning_summary=(
+            "Propose sub-issue decomposition for N parent issues in "
+            "ONE LLM call. For ``N=1``: plain per-parent decomposition. "
+            "For ``N>1``: joint decomposition — the LLM is told the "
+            "parents are related, produces children that don't "
+            "redundantly cover the same scope, and emits a "
+            "``shared_concerns`` list naming concerns that span "
+            "multiple parents. Returns ``{ok, parent_proposals: "
+            "[{parent_number, children: [{title, body}, ...], "
+            "reason}, ...], shared_concerns: [str]}``. The planner "
+            "decides whether to pass one parent at a time or batch "
+            "a cluster — both work with this primitive."
+        ),
+    )
+    async def propose_decompositions(
+        self,
+        *,
+        parent_issue_numbers: list[int],
+        max_children_per_parent: int = 8,
+        decomposition_criteria: str | None = None,
+        repo: str | None = None,
+        llm_max_tokens: int = 2048,
+        llm_temperature: float = 0.2,
+        llm_timeout_s: float = 60.0,
+    ) -> dict[str, Any]:
+        """Proposer primitive. Joint mode for N>1; per-parent for N=1."""
+
+        if not parent_issue_numbers:
+            return {
+                "ok": True, "parent_proposals": [], "shared_concerns": [],
+            }
+
+        github = self._sibling_github_capability()
+        if github is None:
+            return {
+                "ok": False,
+                "parent_proposals": [],
+                "shared_concerns": [],
+                "error": "no_github_capability",
+                "message": (
+                    "No GitHubCapability sibling found on the agent; "
+                    "propose_decompositions requires one."
+                ),
+            }
+        repo = repo or self._resolve_github_repo()
+        if not repo:
+            return {
+                "ok": False,
+                "parent_proposals": [],
+                "shared_concerns": [],
+                **self._no_github_repo_error(),
+            }
+
+        parents: list[dict[str, Any]] = []
+        for number in parent_issue_numbers:
+            resp = await github.get_issue(number, repo=repo)
+            if not resp.get("ok"):
+                continue
+            issue = resp.get("issue") or {}
+            parents.append({
+                "number": number,
+                "title": issue.get("title", ""),
+                "body": issue.get("body") or "",
+            })
+
+        if not parents:
+            return {
+                "ok": False,
+                "parent_proposals": [],
+                "shared_concerns": [],
+                "error": "no_parents_found",
+                "message": (
+                    "None of the requested parent_issue_numbers "
+                    "could be fetched from GitHub."
+                ),
+            }
+
+        criteria = decomposition_criteria or DEFAULT_DECOMPOSITION_CRITERIA
+        prompt = _build_decomposition_prompt(
+            parent_issues=parents,
+            max_children_per_parent=max_children_per_parent,
+            decomposition_criteria=criteria,
+        )
+        try:
+            response = await asyncio.wait_for(
+                self._agent.infer(
+                    prompt=prompt,
+                    max_tokens=llm_max_tokens,
+                    temperature=llm_temperature,
+                ),
+                timeout=llm_timeout_s,
+            )
+            raw = response.generated_text
+        except asyncio.TimeoutError:
+            return {
+                "ok": False,
+                "parent_proposals": [],
+                "shared_concerns": [],
+                "error": "llm_timeout",
+                "message": (
+                    f"Proposer LLM exceeded the {llm_timeout_s}s "
+                    f"timeout. Try a smaller cohort."
+                ),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "propose_decompositions: LLM call failed",
+            )
+            return {
+                "ok": False,
+                "parent_proposals": [],
+                "shared_concerns": [],
+                "error": "llm_call_failed",
+                "message": str(exc),
+            }
+        parsed = _parse_decomposition_proposal(
+            raw,
+            expected_parents=[p["number"] for p in parents],
+            max_children_per_parent=max_children_per_parent,
+        )
+        if parsed is None:
+            return {
+                "ok": False,
+                "parent_proposals": [],
+                "shared_concerns": [],
+                "error": "llm_proposal_parse_failed",
+                "message": (
+                    "Proposer output did not parse. Retry with a "
+                    "smaller cohort."
+                ),
+                "raw_excerpt": raw[:500] if raw else "",
+            }
+        # Decorate per-parent entries with the parent_title so the
+        # operator's approval card has human-readable context.
+        title_by_number = {p["number"]: p["title"] for p in parents}
+        for entry in parsed["parent_proposals"]:
+            entry["parent_title"] = title_by_number.get(
+                entry["parent_number"], "",
+            )
+        return {
+            "ok": True,
+            "parent_proposals": parsed["parent_proposals"],
+            "shared_concerns": parsed["shared_concerns"],
+        }
+
+    @action_executor(
+        planning_summary=(
+            "Apply ONE parent's decomposition: create each child via "
+            "create_issue (with the ``<!-- colony:parent-of: N -->`` "
+            "marker + ``Tracks #N`` line), then PATCH the parent body "
+            "to append the ``- [ ] #<child>`` checklist + the "
+            "``<!-- colony:decomposed-into: A,B,C -->`` marker. "
+            "Returns ``{ok, parent_number, created_child_numbers, "
+            "child_failures, parent_patch_ok}``. This is the ONLY "
+            "mutating primitive in the set — the approval gate "
+            "applies here. Per-parent (not batched) so failures "
+            "don't cascade across parents and the approval semantics "
+            "are clean (one approval card can authorise multiple "
+            "create_decomposition calls)."
+        ),
+    )
+    async def create_decomposition(
+        self,
+        *,
+        parent_issue_number: int,
+        children: list[dict[str, str]],
+        repo: str | None = None,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Apply primitive — per parent. Gated by the
+        ``ApprovalRequiredGuardrail`` on the project_planning
+        coordinator's policy."""
+
+        github = self._sibling_github_capability()
+        if github is None:
+            return {
+                "ok": False,
+                "parent_number": parent_issue_number,
+                "created_child_numbers": [],
+                "child_failures": [],
+                "parent_patch_ok": False,
+                "error": "no_github_capability",
+                "message": (
+                    "No GitHubCapability sibling found on the agent; "
+                    "create_decomposition requires one."
+                ),
+            }
+        repo = repo or self._resolve_github_repo()
+        if not repo:
+            return {
+                "ok": False,
+                "parent_number": parent_issue_number,
+                "created_child_numbers": [],
+                "child_failures": [],
+                "parent_patch_ok": False,
+                **self._no_github_repo_error(),
+            }
+
+        if not children:
+            return {
+                "ok": False,
+                "parent_number": parent_issue_number,
+                "created_child_numbers": [],
+                "child_failures": [],
+                "parent_patch_ok": False,
+                "error": "no_children_provided",
+                "message": (
+                    "create_decomposition called with empty children "
+                    "list. Call propose_decompositions first."
+                ),
+            }
+
+        # Fetch parent title for the cross-link line.
+        parent_get = await github.get_issue(
+            parent_issue_number, repo=repo,
+        )
+        if not parent_get.get("ok"):
+            return {
+                "ok": False,
+                "parent_number": parent_issue_number,
+                "created_child_numbers": [],
+                "child_failures": [],
+                "parent_patch_ok": False,
+                "error": "parent_not_found",
+                "message": parent_get.get("message", ""),
+            }
+        parent_issue = parent_get.get("issue") or {}
+        parent_title = parent_issue.get("title", "") or ""
+        parent_body = parent_issue.get("body") or ""
+
+        if dry_run:
+            # Dry-run shape: what we WOULD do. The proposer already
+            # gave the children; dry-run on the apply primitive is a
+            # last sanity check the planner can do before approval.
+            return {
+                "ok": True,
+                "dry_run": True,
+                "parent_number": parent_issue_number,
+                "would_create": [
+                    {"title": c["title"]} for c in children
+                ],
+                "parent_patch_preview": _render_parent_body_with_children(
+                    original_body=parent_body,
+                    child_numbers=[],  # numbers known only after creation
+                ),
+            }
+
+        created_child_numbers: list[int] = []
+        child_failures: list[dict[str, Any]] = []
+        for child in children:
+            child_body = _render_child_body(
+                parent_number=parent_issue_number,
+                parent_title=parent_title,
+                child_body=child["body"],
+            )
+            create_resp = await github.create_issue(
+                title=child["title"], body=child_body, repo=repo,
+            )
+            if create_resp.get("ok"):
+                created_issue = create_resp.get("issue") or {}
+                created_child_numbers.append(
+                    created_issue.get("number"),
+                )
+            else:
+                child_failures.append({
+                    "title": child["title"],
+                    "error": create_resp.get("message", ""),
+                })
+
+        parent_patch_ok = False
+        if created_child_numbers:
+            new_parent_body = _render_parent_body_with_children(
+                original_body=parent_body,
+                child_numbers=created_child_numbers,
+            )
+            patch_resp = await github.update_issue_body(
+                parent_issue_number, new_parent_body, repo=repo,
+            )
+            parent_patch_ok = bool(patch_resp.get("ok"))
+
+        ok = bool(
+            created_child_numbers
+            and parent_patch_ok
+            and not child_failures
+        )
+        return {
+            "ok": ok,
+            "parent_number": parent_issue_number,
+            "created_child_numbers": created_child_numbers,
+            "child_failures": child_failures,
+            "parent_patch_ok": parent_patch_ok,
         }
 
     async def _maybe_emit_roadmap_sync_event(

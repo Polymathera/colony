@@ -16,9 +16,11 @@ from pydantic import ValidationError
 from polymathera.colony.agents.metadata_parameters import (
     MISSING,
     MetadataParameterRegistry,
+    MissionSpecValidationError,
     ParameterScope,
     ParameterSpec,
     inherit_scoped_parameters,
+    validate_parameter_spec_against_actions,
 )
 
 
@@ -342,3 +344,116 @@ def test_inherit_with_empty_registry_is_no_op() -> None:
         child_params=child, parent_params=parent, registry=reg,
     )
     assert out == {"k": "v"}
+
+
+# ---------------------------------------------------------------------------
+# validate_parameter_spec_against_actions
+# ---------------------------------------------------------------------------
+
+
+_SYNC_FQN = (
+    "polymathera.colony.design_monorepo.process."
+    "DesignProcessCapability.sync_roadmap_with_github"
+)
+
+
+def test_validate_against_action_accepts_literal_member() -> None:
+    spec = ParameterSpec(
+        name="direction", scope=ParameterScope.CALLER,
+        description="ok", default="bidirectional",
+        validates_against=(_SYNC_FQN,),
+    )
+    validate_parameter_spec_against_actions(spec)
+
+
+def test_validate_against_action_rejects_non_literal_member() -> None:
+    spec = ParameterSpec(
+        name="direction", scope=ParameterScope.CALLER,
+        description="bad", default="both",
+        validates_against=(_SYNC_FQN,),
+    )
+    with pytest.raises(MissionSpecValidationError) as exc_info:
+        validate_parameter_spec_against_actions(spec)
+    msg = str(exc_info.value)
+    assert "'both'" in msg
+    assert "bidirectional" in msg
+
+
+def test_validate_against_action_is_noop_when_no_validates_against() -> None:
+    spec = ParameterSpec(
+        name="direction", scope=ParameterScope.CALLER,
+        description="no-check", default="anything-goes",
+    )
+    validate_parameter_spec_against_actions(spec)
+
+
+def test_validate_against_action_is_noop_for_required_spec() -> None:
+    spec = ParameterSpec(
+        name="direction", scope=ParameterScope.CALLER,
+        description="required, no default to check",
+        validates_against=(_SYNC_FQN,),
+    )
+    assert spec.required
+    validate_parameter_spec_against_actions(spec)
+
+
+def test_validate_against_action_silently_skips_missing_param_name() -> None:
+    spec = ParameterSpec(
+        name="not_a_real_arg", scope=ParameterScope.CALLER,
+        description="spec name doesn't match any action parameter",
+        default="whatever",
+        validates_against=(_SYNC_FQN,),
+    )
+    validate_parameter_spec_against_actions(spec)
+
+
+def test_validate_against_action_rejects_malformed_fqn() -> None:
+    spec = ParameterSpec(
+        name="direction", scope=ParameterScope.CALLER,
+        description="malformed", default="bidirectional",
+        validates_against=("nodots",),
+    )
+    with pytest.raises(MissionSpecValidationError):
+        validate_parameter_spec_against_actions(spec)
+
+
+def test_validate_against_action_rejects_unknown_method() -> None:
+    spec = ParameterSpec(
+        name="direction", scope=ParameterScope.CALLER,
+        description="unknown method on real class",
+        default="bidirectional",
+        validates_against=(
+            "polymathera.colony.design_monorepo.process."
+            "DesignProcessCapability.nonexistent_method",
+        ),
+    )
+    with pytest.raises(MissionSpecValidationError) as exc_info:
+        validate_parameter_spec_against_actions(spec)
+    assert "nonexistent_method" in str(exc_info.value)
+
+
+def test_validate_against_action_typechecks_plain_bool() -> None:
+    spec_ok = ParameterSpec(
+        name="dry_run", scope=ParameterScope.CALLER,
+        description="bool ok", default=True,
+        validates_against=(_SYNC_FQN,),
+    )
+    validate_parameter_spec_against_actions(spec_ok)
+
+    spec_bad = ParameterSpec(
+        name="dry_run", scope=ParameterScope.CALLER,
+        description="bool bad", default="yes",
+        validates_against=(_SYNC_FQN,),
+    )
+    with pytest.raises(MissionSpecValidationError):
+        validate_parameter_spec_against_actions(spec_bad)
+
+
+def test_validate_against_action_accepts_none_for_optional_annotated() -> None:
+    spec = ParameterSpec(
+        name="target_project_id", scope=ParameterScope.CALLER,
+        description="Optional[str] action param; default None",
+        default=None,
+        validates_against=(_SYNC_FQN,),
+    )
+    validate_parameter_spec_against_actions(spec)

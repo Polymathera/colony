@@ -35,7 +35,17 @@ class MissionSpec(BaseModel):
     coordinator_version: str = Field(default="v2", description="Coordinator version")
     max_agents: int = Field(default=10, description="Max concurrent worker agents")
     quality_threshold: float = Field(default=0.7, description="Min quality score (0-1)")
-    max_iterations: int = Field(default=10, description="Max planning iterations")
+    max_iterations: int | None = Field(
+        default=None,
+        description=(
+            "Max planning iterations. When ``None`` (default), "
+            "falls back to the mission coordinator's "
+            "``MISSION_EXECUTION_POLICY.max_iterations`` (or "
+            "``AgentMetadata.max_iterations``'s schema default of "
+            "20 if the policy doesn't set one). Pass an explicit "
+            "integer to override both."
+        ),
+    )
     batching_policy: str = Field(default="hybrid", description="Batching: hybrid, clustering, continuous")
     extra_capabilities: list[str] = Field(default_factory=list, description="Extra capability names")
     parameters: dict[str, Any] = Field(default_factory=dict, description="Mission-specific params")
@@ -266,6 +276,8 @@ async def _run_job(
                 # to plant on the coordinator.
                 from polymathera.colony.agents.configs import (
                     build_coordinator_self_concept,
+                    resolve_effective_max_iterations,
+                    resolve_mission_execution_policy,
                 )
 
                 # AgentMetadata's syscontext default_factory captures
@@ -280,20 +292,33 @@ async def _run_job(
                 from polymathera.colony.distributed.ray_utils.serving.context import (
                     require_execution_context,
                 )
+                # Resolve the coordinator's policy first so the
+                # iteration budget gets the same caller > policy >
+                # schema-default precedence as the chat path. Single
+                # source of truth in
+                # ``resolve_effective_max_iterations``.
+                _rest_coord_cls = resolve_class(coord_class)
+                _rest_policy = resolve_mission_execution_policy(
+                    spec=reg, coordinator_class=_rest_coord_cls,
+                )
+                effective_max_iterations = resolve_effective_max_iterations(
+                    caller_override=mission.max_iterations,
+                    policy=_rest_policy,
+                )
                 metadata = AgentMetadata(
                     role=f"{reg['label']} coordinator",
                     syscontext=dataclasses.replace(
                         require_execution_context(), run_id=run_id,
                     ),
                     goals=[f"Run {reg['label']} mission"],
-                    max_iterations=mission.max_iterations,
+                    max_iterations=effective_max_iterations,
                     self_concept=build_coordinator_self_concept(
                         reg, mission_type=mission.type,
                     ),
                     parameters={
                         "max_agents": mission.max_agents,
                         "quality_threshold": mission.quality_threshold,
-                        "max_iterations": mission.max_iterations,
+                        "max_iterations": effective_max_iterations,
                         "batching_policy": {"type": mission.batching_policy},
                         "mission_type": mission.type,
                         **mission.parameters,
@@ -314,7 +339,7 @@ async def _run_job(
                     if cap in EXTRA_CAPABILITIES_REGISTRY
                 ]
 
-                agent_cls = resolve_class(coord_class)
+                agent_cls = _rest_coord_cls
 
                 # Mission spawn-gate. Consults the same cluster-shared
                 # ledger the chat path uses (see

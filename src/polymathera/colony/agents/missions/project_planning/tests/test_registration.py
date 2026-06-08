@@ -81,40 +81,78 @@ def test_project_planning_self_concept_encodes_dry_run_first_constraint() -> Non
     assert "approve" in constraints_blob
 
 
-def test_project_planning_self_concept_names_the_three_modes() -> None:
+def test_project_planning_self_concept_names_the_four_modes() -> None:
     """The planner picks the action based on ``mission_params['mode']``
-    — bootstrap / refresh / assignments. The goals must enumerate
-    all three so the planner doesn't silently default."""
+    — bootstrap / refresh / assignments / decompose. The goals must
+    enumerate all four so the planner doesn't silently default."""
 
     spec = _builtin_missions()["project_planning"]
     goals_blob = "\n".join(spec.self_concept.goals).lower()
     assert "bootstrap" in goals_blob
     assert "refresh" in goals_blob
     assert "assignments" in goals_blob
+    assert "decompose" in goals_blob
     # The matching action names too, so the planner picks the right
-    # one without LLM hallucination.
+    # one without LLM hallucination. For decompose mode, all three
+    # primitives are surfaced — there is no monolithic
+    # ``decompose_issues`` action anymore (see
+    # ``colony/decompose_and_session_recovery_fixes_plan.md`` item 3).
     assert "bootstrap_roadmap_from_objectives" in goals_blob
     assert "sync_roadmap_with_github" in goals_blob
     assert "propose_task_assignments" in goals_blob
+    assert "classify_issues_decomposability" in goals_blob
+    assert "propose_decompositions" in goals_blob
+    assert "create_decomposition" in goals_blob
+
+
+def test_project_planning_coordinator_gates_create_decomposition_on_approval() -> None:
+    """``create_decomposition`` is the ONLY mutating decompose
+    primitive (creates child issues, patches the parent body) — it
+    MUST be in the coordinator's
+    ``MISSION_EXECUTION_POLICY.requires_human_approval_before`` list
+    so the runtime guardrail blocks ``dry_run=False`` without a
+    prior approve response. The READ-ONLY decompose primitives
+    (``classify_issues_decomposability``, ``propose_decompositions``)
+    do NOT need approval and must NOT be in the gate list — gating
+    them would block the agent from composing strategy freely."""
+
+    from polymathera.colony.agents.missions.project_planning.coordinator import (
+        ProjectPlanningCoordinator,
+    )
+
+    policy = ProjectPlanningCoordinator.MISSION_EXECUTION_POLICY
+    assert (
+        "DesignProcessCapability.create_decomposition"
+        in policy.requires_human_approval_before
+    )
+    # Read-only primitives must NOT be gated.
+    for read_only in (
+        "DesignProcessCapability.classify_issues_decomposability",
+        "DesignProcessCapability.propose_decompositions",
+    ):
+        assert read_only not in policy.requires_human_approval_before
 
 
 def test_project_planning_declares_expected_caller_parameters() -> None:
     """``caller_parameters`` documents the mission_params the
     coordinator's planner reads. ``mode`` is required (no default);
-    the other four entries are optional with declared defaults so
-    the planner can omit them when the colony-level resolution
-    fits."""
+    the other entries are optional with declared defaults so the
+    planner can omit them when the colony-level resolution fits."""
 
     spec = _builtin_missions()["project_planning"]
     by_name = {p.name: p for p in spec.caller_parameters}
     assert set(by_name) == {
-        "mode", "repo", "roadmap_path", "user_github_login", "direction",
+        "mode", "repo", "roadmap_path", "user_github_login",
+        "direction", "decomposition_criteria",
     }
     # ``mode`` is the only required CALLER param.
     assert by_name["mode"].required is True
-    # The other four carry declared defaults (Pydantic-style:
+    # The others carry declared defaults (Pydantic-style:
     # required iff no default of any kind).
-    for optional in ("repo", "roadmap_path", "user_github_login", "direction"):
+    for optional in (
+        "repo", "roadmap_path", "user_github_login", "direction",
+        "decomposition_criteria",
+    ):
         assert by_name[optional].required is False
 
 

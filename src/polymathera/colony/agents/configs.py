@@ -689,14 +689,18 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
         "description": (
             "Bootstrap or revise the design roadmap from the project's "
             "design context (objectives + constraints + requirements), "
-            "create matching GitHub issues + Project items, and propose "
-            "colony/user task assignments — every mutation gated on a "
-            "single human-approval round so the user reviews + approves "
-            "(or rejects) before anything is written. Three modes via "
-            "mission_params['mode']: bootstrap (initial roadmap from "
-            "design context), refresh (bidirectional sync between "
-            "ROADMAP.md and GitHub issues), assignments (propose "
-            "colony-vs-user assignment per open roadmap-linked issue)."
+            "create matching GitHub issues + Project items, propose "
+            "colony/user task assignments, and decompose high-level "
+            "GitHub issues into smaller sub-issues — every mutation "
+            "gated on a single human-approval round so the user "
+            "reviews + approves (or rejects) before anything is "
+            "written. Four modes via mission_params['mode']: bootstrap "
+            "(initial roadmap from design context), refresh "
+            "(bidirectional sync between ROADMAP.md and GitHub "
+            "issues), assignments (propose colony-vs-user assignment "
+            "per open roadmap-linked issue), decompose (break "
+            "high-level issues with many unchecked subtasks into "
+            "linked sub-issues)."
         ),
         "coordinator_v1": "polymathera.colony.agents.missions.project_planning.coordinator.ProjectPlanningCoordinator",
         "coordinator_v2": "polymathera.colony.agents.missions.project_planning.coordinator.ProjectPlanningCoordinator",
@@ -723,8 +727,10 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                     "roadmap from design context), 'refresh' "
                     "(bidirectional ROADMAP.md ↔ GitHub sync), "
                     "'assignments' (propose colony/user routing "
-                    "per open roadmap-linked issue). No default — "
-                    "the planner must pick."
+                    "per open roadmap-linked issue), 'decompose' "
+                    "(break high-level issues with many unchecked "
+                    "subtasks into linked sub-issues). No default "
+                    "— the planner must pick."
                 ),
                 "json_type": "string",
             },
@@ -759,28 +765,72 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                 "name": "direction",
                 "scope": "caller",
                 "description": (
-                    "'refresh' mode only: 'both' (default) | "
+                    "'refresh' mode only: 'bidirectional' (default) | "
                     "'roadmap_to_github' | 'github_to_roadmap'."
                 ),
-                "default": "both",
+                "default": "bidirectional",
+                # Cross-checked at registry-build time against
+                # ``sync_roadmap_with_github.direction``'s
+                # ``SyncDirection`` Literal so the spec default can't
+                # drift from the action's accepted set without the
+                # test suite catching it.
+                "validates_against": (
+                    "polymathera.colony.design_monorepo.process."
+                    "DesignProcessCapability.sync_roadmap_with_github",
+                ),
+            },
+            {
+                "name": "decomposition_criteria",
+                "scope": "caller",
+                "description": (
+                    "'decompose' mode only: free-text describing "
+                    "what counts as a 'decomposable' issue. Passed "
+                    "verbatim to the LLM judge inside "
+                    "``classify_issues_decomposability`` and the LLM "
+                    "proposer inside ``propose_decompositions``. "
+                    "When omitted, the canonical default "
+                    "(``DEFAULT_DECOMPOSITION_CRITERIA`` — issues "
+                    "that are too high-level, too vague, too big "
+                    "for one PR, or describe ongoing work) is used. "
+                    "Operators tune this per-call to match their "
+                    "team's notion of 'too big' without code "
+                    "changes."
+                ),
+                "json_type": "string",
+                "default": None,
             },
         ],
         "self_concept": {
             "description": (
                 "Propose, gate on user approval, and apply roadmap "
-                "edits. The mission orchestrates three existing action "
-                "surfaces — bootstrap_roadmap_from_objectives (initial "
-                "roadmap), sync_roadmap_with_github (reconcile), and "
-                "propose_task_assignments (colony/user routing). Every "
-                "apply step is preceded by a dry-run + a single "
+                "edits. The mission orchestrates action surfaces on "
+                "DesignProcessCapability + GitHubCapability. For "
+                "bootstrap / refresh / assignments modes: each is a "
+                "single action call (bootstrap_roadmap_from_objectives "
+                "/ sync_roadmap_with_github / propose_task_assignments) "
+                "followed by a HumanApprovalRequest and an apply. "
+                "For decompose mode: the planner COMPOSES three "
+                "primitives — classify_issues_decomposability (LLM-"
+                "judged candidate selection), propose_decompositions "
+                "(per-parent or joint, returns parent_proposals + "
+                "shared_concerns), and create_decomposition (the "
+                "ONLY mutating primitive — gated by approval). The "
+                "planner picks the strategy based on data: classify "
+                "all issues then propose jointly for clusters, or "
+                "sample then propose per-parent, or skip "
+                "classification when the user pointed at specific "
+                "issues. Every apply step is preceded by a "
                 "HumanApprovalRequest carrying the proposal as ``extra``."
             ),
             "goals": [
                 (
-                    "Read mission_params['mode'] to pick the action: "
+                    "Read mission_params['mode'] to pick the flow: "
                     "bootstrap → bootstrap_roadmap_from_objectives; "
                     "refresh → sync_roadmap_with_github; "
-                    "assignments → propose_task_assignments"
+                    "assignments → propose_task_assignments; "
+                    "decompose → compose the three decompose "
+                    "primitives (classify_issues_decomposability, "
+                    "propose_decompositions, create_decomposition)"
                 ),
                 (
                     "Call the chosen action with dry_run=True to compute "
@@ -801,13 +851,39 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                     "On choice='reject': exit cleanly without writing; "
                     "report what was proposed and why it was rejected"
                 ),
+                (
+                    "For decompose mode: there is NO single "
+                    "'decompose_issues' action — you compose the "
+                    "primitives. Suggested flow: (1) list_issues to "
+                    "discover open issues; (2) "
+                    "classify_issues_decomposability over them (or "
+                    "a subset) — read 'decomposable' + 'reason' for "
+                    "each; (3) IF zero decomposable, respond_to_user "
+                    "directly with a summary (no approval card for "
+                    "an empty proposal); (4) ELSE call "
+                    "propose_decompositions on the decomposable "
+                    "set — pass the FULL set for joint decomposition "
+                    "(with shared_concerns surfacing), or batch by "
+                    "small groups; (5) request_human_approval with "
+                    "the full parent_proposals + shared_concerns as "
+                    "extra; (6) on approve, call create_decomposition "
+                    "once per parent in parent_proposals; (7) report "
+                    "the created child issue numbers + the parent "
+                    "patches to the user"
+                ),
             ],
             "constraints": [
                 (
-                    "NEVER call any DesignProcessCapability action with "
-                    "dry_run=False until a HumanApprovalResponse with "
-                    "choice='approve' is observed for the matching "
-                    "request_id"
+                    "NEVER call any DesignProcessCapability MUTATING "
+                    "action (sync_roadmap_with_github with "
+                    "dry_run=False, propose_task_assignments with "
+                    "dry_run=False, bootstrap_roadmap_from_objectives "
+                    "with dry_run=False, create_decomposition with "
+                    "dry_run=False) until a HumanApprovalResponse "
+                    "with choice='approve' is observed for the "
+                    "matching request_id. The READ-ONLY decompose "
+                    "primitives (classify_issues_decomposability, "
+                    "propose_decompositions) do NOT need approval"
                 ),
                 (
                     "Always pass mission_params['user_github_login'] as "
@@ -830,8 +906,29 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
 
 
 def _builtin_missions() -> dict[str, MissionSpec]:
-    """Build typed defaults from ``_BUILTIN_MISSIONS``."""
-    return {key: MissionSpec(**value) for key, value in _BUILTIN_MISSIONS.items()}
+    """Build typed defaults from ``_BUILTIN_MISSIONS``.
+
+    Side effect — after constructing each :class:`MissionSpec`, every
+    one of its :attr:`caller_parameters` entries with a non-empty
+    ``validates_against`` list is cross-checked against the
+    referenced action signatures via
+    :func:`validate_parameter_spec_against_actions`. Spec drift from
+    the action signature surfaces as
+    :class:`MissionSpecValidationError` at import time so the test
+    suite — and ``colony-env up`` — fails loudly instead of letting
+    the LLM planner waste a mission's iteration budget on
+    ``{"error": "invalid_<arg>"}`` echoes.
+    """
+
+    from .metadata_parameters import validate_parameter_spec_against_actions
+
+    specs: dict[str, MissionSpec] = {}
+    for key, value in _BUILTIN_MISSIONS.items():
+        spec = MissionSpec(**value)
+        for caller_param in spec.caller_parameters:
+            validate_parameter_spec_against_actions(caller_param)
+        specs[key] = spec
+    return specs
 
 
 def resolve_mission_execution_policy(
@@ -882,6 +979,43 @@ def resolve_mission_execution_policy(
     # no caps. Matches pre-policy semantics so unannotated missions
     # keep working.
     return MissionExecutionPolicy()
+
+
+def resolve_effective_max_iterations(
+    *,
+    caller_override: int | None,
+    policy: MissionExecutionPolicy,
+    schema_default: int = 20,
+) -> int:
+    """Compute the planner-loop iteration cap for a mission coordinator.
+
+    Precedence:
+
+    1. ``caller_override`` — when the spawn caller (LLM planner via
+       ``spawn_mission`` or REST handler via ``/api/jobs/submit``)
+       explicitly passed an integer, it wins. Callers that don't
+       care pass ``None``.
+    2. ``policy.max_iterations`` — the mission's declared shape on
+       its coordinator's ``MISSION_EXECUTION_POLICY`` ClassVar.
+       Set this when the mission's natural loop shape (e.g.
+       propose → request_approval → idle-poll → apply → report)
+       doesn't fit the generic 20-iteration default.
+    3. ``schema_default`` — :class:`AgentMetadata`'s field default
+       (20). Matches the pre-policy behaviour for any mission that
+       declares no explicit budget.
+
+    Single resolution point so both spawn paths
+    (:meth:`SessionOrchestratorCapability.spawn_mission` and
+    :func:`web_ui.backend.routers.jobs._run_job`) agree on the
+    precedence rules — adding a new spawn path means routing through
+    this helper, not re-deriving the layering.
+    """
+
+    if caller_override is not None:
+        return caller_override
+    if policy.max_iterations is not None:
+        return policy.max_iterations
+    return schema_default
 
 
 def build_coordinator_self_concept(

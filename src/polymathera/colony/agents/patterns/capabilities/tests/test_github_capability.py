@@ -667,6 +667,7 @@ def test_action_executors_are_registered():
         "get_file_contents", "search_code",
         # issues
         "list_issues", "get_issue", "create_issue",
+        "update_issue_body",
         "comment_on_issue", "comment_as_session_agent",
         "close_issue", "reopen_issue", "add_labels",
         "list_milestones",

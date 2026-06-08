@@ -65,7 +65,9 @@ from .policies import (
 from ..planning.context import PlanningContextBuilder
 from ....distributed.hooks import hookable
 from .code_constraints import (
+    BlockedDispatch,
     CallRecord,
+    _BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES,
     _CALL_RECORD_RESULT_PREVIEW_BYTES,
     CodeGenerator,
     FreeFormCodeGenerator,
@@ -428,6 +430,7 @@ def format_planning_context_for_codegen(
     mode: str,
     error_history: list[dict[str, str]] | None = None,
     allow_self_termination: bool = True,
+    blocked_dispatches: "list[BlockedDispatch] | None" = None,
 ) -> str:
     """Format a ``PlanningContext`` as a code-generation prompt.
 
@@ -442,6 +445,13 @@ def format_planning_context_for_codegen(
             from ALL prior failed attempts, not just the last one.
         allow_self_termination: If True, include signal_completion in
             the prompt instructions and namespace docs.
+        blocked_dispatches: ``BlockedDispatch`` records captured during
+            the PREVIOUS iteration's ``run()`` calls that the runtime
+            guardrail refused. Rendered under ``## Blocked Dispatches``
+            so the planner sees the block + the guardrail's suggestion
+            BEFORE proposing its next cell. Survives one iteration —
+            the policy clears the list after passing it here. Per
+            ``decompose_and_session_recovery_fixes_plan.md`` item 5.
     """
     parts: list[str] = []
 
@@ -482,6 +492,31 @@ def format_planning_context_for_codegen(
     if exec_ctx and exec_ctx.findings:
         findings_lines = [f"- {k}: {v}" for k, v in list(exec_ctx.findings.items())[:10]]  # TODO: Make this configurable
         parts.append("## Findings So Far\n" + "\n".join(findings_lines))
+
+    # Blocked dispatches from the previous iteration. Shown high in
+    # the prompt (near execution history) so the planner notices them
+    # before reading the standing-rule advisory at the bottom. Each
+    # entry names the action_key, the proposed params, and the
+    # guardrail's suggestion — enough for the LLM to retry with the
+    # right precursor or change approach.
+    if blocked_dispatches:
+        block_lines: list[str] = []
+        for block in blocked_dispatches:
+            block_lines.append(
+                f"- Tried: ``await run({block.action_key!r}, "
+                f"**{block.params_preview!r})``"
+            )
+            block_lines.append(f"  Blocked: {block.reason}")
+            if block.suggestion:
+                block_lines.append(f"  Suggestion: {block.suggestion}")
+        parts.append(
+            "## Blocked Dispatches (last iteration)\n"
+            "Your previous cell tried to run the action(s) below but "
+            "the runtime guardrail refused. Address each one before "
+            "retrying — call the suggested precursor, or change "
+            "approach.\n\n"
+            + "\n".join(block_lines)
+        )
 
     # Recalled memories
     if planning_context.recalled_memories:
@@ -740,6 +775,14 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self._skill_library = skill_library or NoOpSkillLibrary()
         self._recovery_strategy = recovery_strategy or DeterministicRecovery()
         self._runtime_guardrail = runtime_guardrail or NoGuardrail()
+        # Let the guardrail (or its inner guardrails, via the
+        # ``CompositeGuardrail.bind_speaker`` propagation) know which
+        # agent owns this policy — needed e.g. by the SessionAgent's
+        # status-claim gate to filter the speaker's own agent_id out
+        # of the "you referenced this id without status-checking it"
+        # check. Default ``bind_speaker`` is a no-op so guardrails
+        # that don't care pay nothing.
+        self._runtime_guardrail.bind_speaker(agent)
         self._completion_validator = completion_validator or LLMCompletionValidator() # NoOpCompletionValidator()
 
         # Execution tracking — PlanExecutionContext is the structured state.
@@ -755,6 +798,12 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         # — see ``_build_codegen_step_summary`` for the canonical
         # example.
         self._call_history: list[CallRecord] = []
+        # Runtime-guardrail blocks captured during the LAST iteration's
+        # ``run()`` calls. Cleared at the start of every iteration
+        # (same lifecycle as ``_call_history``); rendered into the
+        # next iteration's planner prompt so the LLM sees the block +
+        # the guardrail's suggestion BEFORE proposing its next cell.
+        self._last_blocked_dispatches: list[BlockedDispatch] = []
         self._run_call_trace: list[dict[str, Any]] = []
         self._had_internal_failures: bool = False
         self._internal_errors: list[str] = []
@@ -1146,6 +1195,28 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     "blocked": True,
                 })
                 ns["_run_call_trace"] = self._run_call_trace
+                # Capture for the next iteration's prompt. JSON-truncate
+                # the params snapshot so a huge payload (e.g. a full
+                # decomposition proposal that was about to be passed
+                # to a gated action) can't blow the in-memory history.
+                try:
+                    params_preview = json.loads(
+                        json.dumps(
+                            dict(params),
+                        )[:_BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES]
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    params_preview = (
+                        str(params)[
+                            :_BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES
+                        ]
+                    )
+                self._last_blocked_dispatches.append(BlockedDispatch(
+                    action_key=action_key,
+                    params_preview=params_preview,
+                    reason=decision.reason,
+                    suggestion=decision.suggestion,
+                ))
                 return ActionResult(
                     success=False,
                     error=f"Blocked by guardrail: {decision.reason}. {decision.suggestion}",
@@ -1543,7 +1614,32 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             mode=self._mode,
             error_history=self._error_history if self._error_history else None,
             allow_self_termination=self._allow_self_termination,
+            blocked_dispatches=(
+                self._last_blocked_dispatches
+                if self._last_blocked_dispatches else None
+            ),
         )
+        # Blocked-dispatch survival is exactly one iteration: the
+        # planner sees them in THIS iteration's prompt; we clear them
+        # now so iteration N+2 doesn't see iteration N's blocks again.
+        # Per ``decompose_and_session_recovery_fixes_plan.md`` item 5
+        # — block info is recovery context for the NEXT cell, not
+        # standing context.
+        self._last_blocked_dispatches.clear()
+
+        # Runtime-guardrail standing advisory. Lets the planner see
+        # "you must call X before Y" / "you need an approval round
+        # before applying" BEFORE proposing its next cell, instead of
+        # only learning the rule when ``check`` blocks the dispatch
+        # post-hoc. The advisory machinery is per-guardrail (see
+        # :meth:`RuntimeGuardrail.planner_context_advisory`); the
+        # composite/approval/args-aware-ordering guardrails populate
+        # it. Block messages remain the safety net.
+        advisory = self._runtime_guardrail.planner_context_advisory(
+            self._call_history,
+        )
+        if advisory:
+            prompt += "\n\n## Runtime Guardrails\n" + advisory
 
         # Clear completion rejection after it's been rendered into the prompt
         self._execution_context.custom_data.pop("last_completion_rejection", None)

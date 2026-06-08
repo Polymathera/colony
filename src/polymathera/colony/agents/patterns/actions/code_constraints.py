@@ -107,6 +107,43 @@ that guardrails inspect, while keeping the policy's in-memory
 history bounded across long-running coordinators."""
 
 
+@dataclass
+class BlockedDispatch:
+    """One entry in
+    :attr:`CodeGenerationActionPolicy._last_blocked_dispatches`.
+
+    Captured at the moment the runtime guardrail refuses a ``run()``
+    call inside the REPL. Survives exactly one iteration — cleared at
+    the start of the next code-generation cycle, same lifecycle as
+    :attr:`CodeGenerationActionPolicy._call_history`. Rendered into
+    the planner prompt under "## Blocked Dispatches (last iteration)"
+    so the LLM sees the block AND the guardrail's suggestion BEFORE
+    proposing its next cell — instead of having to infer the block
+    after the fact from a ``result.success=False`` in the cell's own
+    code.
+
+    The ``params_preview`` is a JSON-truncated snapshot of the
+    proposed call's params capped at
+    :data:`_BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES`; full payloads
+    stay in the span store, not in this in-memory list.
+    """
+
+    action_key: str
+    params_preview: Any
+    reason: str
+    suggestion: str
+    wall_time: float = field(default_factory=time.time)
+
+
+_BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES = 1024
+"""Per-block truncation cap on ``BlockedDispatch.params_preview``.
+Smaller than ``_CALL_RECORD_RESULT_PREVIEW_BYTES`` because blocked
+dispatches usually carry the LLM's proposed args verbatim and
+typically a few short fields (action_key + content + a few kwargs)
+are enough to recover; long-tail payloads (entire decomposition
+proposals) get truncated."""
+
+
 # ============================================================================
 # Data classes shared across dimensions
 # ============================================================================
@@ -855,6 +892,56 @@ class RuntimeGuardrail(ABC):
         """
         ...
 
+    def bind_speaker(self, agent: "Any | None") -> None:
+        """Tell the guardrail which agent is the SPEAKER (the agent whose
+        action-policy is dispatching the calls this guardrail will check).
+
+        Called by the code-generation action policy during init. Default
+        no-op — guardrails that need speaker context (e.g. the
+        SessionAgent's status-claim gate, which must exclude the
+        SessionAgent's OWN agent_id from the "you referenced this id
+        without status-checking it" check) override this and stash the
+        identity for use in :meth:`check` / predicates.
+        A guardrail that doesn't know who's speaking can't
+        tell self-references from other-references.
+        The narrow ``bind_speaker`` hook keeps the
+        :meth:`check` signature stable while letting guardrails opt
+        in to speaker-aware behaviour.
+
+        Composite guardrails should propagate the bind to their inner
+        guardrails."""
+
+        return None
+
+    def planner_context_advisory(
+        self,
+        call_history: list[CallRecord],
+    ) -> str | None:
+        """Standing guidance to inject into the planner's prompt
+        BEFORE it proposes its next code cell.
+
+        Default: ``None`` — no advisory. Override in subclasses that
+        encode rules the planner can satisfy by choosing actions in
+        a specific order (e.g. *call request_human_approval before
+        the apply path*, *call get_agent_status before mentioning an
+        agent_id in respond_to_user*).
+
+        Why a separate method from :meth:`check`: ``check`` runs
+        AFTER the planner has already chosen an action; surfacing the
+        rule only on the block message means the planner gets steered
+        post-hoc, often after burning iterations on the same wrong
+        choice. The advisory runs BEFORE the planner picks, threaded
+        into the prompt by the code-generation policy. Block messages
+        from ``check`` remain the safety net for any planner that
+        ignores the advisory.
+
+        Implementations should return ``None`` when the rule is
+        currently satisfied (or never applies) so the prompt stays
+        small; return a short paragraph when the planner needs to be
+        nudged.
+        """
+        return None
+
 
 class NoGuardrail(RuntimeGuardrail):
     """Allow everything — no runtime constraints."""
@@ -1076,6 +1163,34 @@ class ArgsAwareTemporalOrderGuardrail(RuntimeGuardrail):
                 )
         return GuardrailDecision(allowed=True)
 
+    def planner_context_advisory(self, call_history):
+        """Surface every rule's pre-fix guidance as standing context.
+
+        These rules describe orderings the planner can always satisfy
+        by choosing actions in the right sequence — making them
+        always-visible standing guidance is cheaper than letting the
+        planner discover them via blocked dispatches. Rules with no
+        ``suggestion`` field skip the advisory (they'll still block
+        at ``check`` time)."""
+
+        if not self._rules:
+            return None
+        bullets = []
+        for rule in self._rules:
+            if rule.suggestion:
+                bullets.append(
+                    f"- Before calling ``{rule.target_action}``: "
+                    f"{rule.suggestion}"
+                )
+        if not bullets:
+            return None
+        return (
+            "**Action-ordering rules in effect.** Satisfy these "
+            "BEFORE proposing the gated call so the runtime "
+            "guardrail doesn't block + burn an iteration:\n"
+            + "\n".join(bullets)
+        )
+
 
 _DEFAULT_APPROVE_CHOICES = frozenset({
     "approve", "approved", "yes", "granted", "accept", "accepted",
@@ -1084,14 +1199,15 @@ _DEFAULT_APPROVE_CHOICES = frozenset({
 
 def _default_is_approval_granted(record: CallRecord) -> bool:
     """Match :class:`HumanApprovalCapability`'s native shape: a
-    successful ``get_response`` call whose ``result.choice`` falls in
-    :data:`_DEFAULT_APPROVE_CHOICES` (case-insensitive).
+    successful ``get_response`` call whose envelope is
+    ``{ok: True, state: "ready", response: {choice: "..."}}`` with
+    ``choice`` in :data:`_DEFAULT_APPROVE_CHOICES` (case-insensitive).
 
     The chat-UI's Approval modal POSTs the operator's choice into
     ``HumanApprovalCapability``; the capability surfaces it via the
-    next ``get_response`` poll's result. No separate
+    next ``get_response`` poll's typed envelope. No separate
     ``approval_granted`` action is emitted, so this predicate keys
-    off the result envelope directly rather than the action key.
+    off the envelope shape directly rather than the action key.
     Custom flows that need a different shape can override via
     :class:`ApprovalRequiredGuardrail`'s ``is_approval_granted``
     constructor kwarg.
@@ -1104,7 +1220,10 @@ def _default_is_approval_granted(record: CallRecord) -> bool:
     result = record.result
     if not isinstance(result, dict):
         return False
-    choice = result.get("choice")
+    response = result.get("response")
+    if not isinstance(response, dict):
+        return False
+    choice = response.get("choice")
     if not isinstance(choice, str):
         return False
     return choice.lower() in _DEFAULT_APPROVE_CHOICES
@@ -1180,6 +1299,38 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
             ),
         )
 
+    def planner_context_advisory(self, call_history):
+        """Tell the planner the propose → approve → apply sequence
+        BEFORE it proposes a mutating call, so the loop doesn't have
+        to bounce off ``check``'s block message to learn it.
+
+        Returns ``None`` once an ``approve`` choice is observed in
+        ``call_history`` — at that point the gate would let the
+        apply through and the advisory would be noise.
+        """
+
+        if not self._gated:
+            return None
+        if any(self._is_granted(c) for c in call_history):
+            return None
+        gated_render = ", ".join(f"``{p}``" for p in self._gated)
+        return (
+            "**Human-approval gate active.** The following action "
+            f"prefixes require operator approval before the apply "
+            f"path will dispatch: {gated_render}. "
+            "Sequence every mutating call as: "
+            "(1) call the action with ``dry_run=True`` to compute the "
+            "proposal; "
+            "(2) call ``HumanApprovalCapability.request_human_approval("
+            "question=..., extra=<proposal>)``; "
+            "(3) poll ``HumanApprovalCapability.get_response("
+            "request_id=...)`` until ``choice`` is ``approve``; "
+            "(4) re-call the action with ``dry_run=False`` to apply. "
+            "Calling the action with ``dry_run=False`` before step "
+            "(3) succeeds will be blocked by the runtime guardrail "
+            "and burn an iteration."
+        )
+
 
 class CompositeGuardrail(RuntimeGuardrail):
     """Apply N guardrails in order; the first non-allowed decision
@@ -1209,6 +1360,31 @@ class CompositeGuardrail(RuntimeGuardrail):
             if not decision.allowed:
                 return decision
         return GuardrailDecision(allowed=True)
+
+    def bind_speaker(self, agent):
+        """Propagate the bind to every inner guardrail so each one
+        can pick up speaker-aware behaviour independently."""
+
+        for guardrail in self._inner:
+            guardrail.bind_speaker(agent)
+
+    def planner_context_advisory(self, call_history):
+        """Join non-empty advisories from every inner guardrail.
+
+        Each inner guardrail's advisory is its own paragraph; we
+        concatenate with a blank line so the resulting prompt
+        section reads as a checklist. Returns ``None`` when no inner
+        guardrail has anything to say (the common case once all
+        active rules are satisfied)."""
+
+        advisories = []
+        for guardrail in self._inner:
+            advisory = guardrail.planner_context_advisory(call_history)
+            if advisory:
+                advisories.append(advisory)
+        if not advisories:
+            return None
+        return "\n\n".join(advisories)
 
 
 # ============================================================================

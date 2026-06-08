@@ -2618,3 +2618,4 @@ async def test_propose_tolerates_missing_roadmap_row(
     assert result["error"] == ""
     assert len(result["proposals"]) == 1
     assert result["proposals"][0]["proposed_assignee"] == "colony"
+

@@ -285,7 +285,13 @@ async def test_approval_guardrail_allows_apply_after_granted() -> None:
         params={"request_id": "appr_xyz"},
         end_wall=time.time(),
         status="ok",
-        result={"request_id": "appr_xyz", "choice": "Approve"},
+        result={
+            "ok": True,
+            "state": "ready",
+            "response": {
+                "request_id": "appr_xyz", "choice": "Approve",
+            },
+        },
     )]
     d = await g.check(
         action_key=(
@@ -311,7 +317,13 @@ async def test_approval_guardrail_ignores_rejected_choice() -> None:
         params={"request_id": "appr_xyz"},
         end_wall=time.time(),
         status="ok",
-        result={"request_id": "appr_xyz", "choice": "Reject"},
+        result={
+            "ok": True,
+            "state": "ready",
+            "response": {
+                "request_id": "appr_xyz", "choice": "Reject",
+            },
+        },
     )]
     d = await g.check(
         action_key=(
@@ -363,7 +375,11 @@ async def test_approval_guardrail_ignores_failed_get_response() -> None:
         params={"request_id": "appr_xyz"},
         end_wall=time.time(),
         status="error",
-        result={"choice": "Approve"},  # ignored: status != ok
+        result={  # ignored: status != ok
+            "ok": True,
+            "state": "ready",
+            "response": {"choice": "Approve"},
+        },
     )]
     d = await g.check(
         action_key=(

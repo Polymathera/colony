@@ -777,7 +777,7 @@ class SessionOrchestratorCapability(AgentCapability):
         *,
         mission_type: str,
         mission_params: dict[str, Any] | None = None,
-        max_iterations: int = 20,
+        max_iterations: int | None = None,
     ) -> dict[str, Any]:
         """Spawn a mission coordinator for ``mission_type`` — the
         recommended way to start a mission task from chat.
@@ -894,10 +894,29 @@ class SessionOrchestratorCapability(AgentCapability):
         #   anywhere in the codebase gets them automatically.
         from polymathera.colony.agents.configs import (
             build_coordinator_self_concept,
+            resolve_effective_max_iterations,
+            resolve_mission_execution_policy,
         )
+        from polymathera.colony.agents.class_resolver import resolve_class
 
         params: dict[str, Any] = dict(mission_params or {})
         params.setdefault("mission_type", mission_type)
+        # Resolve the coordinator's declared mission-execution policy
+        # so we can apply ``policy.max_iterations`` as the metadata
+        # default when the caller didn't pass an explicit override.
+        # Precedence rules (caller > policy > schema-default 20) live
+        # in :func:`resolve_effective_max_iterations` — one source of
+        # truth shared with the REST path in ``routers/jobs.py``.
+        try:
+            coord_cls_obj = resolve_class(coord_class)
+        except (ImportError, AttributeError, ValueError):
+            coord_cls_obj = None
+        coord_policy = resolve_mission_execution_policy(
+            spec=reg, coordinator_class=coord_cls_obj,
+        )
+        effective_max_iterations = resolve_effective_max_iterations(
+            caller_override=max_iterations, policy=coord_policy,
+        )
         # The coordinator runs in this SessionAgent's runtime, so
         # the syscontext default_factory captures the right session
         # context (the SessionAgent itself is spawned inside a
@@ -910,7 +929,7 @@ class SessionOrchestratorCapability(AgentCapability):
         coord_metadata = AgentMetadata(
             role=f"{reg.get('label', mission_type)} coordinator",
             goals=[f"Run {reg.get('label', mission_type)} mission"],
-            max_iterations=max_iterations,
+            max_iterations=effective_max_iterations,
             self_concept=build_coordinator_self_concept(
                 reg, mission_type=mission_type,
             ),

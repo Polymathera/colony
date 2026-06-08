@@ -17,7 +17,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from polymathera.colony.agents.patterns.actions.code_constraints import (
+    ApprovalRequiredGuardrail,
+    ArgsAwareOrderingRule,
+    ArgsAwareTemporalOrderGuardrail,
+    CallRecord,
+    CompositeGuardrail,
     IterationShapeValidator,
+    NoGuardrail,
 )
 
 
@@ -127,3 +133,158 @@ async def test_browse_count_is_textual_not_path_aware() -> None:
     result = await IterationShapeValidator().validate(code, agent=MagicMock())
     assert not result.valid
     assert any("Too many browse" in e for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
+# planner_context_advisory — items 3 + 5 of
+# project_planning_workflow_fixes_plan.md
+# ---------------------------------------------------------------------------
+
+
+def _approve_call(action_key: str = "HumanApprovalCapability.get_response") -> CallRecord:
+    """Synthesise a successful approval-poll CallRecord matching
+    ``_default_is_approval_granted``."""
+
+    return CallRecord(
+        action_key=action_key,
+        params={"request_id": "r"},
+        start_wall=1.0,
+        end_wall=1.1,
+        status="ok",
+        result={
+            "ok": True,
+            "state": "ready",
+            "response": {"request_id": "r", "choice": "approve"},
+        },
+    )
+
+
+def test_noguardrail_has_no_advisory() -> None:
+    assert NoGuardrail().planner_context_advisory([]) is None
+
+
+def test_approval_advisory_present_when_gate_unsatisfied() -> None:
+    """The propose → approve → apply sequence must surface in
+    planner context whenever an approval-gated prefix is configured
+    and no ``approve`` choice has landed yet."""
+
+    g = ApprovalRequiredGuardrail(
+        approval_required_action_prefixes=(
+            "DesignProcessCapability.sync_roadmap_with_github",
+        ),
+    )
+    advisory = g.planner_context_advisory([])
+    assert advisory is not None
+    assert "request_human_approval" in advisory
+    assert "get_response" in advisory
+    assert "dry_run=True" in advisory
+    assert "dry_run=False" in advisory
+
+
+def test_approval_advisory_silent_after_approval_landed() -> None:
+    """Once a positive ``approve`` choice is in call_history, the
+    gate would let the apply through — the advisory becomes noise
+    and must be ``None``."""
+
+    g = ApprovalRequiredGuardrail(
+        approval_required_action_prefixes=(
+            "DesignProcessCapability.sync_roadmap_with_github",
+        ),
+    )
+    assert g.planner_context_advisory([_approve_call()]) is None
+
+
+def test_approval_advisory_silent_with_empty_prefix_list() -> None:
+    """An approval guardrail mounted with no gated prefixes is a
+    no-op; the advisory should reflect that."""
+
+    g = ApprovalRequiredGuardrail(approval_required_action_prefixes=())
+    assert g.planner_context_advisory([]) is None
+
+
+def test_args_aware_ordering_advisory_lists_rule_suggestions() -> None:
+    """Each rule's ``suggestion`` becomes a bullet so the planner
+    sees the constraint as standing context, not just as a
+    post-hoc block message."""
+
+    rule = ArgsAwareOrderingRule(
+        target_action="respond_to_user",
+        applies_when=lambda params: True,
+        required_prior="get_agent_status",
+        max_age_calls=20,
+        suggestion=(
+            "Call AgentPoolCapability.get_agent_status with the "
+            "agent_id(s) you're about to reference."
+        ),
+    )
+    g = ArgsAwareTemporalOrderGuardrail(rules=[rule])
+    advisory = g.planner_context_advisory([])
+    assert advisory is not None
+    assert "respond_to_user" in advisory
+    assert "get_agent_status" in advisory
+
+
+def test_args_aware_ordering_advisory_skips_rules_without_suggestion() -> None:
+    """Rules with no ``suggestion`` field have no useful prompt
+    text — they fall back to the auto-generated ``check`` message
+    only, so the advisory should be ``None`` when no rule has a
+    suggestion."""
+
+    rule = ArgsAwareOrderingRule(
+        target_action="respond_to_user",
+        applies_when=None,
+        required_prior="get_agent_status",
+        max_age_calls=20,
+        suggestion=None,
+    )
+    g = ArgsAwareTemporalOrderGuardrail(rules=[rule])
+    assert g.planner_context_advisory([]) is None
+
+
+def test_composite_advisory_joins_inner_advisories() -> None:
+    """The composite must surface every inner guardrail's advisory
+    so a SessionAgent mounting both an approval gate and a
+    status-claim gate sees both rules in the prompt."""
+
+    ordering_rule = ArgsAwareOrderingRule(
+        target_action="respond_to_user",
+        applies_when=None,
+        required_prior="get_agent_status",
+        max_age_calls=20,
+        suggestion="Call get_agent_status first.",
+    )
+    composite = CompositeGuardrail(
+        ArgsAwareTemporalOrderGuardrail(rules=[ordering_rule]),
+        ApprovalRequiredGuardrail(
+            approval_required_action_prefixes=(
+                "DesignProcessCapability.sync_roadmap_with_github",
+            ),
+        ),
+    )
+    advisory = composite.planner_context_advisory([])
+    assert advisory is not None
+    assert "get_agent_status" in advisory
+    assert "request_human_approval" in advisory
+
+
+def test_composite_advisory_returns_none_when_all_inner_silent() -> None:
+    """When every inner guardrail's advisory is None, the composite
+    advisory is None — keeps the prompt small."""
+
+    composite = CompositeGuardrail(NoGuardrail(), NoGuardrail())
+    assert composite.planner_context_advisory([]) is None
+
+
+def test_composite_advisory_silent_after_approval_landed() -> None:
+    """End-to-end: a composite that only carries an approval gate
+    goes silent once approval has landed. Important so the planner
+    isn't told "you need to approve" AFTER having already done so."""
+
+    composite = CompositeGuardrail(
+        ApprovalRequiredGuardrail(
+            approval_required_action_prefixes=(
+                "DesignProcessCapability.sync_roadmap_with_github",
+            ),
+        ),
+    )
+    assert composite.planner_context_advisory([_approve_call()]) is None

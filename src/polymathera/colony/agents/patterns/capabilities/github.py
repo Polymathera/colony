@@ -793,6 +793,44 @@ class GitHubCapability(AgentCapability):
         return out
 
     @action_executor()
+    async def update_issue_body(
+        self,
+        issue_number: int,
+        body: str,
+        *,
+        repo: str | None = None,
+    ) -> dict[str, Any]:
+        """Replace an issue's body with ``body``.
+
+        Distinct from :meth:`comment_on_issue` (which appends a
+        comment) and :meth:`close_issue` / :meth:`reopen_issue`
+        (which mutate state, not body). Used by the project-
+        planning ``decompose`` mode to stamp ``- [ ] #<child>``
+        checklist lines + a ``<!-- colony:decomposed-into: ... -->``
+        marker onto the parent issue after the child issues are
+        created. Idempotent — re-sending the same body is a no-op
+        from GitHub's perspective.
+        """
+
+        repo = self._resolve_repo(repo)
+        if not repo:
+            return _err("no repo provided and no default_repo set")
+        client, err = await self._ensure_client()
+        if client is None:
+            return _err(err or "")
+        try:
+            data = await client.patch(
+                f"/repos/{repo}/issues/{issue_number}",
+                json={"body": body},
+            )
+        except Exception as e:
+            return self._shape_error(e)
+        await self._write_audit("update_issue_body", {
+            "repo": repo, "number": issue_number,
+        })
+        return _ok(issue=_summarise_issue(data))
+
+    @action_executor()
     async def comment_on_issue(
         self,
         issue_number: int,

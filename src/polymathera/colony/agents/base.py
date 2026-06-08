@@ -1986,6 +1986,42 @@ class Agent(BaseModel):
         ),
     )
 
+    # Idle-wait counter — incremented by polling capabilities for
+    # each distinct external event they're currently waiting on,
+    # decremented when each event resolves. ``_run_agent_loop``
+    # reads the derived :attr:`is_idle_waiting` property AT THE
+    # END of each ``run_step`` and skips incrementing
+    # ``iteration`` when it's truthy. Wall-clock cap (mission
+    # ``max_runtime_seconds``) is the safety net for an agent that
+    # idle-waits forever.
+    #
+    # Contract for consumers (e.g. ``HumanApprovalCapability``):
+    # - Track YOUR OWN per-instance set of "currently-waiting"
+    #   tokens (e.g. request_ids). On the FIRST poll that finds a
+    #   given token NOT yet resolved, add it to your set AND
+    #   increment ``idle_wait_counter``. On the FIRST poll that
+    #   finds it resolved, remove it from your set AND decrement.
+    #   Subsequent polls for the same still-pending token are
+    #   no-ops on the counter (idempotent).
+    # - Pair increment/decrement carefully — a missed decrement
+    #   leaves the counter > 0 forever and the agent never counts
+    #   iterations again. Wall-clock cap kicks in eventually but
+    #   the agent looks wedged in the meantime.
+    # - Counter MUST stay ≥ 0. ``Agent.stop`` does NOT reset it
+    #   — callers are responsible for paired increment/decrement.
+    idle_wait_counter: int = Field(
+        default=0,
+        ge=0,
+        exclude=True,
+        description=(
+            "Number of distinct external events the agent's "
+            "polling capabilities are currently waiting on. > 0 "
+            "means the next run_step is an idle-wait iteration "
+            "and the agent loop will NOT count it toward "
+            "max_iterations."
+        ),
+    )
+
     child_agents: dict[str, str] = Field(default_factory=dict)  # role -> agent_id
 
     # Private attributes (not serialized, use PrivateAttr for Pydantic v2)
@@ -2013,6 +2049,16 @@ class Agent(BaseModel):
     @property
     def colony_id(self) -> str:
         return self.syscontext.colony_id
+
+    @property
+    def is_idle_waiting(self) -> bool:
+        """True iff the agent is currently waiting on at least one
+        external event whose poll hasn't resolved yet. Derived from
+        :attr:`idle_wait_counter`. ``_run_agent_loop`` reads this AT
+        THE END of each ``run_step`` and skips the iteration counter
+        increment when it's True."""
+
+        return self.idle_wait_counter > 0
 
     @classmethod
     def bind(cls, **kwargs) -> AgentBlueprint:
@@ -4176,6 +4222,7 @@ class AgentManagerBase:
             max_iterations: Optional maximum number of iterations for the agent's action policy
         """
         iteration = 0
+        idle_wait_iterations = 0
         error_msg: str | None = None
         try:
             await agent.start()
@@ -4203,7 +4250,20 @@ class AgentManagerBase:
                         f"╚══════════════════════════════════════════════════════════╝"
                     )
                     await agent.run_step()
-                    iteration += 1
+                    # Iterations spent polling an external event
+                    # (typically HumanApprovalCapability.get_response
+                    # for a pending response) shouldn't burn the
+                    # max_iterations budget. The wall-clock cap
+                    # (MissionExecutionPolicy.max_runtime_seconds)
+                    # is the safety net for an agent that idle-waits
+                    # forever. Read AFTER run_step so an iteration
+                    # that STARTED polling mid-step still counts —
+                    # the agent made a decision; only iterations
+                    # that began ALREADY waiting are free.
+                    if agent.is_idle_waiting:
+                        idle_wait_iterations += 1
+                    else:
+                        iteration += 1
                 except Exception as e:
                     error_msg = f"{type(e).__name__}: {e}"
                     logger.error(f"Error in agent {agent.agent_id} step: {error_msg}")
@@ -4238,13 +4298,18 @@ class AgentManagerBase:
             logger.warning(
                 f"\n"
                 f"╔══════════════════════════════════════════════════════════╗\n"
-                f"║  🔄 AGENT LOOP  FINISHED iter={iteration:<4}                    ║\n"
+                f"║  🔄 AGENT LOOP  FINISHED iter={iteration:<4} idle_wait={idle_wait_iterations:<4}║\n"
                 f"║  agent={agent.agent_id:<48}║\n"
                 f"║  state={str(agent.state):<20} reason={stop_reason:<14}║\n"
                 f"╚══════════════════════════════════════════════════════════╝"
             )
 
-            # Finalize tracing spans with actual agent state
+            # Finalize tracing spans with actual agent state. The
+            # iteration count we surface is the PLANNING-iteration
+            # count; idle-wait iterations (passive polling for an
+            # external event) are tracked separately so an operator
+            # diagnosing a stalled mission can see how the budget
+            # was actually spent.
             await agent.emit_lifecycle_stop_event(stop_reason, error_msg, iteration)
 
             # Update AgentRun status in session system

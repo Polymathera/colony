@@ -108,6 +108,37 @@ class HumanApprovalResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Envelope renderer — single point that flattens a HumanApprovalResponse
+# into the JSON-serialisable shape the action surface returns. Reading
+# ``response.choice`` directly off the Pydantic model would round-trip
+# through the action policy's CallRecord preview as ``str(model)`` —
+# guardrail predicates that key off ``record.result["response"]
+# ["choice"]`` wouldn't find a dict. Flattening here once keeps every
+# downstream reader (LLM planner, guardrail predicate, chat UI relay)
+# on the same dict-envelope contract.
+# ---------------------------------------------------------------------------
+
+
+def _render_get_response_envelope(
+    response: "HumanApprovalResponse",
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "state": "ready",
+        "response": {
+            "request_id": response.request_id,
+            "choice": response.choice,
+            "note": response.note,
+            "decided_by": response.decided_by,
+            "decided_at": (
+                response.decided_at.isoformat()
+                if response.decided_at is not None else None
+            ),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Capability
 # ---------------------------------------------------------------------------
 
@@ -169,6 +200,12 @@ class HumanApprovalCapability(AgentCapability):
         # resume so ``list_pending`` returns a stable view even after a
         # restart.
         self._requests: dict[str, HumanApprovalRequest] = {}
+        # Per-instance bookkeeping of which request_ids the agent
+        # is CURRENTLY idle-waiting on. Used to keep
+        # ``Agent.idle_wait_counter`` increment/decrement balanced
+        # and idempotent across repeated ``get_response`` polls for
+        # the same pending request_id.
+        self._idle_waiting_request_ids: set[str] = set()
 
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"human_approval", "gate", "session"})
@@ -178,10 +215,10 @@ class HumanApprovalCapability(AgentCapability):
     @action_executor(
         planning_summary=(
             "Submit a typed human-approval request. Returns immediately "
-            "with the request_id. The user's response surfaces later "
-            "via the capability's event handler — query it with "
-            "get_response or wait for the planner to observe the new "
-            "context."
+            "with ``{ok: True, request_id: '...'}``. The user's response "
+            "surfaces later via the capability's event handler — query "
+            "it with get_response or wait for the planner to observe "
+            "the new context."
         ),
     )
     async def request_human_approval(
@@ -191,8 +228,8 @@ class HumanApprovalCapability(AgentCapability):
         options: tuple[str, ...] = ("approve", "reject"),
         deadline: datetime | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> str:
-        """Post a request and return its ``request_id``."""
+    ) -> dict[str, Any]:
+        """Post a request and return the typed envelope ``{ok, request_id}``."""
 
         request = HumanApprovalRequest(
             question=question,
@@ -214,26 +251,37 @@ class HumanApprovalCapability(AgentCapability):
             },
         )
         self._requests[request.request_id] = request
-        return request.request_id
+        return {"ok": True, "request_id": request.request_id}
 
     @action_executor(
         planning_summary=(
-            "Return the recorded response for a request, or None if "
-            "the user has not responded yet. Falls back to a blackboard "
-            "read so a resumed agent can recover responses that landed "
-            "during suspension."
+            "Return the typed envelope ``{ok, state: 'pending' | "
+            "'ready', response: {request_id, choice, note, decided_by, "
+            "decided_at} | None}``. ``state='ready'`` means the user "
+            "has responded — read ``response.choice``. ``state='pending'``"
+            " means keep polling. Falls back to a blackboard read so a "
+            "resumed agent can recover responses that landed during "
+            "suspension."
         ),
     )
     async def get_response(
         self, request_id: str,
-    ) -> HumanApprovalResponse | None:
+    ) -> dict[str, Any]:
         cached = self._responses.get(request_id)
         if cached is not None:
-            return cached
+            # Cached response → terminal state. Decrement the
+            # idle-wait counter on the FIRST cached-read for this
+            # request_id; subsequent cached-reads are idempotent.
+            self._on_resolved(request_id)
+            return _render_get_response_envelope(cached)
         bb = await self.get_blackboard()
         raw = await bb.read(HumanApprovalProtocol.response_key(request_id))
         if raw is None:
-            return None
+            # Still pending — increment the idle-wait counter on
+            # the FIRST pending poll for this request_id. Subsequent
+            # pending polls for the same id are idempotent.
+            self._on_pending(request_id)
+            return {"ok": True, "state": "pending", "response": None}
         try:
             response = HumanApprovalResponse.model_validate(raw)
         except Exception:  # noqa: BLE001
@@ -241,16 +289,63 @@ class HumanApprovalCapability(AgentCapability):
                 "HumanApprovalCapability: malformed response payload at %s",
                 HumanApprovalProtocol.response_key(request_id),
             )
-            return None
+            return {
+                "ok": False,
+                "state": "pending",
+                "response": None,
+                "error": "malformed_response_payload",
+            }
         self._responses[request_id] = response
-        return response
+        # Just resolved — decrement on the first observation.
+        self._on_resolved(request_id)
+        return _render_get_response_envelope(response)
 
-    @action_executor(planning_summary="List request_ids still awaiting a response.")
-    async def list_pending(self) -> list[str]:
-        return [
-            rid for rid in self._requests
-            if rid not in self._responses
-        ]
+    # ---- Idle-wait counter bookkeeping --------------------------------
+    #
+    # Strict per-(capability instance, request_id) accounting so the
+    # agent's ``idle_wait_counter`` increment/decrement stays paired
+    # even when the LLM polls the same pending request_id many times.
+
+    def _on_pending(self, request_id: str) -> None:
+        if self._agent is None:
+            return
+        if request_id in self._idle_waiting_request_ids:
+            return
+        self._idle_waiting_request_ids.add(request_id)
+        self._agent.idle_wait_counter += 1
+
+    def _on_resolved(self, request_id: str) -> None:
+        if self._agent is None:
+            return
+        if request_id not in self._idle_waiting_request_ids:
+            return
+        self._idle_waiting_request_ids.discard(request_id)
+        # Defensive: never drop below zero. The Pydantic ``ge=0``
+        # validator on the field would raise on assignment of a
+        # negative value via ``model_validate``, but the direct
+        # ``-=`` doesn't re-validate; assert here so a drift bug
+        # surfaces loudly rather than wedging the agent loop.
+        assert self._agent.idle_wait_counter > 0, (
+            f"HumanApprovalCapability: idle_wait_counter underflow "
+            f"on resolve of {request_id!r}"
+        )
+        self._agent.idle_wait_counter -= 1
+
+    @action_executor(
+        planning_summary=(
+            "Return ``{ok, pending_request_ids: [...]}``. Each id is a "
+            "request that has been posted but whose response has not "
+            "yet landed."
+        ),
+    )
+    async def list_pending(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "pending_request_ids": [
+                rid for rid in self._requests
+                if rid not in self._responses
+            ],
+        }
 
     # ---- Receive side -------------------------------------------------
 
@@ -284,6 +379,10 @@ class HumanApprovalCapability(AgentCapability):
             )
             return None
         self._responses[request_id] = response
+        # Resolution arrived via the event stream — decrement the
+        # idle-wait counter if a prior get_response poll had
+        # registered this request_id as pending.
+        self._on_resolved(request_id)
         return EventProcessingResult(
             context_key=f"human_approval_response:{request_id}",
             context={
