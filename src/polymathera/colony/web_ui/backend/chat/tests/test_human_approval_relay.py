@@ -42,7 +42,7 @@ def _exec_ctx():
 
 async def _make_capability_and_chat_bb(_exec_ctx):
     """Build a detached SessionOrchestratorCapability with a fake
-    ``self._agent`` (so ``_handle_human_approval_request`` has an
+    ``self._agent`` (so ``handle_human_approval_request`` has an
     agent_id fallback) and an in-memory chat blackboard."""
 
     cap = SessionOrchestratorCapability(
@@ -60,6 +60,10 @@ async def _make_capability_and_chat_bb(_exec_ctx):
         enable_events=False,
     )
     await chat_bb.initialize()
+    # The handler fetches the chat blackboard via
+    # ``self.get_blackboard()``; pin the cache so the test's
+    # in-memory backend is what the handler sees.
+    cap._blackboard = chat_bb
     return cap, chat_bb
 
 
@@ -81,7 +85,7 @@ async def test_translates_request_into_chat_agent_question(_exec_ctx) -> None:
             "extra": {"checkpoint_id": "cp_42"},
         },
     )
-    await cap._handle_human_approval_request(event, chat_bb)
+    await cap.handle_human_approval_request(event, None)
 
     entries = await chat_bb.query(namespace="chat:agent:*")
     assert len(entries) == 1
@@ -111,7 +115,7 @@ async def test_falls_back_to_session_agent_id_when_requester_missing(
             "options": ["a", "b"],
         },
     )
-    await cap._handle_human_approval_request(event, chat_bb)
+    await cap.handle_human_approval_request(event, None)
 
     entries = await chat_bb.query(namespace="chat:agent:*")
     assert len(entries) == 1
@@ -129,9 +133,32 @@ async def test_provides_default_options_when_payload_omits_them(
             "requester_agent_id": "physics_agent_002",
         },
     )
-    await cap._handle_human_approval_request(event, chat_bb)
+    await cap.handle_human_approval_request(event, None)
     entries = await chat_bb.query(namespace="chat:agent:*")
     assert entries[0].value["response_options"] == ["approve", "reject"]
+
+
+async def test_relays_typed_approval_with_action_type(_exec_ctx) -> None:
+    """When the request carries ``action_type``, the chat message
+    forwards it so the frontend can label the 3-choice buttons."""
+
+    cap, chat_bb = await _make_capability_and_chat_bb(_exec_ctx)
+    event = SimpleNamespace(
+        key=HumanApprovalProtocol.request_key("appr_typed"),
+        value={
+            "request_id": "appr_typed",
+            "question": "Approve decomposition?",
+            "options": ["reject", "approve_once", "approve_all"],
+            "action_type": "create_decomposition",
+            "requester_agent_id": "physics_agent_001",
+        },
+    )
+    await cap.handle_human_approval_request(event, None)
+    payload = (await chat_bb.query(namespace="chat:agent:*"))[0].value
+    assert payload["response_options"] == [
+        "reject", "approve_once", "approve_all",
+    ]
+    assert payload["action_type"] == "create_decomposition"
 
 
 async def test_ignores_non_request_keys(_exec_ctx) -> None:
@@ -140,7 +167,7 @@ async def test_ignores_non_request_keys(_exec_ctx) -> None:
         key="some:other:key",
         value={"question": "ignored"},
     )
-    await cap._handle_human_approval_request(event, chat_bb)
+    await cap.handle_human_approval_request(event, None)
     entries = await chat_bb.query(namespace="chat:agent:*")
     assert entries == []
 
@@ -153,7 +180,7 @@ async def test_tolerates_non_dict_payload(_exec_ctx) -> None:
     )
     # Should not raise; emits a placeholder agent_question with the
     # default options.
-    await cap._handle_human_approval_request(event, chat_bb)
+    await cap.handle_human_approval_request(event, None)
     entries = await chat_bb.query(namespace="chat:agent:*")
     assert len(entries) == 1
     assert entries[0].value["response_options"] == ["approve", "reject"]
@@ -179,10 +206,12 @@ async def test_relay_blackboard_has_real_app_name_not_capability_field(
     SessionAgent's live app name so it matches every other publisher
     in the same scope.
 
-    Structural assertion via AST (comments ignored): the relay's
-    code MUST NOT reference ``self._app_name`` or instantiate
-    ``EnhancedBlackboard`` directly — it must route through
-    ``self.get_blackboard``, which delegates to
+    Structural assertion via AST (comments ignored): the
+    ``stream_events_to_queue`` override and
+    ``handle_human_approval_request`` handler MUST NOT reference
+    ``self._app_name`` or instantiate ``EnhancedBlackboard``
+    directly — they must route through ``self.get_blackboard`` /
+    ``self._agent.get_blackboard``, which delegate to
     ``Agent.get_blackboard`` (which knows the live app name).
     """
     import ast
@@ -192,45 +221,47 @@ async def test_relay_blackboard_has_real_app_name_not_capability_field(
         SessionOrchestratorCapability,
     )
 
-    source = inspect.getsource(
-        SessionOrchestratorCapability._relay_human_approval_to_chat,
-    )
-    # ``inspect.getsource`` preserves the class-body indentation;
-    # ``ast.parse`` needs a top-level-aligned statement.
-    tree = ast.parse(textwrap.dedent(source))
-
+    methods_to_inspect = [
+        SessionOrchestratorCapability.stream_events_to_queue,
+        SessionOrchestratorCapability.handle_human_approval_request,
+    ]
     forbidden_attr_refs = []
     forbidden_ctor_calls = []
-    for node in ast.walk(tree):
-        # `self._app_name` reads
-        if (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "self"
-            and node.attr == "_app_name"
-        ):
-            forbidden_attr_refs.append(ast.unparse(node))
-        # `EnhancedBlackboard(...)` calls
-        if isinstance(node, ast.Call):
-            func = node.func
-            name = (
-                func.id if isinstance(func, ast.Name)
-                else func.attr if isinstance(func, ast.Attribute)
-                else None
-            )
-            if name == "EnhancedBlackboard":
-                forbidden_ctor_calls.append(ast.unparse(node)[:60])
+    for method in methods_to_inspect:
+        source = inspect.getsource(method)
+        tree = ast.parse(textwrap.dedent(source))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "self"
+                and node.attr == "_app_name"
+            ):
+                forbidden_attr_refs.append(
+                    f"{method.__name__}: {ast.unparse(node)}"
+                )
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = (
+                    func.id if isinstance(func, ast.Name)
+                    else func.attr if isinstance(func, ast.Attribute)
+                    else None
+                )
+                if name == "EnhancedBlackboard":
+                    forbidden_ctor_calls.append(
+                        f"{method.__name__}: {ast.unparse(node)[:60]}"
+                    )
 
     assert not forbidden_attr_refs, (
-        "_relay_human_approval_to_chat references "
-        f"self._app_name: {forbidden_attr_refs!r}. That field is "
-        "None for capabilities mounted via the .bind() pipeline, "
-        "producing a 'None:blackboard:events:<scope>' pub/sub "
-        "channel that no real publisher uses. Route through "
+        "Approval-relay code references self._app_name: "
+        f"{forbidden_attr_refs!r}. That field is None for "
+        "capabilities mounted via the .bind() pipeline, producing "
+        "a 'None:blackboard:events:<scope>' pub/sub channel that "
+        "no real publisher uses. Route through "
         "self.get_blackboard(scope_id=...) instead."
     )
     assert not forbidden_ctor_calls, (
-        "_relay_human_approval_to_chat manually constructs an "
+        "Approval-relay code manually constructs an "
         f"EnhancedBlackboard: {forbidden_ctor_calls!r}. That "
         "bypasses Agent.get_blackboard's app_name resolution. "
         "Use self.get_blackboard(scope_id=...) instead."

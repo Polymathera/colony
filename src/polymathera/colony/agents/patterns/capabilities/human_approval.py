@@ -70,7 +70,14 @@ logger = logging.getLogger(__name__)
 
 
 class HumanApprovalRequest(BaseModel):
-    """Payload an agent posts to ``human_approval:request:{request_id}``."""
+    """Payload an agent posts to ``human_approval:request:{request_id}``.
+
+    When ``action_type`` is set, the UI renders three choices
+    (``reject`` / ``approve_once`` / ``approve_all``) and ``approve_all``
+    auto-allows future dispatches whose ``action_key`` contains
+    ``action_type``. When ``None``, the legacy two-choice
+    (``approve`` / ``reject``) shape applies.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -79,6 +86,7 @@ class HumanApprovalRequest(BaseModel):
     )
     question: str
     options: tuple[str, ...] = ("approve", "reject")
+    action_type: str | None = None
     requester_agent_id: str | None = None
     """Agent that asked. ``None`` in detached / test contexts."""
 
@@ -89,6 +97,10 @@ class HumanApprovalRequest(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
     """Free-form context the requester wants the UI to render alongside
     the question (e.g., a diff, a summary, a list of affected pages)."""
+
+    @property
+    def is_typed(self) -> bool:
+        return self.action_type is not None
 
 
 class HumanApprovalResponse(BaseModel):
@@ -218,22 +230,34 @@ class HumanApprovalCapability(AgentCapability):
             "with ``{ok: True, request_id: '...'}``. The user's response "
             "surfaces later via the capability's event handler — query "
             "it with get_response or wait for the planner to observe "
-            "the new context."
+            "the new context. When ``action_type`` is set the UI offers "
+            "three choices (``reject`` / ``approve_once`` / "
+            "``approve_all``); ``approve_all`` covers every future "
+            "dispatch whose action_key contains ``action_type`` in "
+            "this session."
         ),
     )
     async def request_human_approval(
         self,
         question: str,
         *,
-        options: tuple[str, ...] = ("approve", "reject"),
+        action_type: str | None = None,
+        options: tuple[str, ...] | None = None,
         deadline: datetime | None = None,
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Post a request and return the typed envelope ``{ok, request_id}``."""
 
+        if options is None:
+            options = (
+                ("reject", "approve_once", "approve_all")
+                if action_type is not None
+                else ("approve", "reject")
+            )
         request = HumanApprovalRequest(
             question=question,
             options=options,
+            action_type=action_type,
             requester_agent_id=(
                 self._agent.agent_id if self._agent is not None else None
             ),
@@ -248,6 +272,7 @@ class HumanApprovalCapability(AgentCapability):
             metadata={
                 "request_id": request.request_id,
                 "requester_agent_id": request.requester_agent_id or "",
+                "action_type": action_type or "",
             },
         )
         self._requests[request.request_id] = request
@@ -346,6 +371,110 @@ class HumanApprovalCapability(AgentCapability):
                 if rid not in self._responses
             ],
         }
+
+    # ---- Approval-gate lookup -----------------------------------------
+    #
+    # ``ApprovalRequiredGuardrail`` calls ``has_active_approval_for``
+    # at dispatch time. The blackboard is the source of truth; the
+    # in-memory ``_responses`` is a cache primed by the event handler.
+
+    _APPROVE_ALL_CHOICES = frozenset({"approve_all"})
+    _APPROVE_ONCE_CHOICES = frozenset({"approve_once"})
+    _APPROVE_COMPAT_CHOICES = frozenset(
+        {"approve", "approved", "yes", "granted", "accept", "accepted"},
+    )
+
+    async def has_active_approval_for(
+        self, action_key: str,
+    ) -> tuple[bool, str | None]:
+        """Return ``(True, request_id)`` if a non-revoked approval
+        covers ``action_key``, else ``(False, None)``.
+
+        Order: ``approve_all`` (no consumption) → unconsumed
+        ``approve_once`` (writes consumption marker) → legacy untyped
+        ``approve`` (no consumption; backwards compat for missions that
+        haven't migrated to ``action_type``).
+        """
+
+        action_lower = action_key.lower()
+        responses = await self._all_known_responses()
+
+        for rid, resp in responses:
+            req = self._requests.get(rid)
+            atype = (req.action_type or "") if req is not None else ""
+            if (
+                resp.choice in self._APPROVE_ALL_CHOICES
+                and atype
+                and atype.lower() in action_lower
+            ):
+                return True, rid
+
+        for rid, resp in responses:
+            req = self._requests.get(rid)
+            atype = (req.action_type or "") if req is not None else ""
+            if (
+                resp.choice in self._APPROVE_ONCE_CHOICES
+                and atype
+                and atype.lower() in action_lower
+            ):
+                if await self._is_consumed(rid):
+                    continue
+                await self._mark_consumed(rid)
+                return True, rid
+
+        for rid, resp in responses:
+            req = self._requests.get(rid)
+            atype = (req.action_type or "") if req is not None else ""
+            if atype:
+                continue  # typed responses already considered above
+            if resp.choice.lower() in self._APPROVE_COMPAT_CHOICES:
+                return True, rid
+
+        return False, None
+
+    async def _all_known_responses(
+        self,
+    ) -> list[tuple[str, HumanApprovalResponse]]:
+        """Snapshot of (request_id, response) pairs — cache plus any
+        blackboard responses the event handler hasn't observed yet
+        (e.g. resumed agent before its event loop catches up)."""
+
+        out: dict[str, HumanApprovalResponse] = dict(self._responses)
+        if not self._requests:
+            return list(out.items())
+        bb = await self.get_blackboard()
+        for rid in self._requests:
+            if rid in out:
+                continue
+            raw = await bb.read(HumanApprovalProtocol.response_key(rid))
+            if raw is None:
+                continue
+            try:
+                resp = HumanApprovalResponse.model_validate(raw)
+            except Exception:  # noqa: BLE001
+                continue
+            self._responses[rid] = resp
+            out[rid] = resp
+        return list(out.items())
+
+    async def _is_consumed(self, request_id: str) -> bool:
+        bb = await self.get_blackboard()
+        marker = await bb.read(
+            HumanApprovalProtocol.consumption_key(request_id),
+        )
+        return marker is not None
+
+    async def _mark_consumed(self, request_id: str) -> None:
+        bb = await self.get_blackboard()
+        await bb.write(
+            HumanApprovalProtocol.consumption_key(request_id),
+            {
+                "request_id": request_id,
+                "consumed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            tags={"human_approval", "consumed"},
+            metadata={"request_id": request_id},
+        )
 
     # ---- Receive side -------------------------------------------------
 

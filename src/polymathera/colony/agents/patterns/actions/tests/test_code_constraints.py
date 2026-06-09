@@ -141,32 +141,14 @@ async def test_browse_count_is_textual_not_path_aware() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _approve_call(action_key: str = "HumanApprovalCapability.get_response") -> CallRecord:
-    """Synthesise a successful approval-poll CallRecord matching
-    ``_default_is_approval_granted``."""
-
-    return CallRecord(
-        action_key=action_key,
-        params={"request_id": "r"},
-        start_wall=1.0,
-        end_wall=1.1,
-        status="ok",
-        result={
-            "ok": True,
-            "state": "ready",
-            "response": {"request_id": "r", "choice": "approve"},
-        },
-    )
-
-
 def test_noguardrail_has_no_advisory() -> None:
     assert NoGuardrail().planner_context_advisory([]) is None
 
 
-def test_approval_advisory_present_when_gate_unsatisfied() -> None:
-    """The propose → approve → apply sequence must surface in
-    planner context whenever an approval-gated prefix is configured
-    and no ``approve`` choice has landed yet."""
+def test_approval_advisory_describes_the_full_flow() -> None:
+    """The advisory is standing context — it always surfaces when
+    there's a gated prefix, naming the action_type-scoped flow
+    (request_human_approval → poll → approve_once / approve_all)."""
 
     g = ApprovalRequiredGuardrail(
         approval_required_action_prefixes=(
@@ -176,28 +158,12 @@ def test_approval_advisory_present_when_gate_unsatisfied() -> None:
     advisory = g.planner_context_advisory([])
     assert advisory is not None
     assert "request_human_approval" in advisory
-    assert "get_response" in advisory
-    assert "dry_run=True" in advisory
-    assert "dry_run=False" in advisory
-
-
-def test_approval_advisory_silent_after_approval_landed() -> None:
-    """Once a positive ``approve`` choice is in call_history, the
-    gate would let the apply through — the advisory becomes noise
-    and must be ``None``."""
-
-    g = ApprovalRequiredGuardrail(
-        approval_required_action_prefixes=(
-            "DesignProcessCapability.sync_roadmap_with_github",
-        ),
-    )
-    assert g.planner_context_advisory([_approve_call()]) is None
+    assert "action_type" in advisory
+    assert "approve_once" in advisory
+    assert "approve_all" in advisory
 
 
 def test_approval_advisory_silent_with_empty_prefix_list() -> None:
-    """An approval guardrail mounted with no gated prefixes is a
-    no-op; the advisory should reflect that."""
-
     g = ApprovalRequiredGuardrail(approval_required_action_prefixes=())
     assert g.planner_context_advisory([]) is None
 
@@ -275,10 +241,10 @@ def test_composite_advisory_returns_none_when_all_inner_silent() -> None:
     assert composite.planner_context_advisory([]) is None
 
 
-def test_composite_advisory_silent_after_approval_landed() -> None:
-    """End-to-end: a composite that only carries an approval gate
-    goes silent once approval has landed. Important so the planner
-    isn't told "you need to approve" AFTER having already done so."""
+def test_composite_advisory_surfaces_inner_approval_advisory() -> None:
+    """A composite that carries an approval gate must propagate the
+    advisory from its inner guardrail. The advisory is standing
+    context — it does not depend on call_history state."""
 
     composite = CompositeGuardrail(
         ApprovalRequiredGuardrail(
@@ -287,4 +253,6 @@ def test_composite_advisory_silent_after_approval_landed() -> None:
             ),
         ),
     )
-    assert composite.planner_context_advisory([_approve_call()]) is None
+    advisory = composite.planner_context_advisory([])
+    assert advisory is not None
+    assert "request_human_approval" in advisory

@@ -334,6 +334,12 @@ class HumanApprovalProtocol(BlackboardProtocol):
         """Key for the user's typed response."""
         return f"human_approval:response:{request_id}"
 
+    @staticmethod
+    def consumption_key(request_id: str) -> str:
+        """Key marking an ``approve_once`` response as already consumed
+        by one gated dispatch. Idempotent; presence-only payload."""
+        return f"human_approval:consumed:{request_id}"
+
     # --- Pattern construction ---
 
     @staticmethod
@@ -345,6 +351,10 @@ class HumanApprovalProtocol(BlackboardProtocol):
     def response_pattern() -> str:
         """Pattern matching all human-approval responses in the session."""
         return "human_approval:response:*"
+
+    @staticmethod
+    def consumption_pattern() -> str:
+        return "human_approval:consumed:*"
 
     # --- Key parsing ---
 
@@ -2647,3 +2657,60 @@ class MentionEventProtocol(BlackboardProtocol):
             "issue_number": issue_number,
             "comment_id": comment_id,
         }
+
+
+class AgentDiagnosticProtocol(BlackboardProtocol):
+    """Typed events for cross-agent visibility of internal failure
+    patterns (guardrail block streaks, LLM failure streaks, polling
+    timeouts, etc.). Producers: action policies, capabilities.
+    Consumers: parents, observers via ``@event_handler``.
+
+    Scope: SESSION — so a parent agent (SessionAgent) can subscribe
+    once and see diagnostic events from every child coordinator
+    spawned into the same session. The key carries ``agent_id`` so
+    consumers can filter by producer.
+
+    Key shape: ``agent:diagnostic:<agent_id>:<kind>:<sequence>``.
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.SESSION
+
+    _PREFIX = "agent:diagnostic:"
+
+    @staticmethod
+    def event_key(agent_id: str, kind: str, sequence: int) -> str:
+        return f"{AgentDiagnosticProtocol._PREFIX}{agent_id}:{kind}:{sequence}"
+
+    @staticmethod
+    def event_pattern(agent_id: str | None = None) -> str:
+        return f"{AgentDiagnosticProtocol._PREFIX}{agent_id or '*'}:*:*"
+
+    @staticmethod
+    def parse_event_key(key: str) -> dict[str, str]:
+        if not key.startswith(AgentDiagnosticProtocol._PREFIX):
+            raise ValueError(
+                f"Not an AgentDiagnostic key: {key!r}",
+            )
+        rest = key[len(AgentDiagnosticProtocol._PREFIX):]
+        parts = rest.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                f"Malformed AgentDiagnostic key: {key!r}",
+            )
+        agent_id, kind, sequence = parts
+        return {
+            "agent_id": agent_id,
+            "kind": kind,
+            "sequence": sequence,
+        }
+
+
+# Diagnostic kinds — open enum. Add a constant per new kind so the
+# producer/consumer contract stays grep-able. v1 ships one kind; the
+# rest are documented for future producers.
+DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK = "guardrail_block_streak"
+# Reserved for future producers:
+# DIAGNOSTIC_CODE_VALIDATION_STREAK = "code_validation_streak"
+# DIAGNOSTIC_LLM_CALL_FAILURE_STREAK = "llm_call_failure_streak"
+# DIAGNOSTIC_POLLING_TIMEOUT = "polling_timeout"
+# DIAGNOSTIC_BUDGET_THRESHOLD = "budget_threshold_crossed"

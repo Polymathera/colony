@@ -1192,55 +1192,15 @@ class ArgsAwareTemporalOrderGuardrail(RuntimeGuardrail):
         )
 
 
-_DEFAULT_APPROVE_CHOICES = frozenset({
-    "approve", "approved", "yes", "granted", "accept", "accepted",
-})
-
-
-def _default_is_approval_granted(record: CallRecord) -> bool:
-    """Match :class:`HumanApprovalCapability`'s native shape: a
-    successful ``get_response`` call whose envelope is
-    ``{ok: True, state: "ready", response: {choice: "..."}}`` with
-    ``choice`` in :data:`_DEFAULT_APPROVE_CHOICES` (case-insensitive).
-
-    The chat-UI's Approval modal POSTs the operator's choice into
-    ``HumanApprovalCapability``; the capability surfaces it via the
-    next ``get_response`` poll's typed envelope. No separate
-    ``approval_granted`` action is emitted, so this predicate keys
-    off the envelope shape directly rather than the action key.
-    Custom flows that need a different shape can override via
-    :class:`ApprovalRequiredGuardrail`'s ``is_approval_granted``
-    constructor kwarg.
-    """
-
-    if record.status != "ok":
-        return False
-    if "get_response" not in record.action_key.lower():
-        return False
-    result = record.result
-    if not isinstance(result, dict):
-        return False
-    response = result.get("response")
-    if not isinstance(response, dict):
-        return False
-    choice = response.get("choice")
-    if not isinstance(choice, str):
-        return False
-    return choice.lower() in _DEFAULT_APPROVE_CHOICES
-
-
 class ApprovalRequiredGuardrail(RuntimeGuardrail):
     """Block actions whose key prefixes are gated behind a human
     approval round.
 
-    Reads ``approval_required_action_prefixes`` and treats any prior
-    call satisfying ``is_approval_granted`` as the unblock signal.
-    The default matcher (:func:`_default_is_approval_granted`) keys
-    off :class:`HumanApprovalCapability`'s ``get_response`` returning
-    a positive choice; custom approval flows can pass a predicate
-    over :class:`CallRecord` to match a different shape (e.g. a
-    direct ``approval_granted`` action, or a result-envelope field
-    other than ``choice``).
+    Reads ``approval_required_action_prefixes`` and asks
+    :meth:`HumanApprovalCapability.has_active_approval_for` whether a
+    non-revoked approval covers the action_key. The capability is
+    resolved via :meth:`bind_speaker` when the action policy
+    initialises.
 
     ``request_human_approval`` itself is not a substitute: issuing
     the request is not the same as the operator approving it.
@@ -1254,24 +1214,37 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
     def __init__(
         self,
         approval_required_action_prefixes: Sequence[str],
-        *,
-        is_approval_granted: (
-            Callable[["CallRecord"], bool] | None
-        ) = None,
     ):
         self._gated = tuple(approval_required_action_prefixes)
-        self._is_granted = (
-            is_approval_granted or _default_is_approval_granted
+        # Filled by ``bind_speaker``; the guardrail constructor runs
+        # at session-create time, before the agent exists.
+        self._approval_cap_resolver: Callable[[], Any] | None = None
+
+    def bind_speaker(self, agent):
+        """Capture a thunk that resolves the agent's
+        ``HumanApprovalCapability`` lazily — at construction time it
+        may not be mounted yet."""
+
+        if agent is None:
+            self._approval_cap_resolver = None
+            return
+
+        def _resolve():
+            from ..capabilities.human_approval import (
+                HumanApprovalCapability,
+            )
+            return agent.get_capability_by_type(HumanApprovalCapability)
+
+        self._approval_cap_resolver = _resolve
+
+    def _matching_prefix(self, action_key: str) -> str | None:
+        return next(
+            (p for p in self._gated if p.lower() in action_key.lower()),
+            None,
         )
 
     async def check(self, action_key, params, call_history):
-        gated = next(
-            (
-                prefix for prefix in self._gated
-                if prefix.lower() in action_key.lower()
-            ),
-            None,
-        )
+        gated = self._matching_prefix(action_key)
         if gated is None:
             return GuardrailDecision(allowed=True)
         # ``dry_run=True`` proposals never mutate side effects; the
@@ -1282,20 +1255,31 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
         dry_run = params.get("dry_run")
         if dry_run is True:
             return GuardrailDecision(allowed=True)
-        if any(self._is_granted(c) for c in call_history):
-            return GuardrailDecision(allowed=True)
+
+        cap = (
+            self._approval_cap_resolver()
+            if self._approval_cap_resolver is not None
+            else None
+        )
+        if cap is not None:
+            allowed, _ = await cap.has_active_approval_for(action_key)
+            if allowed:
+                return GuardrailDecision(allowed=True)
+
         return GuardrailDecision(
             allowed=False,
             reason=(
                 f"'{action_key}' is gated behind human approval "
-                f"(matched prefix '{gated}'); no successful "
-                f"approval signal in this iteration."
+                f"(matched prefix '{gated}'); no recorded approval "
+                f"covers this action."
             ),
             suggestion=(
                 "Call ``request_human_approval`` with the proposal "
-                "first, poll ``get_response`` until the operator "
-                "answers ``Approve``, THEN re-run the action with "
-                "``dry_run=False``."
+                "first (set ``action_type`` to gate the "
+                "approve_once / approve_all UI), poll "
+                "``get_response`` until the operator answers "
+                "``approve_once`` or ``approve_all``, THEN re-run "
+                "the action with ``dry_run=False``."
             ),
         )
 
@@ -1303,15 +1287,9 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
         """Tell the planner the propose → approve → apply sequence
         BEFORE it proposes a mutating call, so the loop doesn't have
         to bounce off ``check``'s block message to learn it.
-
-        Returns ``None`` once an ``approve`` choice is observed in
-        ``call_history`` — at that point the gate would let the
-        apply through and the advisory would be noise.
         """
 
         if not self._gated:
-            return None
-        if any(self._is_granted(c) for c in call_history):
             return None
         gated_render = ", ".join(f"``{p}``" for p in self._gated)
         return (
@@ -1322,13 +1300,14 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
             "(1) call the action with ``dry_run=True`` to compute the "
             "proposal; "
             "(2) call ``HumanApprovalCapability.request_human_approval("
-            "question=..., extra=<proposal>)``; "
+            "action_type='<gated_prefix_short_name>', question=..., "
+            "extra=<proposal>)``; "
             "(3) poll ``HumanApprovalCapability.get_response("
-            "request_id=...)`` until ``choice`` is ``approve``; "
+            "request_id=...)`` until the operator answers "
+            "``approve_once`` or ``approve_all``; "
             "(4) re-call the action with ``dry_run=False`` to apply. "
-            "Calling the action with ``dry_run=False`` before step "
-            "(3) succeeds will be blocked by the runtime guardrail "
-            "and burn an iteration."
+            "``approve_all`` covers every future dispatch of the same "
+            "``action_type`` in this session — no re-prompt."
         )
 
 

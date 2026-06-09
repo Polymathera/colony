@@ -520,6 +520,7 @@ async def _backfill_chat_history_from_blackboard(
                 "run_status": payload.get("run_status"),
                 "controls": payload.get("controls"),
                 "kind": payload.get("kind"),
+                "action_type": payload.get("action_type"),
             }
             try:
                 await chat_store.save_message(chat_msg)
@@ -581,6 +582,10 @@ async def _listen_for_agent_messages(
                 # ``agent_question`` (replies routed via the chat
                 # WebSocket). Absent for legacy messages.
                 "kind": payload.get("kind"),
+                # Short action name for typed approvals; drives the
+                # 3-choice button labels on the frontend. Absent for
+                # legacy untyped approve/reject requests.
+                "action_type": payload.get("action_type"),
                 # Structured attachments emitted by ``respond_to_user``
                 # / ``respond_to_user_with_table`` / ``respond_to_user_with_diff``. The
                 # chat UI dispatches each attachment to a typed

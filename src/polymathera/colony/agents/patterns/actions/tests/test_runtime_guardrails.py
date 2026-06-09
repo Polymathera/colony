@@ -234,9 +234,31 @@ async def test_args_aware_respects_max_age_seconds() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_approval_guardrail_dry_run_is_always_allowed() -> None:
-    """``dry_run=True`` is never gated — proposals don't mutate."""
+class _FakeCap:
+    """Stub for ``HumanApprovalCapability.has_active_approval_for``."""
 
+    def __init__(self, allow: bool = False, rid: str | None = None) -> None:
+        self.allow = allow
+        self.rid = rid
+        self.queried: list[str] = []
+
+    async def has_active_approval_for(
+        self, action_key: str,
+    ) -> tuple[bool, str | None]:
+        self.queried.append(action_key)
+        return self.allow, self.rid
+
+
+def _bind_cap(g: ApprovalRequiredGuardrail, cap) -> None:
+    class _A:
+        agent_id = "agent-test"
+
+        def get_capability_by_type(self, _cls):
+            return cap
+    g.bind_speaker(_A())
+
+
+async def test_approval_guardrail_dry_run_is_always_allowed() -> None:
     g = ApprovalRequiredGuardrail(
         approval_required_action_prefixes=[
             "DesignProcessCapability.bootstrap_roadmap_from_objectives",
@@ -252,7 +274,9 @@ async def test_approval_guardrail_dry_run_is_always_allowed() -> None:
     assert d.allowed
 
 
-async def test_approval_guardrail_blocks_apply_without_approval() -> None:
+async def test_approval_guardrail_blocks_apply_without_binding() -> None:
+    """No bound capability → no approval state → block."""
+
     g = ApprovalRequiredGuardrail(
         approval_required_action_prefixes=[
             "DesignProcessCapability.bootstrap_roadmap_from_objectives",
@@ -266,152 +290,60 @@ async def test_approval_guardrail_blocks_apply_without_approval() -> None:
         call_history=[],
     )
     assert not d.allowed
-    assert "gated behind human approval" in d.reason
+    assert "no recorded approval" in d.reason
     assert "request_human_approval" in d.suggestion
 
 
-async def test_approval_guardrail_allows_apply_after_granted() -> None:
-    """The default predicate keys off ``get_response`` returning a
-    positive ``choice`` — matches HumanApprovalCapability's actual
-    shape, not a hypothetical ``approval_granted`` action."""
-
+async def test_approval_guardrail_blocks_when_cap_reports_no_approval() -> None:
     g = ApprovalRequiredGuardrail(
         approval_required_action_prefixes=[
             "DesignProcessCapability.bootstrap_roadmap_from_objectives",
         ],
     )
-    history = [CallRecord(
-        action_key="HumanApprovalCapability.get_response",
-        params={"request_id": "appr_xyz"},
-        end_wall=time.time(),
-        status="ok",
-        result={
-            "ok": True,
-            "state": "ready",
-            "response": {
-                "request_id": "appr_xyz", "choice": "Approve",
-            },
-        },
-    )]
+    cap = _FakeCap(allow=False)
+    _bind_cap(g, cap)
     d = await g.check(
         action_key=(
             "DesignProcessCapability.bootstrap_roadmap_from_objectives"
         ),
         params={"dry_run": False},
-        call_history=history,
+        call_history=[],
+    )
+    assert not d.allowed
+    assert cap.queried == [
+        "DesignProcessCapability.bootstrap_roadmap_from_objectives",
+    ]
+
+
+async def test_approval_guardrail_allows_when_cap_reports_approval() -> None:
+    g = ApprovalRequiredGuardrail(
+        approval_required_action_prefixes=[
+            "DesignProcessCapability.bootstrap_roadmap_from_objectives",
+        ],
+    )
+    _bind_cap(g, _FakeCap(allow=True, rid="appr_xyz"))
+    d = await g.check(
+        action_key=(
+            "DesignProcessCapability.bootstrap_roadmap_from_objectives"
+        ),
+        params={"dry_run": False},
+        call_history=[],
     )
     assert d.allowed
 
 
-async def test_approval_guardrail_ignores_rejected_choice() -> None:
-    """A ``get_response`` returning ``choice='Reject'`` is not
-    treated as granted — the operator's no must stick."""
-
-    g = ApprovalRequiredGuardrail(
-        approval_required_action_prefixes=[
-            "DesignProcessCapability.bootstrap_roadmap_from_objectives",
-        ],
-    )
-    history = [CallRecord(
-        action_key="HumanApprovalCapability.get_response",
-        params={"request_id": "appr_xyz"},
-        end_wall=time.time(),
-        status="ok",
-        result={
-            "ok": True,
-            "state": "ready",
-            "response": {
-                "request_id": "appr_xyz", "choice": "Reject",
-            },
-        },
-    )]
-    d = await g.check(
-        action_key=(
-            "DesignProcessCapability.bootstrap_roadmap_from_objectives"
-        ),
-        params={"dry_run": False},
-        call_history=history,
-    )
-    assert not d.allowed
-
-
-async def test_approval_guardrail_ignores_pending_response() -> None:
-    """A ``get_response`` poll that returned None / empty (no decision
-    yet) is not treated as granted."""
-
-    g = ApprovalRequiredGuardrail(
-        approval_required_action_prefixes=[
-            "DesignProcessCapability.bootstrap_roadmap_from_objectives",
-        ],
-    )
-    history = [CallRecord(
-        action_key="HumanApprovalCapability.get_response",
-        params={"request_id": "appr_xyz"},
-        end_wall=time.time(),
-        status="ok",
-        result=None,
-    )]
-    d = await g.check(
-        action_key=(
-            "DesignProcessCapability.bootstrap_roadmap_from_objectives"
-        ),
-        params={"dry_run": False},
-        call_history=history,
-    )
-    assert not d.allowed
-
-
-async def test_approval_guardrail_ignores_failed_get_response() -> None:
-    """``status='error'`` on the get_response record is treated as
-    'not granted'."""
-
-    g = ApprovalRequiredGuardrail(
-        approval_required_action_prefixes=[
-            "DesignProcessCapability.bootstrap_roadmap_from_objectives",
-        ],
-    )
-    history = [CallRecord(
-        action_key="HumanApprovalCapability.get_response",
-        params={"request_id": "appr_xyz"},
-        end_wall=time.time(),
-        status="error",
-        result={  # ignored: status != ok
-            "ok": True,
-            "state": "ready",
-            "response": {"choice": "Approve"},
-        },
-    )]
-    d = await g.check(
-        action_key=(
-            "DesignProcessCapability.bootstrap_roadmap_from_objectives"
-        ),
-        params={"dry_run": False},
-        call_history=history,
-    )
-    assert not d.allowed
-
-
-async def test_approval_guardrail_custom_predicate() -> None:
-    """Custom ``is_approval_granted`` lets non-HumanApprovalCapability
-    approval flows plug in without subclassing."""
-
-    def _custom(record: CallRecord) -> bool:
-        return record.action_key == "custom.approval" and record.status == "ok"
-
+async def test_approval_guardrail_bind_speaker_none_clears_resolver() -> None:
     g = ApprovalRequiredGuardrail(
         approval_required_action_prefixes=["X.gated"],
-        is_approval_granted=_custom,
     )
-    history = [CallRecord(
-        action_key="custom.approval", params={}, end_wall=time.time(),
-        status="ok",
-    )]
+    _bind_cap(g, _FakeCap(allow=True))
+    g.bind_speaker(None)
     d = await g.check(
         action_key="X.gated.apply",
         params={"dry_run": False},
-        call_history=history,
+        call_history=[],
     )
-    assert d.allowed
+    assert not d.allowed
 
 
 async def test_approval_guardrail_ungated_action_passes() -> None:

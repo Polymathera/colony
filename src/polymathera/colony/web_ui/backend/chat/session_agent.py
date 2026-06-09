@@ -27,7 +27,12 @@ from polymathera.colony.agents.metadata_parameters import (
 from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from polymathera.colony.agents.models import AgentMetadata, AgentSuspensionState, RunContext, PolicyREPL
 from polymathera.colony.agents.blackboard import BlackboardEvent
-from polymathera.colony.agents.blackboard.protocol import ActionPolicyLifecycleProtocol
+from polymathera.colony.agents.blackboard.protocol import (
+    ActionPolicyLifecycleProtocol,
+    AgentDiagnosticProtocol,
+    DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK,
+    HumanApprovalProtocol,
+)
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult, PROCESSED
 from polymathera.colony.agents.patterns.actions import action_executor
 from polymathera.colony.agents.patterns.actions.repl import (
@@ -195,26 +200,23 @@ class SessionOrchestratorCapability(AgentCapability):
             capability_key=capability_key,
             app_name=app_name,
         )
-        self._lifecycle_relay_task: asyncio.Task | None = None
-        self._human_approval_relay_task: asyncio.Task | None = None
-        self._human_approval_blackboard: Any | None = None
 
     @override
     async def initialize(self) -> None:
         """Spin up the policy→chat lifecycle bridge.
 
         ``ActionPolicyLifecycleProtocol`` events are emitted by the
-        agent's action policy on the agent's primary blackboard. We
-        cannot route them through the policy's own event queue (that
-        would re-enter ``plan_step`` on every emission and form a
-        feedback loop), so a dedicated background task subscribes
-        directly and translates each event into the corresponding
-        chat-blackboard record. The chat WebSocket relay then
-        forwards those records to the browser.
-
-        The task is cancelled on ``shutdown``. Failures inside the
-        loop are logged but never propagated — the chat UI is a
-        downstream consumer; its absence must not break the agent.
+        agent's action policy on the agent's primary blackboard. They
+        cannot route through the policy's own normal event queue —
+        that would re-enter ``plan_step`` on every emission and form a
+        feedback loop on this agent's own actions. Instead the
+        :meth:`stream_events_to_queue` override below subscribes them
+        on the policy's high-priority queue, where
+        :meth:`handle_lifecycle_event` (decorated
+        ``priority="high"``) translates each event into the
+        corresponding chat-blackboard record on the dedicated
+        ``_run_high_priority_loop`` task. The chat WebSocket relay
+        then forwards those records to the browser.
 
         Also performs the first refresh of the dynamic L4 mission /
         agent registry the LLM planner reads from
@@ -252,40 +254,6 @@ class SessionOrchestratorCapability(AgentCapability):
                 "available_tools refresh failed; planner will see "
                 "no L4 tools until the next user message",
             )
-        self._lifecycle_relay_task = asyncio.create_task(
-            self._relay_policy_lifecycle_to_chat(),
-            name=f"policy_lifecycle_relay:{self._agent.agent_id}",
-        )
-        self._human_approval_relay_task = asyncio.create_task(
-            self._relay_human_approval_to_chat(),
-            name=f"human_approval_relay:{self._agent.agent_id}",
-        )
-
-    async def shutdown(self) -> None:
-        """Cancel the lifecycle + human-approval relay tasks. Idempotent."""
-        if self._lifecycle_relay_task is not None:
-            self._lifecycle_relay_task.cancel()
-            try:
-                await self._lifecycle_relay_task
-            except (asyncio.CancelledError, Exception):  # pragma: no cover
-                pass
-            self._lifecycle_relay_task = None
-        if self._human_approval_relay_task is not None:
-            self._human_approval_relay_task.cancel()
-            try:
-                await self._human_approval_relay_task
-            except (asyncio.CancelledError, Exception):  # pragma: no cover
-                pass
-            self._human_approval_relay_task = None
-        if self._human_approval_blackboard is not None:
-            try:
-                await self._human_approval_blackboard.stop()
-            except Exception:  # pragma: no cover
-                logger.exception(
-                    "SessionOrchestratorCapability: failed to stop "
-                    "human-approval blackboard",
-                )
-            self._human_approval_blackboard = None
 
     def _refresh_available_missions(self) -> None:
         """Rebuild ``self.agent.metadata.parameters["available_missions"]``
@@ -406,110 +374,14 @@ class SessionOrchestratorCapability(AgentCapability):
                 }
         self._agent.metadata.parameters[self.AVAILABLE_TOOLS_KEY] = available
 
-    async def _relay_policy_lifecycle_to_chat(self) -> None:
-        """Subscribe to policy lifecycle events on the agent's primary
-        blackboard and translate each into a chat-blackboard write.
 
-        See :class:`ActionPolicyLifecycleProtocol` for the event
-        catalogue. The translation here is the only place that knows
-        about both worlds — the policy emits generic events, the chat
-        UI consumes chat-shaped records, and this method bridges them.
-        """
-        try:
-            agent_bb = await self._agent.get_blackboard()
-            chat_bb = await self.get_blackboard()
-        except Exception as e:
-            logger.warning(
-                "SessionOrchestratorCapability: lifecycle relay "
-                "failed to acquire blackboards (%s); chat-side action "
-                "status will not appear", e,
-            )
-            return
-        try:
-            async for event in agent_bb.stream_events(
-                pattern=ActionPolicyLifecycleProtocol.all_pattern(),
-                event_types={"write"},
-                timeout=None,
-            ):
-                try:
-                    await self._handle_lifecycle_event(event, chat_bb)
-                except Exception as e:  # pragma: no cover — defensive
-                    logger.debug(
-                        "lifecycle relay translation failed for %s: %s",
-                        event.key, e,
-                    )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # pragma: no cover — defensive
-            logger.error(
-                "SessionOrchestratorCapability: lifecycle relay loop "
-                "crashed: %s", e, exc_info=True,
-            )
-
-    async def _relay_human_approval_to_chat(self) -> None:
-        """Subscribe to ``HumanApprovalProtocol`` requests on the
-        session's ``human_approval`` scope and translate each into a
-        chat-blackboard agent_question record.
-
-        The request payload carries ``options`` and ``request_id``; we
-        write a ``chat:agent:{session_agent_id}:{message_id}`` record
-        with ``awaiting_reply=True`` and ``response_options`` so the
-        existing chat WebSocket relay forwards it as
-        ``agent_question`` to the browser. The frontend recognises
-        ``kind == "human_approval"`` and routes the user's click to
-        the HTTP endpoint instead of the WebSocket reply path —
-        keeping the agent's event handler the single point of truth
-        for the typed response.
-        """
-
-        from polymathera.colony.agents.blackboard.protocol import (
-            HumanApprovalProtocol,
-        )
-        from polymathera.colony.agents.patterns.capabilities.human_approval import (
-            HumanApprovalCapability,
-        )
-
-        try:
-            human_bb = await self.get_blackboard(
-                scope_id=get_scope_prefix(
-                    BlackboardScope.SESSION,
-                    namespace=HumanApprovalCapability.DEFAULT_NAMESPACE,
-                ),
-                enable_events=True,
-            )
-            self._human_approval_blackboard = human_bb
-            chat_bb = await self.get_blackboard()
-        except Exception as e:
-            logger.warning(
-                "SessionOrchestratorCapability: human-approval relay "
-                "failed to acquire blackboards (%s); approval requests "
-                "will not surface in chat", e,
-            )
-            return
-        try:
-            async for event in human_bb.stream_events(
-                pattern=HumanApprovalProtocol.request_pattern(),
-                event_types={"write"},
-                timeout=None,
-            ):
-                try:
-                    await self._handle_human_approval_request(event, chat_bb)
-                except Exception as e:  # pragma: no cover — defensive
-                    logger.debug(
-                        "human-approval relay translation failed for %s: %s",
-                        event.key, e,
-                    )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # pragma: no cover — defensive
-            logger.error(
-                "SessionOrchestratorCapability: human-approval relay "
-                "loop crashed: %s", e, exc_info=True,
-            )
-
-    async def _handle_human_approval_request(
-        self, event: BlackboardEvent, chat_bb,
-    ) -> None:
+    @event_handler(
+        pattern=HumanApprovalProtocol.request_pattern(),
+        priority="high",
+    )
+    async def handle_human_approval_request(
+        self, event: BlackboardEvent, _repl: Any,
+    ) -> EventProcessingResult | None:
         """Translate one ``HumanApprovalRequest`` into a chat agent_question.
 
         The chat scope's existing WebSocket relay
@@ -520,17 +392,15 @@ class SessionOrchestratorCapability(AgentCapability):
         the HTTP endpoint rather than the WebSocket reply lane.
         """
 
-        from polymathera.colony.agents.blackboard.protocol import (
-            HumanApprovalProtocol,
-        )
-
         try:
             request_id = HumanApprovalProtocol.parse_request_key(event.key)
         except ValueError:
-            return
+            return PROCESSED
+        chat_bb = await self.get_blackboard()
         payload = event.value if isinstance(event.value, dict) else {}
         question = payload.get("question") or "(empty approval request)"
         options = payload.get("options") or ["approve", "reject"]
+        action_type = payload.get("action_type") or None
         requester_agent_id = (
             payload.get("requester_agent_id")
             or self._agent.agent_id
@@ -548,16 +418,22 @@ class SessionOrchestratorCapability(AgentCapability):
                 "content": question,
                 "request_id": request_id,
                 "response_options": list(options),
+                "action_type": action_type,
                 "awaiting_reply": True,
                 "kind": "human_approval",
                 "timestamp": time.time(),
                 "extra": payload.get("extra") or {},
             },
         )
+        return PROCESSED
 
-    async def _handle_lifecycle_event(
-        self, event: BlackboardEvent, chat_bb,
-    ) -> None:
+    @event_handler(
+        pattern=ActionPolicyLifecycleProtocol.all_pattern(),
+        priority="high",
+    )
+    async def handle_lifecycle_event(
+        self, event: BlackboardEvent, _repl: Any,
+    ) -> EventProcessingResult | None:
         """Translate one lifecycle event into a chat-blackboard write.
 
         Action started/completed → ``chat:action_status:*`` (drives
@@ -572,6 +448,7 @@ class SessionOrchestratorCapability(AgentCapability):
         ``chat:agent:*`` system_failure message that lands in the
         user's chat history alongside normal agent replies.
         """
+        chat_bb = await self.get_blackboard()
         key = event.key
         payload = event.value if isinstance(event.value, dict) else {}
         agent_id = payload.get("agent_id") or self._agent.agent_id
@@ -588,7 +465,7 @@ class SessionOrchestratorCapability(AgentCapability):
                     "started_at": payload.get("started_at"),
                 },
             )
-            return
+            return PROCESSED
 
         if key.startswith(ActionPolicyLifecycleProtocol._ACTION_COMPLETED):
             action_id = payload.get("action_id") or "?"
@@ -605,7 +482,7 @@ class SessionOrchestratorCapability(AgentCapability):
                     "error": payload.get("error"),
                 },
             )
-            return
+            return PROCESSED
 
         if ActionPolicyLifecycleProtocol.is_codegen_retry_key(key):
             # ``codegen_retry`` carries both progress events (``finished=False``)
@@ -650,7 +527,7 @@ class SessionOrchestratorCapability(AgentCapability):
                         "started_at": payload.get("ts"),
                     },
                 )
-            return
+            return PROCESSED
 
         if ActionPolicyLifecycleProtocol.is_codegen_failed_key(key):
             attempts = payload.get("attempts", 0)
@@ -693,6 +570,88 @@ class SessionOrchestratorCapability(AgentCapability):
                     "kind": "system_failure",
                 },
             )
+            return PROCESSED
+
+        return PROCESSED
+
+    @override
+    async def stream_events_to_queue(
+        self,
+        event_queue: asyncio.Queue[BlackboardEvent],
+        *,
+        high_priority_queue: asyncio.Queue[BlackboardEvent] | None = None,
+    ) -> None:
+        """Add the cross-scope subscriptions this capability's
+        ``@event_handler`` methods need.
+
+        Routing mirrors the base method's ``target_for_high`` rule so
+        ``priority="high"`` patterns reach the dedicated
+        ``_run_high_priority_loop`` task (side-effect mirrors that
+        must NOT re-enter the planner) while normal-priority patterns
+        reach the main planning queue (real planner triggers).
+
+        - Agent's primary scope → ``ActionPolicyLifecycleProtocol``
+          events for :meth:`handle_lifecycle_event` (HIGH — same-scope
+          side-effect mirror; routing through the main queue would
+          feed the planner its own action_started/completed events
+          and form an infinite re-iteration loop, see
+          ``session_agent_lifecycle_feedback_loop_audit.md``).
+        - Session's ``human_approval`` scope →
+          ``HumanApprovalProtocol`` requests for
+          :meth:`handle_human_approval_request` (HIGH — pure chat
+          mirror, no planner context bound).
+        - Session's ``agent_diagnostic`` scope →
+          ``AgentDiagnosticProtocol`` events for
+          :meth:`handle_agent_diagnostic` (NORMAL — produces
+          ``EventProcessingResult`` planner context the LLM must see
+          on its next iteration; producers are CHILD agents so there
+          is no feedback loop).
+        """
+
+        await super().stream_events_to_queue(
+            event_queue, high_priority_queue=high_priority_queue,
+        )
+        from polymathera.colony.agents.patterns.actions.code_generation import (
+            BlockStreakTracker,
+        )
+        from polymathera.colony.agents.patterns.capabilities.human_approval import (
+            HumanApprovalCapability,
+        )
+
+        target_for_high = high_priority_queue or event_queue
+
+        agent_bb = await self._agent.get_blackboard()
+        agent_bb.stream_events_to_queue(
+            target_for_high,
+            pattern=ActionPolicyLifecycleProtocol.all_pattern(),
+            event_types={"write"},
+        )
+
+        human_bb = await self.get_blackboard(
+            scope_id=get_scope_prefix(
+                BlackboardScope.SESSION,
+                namespace=HumanApprovalCapability.DEFAULT_NAMESPACE,
+            ),
+            enable_events=True,
+        )
+        human_bb.stream_events_to_queue(
+            target_for_high,
+            pattern=HumanApprovalProtocol.request_pattern(),
+            event_types={"write"},
+        )
+
+        diag_bb = await self.get_blackboard(
+            scope_id=get_scope_prefix(
+                BlackboardScope.SESSION,
+                namespace=BlockStreakTracker.DIAGNOSTIC_NAMESPACE,
+            ),
+            enable_events=True,
+        )
+        diag_bb.stream_events_to_queue(
+            event_queue,
+            pattern=AgentDiagnosticProtocol.event_pattern(),
+            event_types={"write"},
+        )
 
     @override
     async def serialize_suspension_state(self, state: AgentSuspensionState) -> AgentSuspensionState:
@@ -1241,6 +1200,44 @@ class SessionOrchestratorCapability(AgentCapability):
 
         # Fallback — shouldn't reach here
         await self._post_response("Could not process @mention.")
+
+    @event_handler(pattern=AgentDiagnosticProtocol.event_pattern())
+    async def handle_agent_diagnostic(
+        self, event: BlackboardEvent, _repl: Any,
+    ) -> EventProcessingResult | None:
+        """Translate one diagnostic event into planner context.
+
+        The relay task ``_relay_agent_diagnostic_to_planner`` bridges
+        events from the session's ``agent_diagnostic`` scope into
+        this policy's event queue; this handler picks them up by
+        pattern and surfaces a structured context binding the LLM
+        sees on its next iteration.
+        """
+
+        try:
+            parsed = AgentDiagnosticProtocol.parse_event_key(event.key)
+        except ValueError:
+            return PROCESSED
+        producer_id = parsed["agent_id"]
+        if self._agent is not None and producer_id == self._agent.agent_id:
+            return PROCESSED
+        kind = parsed["kind"]
+        payload = event.value if isinstance(event.value, dict) else {}
+        if kind == DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK:
+            return EventProcessingResult(
+                context_key=(
+                    f"agent_diagnostic:{producer_id}:{kind}:{parsed['sequence']}"
+                ),
+                context={
+                    "producer_agent_id": producer_id,
+                    "kind": kind,
+                    "action_key": payload.get("action_key"),
+                    "count": payload.get("count"),
+                    "reason": payload.get("reason"),
+                    "suggestion": payload.get("suggestion"),
+                },
+            )
+        return PROCESSED
 
     @event_handler(pattern=SessionChatProtocol.reply_pattern())
     async def handle_user_reply(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult:

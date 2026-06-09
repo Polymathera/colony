@@ -45,7 +45,11 @@ from typing import Any
 from overrides import override
 
 from ...base import Agent
-from ...blackboard.protocol import ActionPolicyLifecycleProtocol
+from ...blackboard.protocol import (
+    ActionPolicyLifecycleProtocol,
+    AgentDiagnosticProtocol,
+    DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK,
+)
 from ...blueprint import ActionPolicyBlueprint, AgentCapabilityBlueprint
 from ...models import (
     Action,
@@ -695,6 +699,90 @@ def _first_action_key(planning_context: PlanningContext) -> str | None:
 # CodeGenerationActionPolicy
 # ---------------------------------------------------------------------------
 
+class BlockStreakTracker:
+
+    DIAGNOSTIC_NAMESPACE = "agent_diagnostic"
+
+    def __init__(self, agent: Agent):
+        self.agent = agent
+        # Guardrail-block streak tracking. When the SAME action_key
+        # is blocked ``_block_streak_threshold`` times in a row, we
+        # emit one ``AgentDiagnosticProtocol`` event (kind=
+        # ``guardrail_block_streak``) so parent agents can react.
+        # Streak resets on a different action_key being blocked or
+        # on any successful dispatch.
+        self._block_streak_action_key: str | None = None
+        self._block_streak_count: int = 0
+        self._block_streak_threshold: int = 3
+        self._block_diagnostic_seq: int = 0
+
+    def reset_streak(self) -> None:
+        """Reset the guardrail block streak tracker. Called on any successful
+        dispatch or when a different action_key is blocked."""
+        self._block_streak_action_key = None
+        self._block_streak_count = 0
+
+    async def track(
+        self, *, action_key: str, reason: str, suggestion: str,
+    ) -> None:
+        """Count consecutive blocks of the same action_key and emit
+        ONE ``guardrail_block_streak`` event when the count crosses
+        the threshold. Subsequent blocks of the same key re-emit
+        every ``threshold`` more blocks (debounced)."""
+
+        if self._block_streak_action_key != action_key:
+            self._block_streak_action_key = action_key
+            self._block_streak_count = 1
+            return
+        self._block_streak_count += 1
+        if self._block_streak_count % self._block_streak_threshold != 0:
+            return
+        await self._emit_diagnostic(
+            kind=DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK,
+            payload={
+                "agent_id": self.agent.agent_id,
+                "action_key": action_key,
+                "count": self._block_streak_count,
+                "reason": reason,
+                "suggestion": suggestion,
+            },
+        )
+
+    async def _emit_diagnostic(
+        self, *, kind: str, payload: dict[str, Any],
+    ) -> None:
+        """Publish one ``AgentDiagnosticProtocol`` event on the
+        session's diagnostic namespace so parents can subscribe.
+        Best-effort."""
+
+        self._block_diagnostic_seq += 1
+        seq = self._block_diagnostic_seq
+        try:
+            from ...scopes import BlackboardScope, get_scope_prefix
+            scope_id = get_scope_prefix(
+                BlackboardScope.SESSION,
+                self.agent,
+                namespace=self.DIAGNOSTIC_NAMESPACE,
+            )
+            bb = await self.agent.get_blackboard(scope_id=scope_id)
+            await bb.write(
+                AgentDiagnosticProtocol.event_key(
+                    self.agent.agent_id, kind, seq,
+                ),
+                payload,
+                tags={"agent_diagnostic", kind},
+                metadata={
+                    "agent_id": self.agent.agent_id,
+                    "kind": kind,
+                },
+            )
+        except Exception as e:  # pragma: no cover — defensive
+            logger.debug(
+                "CodeGenerationActionPolicy: diagnostic emit failed: %s",
+                e,
+            )
+
+
 class CodeGenerationActionPolicy(EventDrivenActionPolicy):
     """Action policy that uses LLM code generation instead of JSON action selection.
 
@@ -804,6 +892,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         # next iteration's planner prompt so the LLM sees the block +
         # the guardrail's suggestion BEFORE proposing its next cell.
         self._last_blocked_dispatches: list[BlockedDispatch] = []
+        self._block_streak_tracker = BlockStreakTracker(agent)
         self._run_call_trace: list[dict[str, Any]] = []
         self._had_internal_failures: bool = False
         self._internal_errors: list[str] = []
@@ -1217,6 +1306,11 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     reason=decision.reason,
                     suggestion=decision.suggestion,
                 ))
+                await self._block_streak_tracker.track(
+                    action_key=action_key,
+                    reason=decision.reason,
+                    suggestion=decision.suggestion,
+                )
                 return ActionResult(
                     success=False,
                     error=f"Blocked by guardrail: {decision.reason}. {decision.suggestion}",
@@ -1322,6 +1416,8 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     if not result.success else None,
                     result=preview,
                 ))
+                if result.success:
+                    self._block_streak_tracker.reset_streak()
 
                 # Per-call trace for timeline view annotations.
                 # Stored both on the policy and in the REPL namespace so

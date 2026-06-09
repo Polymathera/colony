@@ -839,13 +839,23 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                 ),
                 (
                     "Post one HumanApprovalRequest via "
-                    "request_human_approval(question=..., extra={proposal,"
-                    " mode, repo, ...}); WAIT for the user's choice to "
+                    "request_human_approval(action_type='<short_action_name>', "
+                    "question=..., extra={proposal, mode, repo, ...}). "
+                    "Set action_type to the short name of the gated "
+                    "action (e.g. 'sync_roadmap_with_github', "
+                    "'create_decomposition'). The UI then renders "
+                    "three choices: reject / approve_once / "
+                    "approve_all. WAIT for the user's choice to "
                     "surface as planner context"
                 ),
                 (
-                    "On choice='approve': re-call the same action with "
-                    "dry_run=False and report the applied result"
+                    "On choice='approve_once' or 'approve_all': re-call "
+                    "the gated action with dry_run=False. The guardrail "
+                    "consults the persistent approval state on the "
+                    "blackboard — no need to re-poll get_response in "
+                    "the same iteration as the apply. 'approve_all' "
+                    "covers every future dispatch of the same "
+                    "action_type this session"
                 ),
                 (
                     "On choice='reject': exit cleanly without writing; "
@@ -864,9 +874,10 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                     "propose_decompositions on the decomposable "
                     "set — pass the FULL set for joint decomposition "
                     "(with shared_concerns surfacing), or batch by "
-                    "small groups; (5) request_human_approval with "
+                    "small groups; (5) request_human_approval"
+                    "(action_type='create_decomposition', ...) with "
                     "the full parent_proposals + shared_concerns as "
-                    "extra; (6) on approve, call create_decomposition "
+                    "extra; (6) on approve_once/approve_all, call create_decomposition "
                     "once per parent in parent_proposals; (7) report "
                     "the created child issue numbers + the parent "
                     "patches to the user"
@@ -879,10 +890,13 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                     "dry_run=False, propose_task_assignments with "
                     "dry_run=False, bootstrap_roadmap_from_objectives "
                     "with dry_run=False, create_decomposition with "
-                    "dry_run=False) until a HumanApprovalResponse "
-                    "with choice='approve' is observed for the "
-                    "matching request_id. The READ-ONLY decompose "
-                    "primitives (classify_issues_decomposability, "
+                    "dry_run=False) until the guardrail allows it. "
+                    "The guardrail reads persistent approval state "
+                    "from the blackboard; once the user has chosen "
+                    "approve_once or approve_all for the matching "
+                    "action_type, the apply can run in any later "
+                    "iteration. The READ-ONLY decompose primitives "
+                    "(classify_issues_decomposability, "
                     "propose_decompositions) do NOT need approval"
                 ),
                 (

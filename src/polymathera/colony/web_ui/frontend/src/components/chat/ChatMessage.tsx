@@ -100,6 +100,9 @@ export interface ChatMessageData {
   //  - "human_approval" → POST to /sessions/{id}/human_approval/{request_id}/respond
   //  - undefined / other → existing WebSocket reply lane
   kind?: "human_approval" | string;
+  // Short action name (e.g. "create_decomposition"). Present iff the
+  // request was a typed approval — drives the 3-choice button labels.
+  action_type?: string | null;
   // Run lifecycle
   run_status?: "submitted" | "spawning" | "running" | "completed" | "failed";
   // Structured attachments (code / table / diff blocks the agent
@@ -129,8 +132,25 @@ function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function approvalButtonLabel(
+  option: string,
+  actionType: string | null,
+): string {
+  if (option === "reject") return "Reject";
+  if (option === "approve") return "Approve";
+  if (option === "approve_once") {
+    return actionType ? `Approve once: ${actionType}` : "Approve once";
+  }
+  if (option === "approve_all") {
+    return actionType
+      ? `Approve all ${actionType} this session`
+      : "Approve all this session";
+  }
+  return option;
+}
+
 export function ChatMessage({ message, onReply }: ChatMessageProps) {
-  const { role, content, agent_id, agent_type, username, timestamp, request_id, response_options, awaiting_reply, run_status, attachments } = message;
+  const { role, content, agent_id, agent_type, username, timestamp, request_id, response_options, awaiting_reply, run_status, attachments, action_type } = message;
 
   return (
     <div className={cn("rounded-lg border px-3 py-2 text-xs", ROLE_COLORS[role] || ROLE_COLORS.system)}>
@@ -194,9 +214,16 @@ export function ChatMessage({ message, onReply }: ChatMessageProps) {
             <button
               key={i}
               onClick={() => onReply(message, option)}
-              className="rounded border border-primary/30 bg-primary/10 px-2.5 py-1 text-[10px] font-medium text-primary hover:bg-primary/20 transition-colors"
+              className={cn(
+                "rounded border px-2.5 py-1 text-[10px] font-medium transition-colors",
+                option === "reject"
+                  ? "border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20"
+                  : option === "approve_all"
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+                  : "border-primary/30 bg-primary/10 text-primary hover:bg-primary/20",
+              )}
             >
-              {option}
+              {approvalButtonLabel(option, action_type ?? null)}
             </button>
           ))}
         </div>

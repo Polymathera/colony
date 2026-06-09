@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     request_id      TEXT,                    -- for routing user replies back
     response_options JSONB,                  -- multiple-choice options
     awaiting_reply  BOOLEAN DEFAULT FALSE,
+    -- Short action name for typed approvals (e.g. "create_decomposition").
+    -- Drives the 3-choice button labels (Reject / Approve once /
+    -- Approve all <action_type> this session). NULL for untyped
+    -- legacy approve/reject requests.
+    action_type     TEXT,
     -- Run lifecycle
     run_status      TEXT,                    -- 'submitted', 'running', 'completed', 'failed'
     -- Controls sent with the message (JSON blob)
@@ -50,6 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id
 # exists; safe to run on every startup.
 CHAT_MESSAGES_MIGRATIONS_SQL = (
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS attachments JSONB;",
+    "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS action_type TEXT;",
 )
 
 

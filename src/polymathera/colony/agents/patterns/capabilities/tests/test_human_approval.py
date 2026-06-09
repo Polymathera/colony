@@ -298,3 +298,147 @@ async def test_end_to_end_via_blackboard_event_stream(_exec_ctx) -> None:
     envelope = await cap.get_response(rid)
     assert envelope["state"] == "ready"
     assert envelope["response"]["choice"] == "reject"
+
+
+# ---------------------------------------------------------------------------
+# has_active_approval_for — guardrail's lookup path
+# ---------------------------------------------------------------------------
+
+
+async def _seed_response(
+    cap, *, rid: str, choice: str, action_type: str | None,
+) -> None:
+    """Plant a typed request + response on the blackboard, like a
+    real Web UI POST would."""
+
+    cap._requests[rid] = HumanApprovalRequest(
+        request_id=rid,
+        question="?",
+        action_type=action_type,
+        options=(
+            ("reject", "approve_once", "approve_all")
+            if action_type is not None else ("approve", "reject")
+        ),
+    )
+    response = HumanApprovalResponse(
+        request_id=rid, choice=choice, decided_by="t",
+    )
+    bb = await cap.get_blackboard()
+    await bb.write(
+        HumanApprovalProtocol.response_key(rid),
+        response.model_dump(mode="json"),
+    )
+    cap._responses[rid] = response
+
+
+async def test_has_active_approval_blocks_when_no_approval(_exec_ctx) -> None:
+    cap = await _make_capability(_exec_ctx)
+    allowed, rid = await cap.has_active_approval_for(
+        "DesignProcessCapability.create_decomposition",
+    )
+    assert allowed is False
+    assert rid is None
+
+
+async def test_has_active_approval_blocks_on_rejected(_exec_ctx) -> None:
+    cap = await _make_capability(_exec_ctx)
+    await _seed_response(
+        cap, rid="r1", choice="reject",
+        action_type="create_decomposition",
+    )
+    allowed, _ = await cap.has_active_approval_for(
+        "DesignProcessCapability.create_decomposition",
+    )
+    assert allowed is False
+
+
+async def test_approve_once_allows_first_dispatch_and_consumes(
+    _exec_ctx,
+) -> None:
+    cap = await _make_capability(_exec_ctx)
+    await _seed_response(
+        cap, rid="r1", choice="approve_once",
+        action_type="create_decomposition",
+    )
+
+    first, rid1 = await cap.has_active_approval_for(
+        "DesignProcessCapability.create_decomposition",
+    )
+    assert first is True
+    assert rid1 == "r1"
+
+    # Subsequent dispatch — consumption marker should make this False.
+    second, rid2 = await cap.has_active_approval_for(
+        "DesignProcessCapability.create_decomposition",
+    )
+    assert second is False
+    assert rid2 is None
+
+
+async def test_approve_all_allows_unbounded_dispatches(_exec_ctx) -> None:
+    cap = await _make_capability(_exec_ctx)
+    await _seed_response(
+        cap, rid="r1", choice="approve_all",
+        action_type="create_decomposition",
+    )
+
+    for _ in range(5):
+        allowed, rid = await cap.has_active_approval_for(
+            "DesignProcessCapability.create_decomposition",
+        )
+        assert allowed is True
+        assert rid == "r1"
+
+
+async def test_action_type_must_match_action_key(_exec_ctx) -> None:
+    cap = await _make_capability(_exec_ctx)
+    await _seed_response(
+        cap, rid="r1", choice="approve_all",
+        action_type="sync_roadmap_with_github",
+    )
+    allowed, _ = await cap.has_active_approval_for(
+        "DesignProcessCapability.create_decomposition",
+    )
+    assert allowed is False
+
+
+async def test_legacy_untyped_approve_still_unlocks(_exec_ctx) -> None:
+    """Backwards compat for missions that haven't migrated to
+    ``action_type``: an untyped ``choice='approve'`` unlocks any
+    gated action."""
+
+    cap = await _make_capability(_exec_ctx)
+    await _seed_response(
+        cap, rid="r1", choice="approve", action_type=None,
+    )
+    allowed, rid = await cap.has_active_approval_for(
+        "DesignProcessCapability.bootstrap_roadmap_from_objectives",
+    )
+    assert allowed is True
+    assert rid == "r1"
+
+
+async def test_approve_all_preferred_over_unconsumed_approve_once(
+    _exec_ctx,
+) -> None:
+    """When both an ``approve_all`` and an ``approve_once`` cover an
+    action_key, ``approve_all`` wins so we don't consume an
+    approve_once unnecessarily."""
+
+    cap = await _make_capability(_exec_ctx)
+    await _seed_response(
+        cap, rid="once", choice="approve_once",
+        action_type="create_decomposition",
+    )
+    await _seed_response(
+        cap, rid="all", choice="approve_all",
+        action_type="create_decomposition",
+    )
+
+    allowed, rid = await cap.has_active_approval_for(
+        "DesignProcessCapability.create_decomposition",
+    )
+    assert allowed is True
+    assert rid == "all"
+    # approve_once stays unconsumed and ready for use elsewhere.
+    assert await cap._is_consumed("once") is False
