@@ -759,7 +759,14 @@ class RemoteLLMDeployment(AgentManagerBase):
                 f"Inference failed for request {request.request_id}: {e}",
                 exc_info=True,
             )
-            raise
+            # Wrap provider-specific errors in a typed marker so callers
+            # (action policies) can pattern-match LLM-cluster failures
+            # without depending on the underlying provider's exception
+            # tree. The original is chained via ``__cause__``.
+            from .errors import LLMInferenceError
+            raise LLMInferenceError(
+                request_id=request.request_id, message=str(e),
+            ) from e
 
         finally:
             async for dep_state in self.state_manager.write_transaction():

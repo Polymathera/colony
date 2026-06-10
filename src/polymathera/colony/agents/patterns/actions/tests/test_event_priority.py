@@ -266,7 +266,12 @@ class TestHighPriorityLoop:
                 return None
 
         async def run():
-            agent = MagicMock()
+            # ``spec=`` restricts MagicMock auto-attribute creation so
+            # ``_get_object_event_handlers``'s ``dir(cap)`` walk doesn't
+            # pick the agent itself up as an event handler (a MagicMock
+            # without ``spec`` falsely satisfies the
+            # ``hasattr(method, '_is_event_handler')`` filter).
+            agent = MagicMock(spec=["agent_id", "get_capabilities"])
             agent.agent_id = "agent-test"
             agent.get_capabilities = MagicMock(return_value=[])
 
@@ -376,7 +381,10 @@ class TestHighPriorityLoop:
                 return None
 
         async def run():
-            agent = MagicMock()
+            # See the sibling test for the rationale on ``spec=`` —
+            # without it, MagicMock auto-fakes ``_is_event_handler``
+            # and gets misclassified as an event handler.
+            agent = MagicMock(spec=["agent_id", "get_capabilities"])
             agent.agent_id = "agent-test"
             agent.get_capabilities = MagicMock(return_value=[])
 
@@ -436,21 +444,31 @@ class TestStatusSnapshot:
         from polymathera.colony.agents.patterns.actions.policies import (
             BaseActionPolicy,
         )
+        from polymathera.colony.agents.patterns.actions.llm_failure_backoff import (
+            LLMFailureBackoff,
+        )
         agent = MagicMock(); agent.agent_id = "a1"
+        agent.metadata.idle_wait_counter = 0
         p = BaseActionPolicy.__new__(BaseActionPolicy)
-        p._agent = agent
         p.agent = agent
+        p._llm_failure_backoff = LLMFailureBackoff(agent)
         snap = p.get_status_snapshot()
-        assert snap == {"agent_id": "a1", "policy_class": "BaseActionPolicy"}
+        assert snap["agent_id"] == "a1"
+        assert snap["policy_class"] == "BaseActionPolicy"
+        assert snap["llm_failure_backoff"]["in_backoff_streak"] is False
 
     def test_event_driven_snapshot_includes_queue_depth(self):
         from polymathera.colony.agents.patterns.actions.policies import (
             EventDrivenActionPolicy,
         )
+        from polymathera.colony.agents.patterns.actions.llm_failure_backoff import (
+            LLMFailureBackoff,
+        )
         agent = MagicMock(); agent.agent_id = "a2"
+        agent.metadata.idle_wait_counter = 0
         p = EventDrivenActionPolicy.__new__(EventDrivenActionPolicy)
-        p._agent = agent
         p.agent = agent
+        p._llm_failure_backoff = LLMFailureBackoff(agent)
         p._event_queue = asyncio.Queue()
         p._high_priority_event_queue = asyncio.Queue()
         p._high_priority_task = None

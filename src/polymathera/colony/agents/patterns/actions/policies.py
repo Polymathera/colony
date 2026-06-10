@@ -139,6 +139,11 @@ class BaseActionPolicy(ActionPolicy):
         # fan post-dispatch ``ActionResult.data`` into ``"tool_output"``
         # entries without invoking the full source ABC each time.
         self._tool_result_sources: list[Any] = []
+        # LLM-cluster failure backoff. Extracted into its own class so
+        # the host stays focused on plan-step / dispatch concerns —
+        # see ``llm_failure_backoff.py`` for the contract.
+        from .llm_failure_backoff import LLMFailureBackoff
+        self._llm_failure_backoff = LLMFailureBackoff(agent)
 
     @override
     def use_agent_capabilities(self, capabilities: list[str]) -> None:
@@ -184,7 +189,7 @@ class BaseActionPolicy(ActionPolicy):
         agent has no manager (detached/test policies)."""
         streams = [
             s for s in self._consciousness_streams
-            if getattr(s, "compaction_enabled", False)
+            if s.compaction_enabled
         ]
         if not streams:
             return
@@ -233,7 +238,7 @@ class BaseActionPolicy(ActionPolicy):
                 logger.exception(
                     "Failed to wire durable log for stream %s; it will "
                     "run un-compacted (in-memory) this session.",
-                    getattr(stream, "name", "?"),
+                    stream.name,
                 )
 
     async def _maintain_streams(self) -> None:
@@ -241,7 +246,7 @@ class BaseActionPolicy(ActionPolicy):
         stream's durable log + run its budget safety-net. Driven once
         per iteration by :meth:`execute_iteration`. Never raises."""
         for stream in self._consciousness_streams:
-            if not getattr(stream, "compaction_enabled", False):
+            if not stream.compaction_enabled:
                 continue
             try:
                 await stream.flush()
@@ -249,7 +254,7 @@ class BaseActionPolicy(ActionPolicy):
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "stream maintenance failed for %s",
-                    getattr(stream, "name", "?"),
+                    stream.name,
                 )
 
     @override
@@ -333,7 +338,7 @@ class BaseActionPolicy(ActionPolicy):
                 logger.exception(
                     "Stream source %s failed to attach to %s; skipping",
                     type(src).__name__,
-                    getattr(self.agent, "agent_id", "<no-agent>"),
+                    self.agent.agent_id,
                 )
                 continue
             self._attached_source_ids.add(id(src))
@@ -381,16 +386,11 @@ class BaseActionPolicy(ActionPolicy):
         and code-gen subclasses extend with queue + recovery telemetry.
         Used by high-priority control handlers (e.g., ``/status``)
         without going through the LLM.
-
-        Tolerant of partial init: production policies always have an
-        agent set, but background tasks can call this very early
-        before construction has completed; ``getattr(self, "_agent")``
-        returns ``None`` cleanly in that case.
         """
-        agent = getattr(self, "_agent", None)
         return {
-            "agent_id": getattr(agent, "agent_id", None) if agent is not None else None,
+            "agent_id": self.agent.agent_id,
             "policy_class": type(self).__name__,
+            "llm_failure_backoff": self._llm_failure_backoff.snapshot(),
         }
 
     async def get_action_descriptions(
@@ -447,7 +447,7 @@ class BaseActionPolicy(ActionPolicy):
             for src in self._tool_result_sources:
                 try:
                     payload = src.build_payload(
-                        action_key=getattr(action, "action_type", ""),
+                        action_key=action.action_type,
                         action_result=result,
                         policy=self,
                     )
@@ -603,7 +603,21 @@ class BaseActionPolicy(ActionPolicy):
                 f"    │  agent={self.agent.agent_id:<38}│\n"
                 f"    └────────────────────────────────────────────┘"
             )
-            next_action = await self.plan_step(state)
+            from ....cluster.errors import LLMInferenceError
+            try:
+                next_action = await self.plan_step(state)
+            except LLMInferenceError as exc:
+                # Cluster-side failure (credit-out, rate-limit, 5xx,
+                # provider timeout). Sleep the next backoff interval +
+                # mark the iteration as idle-wait so the agent loop
+                # doesn't count it toward ``max_iterations``. The
+                # outer loop will call ``execute_iteration`` again
+                # and re-try ``plan_step`` after the sleep returns.
+                await self._llm_failure_backoff.handle_failure(exc)
+                return ActionPolicyIterationResult(
+                    success=False, policy_completed=False, idle=True,
+                )
+            self._llm_failure_backoff.record_success()
             action_str, trunc = pydantic_model_to_str(next_action)
             logger.info(f"    ⚙ EXEC_ITER: plan_step returned → {type(next_action).__name__}: {action_str} ({trunc})")
 
@@ -790,12 +804,12 @@ class EventDrivenActionPolicy(BaseActionPolicy):
                 continue
             self._subscribed_providers.add(id(provider))
 
-            if isinstance(provider, AgentCapability) and hasattr(provider, "stream_events_to_queue"):
+            if isinstance(provider, AgentCapability):
                 logger.debug(
                     "Subscribing capability %s (scope_id=%s, input_patterns=%s) to event queue",
                     type(provider).__name__,
-                    getattr(provider, "scope_id", "?"),
-                    provider.input_patterns if hasattr(provider, "input_patterns") else "?",
+                    provider.scope_id,
+                    provider.input_patterns,
                 )
                 await provider.stream_events_to_queue(
                     self.get_event_queue(),
@@ -891,20 +905,20 @@ class EventDrivenActionPolicy(BaseActionPolicy):
                         logger.warning(
                             "high-priority handler %s raised on event "
                             "%s: %s",
-                            getattr(handler, "__name__", "<anon>"),
+                            handler.__name__,
                             event.key, e,
                             exc_info=True,
                         )
                         continue
                     if result is None:
                         continue
-                    if getattr(result, "immediate_action", None):
+                    if result.immediate_action is not None:
                         logger.warning(
                             "high-priority handler %s returned an "
                             "immediate_action on event %s; ignored — "
                             "high-priority handlers are read-only by "
                             "contract.",
-                            getattr(handler, "__name__", "<anon>"),
+                            handler.__name__,
                             event.key,
                         )
         except asyncio.CancelledError:
@@ -924,7 +938,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         display (the values may differ by a few microseconds).
         """
         snapshot = super().get_status_snapshot()
-        high_task = getattr(self, "_high_priority_task", None)
+        high_task = self._high_priority_task
         snapshot.update({
             "queue_depth_normal": self._event_queue.qsize(),
             "queue_depth_high": self._high_priority_event_queue.qsize(),

@@ -3290,6 +3290,20 @@ class Agent(BaseModel):
         agent_system_handle = await get_agent_system()
         await agent_system_handle.stop_agent(agent_id, reason=reason)
 
+    async def _is_child_alive(self, child_agent_id: str) -> bool:
+        """Return True iff the agent system still has a non-STOPPED record
+        for ``child_agent_id``. Authoritative source for "is this child
+        binding still valid?" — used by :meth:`spawn_child_agents` to
+        self-heal stale ``self.child_agents[role]`` entries after a child
+        terminated. Unregistered (info is None) and STOPPED both mean the
+        binding is stale and may be replaced.
+        """
+        from ..system import get_agent_system
+
+        agent_system = await get_agent_system(app_name=self._app_name)
+        info = await agent_system.get_agent_info(child_agent_id)
+        return info is not None and info.state != AgentState.STOPPED
+
     async def spawn_child_agents(
         self,
         blueprints: list[AgentBlueprint],
@@ -3348,8 +3362,17 @@ class Agent(BaseModel):
         for i, child_id in enumerate(child_ids):
             role = blueprints[i].metadata.role
             if role:
-                if role in self.child_agents:
-                    raise ValueError(f"Duplicate child role '{role}' in spawn_child_agents - roles must be unique for tracking")
+                existing = self.child_agents.get(role)
+                if existing is not None and existing != child_id:
+                    if await self._is_child_alive(existing):
+                        raise ValueError(
+                            f"Duplicate child role '{role}' in spawn_child_agents — "
+                            f"existing child {existing} is still alive; roles must be unique."
+                        )
+                    logger.info(
+                        f"Agent {self.agent_id}: stale child_agents[{role!r}]={existing} "
+                        f"is unregistered or STOPPED; replacing with {child_id}."
+                    )
                 self.child_agents[role] = child_id
                 logger.info(f"Agent {self.agent_id} spawned child {role} ({child_id})")
 

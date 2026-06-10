@@ -262,9 +262,15 @@ class ProseChunker:
                     running += para_tokens[k]
                     if running >= cfg.overlap_tokens:
                         break
-                # Cap so we always make progress (advance ≥ 1).
+                # Section smaller than the overlap window — one chunk
+                # already covers everything; no meaningful overlap
+                # exists. Earlier cap to ``consumed - 1`` forced
+                # ``advance = 1`` and re-emitted the same section as N
+                # near-duplicate chunks per N-paragraph section
+                # (6.7× cost multiplier observed against the 97KB
+                # design-doc).
                 if overlap_paragraphs >= consumed:
-                    overlap_paragraphs = consumed - 1
+                    overlap_paragraphs = 0
             advance = max(1, consumed - overlap_paragraphs)
             char_offset += sum(len(p) + 2 for p in paragraphs[i : i + advance])
             i += advance

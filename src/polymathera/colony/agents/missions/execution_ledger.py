@@ -428,6 +428,45 @@ class MissionExecutionLedger:
                 ]
         return result
 
+    async def list_for_scope(
+        self,
+        *,
+        scope: MissionConcurrencyScope,
+        scope_id: str,
+        mission_type: str | None = None,
+    ) -> list[tuple[RunningMissionKey, RunningMissionEntry]]:
+        """Return every live ``(key, entry)`` pair under ``(scope, scope_id)``.
+
+        The READ primitive the LLM planner uses to answer "did I
+        already spawn this mission in my scope?" before calling
+        :meth:`SessionOrchestratorCapability.spawn_mission` a second
+        time. Returns tuples (not bare entries) so ``mission_type`` —
+        which lives in the key, not the entry — is always visible on
+        the result without forcing the caller to re-derive it.
+
+        When ``mission_type`` is ``None``, every mission type in the
+        scope matches; otherwise the filter is exact-match on the
+        registry key (``project_planning``, ``opm_meg``, …). An empty
+        scope returns ``[]`` (NOT a raise) — "no missions running" is
+        a normal answer, not an error.
+
+        Read-only — uses ``read_transaction()`` so it does not bump
+        the version, matching :meth:`snapshot`."""
+
+        result: list[tuple[RunningMissionKey, RunningMissionEntry]] = []
+        async for state in self._state_manager.read_transaction():
+            for storage_key, entries in state.buckets.items():
+                key = RunningMissionKey.from_storage_key(storage_key)
+                if key.scope is not scope or key.scope_id != scope_id:
+                    continue
+                if mission_type is not None and key.mission_type != mission_type:
+                    continue
+                for entry in entries:
+                    result.append(
+                        (key, RunningMissionEntry(**entry.model_dump())),
+                    )
+        return result
+
 
 # ---------------------------------------------------------------------------
 # Singleton accessor + scope resolution helper.

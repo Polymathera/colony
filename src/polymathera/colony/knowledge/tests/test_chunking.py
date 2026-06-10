@@ -55,6 +55,51 @@ def test_prose_chunker_empty_text_zero_chunks() -> None:
     assert chunks == ()
 
 
+def test_prose_chunker_small_section_with_overlap_emits_one_chunk() -> None:
+    """Regression for the 6.7× chunk-count multiplier observed against
+    a 97KB design doc on 2026-06-09. When a section's total tokens
+    sit below ``overlap_tokens``, the prior cap (``overlap_paragraphs
+    = consumed - 1``) forced ``advance = 1`` and re-emitted the same
+    paragraphs as N near-duplicate chunks. Now the chunker drops the
+    overlap entirely for that case — one chunk in, one chunk out."""
+
+    # 3 paragraphs × 3 tokens each = 9 tokens total, well under the
+    # overlap window of 100 tokens. Pre-fix this produced 3 chunks;
+    # the fix collapses it to 1.
+    text = "First para.\n\nSecond para.\n\nThird para."
+    chunker = ProseChunker(
+        config=ChunkerConfig(
+            target_tokens=200, overlap_tokens=100, min_tokens=1,
+        ),
+        token_counter=lambda s: max(1, len(s.split())),
+    )
+    chunks = chunker.chunk(_section(text))
+    assert len(chunks) == 1
+    assert "First para" in chunks[0].text
+    assert "Third para" in chunks[0].text
+
+
+def test_prose_chunker_many_small_sections_no_duplicates() -> None:
+    """Stress version of the regression — calling chunk() on each of
+    20 small sections (mirroring how the Ingestor calls per-section)
+    must emit exactly 20 chunks total, not 20 × M."""
+
+    chunker = ProseChunker(
+        config=ChunkerConfig(
+            target_tokens=200, overlap_tokens=100, min_tokens=1,
+        ),
+        token_counter=lambda s: max(1, len(s.split())),
+    )
+    section_texts = [
+        f"Heading line {i}.\n\nBody para alpha {i}.\n\nBody para beta {i}."
+        for i in range(20)
+    ]
+    total = 0
+    for t in section_texts:
+        total += len(chunker.chunk(_section(t)))
+    assert total == 20
+
+
 def test_prose_chunker_overlap_provides_continuity() -> None:
     text = "\n\n".join(f"Paragraph {i}." for i in range(10))
     chunker = ProseChunker(

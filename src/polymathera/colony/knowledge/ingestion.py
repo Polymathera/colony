@@ -434,6 +434,12 @@ class Ingestor:
         tier: CorpusTier,
         data_type_override: str | None,
     ) -> Sequence[Chunk]:
+        if fmt is not KnowledgeFormat.SOURCE_CODE:
+            sections = _merge_small_sections(
+                sections,
+                target_tokens=self._prose._config.target_tokens,
+                token_count=self._prose._count,
+            )
         out: list[Chunk] = []
         for section in sections:
             if not section.text.strip():
@@ -498,6 +504,103 @@ class Ingestor:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _merge_small_sections(
+    sections: Sequence[ParsedSection],
+    *,
+    target_tokens: int,
+    token_count: Callable[[str], int],
+) -> tuple[ParsedSection, ...]:
+    """Pack adjacent prose / markdown sections whose combined token
+    count fits inside ``target_tokens`` into a single
+    :class:`ParsedSection` before chunking.
+
+    Why this exists: readers like :class:`MarkdownReader` split on
+    every heading regardless of size. A doc with 94 ATX headings →
+    94 sections, most under 200 tokens. The chunker is then called
+    per-section and emits at least one chunk per section, even though
+    the chunker's ``target_tokens`` budget (default 800) could easily
+    fit several adjacent sections in one chunk.
+
+    Merging rules:
+
+    - Only adjacent sections with the same ``citation.source_uri``
+      and the same ``format`` are mergeable (a single document's
+      sibling sections).
+    - Sections whose ``section_path`` shares the first ``/``-separated
+      segment ("same top-level heading subtree") are mergeable; the
+      first segment changing breaks the pack so retrieval that filters
+      by top-level path stays predictable.
+    - Adding a section that would push the pack over ``target_tokens``
+      breaks the pack (the pack flushes; the new section starts the
+      next one).
+    - A pack with a single section is passed through unchanged
+      (avoids redundant model_copy + heading-prefix rewriting when
+      no merging happened).
+
+    Returns the new section tuple. Input is not mutated.
+    """
+
+    if not sections:
+        return tuple(sections)
+
+    def _top_segment(path: str) -> str:
+        return path.split("/", 1)[0] if path else ""
+
+    def _flush(pack: list[ParsedSection]) -> ParsedSection:
+        if len(pack) == 1:
+            return pack[0]
+        anchor = pack[0]
+        merged_text_parts: list[str] = []
+        merged_figures: list = []
+        for sec in pack:
+            if sec.heading:
+                merged_text_parts.append(f"## {sec.heading}")
+            body = sec.text
+            # The reader emits ``text = f"{heading}\n\n{body}"`` —
+            # strip the duplicate leading heading line from the body
+            # so the merged text isn't ``## H\n\nH\n\nbody``.
+            if sec.heading and body.startswith(sec.heading):
+                body = body[len(sec.heading):].lstrip("\n")
+            merged_text_parts.append(body.strip())
+            merged_figures.extend(sec.figures)
+        merged_text = "\n\n".join(p for p in merged_text_parts if p)
+        return anchor.model_copy(
+            update={
+                "text": merged_text,
+                "citation": anchor.citation.model_copy(
+                    update={"char_end": pack[-1].citation.char_end},
+                ),
+                "figures": tuple(merged_figures),
+            }
+        )
+
+    out: list[ParsedSection] = []
+    pack: list[ParsedSection] = [sections[0]]
+    pack_tokens = token_count(sections[0].text)
+    pack_top = _top_segment(sections[0].section_path)
+    pack_uri = sections[0].citation.source_uri
+    pack_format = sections[0].format
+
+    for sec in sections[1:]:
+        sec_tokens = token_count(sec.text)
+        same_uri = sec.citation.source_uri == pack_uri
+        same_format = sec.format == pack_format
+        same_top = _top_segment(sec.section_path) == pack_top
+        fits = pack_tokens + sec_tokens <= target_tokens
+        if same_uri and same_format and same_top and fits:
+            pack.append(sec)
+            pack_tokens += sec_tokens
+            continue
+        out.append(_flush(pack))
+        pack = [sec]
+        pack_tokens = sec_tokens
+        pack_top = _top_segment(sec.section_path)
+        pack_uri = sec.citation.source_uri
+        pack_format = sec.format
+    out.append(_flush(pack))
+    return tuple(out)
 
 
 _TEXT_FORMATS: frozenset[KnowledgeFormat] = frozenset(

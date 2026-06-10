@@ -217,43 +217,11 @@ class SessionOrchestratorCapability(AgentCapability):
         corresponding chat-blackboard record on the dedicated
         ``_run_high_priority_loop`` task. The chat WebSocket relay
         then forwards those records to the browser.
-
-        Also performs the first refresh of the dynamic L4 mission /
-        agent registry the LLM planner reads from
-        ``metadata.parameters["available_missions"]`` — see
-        :meth:`_refresh_available_missions`. Subsequent refreshes
-        fire on each user-message arrival so missions authored
-        mid-session via L1-E become visible immediately.
         """
         await super().initialize()
         if self._agent is None:
             # Detached mode: no agent blackboard to subscribe to.
             return
-        # First refresh of available_missions + available_tools against
-        # the L4 design monorepo's ``.colony/`` (if any). Runs in a thread
-        # because the underlying lazy clone of the design monorepo is
-        # blocking IO; we don't want to stall the event loop on a
-        # multi-second git clone.
-        try:
-            await asyncio.get_running_loop().run_in_executor(
-                None, self._refresh_available_missions,
-            )
-        except Exception:  # noqa: BLE001 — refresh must not block init
-            logger.exception(
-                "SessionOrchestratorCapability: initial "
-                "available_missions refresh failed; planner will see "
-                "the static snapshot until the next user message",
-            )
-        try:
-            await asyncio.get_running_loop().run_in_executor(
-                None, self._refresh_available_tools,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "SessionOrchestratorCapability: initial "
-                "available_tools refresh failed; planner will see "
-                "no L4 tools until the next user message",
-            )
 
     def _refresh_available_missions(self) -> None:
         """Rebuild ``self.agent.metadata.parameters["available_missions"]``
@@ -374,6 +342,52 @@ class SessionOrchestratorCapability(AgentCapability):
                 }
         self._agent.metadata.parameters[self.AVAILABLE_TOOLS_KEY] = available
 
+    async def _refresh_monorepo_extensions(self) -> None:
+        """Refresh the L4 extension snapshot in metadata.parameters.
+
+        The LLM planner reads from this snapshot when deciding what tools
+        and missions are available, so keeping it up to date ensures the
+        LLM can pick up mid-session additions. Async wrapper around the
+        sync ``_refresh_available_missions`` / ``_refresh_available_tools``
+        helpers; this method hops them to a thread so the first call's
+        blocking ``git clone`` of the L4 design monorepo does not stall
+        the event loop.
+        """
+        # Refresh the dynamic L4 mission / agent registry the LLM
+        # planner reads from ``metadata.parameters["available_missions"]``
+        # right before the planner runs. Cheap when nothing changed
+        # (mtime fingerprint hit on the cached
+        # ``RepoStateProvider.discovered_extensions``); picks up
+        # mid-session L1-E mission additions on the next stat tick.
+        # Failure here must NOT block the user's message — a refresh
+        # error logs and the planner sees the previous snapshot.
+
+        # First refresh of available_missions + available_tools against
+        # the L4 design monorepo's ``.colony/`` (if any). Runs in a thread
+        # because the underlying lazy clone of the design monorepo is
+        # blocking IO; we don't want to stall the event loop on a
+        # multi-second git clone.
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._refresh_available_missions,
+            )
+        except Exception:  # noqa: BLE001 — refresh must not block init
+            logger.exception(
+                "SessionOrchestratorCapability: "
+                "available_missions refresh failed; planner will see "
+                "the static snapshot",
+            )
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._refresh_available_tools,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "SessionOrchestratorCapability: "
+                "available_tools refresh failed; planner will see "
+                "the previous snapshot",
+            )
 
     @event_handler(
         pattern=HumanApprovalProtocol.request_pattern(),
@@ -939,6 +953,114 @@ class SessionOrchestratorCapability(AgentCapability):
         )
 
     @action_executor()
+    async def list_spawned_missions(
+        self,
+        *,
+        mission_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Query the cluster-shared ledger for missions this session has
+        already spawned.
+
+        Read primitive backing the "before calling ``spawn_mission``,
+        check if there's already a live coordinator for this kind of
+        work" loop. Reads :class:`MissionExecutionLedger` directly —
+        the authoritative source for "what missions are running where"
+        — so the answer reflects every Ray worker in the cluster, not
+        just this process.
+
+        Scope resolution: when ``mission_type`` is given, the mission's
+        declared ``concurrency_scope`` decides which bucket to read
+        (``project_planning`` is SESSION-scoped, others may differ).
+        When ``mission_type`` is ``None``, the query defaults to the
+        SessionAgent's own SESSION bucket — the natural concern of the
+        chat planner. Wider visibility (colony, tenant) is a future
+        opt-in via an explicit ``scope=`` kwarg.
+
+        Args:
+            mission_type: A key from ``available_missions``. ``None``
+                returns every mission running in this SessionAgent's
+                SESSION scope.
+
+        Returns:
+            ``{"missions": [{"agent_id", "mission_type", "mode",
+            "started_at"}, ...]}``. Empty list when nothing matches
+            (NOT an error — "no live missions" is a normal answer the
+            planner branches on).
+        """
+
+        from polymathera.colony.agents.mission_registry import (
+            get_mission_registry,
+        )
+        from polymathera.colony.design_monorepo.extensions import (
+            get_l4_extensions,
+        )
+        from polymathera.colony.agents.configs import (
+            MissionConcurrencyScope,
+            resolve_mission_execution_policy,
+        )
+        from polymathera.colony.agents.class_resolver import resolve_class
+        from polymathera.colony.agents.missions.execution_ledger import (
+            get_mission_execution_ledger,
+            resolve_scope_id,
+        )
+
+        # Resolve scope per registry entry when mission_type is given;
+        # else default to SESSION (the SessionAgent's natural concern).
+        if mission_type is None:
+            scope = MissionConcurrencyScope.SESSION
+        else:
+            registry = dict(get_mission_registry())
+            if self._agent is not None:
+                snapshot = get_l4_extensions(self._agent)
+                if snapshot is not None:
+                    registry.update(snapshot.missions)
+            if mission_type not in registry:
+                available = sorted(registry.keys())
+                return {
+                    "missions": [],
+                    "error": (
+                        f"Unknown mission type {mission_type!r}. "
+                        f"Available: {available}"
+                    ),
+                }
+            reg = registry[mission_type]
+            coord_class = (
+                reg.get("coordinator_v2") or reg.get("coordinator_v1") or ""
+            )
+            try:
+                coord_cls_obj = (
+                    resolve_class(coord_class) if coord_class else None
+                )
+            except (ImportError, AttributeError, ValueError):
+                coord_cls_obj = None
+            policy = resolve_mission_execution_policy(
+                spec=reg, coordinator_class=coord_cls_obj,
+            )
+            scope = policy.concurrency_scope
+
+        scope_id = resolve_scope_id(scope, self.agent)
+        ledger = await get_mission_execution_ledger(self._app_name)
+        pairs = await ledger.list_for_scope(
+            scope=scope, scope_id=scope_id, mission_type=mission_type,
+        )
+
+        # ``mission_type`` comes from the KEY (not the entry). ``mode``
+        # and ``started_at`` come from the ENTRY — direct attribute
+        # access, no getattr defaults: every field is a pydantic
+        # default-factory field, so it's always present.
+        return {
+            "missions": [
+                {
+                    "agent_id": entry.agent_id,
+                    "mission_type": key.mission_type,
+                    "mode": entry.mode,
+                    "started_at": entry.started_at,
+                }
+                for key, entry in pairs
+            ],
+        }
+
+    @action_executor()
     async def respond_to_user(
         self,
         content: str,
@@ -1107,30 +1229,7 @@ class SessionOrchestratorCapability(AgentCapability):
             await self._handle_at_mention(content, at_mentions, controls)
             return PROCESSED
 
-        # Refresh the dynamic L4 mission / agent registry the LLM
-        # planner reads from ``metadata.parameters["available_missions"]``
-        # right before the planner runs. Cheap when nothing changed
-        # (mtime fingerprint hit on the cached
-        # ``RepoStateProvider.discovered_extensions``); picks up
-        # mid-session L1-E mission additions on the next stat tick.
-        # Failure here must NOT block the user's message — a refresh
-        # error logs and the planner sees the previous snapshot.
-        try:
-            self._refresh_available_missions()
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "SessionOrchestratorCapability: per-message "
-                "available_missions refresh failed; planner will see "
-                "the previous snapshot",
-            )
-        try:
-            self._refresh_available_tools()
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "SessionOrchestratorCapability: per-message "
-                "available_tools refresh failed; planner will see "
-                "the previous snapshot",
-            )
+        await self._refresh_monorepo_extensions()  # in case the user just added a new mission or tool
 
         # Plain message — provide context to the LLM planner so it can decide
         # what action to take (respond_to_user, create_agent, etc.)

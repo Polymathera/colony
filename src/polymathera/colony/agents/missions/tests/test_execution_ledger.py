@@ -452,6 +452,115 @@ async def test_snapshot_exposes_current_state(
 
 
 # ---------------------------------------------------------------------------
+# list_for_scope — read primitive backing list_spawned_missions
+# ---------------------------------------------------------------------------
+
+
+async def test_list_for_scope_filters_by_mission_type(
+    ledger: MissionExecutionLedger,
+) -> None:
+    """When ``mission_type`` is provided, only entries whose KEY's
+    mission_type matches are returned — even when other mission types
+    are live in the same scope."""
+
+    policy = MissionExecutionPolicy(max_concurrent_instances=2)
+    # Two missions live under the same session scope: project_planning
+    # and impact.
+    _, r1 = await ledger.try_admit(
+        key=_key(mission_type="project_planning"),
+        mode="bootstrap", policy=policy,
+    )
+    _, r2 = await ledger.try_admit(
+        key=_key(mission_type="impact"),
+        mode=None, policy=policy,
+    )
+    await ledger.register(
+        reservation_id=r1, agent_id="agent-PP", mode="bootstrap",
+    )
+    await ledger.register(
+        reservation_id=r2, agent_id="agent-IM", mode=None,
+    )
+
+    pp_only = await ledger.list_for_scope(
+        scope=MissionConcurrencyScope.SESSION,
+        scope_id="session_test",
+        mission_type="project_planning",
+    )
+    assert len(pp_only) == 1
+    key, entry = pp_only[0]
+    assert key.mission_type == "project_planning"
+    assert entry.agent_id == "agent-PP"
+    assert entry.mode == "bootstrap"
+
+
+async def test_list_for_scope_returns_all_for_scope_when_mission_type_none(
+    ledger: MissionExecutionLedger,
+) -> None:
+    """``mission_type=None`` returns every live entry under
+    ``(scope, scope_id)`` regardless of registry key — the planner's
+    "what's running in my scope at all?" query."""
+
+    policy = MissionExecutionPolicy(max_concurrent_instances=2)
+    _, r1 = await ledger.try_admit(
+        key=_key(mission_type="project_planning"),
+        mode="bootstrap", policy=policy,
+    )
+    _, r2 = await ledger.try_admit(
+        key=_key(mission_type="impact"),
+        mode=None, policy=policy,
+    )
+    await ledger.register(
+        reservation_id=r1, agent_id="agent-PP", mode="bootstrap",
+    )
+    await ledger.register(
+        reservation_id=r2, agent_id="agent-IM", mode=None,
+    )
+    # A different session's entry must NOT leak in.
+    _, r3 = await ledger.try_admit(
+        key=_key(
+            scope_id="session_other", mission_type="project_planning",
+        ),
+        mode=None, policy=policy,
+    )
+    await ledger.register(
+        reservation_id=r3, agent_id="agent-OTHER", mode=None,
+    )
+
+    all_in_scope = await ledger.list_for_scope(
+        scope=MissionConcurrencyScope.SESSION,
+        scope_id="session_test",
+        mission_type=None,
+    )
+    agent_ids = {entry.agent_id for _, entry in all_in_scope}
+    assert agent_ids == {"agent-PP", "agent-IM"}
+    mission_types = {key.mission_type for key, _ in all_in_scope}
+    assert mission_types == {"project_planning", "impact"}
+
+
+async def test_list_for_scope_empty_when_no_entries(
+    ledger: MissionExecutionLedger,
+) -> None:
+    """A scope with nothing running returns ``[]`` — not a raise.
+    "No live missions" is a normal answer the planner branches on,
+    not an error condition."""
+
+    result = await ledger.list_for_scope(
+        scope=MissionConcurrencyScope.SESSION,
+        scope_id="session_empty",
+        mission_type=None,
+    )
+    assert result == []
+
+    # Same shape with mission_type filter applied to an empty bucket.
+    result_filtered = await ledger.list_for_scope(
+        scope=MissionConcurrencyScope.SESSION,
+        scope_id="session_empty",
+        mission_type="project_planning",
+    )
+    assert result_filtered == []
+
+
+# ---------------------------------------------------------------------------
 # Concurrent admits — pin the parallel-spawn race is closed
 # ---------------------------------------------------------------------------
 
