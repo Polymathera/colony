@@ -479,3 +479,47 @@ def inherit_scoped_parameters(
             continue
         child[key] = value
     return child
+
+
+# ---------------------------------------------------------------------------
+# Shared parameter declarations
+# ---------------------------------------------------------------------------
+#
+# Concrete ``ParameterSpec`` instances that multiple capabilities consume
+# live here so each consumer can reference the SAME object by identity
+# rather than duplicating the literal (which would drift on rename and
+# would also trip the registry's "non-equal redeclaration" guard at
+# import order edges). The matching ``KEY`` constants live alongside so
+# string lookups never hardcode the name.
+#
+# Place each consumer's import next to the spec it consumes, and add
+# its key to the consumer's ``AGENT_METADATA_PARAMS`` by referencing
+# the canonical attribute below (not by re-instantiating).
+
+DESIGN_MONOREPO_URL_KEY = "design_monorepo_url"
+"""Metadata key for the origin URL of the colony's design monorepo.
+Read by ``DesignMonorepoCapabilityBase._lazy_clone_from_agent_metadata``
+and ``GitHubCapability._resolve_repo``."""
+
+DESIGN_MONOREPO_URL_PARAM = ParameterSpec(
+    name=DESIGN_MONOREPO_URL_KEY,
+    scope=ParameterScope.COLONY,
+    description=(
+        "Origin URL of the design monorepo. "
+        "``_lazy_clone_from_agent_metadata`` reads this on "
+        "first ``_client_sync`` to materialise the per-agent "
+        "clone under ``/mnt/shared/agents/<agent>/clones/``. "
+        "``GitHubCapability._resolve_repo`` reads it to derive "
+        "``owner/repo`` for every action — the LLM planner never "
+        "threads ``repo=...`` because the colony has exactly one "
+        "monorepo. Absent (colony has no design monorepo configured) "
+        "leaves consumers detached — actions that need a clone "
+        "surface ``DesignMonorepoError`` with the remediation hint; "
+        "GitHub actions return a clean error envelope."
+    ),
+    default=None,
+)
+"""Canonical ``ParameterSpec`` for ``design_monorepo_url``. Every
+capability that consumes this key MUST add this exact instance to its
+``AGENT_METADATA_PARAMS`` (by identity, not by re-instantiating). See
+``feedback_colony_scoped_params_propagation.md``."""

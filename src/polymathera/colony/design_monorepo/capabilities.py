@@ -30,6 +30,7 @@ from overrides import override
 
 from ..agents.base import Agent, AgentCapability
 from ..agents.metadata_parameters import ParameterScope, ParameterSpec
+from ..agents import metadata_parameters as _shared
 from ..agents.scopes import ScopeUtils
 from ..agents.blackboard import BlackboardEvent, ConvergenceQuiescenceProtocol
 from ..agents.blackboard.protocol import (
@@ -217,13 +218,15 @@ class DesignMonorepoCapabilityBase(AgentCapability):
 
     # Key constants for the COLONY-scoped metadata.parameters entries
     # every design-monorepo capability reads. Single source of truth —
-    # the ``AGENT_METADATA_PARAMS`` ParameterSpecs reference these
-    # names, and consumers throughout the class (``design_monorepo_url``
-    # property, ``_lazy_clone_from_agent_metadata``,
-    # ``_resolve_attribution``, ``_default_manifest_bootstrap``) read
-    # ``params.get(_DESIGN_MONOREPO_URL_KEY)`` / ``_GIT_ATTRIBUTION_KEY``.
-    # If you rename either string, only one site changes.
-    _DESIGN_MONOREPO_URL_KEY = "design_monorepo_url"
+    # the ``DESIGN_MONOREPO_URL_KEY`` + ``DESIGN_MONOREPO_URL_PARAM``
+    # canonical declarations live in ``agents/metadata_parameters.py``
+    # so other consumers (notably ``GitHubCapability``, which lives in
+    # a sibling package that this module already imports from at line
+    # 41) can reference the same instance without triggering a
+    # circular import on ``DesignMonorepoCapabilityBase``. Aliased
+    # here as class attributes so existing internal call sites keep
+    # working unchanged.
+    DESIGN_MONOREPO_URL_KEY = _shared.DESIGN_MONOREPO_URL_KEY
     _GIT_ATTRIBUTION_KEY = "git_attribution"
 
     # Colony-scoped metadata parameters every design-monorepo capability
@@ -240,21 +243,7 @@ class DesignMonorepoCapabilityBase(AgentCapability):
     # central inheritance gate in ``AgentPoolCapability.create_agent``
     # flows whatever the parent has; absent → leave absent.
     AGENT_METADATA_PARAMS = (
-        ParameterSpec(
-            name=_DESIGN_MONOREPO_URL_KEY,
-            scope=ParameterScope.COLONY,
-            description=(
-                "Origin URL of the design monorepo. "
-                "``_lazy_clone_from_agent_metadata`` reads this on "
-                "first ``_client_sync`` to materialise the per-agent "
-                "clone under ``/mnt/shared/agents/<agent>/clones/``. "
-                "Absent (colony has no design monorepo configured) "
-                "leaves the capability detached — actions that need "
-                "a clone surface ``DesignMonorepoError`` with the "
-                "remediation hint."
-            ),
-            default=None,
-        ),
+        _shared.DESIGN_MONOREPO_URL_PARAM,
         ParameterSpec(
             name=_GIT_ATTRIBUTION_KEY,
             scope=ParameterScope.COLONY,
@@ -477,7 +466,7 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         params = (
             self._agent.metadata.parameters if self._agent is not None else {}
         )
-        origin_url = params.get(self._DESIGN_MONOREPO_URL_KEY, "")
+        origin_url = params.get(self.DESIGN_MONOREPO_URL_KEY, "")
         try:
             branch = repo.active_branch.name
         except TypeError:
@@ -633,7 +622,7 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         """The L4 design-monorepo URL configured on this capability's agent metadata."""
         if self._agent is None:
             return None
-        return self._agent.metadata.parameters.get(self._DESIGN_MONOREPO_URL_KEY)
+        return self._agent.metadata.parameters.get(self.DESIGN_MONOREPO_URL_KEY)
 
     def ensure_materialized(self) -> bool:
         """Trigger the lazy clone if the per-agent working tree has
@@ -665,7 +654,7 @@ class DesignMonorepoCapabilityBase(AgentCapability):
             # Lazy-clone: if the per-agent ``working_dir`` does not yet
             # contain a git repo, clone the colony's configured design
             # monorepo into it. The URL is read from
-            # ``agent.metadata.parameters[design_monorepo_url]``,
+            # ``agent.metadata.parameters[DESIGN_MONOREPO_URL_KEY]``,
             # which the dashboard populates at session-creation time
             # (or which ``DesignMonorepoBootstrap.set_design_monorepo``
             # mutates in-place for chat-driven configuration). Auth is
@@ -679,7 +668,7 @@ class DesignMonorepoCapabilityBase(AgentCapability):
 
     def _lazy_clone_from_agent_metadata(self) -> None:
         """Issue a raw ``git clone`` into ``self._working_dir`` when an
-        ``agent.metadata.parameters[design_monorepo_url]`` is present.
+        ``agent.metadata.parameters[DESIGN_MONOREPO_URL_KEY]`` is present.
         No-op when the parameter is missing — :meth:`_client_sync`
         then falls back to ``open()`` and the caller sees the
         unmodified ``DesignMonorepoError``.
@@ -688,7 +677,7 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         if self._agent is None:
             return
         url = self._agent.metadata.parameters.get(
-            self._DESIGN_MONOREPO_URL_KEY,
+            self.DESIGN_MONOREPO_URL_KEY,
         )
         if not url:
             return
@@ -2779,7 +2768,7 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
         ``colony`` from the current execution context, ``program``
         defaulting to the colony id, ``target_system`` left as
         ``"unspecified"``, ``design_repo_url`` from the agent's
-        ``design_monorepo_url`` parameter (or empty for a local-only
+        ``DESIGN_MONOREPO_URL_KEY`` parameter (or empty for a local-only
         bootstrap). Operator can edit any of these later — the file
         is plain JSON.
 
@@ -2869,7 +2858,7 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
         if not (repo_root / ".git").is_dir():
             raise DesignMonorepoError(
                 f"{repo_root} is not a git repository and no "
-                "``design_monorepo_url`` is configured on the agent's "
+                f"``{self.DESIGN_MONOREPO_URL_KEY}`` is configured on the agent's "
                 "metadata — set the URL on the colony (Landing page → "
                 "Colonies → pencil) and start a fresh session, or "
                 "``git init`` the working tree manually if you mean "
@@ -3124,7 +3113,7 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
         url = ""
         if self._agent is not None:
             url = self._agent.metadata.parameters.get(
-                self._DESIGN_MONOREPO_URL_KEY, "",
+                self.DESIGN_MONOREPO_URL_KEY, "",
             ) or ""
 
         return DesignMonorepoManifest(

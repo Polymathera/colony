@@ -780,6 +780,8 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         self._subscribed_callbacks: list[Callable] = []
         self._subscribed_providers: set[int] = set()  # Track by identity to prevent duplicate subscriptions
         self._reactive_only = reactive_only
+        from .continuation_tracker import ContinuationTracker
+        self._continuation_tracker = ContinuationTracker(agent) if reactive_only else None
         # NOTE: ``_consciousness_streams`` is stored on the base
         # (BaseActionPolicy) so every policy gets the same plumbing
         # uniformly. We accept the kwarg here and forward it to super
@@ -948,6 +950,8 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             "reactive_only": self._reactive_only,
             "has_pending_work": self.has_pending_work(),
         })
+        if self._continuation_tracker is not None:
+            snapshot["continuation"] = self._continuation_tracker.snapshot()
         return snapshot
 
     @hookable
@@ -1054,6 +1058,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
 
         Flow:
         1. Get next event from queue via get_next_event_nowait() (non-blocking)
+           In reactive_only mode, ``state.custom["continuation_requested"]`` bypasses the blocking wait so the LLM gets one more turn (budget enforced by ``ContinuationTracker``).
         2. Extract session_id from event metadata and set up context
         3. If event exists, broadcast to @event_handler methods in capabilities
            and action providers
@@ -1092,14 +1097,38 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             # queued event with a clean slate.
             event = None
         elif self._reactive_only:
-            # Block until an event arrives — no LLM calls when idle.
-            # This makes the agent purely event-driven: it only acts
-            # when something happens (user message, child agent event, etc.)
-            event = await self.get_next_event()
+            # Continuation gate: if the LLM signaled signal_continuation()
+            # on the prior iteration, fire one more planning turn instead
+            # of blocking on the event queue. The flag is one-shot — popped
+            # at consumption — and the tracker decides whether the budget
+            # still allows it. See ContinuationTracker for the burst model.
+            continuation_requested = state.custom.pop("continuation_requested", False)
+            if continuation_requested:
+                reason = state.custom.pop("continuation_reason", "")
+                continuation_allowed = await self._continuation_tracker.record_continuation(
+                    reason,
+                )
+                if continuation_allowed:
+                    event = None
+                else:
+                    # Budget exhausted — diagnostic already emitted by the
+                    # tracker; fall through to blocking event-wait so the
+                    # agent commits on the next real event.
+                    event = await self.get_next_event()
+            else:
+                # Block until an event arrives — no LLM calls when idle.
+                # This makes the agent purely event-driven: it only acts
+                # when something happens (user message, child agent event, etc.)
+                event = await self.get_next_event()
         else:
             event = await self.get_next_event_nowait()
 
         if event is not None:
+            # Any real event (not a self-triggered continuation) ends the
+            # current burst. The tracker resets so the next continuation
+            # chain gets a fresh budget.
+            if self._continuation_tracker is not None:
+                self._continuation_tracker.reset()
             logger.debug(
                 "plan_step received event: key=%s, value_type=%s, value_preview=%s, metadata=%s",
                 event.key,

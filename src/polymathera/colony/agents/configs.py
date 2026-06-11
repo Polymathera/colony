@@ -735,16 +735,6 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                 "json_type": "string",
             },
             {
-                "name": "repo",
-                "scope": "caller",
-                "description": (
-                    "GitHub full_name (owner/repo). When absent, "
-                    "the action resolves to the colony's design "
-                    "monorepo at use time."
-                ),
-                "default": None,
-            },
-            {
                 "name": "roadmap_path",
                 "scope": "caller",
                 "description": "Relative path to ROADMAP.md inside the repo.",
@@ -910,8 +900,8 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                     "propose_task_assignments — never hardcode or invent"
                 ),
                 (
-                    "Forward mission_params['repo'] and ['roadmap_path'] "
-                    "verbatim to the action calls; do not infer them"
+                    "Forward mission_params['roadmap_path'] verbatim to "
+                    "the action calls; do not infer it"
                 ),
                 (
                     "Stamp the colony:roadmap-task marker via the "

@@ -142,7 +142,7 @@ def test_project_planning_declares_expected_caller_parameters() -> None:
     spec = _builtin_missions()["project_planning"]
     by_name = {p.name: p for p in spec.caller_parameters}
     assert set(by_name) == {
-        "mode", "repo", "roadmap_path", "user_github_login",
+        "mode", "roadmap_path", "user_github_login",
         "direction", "decomposition_criteria",
     }
     # ``mode`` is the only required CALLER param.
@@ -150,7 +150,7 @@ def test_project_planning_declares_expected_caller_parameters() -> None:
     # The others carry declared defaults (Pydantic-style:
     # required iff no default of any kind).
     for optional in (
-        "repo", "roadmap_path", "user_github_login", "direction",
+        "roadmap_path", "user_github_login", "direction",
         "decomposition_criteria",
     ):
         assert by_name[optional].required is False

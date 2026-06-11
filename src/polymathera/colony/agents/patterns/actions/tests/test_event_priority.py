@@ -474,6 +474,13 @@ class TestStatusSnapshot:
         p._high_priority_task = None
         p._reactive_only = True
         p._consciousness_streams = []
+        # ContinuationTracker is hosted on EventDrivenActionPolicy when
+        # reactive_only=True; this __new__-based fixture must mirror the
+        # __init__ invariant explicitly.
+        from polymathera.colony.agents.patterns.actions.continuation_tracker import (
+            ContinuationTracker,
+        )
+        p._continuation_tracker = ContinuationTracker(agent)
         snap = p.get_status_snapshot()
         assert snap["agent_id"] == "a2"
         assert snap["policy_class"] == "EventDrivenActionPolicy"
@@ -482,6 +489,7 @@ class TestStatusSnapshot:
         assert snap["high_priority_loop_running"] is False
         assert snap["reactive_only"] is True
         assert snap["has_pending_work"] is False
+        assert "continuation" in snap
 
 
 # ---------------------------------------------------------------------------

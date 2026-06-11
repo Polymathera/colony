@@ -523,28 +523,6 @@ async def create_session(
                 origin="dashboard_session_create",
             )
 
-            # ``session_default_repo`` is used in two places:
-            #   - threaded as ``GitHubCapability.bind(default_repo=...)``
-            #     so the LLM planner doesn't need to repeat the
-            #     ``repo=`` kwarg on every action;
-            #   - already threaded via ``parameters[design_monorepo_url]``
-            #     for the design-monorepo capability trio.
-            # Resolved once here in the canonical ``owner/repo`` shape
-            # the capability expects (NOT the full clone URL).
-            session_monorepo = await auth_service.get_design_monorepo(
-                colony._db_pool,
-                colony_id=requested_colony_id,
-                tenant_id=requested_tenant_id,
-            ) or {}
-            session_default_repo: str | None = None
-            if session_monorepo.get("origin_url"):
-                from polymathera.colony.design_monorepo.process import (
-                    parse_owner_repo_from_url,
-                )
-                session_default_repo = parse_owner_repo_from_url(
-                    session_monorepo["origin_url"],
-                )
-
             agent_metadata = AgentMetadata(
                 role="session_orchestrator",
                 syscontext=session_syscontext,
@@ -606,6 +584,18 @@ async def create_session(
                         "  list_spawned_missions(mission_type=<key>) first. A non-empty\n"
                         "  result means you already have a live coordinator — reuse the\n"
                         "  returned agent_id instead of spawning a duplicate.\n\n"
+                        "  When you store data in ``results`` (e.g., a query response, a\n"
+                        "  child agent's status report) and the next step is a simple\n"
+                        "  conditional, branch inline in the same code block using Python\n"
+                        "  if/else over ``results[\"<key>\"].output``. When the next step\n"
+                        "  genuinely needs fresh LLM reasoning over what you just learned\n"
+                        "  (the data is too large, the decision is open-ended, or you need\n"
+                        "  a new context window), call ``signal_continuation(reason=...)``\n"
+                        "  at the end of the code block. Do NOT use it as a sequencing\n"
+                        "  primitive — it is the escape valve for cases where inline\n"
+                        "  branching cannot decide. The framework will fire one more\n"
+                        "  planning turn even without a new external event; budget is\n"
+                        "  finite per inbound event, so commit promptly.\n\n"
                         "AVAILABLE TOOLS — how to know what compute / retrieval / dispatch\n"
                         "actions a freshly-spawned coordinator can mount:\n"
                         "  The dict ``available_tools`` (in this agent's metadata.parameters)\n"
@@ -792,7 +782,7 @@ async def create_session(
                     # lazy-clone the repo into the per-agent working
                     # directory on first access. ``None`` when the
                     # colony has no design monorepo configured yet.
-                    DesignMonorepoCapabilityBase._DESIGN_MONOREPO_URL_KEY: (
+                    DesignMonorepoCapabilityBase.DESIGN_MONOREPO_URL_KEY: (
                         await auth_service.get_design_monorepo(
                             colony._db_pool,
                             colony_id=get_colony_id() or "",
@@ -866,15 +856,11 @@ async def create_session(
                     # ``default_project_id`` is the colony's attached
                     # GitHub Project (v2) node id — every new issue
                     # ``GitHubCapability.create_issue`` mints gets
-                    # auto-attached to this project. ``default_repo``
-                    # is the same monorepo every Colony action defaults
-                    # to so the LLM planner doesn't have to thread
-                    # ``repo=...`` on every action. Both are resolved
-                    # upfront (see the lookup block above the spawn).
+                    # auto-attached to this project. Resolved upfront
+                    # (see the lookup block above the spawn).
                     GitHubCapability.bind(
                         scope=BlackboardScope.SESSION,
                         default_project_id=colony_project["node_id"],
-                        default_repo=session_default_repo,
                     ),
                     # Design-monorepo capability trio (state, checkpointing,
                     # tool building) — per-agent clones under

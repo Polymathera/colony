@@ -893,12 +893,24 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         # the guardrail's suggestion BEFORE proposing its next cell.
         self._last_blocked_dispatches: list[BlockedDispatch] = []
         self._block_streak_tracker = BlockStreakTracker(agent)
+        # NOTE: ``self._continuation_tracker`` is hosted on the parent
+        # ``EventDrivenActionPolicy`` (set in its __init__ when
+        # ``reactive_only=True``; None otherwise). See policies.py.
         self._run_call_trace: list[dict[str, Any]] = []
         self._had_internal_failures: bool = False
         self._internal_errors: list[str] = []
         self._browser: CapabilityBrowser | None = None
         self._run_helper_installed: bool = False
         self._complete_signaled: bool = False
+        # Shadow field set by ``signal_continuation`` (REPL builtin)
+        # and mirrored into ``state.custom["continuation_requested"]``
+        # at the top of ``plan_step``. Same channel pattern as
+        # ``_complete_signaled`` → ``state.custom["policy_complete"]``.
+        # The gate in ``EventDrivenActionPolicy.plan_step`` consumes
+        # the state.custom flag; the tracker decides whether the
+        # budget allows the continuation.
+        self._continuation_requested: bool = False
+        self._continuation_reason: str = ""
 
         # Mode: "planning" shows only planning capabilities in prompt,
         # "execution" shows only domain capabilities. Starts in planning.
@@ -1535,6 +1547,30 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     "suggestions": validation.suggestions,
                 }
 
+        async def signal_continuation(reason: str):
+            """Request one more LLM turn to reason about what was just learned.
+
+            Use when you stored data in ``results`` (e.g., a query response,
+            a child agent's report) and need a fresh LLM context to inspect
+            it and decide the next step. Prefer inline Python branching
+            (``if results["r"].output.get(...)``) when a conditional alone
+            suffices — ``signal_continuation`` is the escape valve for cases
+            that genuinely need a new reasoning turn.
+
+            Honored only in reactive_only policies (proactive policies
+            iterate anyway). Budget: ``ContinuationTracker.max_per_burst``
+            consecutive continuations per inbound event; on exhaustion an
+            ``AgentDiagnosticProtocol`` event surfaces in the next prompt.
+            """
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError(
+                    "signal_continuation(reason=...) requires a non-empty "
+                    "string explaining why another LLM turn is needed."
+                )
+            self._continuation_requested = True
+            self._continuation_reason = reason
+            log(f"Continuation requested: {reason}")
+
         def switch_mode(mode: str):
             """Switch between planning and execution modes.
 
@@ -1561,6 +1597,8 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         if self._allow_self_termination:
             ns["signal_completion"] = signal_completion
         ns["switch_mode"] = switch_mode
+        if self._reactive_only:
+            ns["signal_continuation"] = signal_continuation
         ns["log"] = log
         ns["results"] = {}
         ns["pages"] = []
@@ -1655,6 +1693,17 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         4. Returns an EXECUTE_CODE action containing the generated code
         5. On failure, retries with error feedback (iterative refinement)
         """
+        # Mirror the ``signal_continuation`` shadow into state.custom so
+        # the reactive_only gate in ``EventDrivenActionPolicy.plan_step``
+        # can consume it. Same channel pattern as ``_complete_signaled``
+        # → ``state.custom["policy_complete"]``. Shadow is cleared here
+        # so the gate's pop is the single point of consumption.
+        if self._continuation_requested:
+            state.custom["continuation_requested"] = True
+            state.custom["continuation_reason"] = self._continuation_reason
+            self._continuation_requested = False
+            self._continuation_reason = ""
+
         # First, process any pending events (inherited from EventDrivenActionPolicy)
         event_action = await super().plan_step(state)
         if event_action is not None:

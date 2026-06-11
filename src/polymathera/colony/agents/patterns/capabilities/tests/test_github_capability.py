@@ -127,11 +127,13 @@ def _make_cap(
 ) -> GitHubCapability:
     agent = MagicMock()
     agent.agent_id = "agent-A"
+    agent.metadata.parameters = {
+        "design_monorepo_url": "https://github.com/acme/proj.git",
+    }
     cap = GitHubCapability(
         agent=agent,
         scope=BlackboardScope.SESSION,
         client=client,
-        default_repo="acme/proj",
     )
     return cap
 
@@ -361,7 +363,7 @@ def test_list_repos_returns_installation_repositories():
     assert [r["full_name"] for r in result["repos"]] == ["acme/a", "acme/b"]
 
 
-def test_get_repo_uses_default_repo_when_none_given():
+def test_get_repo_resolves_owner_repo_from_metadata():
     stub = _StubClient()
     stub.responses[("GET", "/repos/acme/proj")] = {
         "full_name": "acme/proj", "default_branch": "main",
@@ -375,17 +377,18 @@ def test_get_repo_uses_default_repo_when_none_given():
     assert result["repo"]["full_name"] == "acme/proj"
 
 
-def test_get_repo_reports_missing_default():
+def test_get_repo_reports_when_metadata_has_no_design_monorepo_url():
     stub = _StubClient()
     agent = MagicMock(); agent.agent_id = "a"
+    agent.metadata.parameters = {}  # no design_monorepo_url
     with _with_context():
         cap = GitHubCapability(
             agent=agent, scope=BlackboardScope.SESSION,
-            client=stub, default_repo=None,
+            client=stub,
         )
         result = _run(cap.get_repo())
     assert result["ok"] is False
-    assert "no repo" in result["message"]
+    assert "design_monorepo_url" in result["message"]
 
 
 def test_list_issues_excludes_pull_requests():
@@ -707,11 +710,13 @@ def _make_cap_with_default_project(
 ) -> GitHubCapability:
     agent = MagicMock()
     agent.agent_id = "agent-A"
+    agent.metadata.parameters = {
+        "design_monorepo_url": "https://github.com/acme/proj.git",
+    }
     return GitHubCapability(
         agent=agent,
         scope=BlackboardScope.SESSION,
         client=client,
-        default_repo="acme/proj",
         default_project_id=default_project_id,
     )
 
@@ -1166,19 +1171,19 @@ def test_list_milestones_state_filter_passes_through():
     assert stub.calls[0][2]["params"]["state"] == "closed"
 
 
-def test_list_milestones_returns_empty_when_no_default_repo():
+def test_list_milestones_returns_empty_when_no_design_monorepo_url():
     stub = _StubClient()
     agent = MagicMock()
     agent.agent_id = "agent-A"
+    agent.metadata.parameters = {}  # no design_monorepo_url
     with _with_context():
         cap = GitHubCapability(
             agent=agent, scope=BlackboardScope.SESSION, client=stub,
-            # No default_repo set, no explicit repo arg.
         )
         result = _run(cap.list_milestones())
     assert result["ok"] is False
     assert result["milestones"] == []
-    assert "default_repo" in result["message"]
+    assert "design_monorepo_url" in result["message"]
     assert stub.calls == []  # no API call
 
 
@@ -1254,10 +1259,12 @@ def test_whoami_surfaces_no_client_error():
 
     agent = MagicMock()
     agent.agent_id = "agent-A"
+    agent.metadata.parameters = {
+        "design_monorepo_url": "https://github.com/acme/proj.git",
+    }
     with _with_context():
         cap = GitHubCapability(
             agent=agent, scope=BlackboardScope.SESSION,
-            default_repo="acme/proj",
         )
         # Simulate the init-error path without actually wiring envs.
         cap._client = None
@@ -1350,17 +1357,18 @@ def test_assign_issue_strips_empty_assignees():
     assert body == {"assignees": ["real"]}
 
 
-def test_assign_issue_returns_error_when_no_default_repo():
+def test_assign_issue_returns_error_when_no_design_monorepo_url():
     stub = _StubClient()
     agent = MagicMock()
     agent.agent_id = "agent-A"
+    agent.metadata.parameters = {}  # no design_monorepo_url
     with _with_context():
         cap = GitHubCapability(
             agent=agent, scope=BlackboardScope.SESSION, client=stub,
         )
         result = _run(cap.assign_issue(7, ["x"]))
     assert result["ok"] is False
-    assert "default_repo" in result["message"]
+    assert "design_monorepo_url" in result["message"]
     assert stub.calls == []
 
 
@@ -1455,7 +1463,6 @@ def test_build_live_client_reads_installation_id_from_metadata(
     with _with_context():
         cap = GitHubCapability(
             agent=agent, scope=BlackboardScope.SESSION,
-            default_repo="acme/proj",
         )
         client = _run(cap._build_live_client())
     # TokenCache stores the installation_id as a string on a private
@@ -1482,7 +1489,6 @@ def test_build_live_client_kwarg_overrides_metadata(
     with _with_context():
         cap = GitHubCapability(
             agent=agent, scope=BlackboardScope.SESSION,
-            default_repo="acme/proj",
             installation_id="from-kwarg",
         )
         client = _run(cap._build_live_client())
@@ -1505,7 +1511,6 @@ def test_build_live_client_errors_when_no_installation_id(
     with _with_context():
         cap = GitHubCapability(
             agent=agent, scope=BlackboardScope.SESSION,
-            default_repo="acme/proj",
         )
         with pytest.raises(RuntimeError, match="Tenant GitHub Installation"):
             _run(cap._build_live_client())
@@ -1528,7 +1533,6 @@ def test_build_live_client_errors_when_no_app_credentials(
     with _with_context():
         cap = GitHubCapability(
             agent=agent, scope=BlackboardScope.SESSION,
-            default_repo="acme/proj",
         )
         with pytest.raises(
             RuntimeError, match="GITHUB_APP_ID.*GITHUB_PRIVATE_KEY_PEM",
@@ -1554,7 +1558,86 @@ def test_build_live_client_tolerates_missing_github_identity_key(
     with _with_context():
         cap = GitHubCapability(
             agent=agent, scope=BlackboardScope.SESSION,
-            default_repo="acme/proj",
         )
         with pytest.raises(RuntimeError, match="installation"):
             _run(cap._build_live_client())
+
+
+# ---------------------------------------------------------------------------
+# Durable fix (2026-06-10): ``repo`` removed from LLM-facing surface;
+# ``_resolve_repo`` reads ``design_monorepo_url`` from agent metadata.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_repo_reads_from_metadata():
+    """``_resolve_repo`` parses ``owner/repo`` out of the agent's
+    ``design_monorepo_url`` metadata parameter — the single resolution
+    point every action funnels through."""
+
+    agent = MagicMock()
+    agent.agent_id = "a"
+    agent.metadata.parameters = {
+        "design_monorepo_url": "git@github.com:Polymathera/monorepo_opm_meg.git",
+    }
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent, scope=BlackboardScope.SESSION, client=_StubClient(),
+        )
+        assert cap._resolve_repo() == "Polymathera/monorepo_opm_meg"
+
+
+def test_resolve_repo_returns_none_when_metadata_absent():
+    """Empty ``parameters`` → ``_resolve_repo`` returns ``None`` so the
+    action surface can return a clean error rather than guessing."""
+
+    agent = MagicMock()
+    agent.agent_id = "a"
+    agent.metadata.parameters = {}
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent, scope=BlackboardScope.SESSION, client=_StubClient(),
+        )
+        assert cap._resolve_repo() is None
+
+
+def test_resolve_repo_returns_none_for_non_github_url():
+    """Non-github URLs (gitlab, internal forges) → ``None`` rather than
+    a wrong-repo write. Forces an error at the action surface."""
+
+    agent = MagicMock()
+    agent.agent_id = "a"
+    agent.metadata.parameters = {
+        "design_monorepo_url": "https://gitlab.internal/team/proj.git",
+    }
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent, scope=BlackboardScope.SESSION, client=_StubClient(),
+        )
+        assert cap._resolve_repo() is None
+
+
+def test_list_issues_uses_colony_monorepo_when_no_repo_arg():
+    """Regression — the 2026-06-10 wedged-coordinator failure.
+
+    Coordinator called list_issues with no repo kwarg (no longer
+    accepts one), and got real results back instead of
+    'no repo provided and no default_repo set'.
+    """
+
+    stub = _StubClient()
+    stub.responses[("ITER", "/repos/Polymathera/monorepo_opm_meg/issues")] = [
+        {"number": 7, "title": "stub", "state": "open",
+         "user": {"login": "a"}, "labels": [], "assignees": []},
+    ]
+    agent = MagicMock()
+    agent.agent_id = "a"
+    agent.metadata.parameters = {
+        "design_monorepo_url": "https://github.com/Polymathera/monorepo_opm_meg.git",
+    }
+    with _with_context():
+        cap = GitHubCapability(
+            agent=agent, scope=BlackboardScope.SESSION, client=stub,
+        )
+        result = _run(cap.list_issues())  # NOTE: no repo kwarg
+    assert result["ok"] is True
+    assert result["count"] == 1

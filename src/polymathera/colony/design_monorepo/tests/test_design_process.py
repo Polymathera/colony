@@ -117,12 +117,11 @@ def _make_github_stub(
     list_milestones_ok: bool = True,
     issues: list[dict] | None = None,
     list_issues_ok: bool = True,
-    default_repo: str = "acme/proj",
 ) -> Any:
     """A minimal duck-typed GitHubCapability for use as a sibling
-    capability. Implements ``list_milestones`` + ``list_issues`` +
-    ``_default_repo`` — enough surface for ``summarise_progress``
-    and ``identify_bottlenecks`` to call into.
+    capability. Implements ``list_milestones`` + ``list_issues`` —
+    enough surface for ``summarise_progress`` and
+    ``identify_bottlenecks`` to call into.
 
     Marked as a ``GitHubCapability`` instance via isinstance check
     sleight-of-hand (we make the fake's class identity match by
@@ -134,7 +133,6 @@ def _make_github_stub(
     )
 
     fake = MagicMock(spec=GitHubCapability)
-    fake._default_repo = default_repo
     if list_milestones_ok:
         fake.list_milestones = AsyncMock(return_value={
             "ok": True, "message": "",
@@ -1877,7 +1875,6 @@ def _stub_github_with_assignment(
         GitHubCapability,
     )
     fake = MagicMock(spec=GitHubCapability)
-    fake._default_repo = "acme/proj"
     fake.list_issues = AsyncMock(return_value={
         "ok": True, "message": "", "issues": issues, "count": len(issues),
     })
@@ -1895,7 +1892,7 @@ def _stub_github_with_assignment(
             "login": None, "slug": None,
         })
 
-    async def _assign(issue_number, assignees, *, repo=None, replace=True):
+    async def _assign(issue_number, assignees, *, replace=True):
         pinned = (assign_results or {}).get(issue_number)
         if pinned is not None:
             return pinned

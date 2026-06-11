@@ -27,7 +27,12 @@ from overrides import override
 import httpx
 
 from ...base import AgentCapability
-from ...metadata_parameters import ParameterScope, ParameterSpec
+from ...metadata_parameters import (
+    DESIGN_MONOREPO_URL_KEY,
+    DESIGN_MONOREPO_URL_PARAM,
+    ParameterScope,
+    ParameterSpec,
+)
 from ...blackboard.protocol import GitHubEventProtocol
 from ...models import AgentSuspensionState
 from ...scopes import BlackboardScope, get_scope_prefix
@@ -237,8 +242,6 @@ class GitHubCapability(AgentCapability):
             ``agent.metadata.parameters["github_identity"]
             ["tenant_installation_id"]`` — this kwarg is for test
             injection only.
-        default_repo: Optional ``owner/repo`` default — used when an
-            action accepts ``repo=None``.
         default_project_id: Optional Projects v2 GraphQL node id used
             by project actions when the caller omits ``project_id``.
         max_requests_per_minute: Soft cap at the action level (the
@@ -286,6 +289,7 @@ class GitHubCapability(AgentCapability):
             json_type="object",
             default_factory=dict,
         ),
+        DESIGN_MONOREPO_URL_PARAM,
     )
 
     _CLAIMED_BY_LABEL_PREFIX = "claimed-by:"
@@ -299,7 +303,6 @@ class GitHubCapability(AgentCapability):
         private_key_pem: str | None = None,
         private_key_path: str | None = None,
         installation_id: str | None = None,
-        default_repo: str | None = None,
         default_project_id: str | None = None,
         max_requests_per_minute: int = 120,
         client: GitHubClient | None = None,
@@ -314,7 +317,6 @@ class GitHubCapability(AgentCapability):
             capability_key=capability_key,
             app_name=app_name,
         )
-        self._default_repo = default_repo
         self._default_project_id = default_project_id
         self._audit_enabled = audit_enabled
         self._http_owned = httpx_client is None
@@ -439,8 +441,25 @@ class GitHubCapability(AgentCapability):
             return None, self._init_error or "GitHub client not configured"
         return self._client, None
 
-    def _resolve_repo(self, repo: str | None) -> str | None:
-        return repo or self._default_repo
+    def _resolve_repo(self) -> str | None:
+        """Resolve ``owner/repo`` from the agent's
+        ``design_monorepo_url`` metadata parameter.
+
+        Single resolution point for every action in this capability
+        ([[fix-the-class-not-the-instance]]). The LLM-facing surface
+        never carries ``repo`` — the colony has exactly one design
+        monorepo and the framework already knows its URL.
+        """
+        if self._agent is None:
+            return None
+
+        url = self._agent.metadata.parameters.get(
+            DESIGN_MONOREPO_URL_KEY
+        )
+        if not url:
+            return None
+        from ._github.url import parse_owner_repo_from_url
+        return parse_owner_repo_from_url(url)
 
     def _agent_id(self) -> str:
         return self.agent.agent_id if self._agent is not None else "unknown"
@@ -504,11 +523,14 @@ class GitHubCapability(AgentCapability):
         return _ok(repos=repos, count=len(repos))
 
     @action_executor()
-    async def get_repo(self, repo: str | None = None) -> dict[str, Any]:
+    async def get_repo(self) -> dict[str, Any]:
         """Fetch one repository's metadata."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} "
+                "configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -527,12 +549,15 @@ class GitHubCapability(AgentCapability):
 
     @action_executor()
     async def list_branches(
-        self, repo: str | None = None, *, max_results: int = 100,
+        self, *, max_results: int = 100,
     ) -> dict[str, Any]:
         """List branches on a repo."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set", branches=[])
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} "
+                "configured (or it is not a github.com URL)", branches=[]
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "", branches=[])
@@ -557,7 +582,6 @@ class GitHubCapability(AgentCapability):
         self,
         path: str,
         *,
-        repo: str | None = None,
         ref: str | None = None,
         max_bytes: int = 1_000_000,
     ) -> dict[str, Any]:
@@ -568,9 +592,12 @@ class GitHubCapability(AgentCapability):
         file's committed ``truncated`` field (which refers to large-
         file storage).
         """
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} "
+                "configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -617,19 +644,14 @@ class GitHubCapability(AgentCapability):
         self,
         query: str,
         *,
-        repo: str | None = None,
         max_results: int = 30,
     ) -> dict[str, Any]:
-        """Search code across repos the App can see.
-
-        When ``repo`` is provided, the query is automatically narrowed
-        to that repo via the ``repo:`` qualifier.
-        """
+        """Search code across repos the App can see."""
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "", hits=[])
         full_query = query
-        target_repo = self._resolve_repo(repo)
+        target_repo = self._resolve_repo()
         if target_repo and "repo:" not in query:
             full_query = f"{query} repo:{target_repo}"
         try:
@@ -660,7 +682,6 @@ class GitHubCapability(AgentCapability):
     async def list_issues(
         self,
         *,
-        repo: str | None = None,
         state: Literal["open", "closed", "all"] = "open",
         labels: list[str] | None = None,
         assignee: str | None = None,
@@ -672,9 +693,11 @@ class GitHubCapability(AgentCapability):
         the PR-specific actions. This matches the distinction users
         expect when they say "issue".
         """
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set", issues=[])
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)", issues=[]
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "", issues=[])
@@ -699,12 +722,14 @@ class GitHubCapability(AgentCapability):
 
     @action_executor()
     async def get_issue(
-        self, issue_number: int, *, repo: str | None = None,
+        self, issue_number: int,
     ) -> dict[str, Any]:
         """Fetch one issue."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -720,7 +745,6 @@ class GitHubCapability(AgentCapability):
         *,
         title: str,
         body: str,
-        repo: str | None = None,
         labels: list[str] | None = None,
         assignees: list[str] | None = None,
         auto_attach_to_default_project: bool = True,
@@ -740,9 +764,11 @@ class GitHubCapability(AgentCapability):
         back. Set the flag to ``False`` for issues you intentionally
         want unsorted (e.g. spam/triage queue).
         """
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -797,8 +823,6 @@ class GitHubCapability(AgentCapability):
         self,
         issue_number: int,
         body: str,
-        *,
-        repo: str | None = None,
     ) -> dict[str, Any]:
         """Replace an issue's body with ``body``.
 
@@ -812,9 +836,11 @@ class GitHubCapability(AgentCapability):
         from GitHub's perspective.
         """
 
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -835,14 +861,14 @@ class GitHubCapability(AgentCapability):
         self,
         issue_number: int,
         body: str,
-        *,
-        repo: str | None = None,
     ) -> dict[str, Any]:
         """Post a comment on an issue (or a pull request; PRs accept
         issue comments on the conversation timeline)."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -877,7 +903,6 @@ class GitHubCapability(AgentCapability):
         src_comment_id: int | None = None,
         scheduled_mission_name: str | None = None,
         agent_role: str = "SessionAgent",
-        repo: str | None = None,
     ) -> dict[str, Any]:
         """Post a comment with the Colony signing + attribution
         conventions baked in (top-level design plan §16.5).
@@ -936,7 +961,7 @@ class GitHubCapability(AgentCapability):
         # body via the footer, which the inbound parser will pull
         # out — no separate audit-row schema needed).
         return await self.comment_on_issue(
-            issue_number, full_body, repo=repo,
+            issue_number, full_body,
         )
 
     @action_executor()
@@ -944,13 +969,14 @@ class GitHubCapability(AgentCapability):
         self,
         issue_number: int,
         *,
-        repo: str | None = None,
         reason: Literal["completed", "not_planned"] = "completed",
     ) -> dict[str, Any]:
         """Close an issue with a state_reason."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -968,12 +994,14 @@ class GitHubCapability(AgentCapability):
 
     @action_executor()
     async def reopen_issue(
-        self, issue_number: int, *, repo: str | None = None,
+        self, issue_number: int,
     ) -> dict[str, Any]:
         """Reopen a previously-closed issue."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -994,13 +1022,13 @@ class GitHubCapability(AgentCapability):
         self,
         issue_number: int,
         labels: list[str],
-        *,
-        repo: str | None = None,
     ) -> dict[str, Any]:
         """Add labels to an issue (additive; does not replace)."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -1022,7 +1050,6 @@ class GitHubCapability(AgentCapability):
     async def list_milestones(
         self,
         *,
-        repo: str | None = None,
         state: Literal["open", "closed", "all"] = "open",
         sort: Literal["due_on", "completeness"] = "due_on",
         direction: Literal["asc", "desc"] = "asc",
@@ -1040,10 +1067,10 @@ class GitHubCapability(AgentCapability):
         Used by :meth:`DesignProcessCapability.summarise_progress`
         to roll milestone state up into a progress snapshot.
         """
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
             return _err(
-                "no repo provided and no default_repo set",
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)",
                 milestones=[],
             )
         client, err = await self._ensure_client()
@@ -1115,7 +1142,6 @@ class GitHubCapability(AgentCapability):
         issue_number: int,
         assignees: list[str],
         *,
-        repo: str | None = None,
         replace: bool = True,
     ) -> dict[str, Any]:
         """Set the assignees on an issue.
@@ -1126,7 +1152,6 @@ class GitHubCapability(AgentCapability):
                 form ``<app-slug>[bot]`` — use :meth:`whoami` to get
                 Colony's bot login. Pass ``[]`` with ``replace=True``
                 to unassign everyone.
-            repo: ``owner/repo``; falls back to ``default_repo``.
             replace: If ``True`` (default), the issue's assignees are
                 set to exactly ``assignees`` — anyone previously
                 assigned and not in this list is removed. If
@@ -1136,9 +1161,11 @@ class GitHubCapability(AgentCapability):
 
         Returns the updated issue summary.
         """
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -1171,14 +1198,16 @@ class GitHubCapability(AgentCapability):
     async def list_pull_requests(
         self,
         *,
-        repo: str | None = None,
         state: Literal["open", "closed", "all"] = "open",
         max_results: int = 50,
     ) -> dict[str, Any]:
         """List pull requests."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set", prs=[])
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)",
+                prs=[],
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "", prs=[])
@@ -1196,7 +1225,7 @@ class GitHubCapability(AgentCapability):
 
     @action_executor()
     async def get_pull_request(
-        self, number: int, *, repo: str | None = None,
+        self, number: int,
     ) -> dict[str, Any]:
         """Fetch one pull request's metadata.
 
@@ -1204,9 +1233,11 @@ class GitHubCapability(AgentCapability):
         base refs, draft / merged / mergeable status — enough for the
         LLM to reason about whether to comment, review, or wait.
         """
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -1221,13 +1252,14 @@ class GitHubCapability(AgentCapability):
         self,
         number: int,
         *,
-        repo: str | None = None,
         max_bytes: int = 500_000,
     ) -> dict[str, Any]:
         """Fetch a PR's diff as plain text."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -1269,13 +1301,14 @@ class GitHubCapability(AgentCapability):
         base: str,
         title: str,
         body: str,
-        repo: str | None = None,
         draft: bool = False,
     ) -> dict[str, Any]:
         """Open a new PR."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -1298,12 +1331,10 @@ class GitHubCapability(AgentCapability):
         self,
         number: int,
         body: str,
-        *,
-        repo: str | None = None,
     ) -> dict[str, Any]:
         """Post a conversation-timeline comment on a PR."""
         return await self.comment_on_issue(
-            issue_number=number, body=body, repo=repo,
+            issue_number=number, body=body,
         )
 
     @action_executor()
@@ -1313,7 +1344,6 @@ class GitHubCapability(AgentCapability):
         *,
         event: Literal["APPROVE", "REQUEST_CHANGES", "COMMENT"],
         body: str,
-        repo: str | None = None,
         comments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Submit a review.
@@ -1321,9 +1351,11 @@ class GitHubCapability(AgentCapability):
         ``comments`` is forwarded verbatim to GitHub — each entry is a
         dict like ``{"path": "...", "position": 12, "body": "..."}``.
         """
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -1348,13 +1380,13 @@ class GitHubCapability(AgentCapability):
     async def get_pr_checks(
         self,
         number: int,
-        *,
-        repo: str | None = None,
     ) -> dict[str, Any]:
         """Summarise the check-runs on a PR's head commit."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -1523,17 +1555,14 @@ class GitHubCapability(AgentCapability):
     async def list_projects_for_repo(
         self,
         *,
-        repo: str | None = None,
         max_results: int = 25,
     ) -> dict[str, Any]:
-        """List open Projects v2 attached to ``repo``.
+        """List open Projects v2 attached to the colony's design monorepo.
 
         Returns
         ``{"ok": True, "projects": [{"node_id", "title", "number",
         "url"}], "count": int}``. Used by the dashboard's colony
-        management UI to populate the project picker. ``repo`` is in
-        the ``owner/name`` form; falls back to the capability's
-        ``default_repo`` when omitted.
+        management UI to populate the project picker.
 
         Closed projects are filtered server-side via
         ``projectsV2(query: "is:open")`` so the picker only shows
@@ -1542,7 +1571,7 @@ class GitHubCapability(AgentCapability):
         ``after`` cursor.
         """
 
-        target_repo = repo or self._default_repo
+        target_repo = self._resolve_repo()
         if not target_repo or "/" not in target_repo:
             return _err(
                 "repo must be in 'owner/name' form (got "
@@ -1628,7 +1657,6 @@ class GitHubCapability(AgentCapability):
         issue_number: int,
         *,
         project_id: str | None = None,
-        repo: str | None = None,
     ) -> dict[str, Any]:
         """Attach an existing issue to a Projects v2 board.
 
@@ -1645,9 +1673,11 @@ class GitHubCapability(AgentCapability):
             return _err(
                 "no project_id provided and no default_project_id set",
             )
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")
@@ -1678,7 +1708,6 @@ class GitHubCapability(AgentCapability):
     async def claim_unassigned_issue(
         self,
         *,
-        repo: str | None = None,
         label: str | None = None,
         max_candidates: int = 25,
     ) -> dict[str, Any]:
@@ -1697,10 +1726,10 @@ class GitHubCapability(AgentCapability):
             When nothing is available: ``{"ok": True, "claimed": False,
             "issue": None}``.
         """
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
             return _err(
-                "no repo provided and no default_repo set", claimed=False,
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)", claimed=False,
             )
         client, err = await self._ensure_client()
         if client is None:
@@ -1733,7 +1762,7 @@ class GitHubCapability(AgentCapability):
                 continue
             # Apply our label. Conflicts surface as errors from add_labels.
             label_resp = await self.add_labels(
-                issue_number=number, labels=[agent_label], repo=repo,
+                issue_number=number, labels=[agent_label],
             )
             if not label_resp.get("ok"):
                 continue
@@ -1775,13 +1804,13 @@ class GitHubCapability(AgentCapability):
     async def release_claim(
         self,
         issue_number: int,
-        *,
-        repo: str | None = None,
     ) -> dict[str, Any]:
         """Release this agent's ``claimed-by:`` label on an issue."""
-        repo = self._resolve_repo(repo)
+        repo = self._resolve_repo()
         if not repo:
-            return _err("no repo provided and no default_repo set")
+            return _err(
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured (or it is not a github.com URL)"
+            )
         client, err = await self._ensure_client()
         if client is None:
             return _err(err or "")

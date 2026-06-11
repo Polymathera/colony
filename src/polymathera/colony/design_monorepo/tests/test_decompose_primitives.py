@@ -107,9 +107,8 @@ def _make_github_stub(
     )
 
     fake = MagicMock(spec=GitHubCapability)
-    fake._default_repo = "acme/proj"
 
-    async def _get_issue(number, *, repo=None):
+    async def _get_issue(number):
         data = (issues_by_number or {}).get(number)
         if data is None:
             return {"ok": False, "message": f"not found: #{number}"}
@@ -120,7 +119,7 @@ def _make_github_stub(
         create_issue_results = []
     iter_results = iter(create_issue_results)
 
-    async def _create_issue(*, title, body, repo=None, **kw):
+    async def _create_issue(*, title, body, **kw):
         try:
             return next(iter_results)
         except StopIteration:

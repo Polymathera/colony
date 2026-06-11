@@ -30,8 +30,10 @@ from polymathera.colony.agents.blackboard import BlackboardEvent
 from polymathera.colony.agents.blackboard.protocol import (
     ActionPolicyLifecycleProtocol,
     AgentDiagnosticProtocol,
+    DIAGNOSTIC_CONTINUATION_BUDGET_EXHAUSTED,
     DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK,
     HumanApprovalProtocol,
+    SELF_RELEVANT_DIAGNOSTIC_KINDS,
 )
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult, PROCESSED
 from polymathera.colony.agents.patterns.actions import action_executor
@@ -1318,9 +1320,10 @@ class SessionOrchestratorCapability(AgentCapability):
         except ValueError:
             return PROCESSED
         producer_id = parsed["agent_id"]
-        if self._agent is not None and producer_id == self._agent.agent_id:
-            return PROCESSED
         kind = parsed["kind"]
+        is_self = self._agent is not None and producer_id == self._agent.agent_id
+        if is_self and kind not in SELF_RELEVANT_DIAGNOSTIC_KINDS:
+            return PROCESSED
         payload = event.value if isinstance(event.value, dict) else {}
         if kind == DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK:
             return EventProcessingResult(
@@ -1333,6 +1336,21 @@ class SessionOrchestratorCapability(AgentCapability):
                     "action_key": payload.get("action_key"),
                     "count": payload.get("count"),
                     "reason": payload.get("reason"),
+                    "suggestion": payload.get("suggestion"),
+                },
+            )
+        if kind == DIAGNOSTIC_CONTINUATION_BUDGET_EXHAUSTED:
+            return EventProcessingResult(
+                context_key=(
+                    f"agent_diagnostic:{producer_id}:{kind}:{parsed['sequence']}"
+                ),
+                context={
+                    "producer_agent_id": producer_id,
+                    "kind": kind,
+                    "consecutive_count": payload.get("consecutive_count"),
+                    "max_per_burst": payload.get("max_per_burst"),
+                    "last_reason": payload.get("last_reason"),
+                    "attempted_reason": payload.get("attempted_reason"),
                     "suggestion": payload.get("suggestion"),
                 },
             )

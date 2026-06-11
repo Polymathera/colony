@@ -102,3 +102,20 @@ def test_project_planning_coordinator_policy_carries_max_iterations() -> None:
     )
 
     assert ProjectPlanningCoordinator.MISSION_EXECUTION_POLICY.max_iterations == 50
+
+
+def test_project_planning_mission_does_not_declare_repo_caller_param() -> None:
+    """Pin: the project_planning mission MUST NOT re-grow a ``repo``
+    caller_parameter. The action surface resolves ``owner/repo`` from
+    the agent's ``design_monorepo_url`` metadata parameter — the LLM
+    planner should not be threading it. See
+    [[no-llm-facing-framework-state]]."""
+
+    from polymathera.colony.agents.configs import _builtin_missions
+
+    spec = _builtin_missions()["project_planning"]
+    names = {p.name for p in spec.caller_parameters}
+    assert "repo" not in names, (
+        "project_planning mission re-grew a 'repo' caller_parameter — "
+        "the action surface resolves owner/repo from agent metadata."
+    )

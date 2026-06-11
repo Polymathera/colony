@@ -16,6 +16,9 @@ from ..agents.blackboard.protocol import (
     RoadmapSyncProtocol,
 )
 from ..agents.patterns.actions import action_executor
+from ..agents.patterns.capabilities._github.url import (
+    parse_owner_repo_from_url,
+)
 
 from .repo_map import RepoMap, REPO_MAP_DIR, REPO_MAP_FILENAME
 from ._internal import (
@@ -118,39 +121,6 @@ _PARENT_OF_MARKER_RE = re.compile(
     r"<!--\s*colony:parent-of:\s*(?P<parent>\d+)\s*-->",
     re.IGNORECASE,
 )
-
-
-def parse_owner_repo_from_url(url: str) -> str | None:
-    """Extract ``owner/repo`` from a github.com clone URL.
-
-    Handles the common shapes:
-
-    - ``https://github.com/owner/repo.git``
-    - ``https://github.com/owner/repo``
-    - ``git@github.com:owner/repo.git``
-
-    Returns ``None`` for non-github URLs (gitlab, internal forges) or
-    malformed input — caller surfaces a clean error rather than guess.
-    Pure; no IO. Tested in isolation.
-    """
-
-    if not url:
-        return None
-    s = url.strip()
-    # SSH form: ``git@github.com:owner/repo[.git]``
-    if s.startswith("git@github.com:"):
-        path = s[len("git@github.com:"):]
-    elif "github.com/" in s:
-        path = s.split("github.com/", 1)[1]
-    else:
-        return None
-    if path.endswith(".git"):
-        path = path[:-4]
-    path = path.strip("/")
-    parts = path.split("/")
-    if len(parts) != 2 or not parts[0] or not parts[1]:
-        return None
-    return f"{parts[0]}/{parts[1]}"
 
 
 def _stable_task_id(milestone_title: str, task_title: str) -> str:
@@ -1644,7 +1614,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             }
 
         result = await github.list_milestones(
-            repo=repo, state=milestone_state, max_results=max_milestones,
+            state=milestone_state, max_results=max_milestones,
         )
         if not result.get("ok"):
             return {
@@ -1758,7 +1728,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         stalled: list[dict[str, Any]] = []
         if github is not None and resolved_repo:
             issues_result = await github.list_issues(
-                repo=resolved_repo, state="open",
+                state="open",
                 max_results=max_issues_scanned,
             )
             if issues_result.get("ok"):
@@ -1991,7 +1961,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         existing_issues: list[dict[str, Any]] = []
         if github is not None:
             issues_result = await github.list_issues(
-                repo=repo, state="open", max_results=200,
+                state="open", max_results=200,
             )
             if issues_result.get("ok"):
                 existing_issues = issues_result.get("issues") or []
@@ -2159,7 +2129,6 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     create_result = await github.create_issue(
                         title=task["title"],
                         body=body,
-                        repo=repo,
                         labels=task.get("labels") or None,
                         project_id=target_project_id,
                     )
@@ -2341,7 +2310,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         # matches (otherwise we'd erroneously propose creating a new
         # one). Open + closed are both relevant to the diff.
         issues_result = await github.list_issues(
-            repo=repo, state="all", max_results=max_issues_scanned,
+            state="all", max_results=max_issues_scanned,
         )
         if not issues_result.get("ok"):
             return {
@@ -2402,7 +2371,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     },
                 )
                 result = await github.create_issue(
-                    title=entry["title"], body=body, repo=repo,
+                    title=entry["title"], body=body,
                     labels=entry.get("labels") or None,
                     project_id=target_project_id,
                 )
@@ -2672,7 +2641,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
 
         # ---------- step 3: list open issues with markers -----------
         issues_result = await github.list_issues(
-            repo=repo, state="open", max_results=max_issues_scanned,
+            state="open", max_results=max_issues_scanned,
         )
         if not issues_result.get("ok"):
             return {
@@ -2851,7 +2820,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 continue
             result = await github.assign_issue(
                 p["issue_number"], [p["proposed_login"]],
-                repo=repo, replace=True,
+                replace=True,
             )
             if result.get("ok"):
                 applied.append({
@@ -2920,7 +2889,6 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         *,
         issue_numbers: list[int],
         decomposition_criteria: str | None = None,
-        repo: str | None = None,
         llm_max_tokens: int = 2048,
         llm_temperature: float = 0.2,
         llm_timeout_s: float = 60.0,
@@ -2942,7 +2910,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     "classify_issues_decomposability requires one."
                 ),
             }
-        repo = repo or self._resolve_github_repo()
+        repo = self._resolve_github_repo()
         if not repo:
             return {
                 "ok": False,
@@ -2956,7 +2924,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         # pass a subset here.
         issues: list[dict[str, Any]] = []
         for number in issue_numbers:
-            resp = await github.get_issue(number, repo=repo)
+            resp = await github.get_issue(number)
             if not resp.get("ok"):
                 continue
             issue = resp.get("issue") or {}
@@ -3037,7 +3005,6 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         parent_issue_numbers: list[int],
         max_children_per_parent: int = 8,
         decomposition_criteria: str | None = None,
-        repo: str | None = None,
         llm_max_tokens: int = 2048,
         llm_temperature: float = 0.2,
         llm_timeout_s: float = 60.0,
@@ -3061,7 +3028,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     "propose_decompositions requires one."
                 ),
             }
-        repo = repo or self._resolve_github_repo()
+        repo = self._resolve_github_repo()
         if not repo:
             return {
                 "ok": False,
@@ -3072,7 +3039,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
 
         parents: list[dict[str, Any]] = []
         for number in parent_issue_numbers:
-            resp = await github.get_issue(number, repo=repo)
+            resp = await github.get_issue(number)
             if not resp.get("ok"):
                 continue
             issue = resp.get("issue") or {}
@@ -3183,7 +3150,6 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         *,
         parent_issue_number: int,
         children: list[dict[str, str]],
-        repo: str | None = None,
         dry_run: bool = True,
     ) -> dict[str, Any]:
         """Apply primitive — per parent. Gated by the
@@ -3204,7 +3170,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     "create_decomposition requires one."
                 ),
             }
-        repo = repo or self._resolve_github_repo()
+        repo = self._resolve_github_repo()
         if not repo:
             return {
                 "ok": False,
@@ -3231,7 +3197,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
 
         # Fetch parent title for the cross-link line.
         parent_get = await github.get_issue(
-            parent_issue_number, repo=repo,
+            parent_issue_number,
         )
         if not parent_get.get("ok"):
             return {
@@ -3273,7 +3239,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 child_body=child["body"],
             )
             create_resp = await github.create_issue(
-                title=child["title"], body=child_body, repo=repo,
+                title=child["title"], body=child_body,
             )
             if create_resp.get("ok"):
                 created_issue = create_resp.get("issue") or {}
@@ -3293,7 +3259,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 child_numbers=created_child_numbers,
             )
             patch_resp = await github.update_issue_body(
-                parent_issue_number, new_parent_body, repo=repo,
+                parent_issue_number, new_parent_body,
             )
             parent_patch_ok = bool(patch_resp.get("ok"))
 
@@ -3330,11 +3296,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
 
         if not emit:
             return
-        github = self._sibling_github_capability()
-        resolved_repo = (
-            repo or (github._default_repo if github is not None else "")
-            or "local"
-        )
+        resolved_repo = repo or self._resolve_github_repo() or "local"
         import time as _time
 
         blackboard = await self._get_colony_blackboard()
