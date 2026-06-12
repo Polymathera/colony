@@ -2709,7 +2709,7 @@ class AgentDiagnosticProtocol(BlackboardProtocol):
 # producer/consumer contract stays grep-able. v1 ships one kind; the
 # rest are documented for future producers.
 DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK = "guardrail_block_streak"
-DIAGNOSTIC_CONTINUATION_BUDGET_EXHAUSTED = "continuation_budget_exhausted"
+DIAGNOSTIC_EMPTY_ITERATION_STREAK = "empty_iteration_streak"
 # Reserved for future producers:
 # DIAGNOSTIC_CODE_VALIDATION_STREAK = "code_validation_streak"
 # DIAGNOSTIC_LLM_CALL_FAILURE_STREAK = "llm_call_failure_streak"
@@ -2718,8 +2718,9 @@ DIAGNOSTIC_CONTINUATION_BUDGET_EXHAUSTED = "continuation_budget_exhausted"
 
 # Diagnostics that are RELEVANT to their own producer's planner context.
 # Most diagnostics describe "what this agent did" (already in the trace);
-# continuation_budget_exhausted describes "what this agent must do next",
-# which is exactly the planner-context surface.
+# ``empty_iteration_streak`` describes "what this agent must do next"
+# (call ``wait_for_next_event``), which is exactly the planner-context
+# surface.
 SELF_RELEVANT_DIAGNOSTIC_KINDS: frozenset[str] = frozenset({
-    DIAGNOSTIC_CONTINUATION_BUDGET_EXHAUSTED,
+    DIAGNOSTIC_EMPTY_ITERATION_STREAK,
 })

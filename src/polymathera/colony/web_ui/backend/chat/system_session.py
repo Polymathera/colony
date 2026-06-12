@@ -103,16 +103,18 @@ def _build_system_session_agent_metadata(
                 "with the standard initialize / shutdown / "
                 "@event_handler lifecycle. Capabilities mount on you "
                 "via the system-session blueprint; their behaviour is "
-                "driven by blackboard events, NOT by user messages."
+                "driven by blackboard events, NOT by user messages. "
+                "You are a proactive agent: when you have no work to do, "
+                "end your code block with "
+                "``await run('wait_for_next_event')`` to pause until the "
+                "next event arrives, instead of burning empty planning "
+                "iterations."
             ),
         ),
         parameters={
             "session_kind": "system",
         },
         action_policy_config={
-            # No proactive planning — every capability is reactive
-            # (timer-driven poll loop, @event_handler subscriptions).
-            "reactive_only": True,
             "allow_self_termination": False,
             "planning_capability_blueprints": [],
         },

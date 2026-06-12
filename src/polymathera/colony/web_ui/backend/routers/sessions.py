@@ -587,15 +587,24 @@ async def create_session(
                         "  When you store data in ``results`` (e.g., a query response, a\n"
                         "  child agent's status report) and the next step is a simple\n"
                         "  conditional, branch inline in the same code block using Python\n"
-                        "  if/else over ``results[\"<key>\"].output``. When the next step\n"
-                        "  genuinely needs fresh LLM reasoning over what you just learned\n"
-                        "  (the data is too large, the decision is open-ended, or you need\n"
-                        "  a new context window), call ``signal_continuation(reason=...)``\n"
-                        "  at the end of the code block. Do NOT use it as a sequencing\n"
-                        "  primitive — it is the escape valve for cases where inline\n"
-                        "  branching cannot decide. The framework will fire one more\n"
-                        "  planning turn even without a new external event; budget is\n"
-                        "  finite per inbound event, so commit promptly.\n\n"
+                        "  if/else over ``results[\"<key>\"].output``. Variables you bind\n"
+                        "  in ``results[...]`` persist across iterations, so when fresh\n"
+                        "  reasoning is needed (data is too large, decision is open-ended,\n"
+                        "  or you need a new context window), simply end your block — the\n"
+                        "  next planning iteration sees the updated ``results``.\n\n"
+                        "IDLE DISCIPLINE — wait when there is no work to do:\n"
+                        "  You are a proactive agent: after every code block, the framework\n"
+                        "  calls you again for the next planning iteration. When you have\n"
+                        "  fully addressed the user's last message and have no in-flight\n"
+                        "  queries to inspect, end your block with\n"
+                        "  ``await run(\"wait_for_next_event\")`` to pause until the next\n"
+                        "  event arrives (a user message, a child-agent diagnostic, a\n"
+                        "  GitHub webhook, …). The framework does NOT auto-pause you —\n"
+                        "  if you have nothing to do and do not call ``wait_for_next_event``,\n"
+                        "  you will keep burning empty planning iterations.\n"
+                        "  ``wait_for_next_event(timeout_seconds=N)`` is available for\n"
+                        "  deadline-driven waits — on timeout the action returns\n"
+                        "  ``{\"ok\": True, \"timed_out\": True}`` so you can branch.\n\n"
                         "AVAILABLE TOOLS — how to know what compute / retrieval / dispatch\n"
                         "actions a freshly-spawned coordinator can mount:\n"
                         "  The dict ``available_tools`` (in this agent's metadata.parameters)\n"
@@ -826,7 +835,6 @@ async def create_session(
                 },
                 action_policy_config={
                     "allow_self_termination": False,  # SessionAgent should not terminate itself — the session lives on until the user closes it
-                    "reactive_only": True, # SessionAgent only responds to user messages, it doesn't have proactive goals or actions
                     "planning_capability_blueprints": [],
                 },
             )
@@ -865,13 +873,13 @@ async def create_session(
                     # Design-monorepo capability trio (state, checkpointing,
                     # tool building) — per-agent clones under
                     # /mnt/shared/agents/<agent_id>/clones/<scope_id>/.
-                    # SessionAgent runs in ``reactive_only`` mode so it
-                    # must NOT subscribe to the convergence-quiescence
-                    # stream — every episode boundary would otherwise
-                    # wake the LLM planner, producing the same welcome
-                    # message in a tight loop. Sub-agents that perform
-                    # actual design work get the default trio (with
-                    # auto-checkpoint enabled) when they are spawned.
+                    # SessionAgent must NOT subscribe to the
+                    # convergence-quiescence stream — every episode
+                    # boundary would otherwise wake the LLM planner,
+                    # producing the same welcome message in a tight
+                    # loop. Sub-agents that perform actual design work
+                    # get the default trio (with auto-checkpoint
+                    # enabled) when they are spawned.
                     *design_monorepo_capability_blueprints(
                         auto_checkpoint_on_quiescence=False,
                     ),

@@ -49,8 +49,8 @@ async def test_no_handler_capabilities_opt_out_via_empty_input_patterns(
     wildcard fallback. Otherwise the agent's own
     ``policy:action_started:*`` lifecycle writes (published on the
     agent's primary blackboard) would be fed back into the action
-    policy's event queue, producing a tight plan-and-act loop in
-    ``reactive_only`` mode.
+    policy's event queue, producing a tight plan-and-act loop on
+    every action the agent dispatches.
 
     This test pins the convention at the constructor boundary
     (``_input_patterns == []``) and verifies the runtime behaviour
@@ -104,9 +104,9 @@ def test_disabling_auto_checkpoint_drops_quiescence_subscription(
     """``auto_checkpoint_on_quiescence=False`` must skip the
     convergence-quiescence subscription entirely.
 
-    Otherwise SessionAgent (which runs in ``reactive_only`` mode and
-    therefore wakes the LLM planner on every queue event) would re-plan
-    on every episode boundary — producing a tight loop where the same
+    Otherwise SessionAgent (whose LLM planner reacts to every queue
+    event via the observation-and-dispatch path) would re-plan on
+    every episode boundary — producing a tight loop where the same
     welcome message is re-emitted as the action policy keeps settling
     and being woken again. The remote-change subscription stays
     active because it only fires on actual upstream changes.

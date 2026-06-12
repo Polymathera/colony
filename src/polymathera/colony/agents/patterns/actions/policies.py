@@ -43,7 +43,7 @@ from ...blackboard import BlackboardEvent
 from ...blackboard.protocol import ActionPolicyProtocol
 from ...scopes import BlackboardScope
 from ....distributed.hooks import hookable
-from .dispatcher import ActionDispatcher, ActionGroup, SchemaDetail, pydantic_model_to_str
+from .dispatcher import ActionDispatcher, ActionGroup, SchemaDetail, action_executor, pydantic_model_to_str
 from ..planning import (
     ActionPlanner,
     PlanBlackboard,
@@ -757,7 +757,6 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         action_map: list[ActionGroup] | None = None,
         action_providers: list[Any] = [],
         io: ActionPolicyIO | None = None, # Declare I/O contract (override in subclasses)
-        reactive_only: bool = False,
         consciousness_streams: list[ConsciousnessStream] | None = None,
         **kwargs
     ):
@@ -765,23 +764,42 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             agent, action_map=action_map, action_providers=action_providers,
             io=io, consciousness_streams=consciousness_streams, **kwargs,
         )
-        self._event_queue: asyncio.Queue[BlackboardEvent] = asyncio.Queue()
+        # Two-lane event queue with a shared wakeup signal. The pair
+        # owns the synchronization primitive that supports the
+        # consume-none ``wait_for_next_event`` action; producers that
+        # call ``put_nowait`` on either queue automatically wake any
+        # task awaiting on ``self._queues.wait_nonempty()``. The two
+        # ``_event_queue`` / ``_high_priority_event_queue`` aliases
+        # below preserve the existing accessor surface unchanged — the
         # High-priority lane: drained by ``_run_high_priority_loop`` on
         # a dedicated background task that runs concurrently with the
         # main policy loop. Lets read-only handlers (status queries,
         # control commands) make progress even while the main loop is
         # awaiting a long-running action's coroutine. See
         # ``colony_docs/markdown/plans/design_event_priority_and_action_interruption.md``.
-        self._high_priority_event_queue: asyncio.Queue[BlackboardEvent] = asyncio.Queue()
+        from .event_queue_pair import EventQueuePair
+        self._queues = EventQueuePair()
+        self._event_queue: asyncio.Queue[BlackboardEvent] = self._queues.normal
+        self._high_priority_event_queue: asyncio.Queue[BlackboardEvent] = self._queues.high
         self._high_priority_task: asyncio.Task | None = None
         # Bounded restart counter for the concurrent loop, so a
         # poisonous event handler can't burn CPU restarting forever.
         self._high_priority_restarts: int = 0
         self._subscribed_callbacks: list[Callable] = []
         self._subscribed_providers: set[int] = set()  # Track by identity to prevent duplicate subscriptions
-        self._reactive_only = reactive_only
-        from .continuation_tracker import ContinuationTracker
-        self._continuation_tracker = ContinuationTracker(agent) if reactive_only else None
+        # Soft backstop for the unified proactive model: counts
+        # consecutive iterations where the LLM produced no actions AND
+        # no event arrived (the textbook "should have waited" shape),
+        # and emits ONE ``empty_iteration_streak`` diagnostic at
+        # threshold. The diagnostic surfaces in the LLM's next prompt
+        # via the existing ``agent_diagnostic`` relay, nudging the LLM
+        # to call ``wait_for_next_event``.
+        from .empty_iteration_tracker import EmptyIterationTracker
+        self._empty_iteration_tracker = EmptyIterationTracker(agent)
+        # Carried across plan_step calls so the tracker can observe
+        # the PRIOR iteration's outcome at the top of the CURRENT
+        # call. None means "no prior iteration to observe".
+        self._last_observation_was_empty: bool | None = None
         # NOTE: ``_consciousness_streams`` is stored on the base
         # (BaseActionPolicy) so every policy gets the same plumbing
         # uniformly. We accept the kwarg here and forward it to super
@@ -947,11 +965,8 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             "high_priority_loop_running": (
                 high_task is not None and not high_task.done()
             ),
-            "reactive_only": self._reactive_only,
             "has_pending_work": self.has_pending_work(),
         })
-        if self._continuation_tracker is not None:
-            snapshot["continuation"] = self._continuation_tracker.snapshot()
         return snapshot
 
     @hookable
@@ -974,16 +989,63 @@ class EventDrivenActionPolicy(BaseActionPolicy):
 
     @hookable
     async def get_next_event(self) -> BlackboardEvent:
-        """Block until an event arrives (for reactive_only mode).
+        """Block until an event arrives.
 
-        Like get_next_event_nowait but blocking. Used when the agent should only
-        act in response to events, never spontaneously. @hookable so tracing
-        and memory hooks can observe events just like get_next_event_nowait.
+        Like :meth:`get_next_event_nowait` but blocking. Used as the
+        internal primitive that backs the LLM-callable
+        ``wait_for_next_event`` action; agent code paths should prefer
+        the action so the wait is observable in ``_run_call_trace`` and
+        in ``idle_wait_counter`` accounting. ``@hookable`` so tracing
+        and memory hooks can observe events just like
+        ``get_next_event_nowait``.
 
         Returns:
             The next event (never None — blocks until one arrives).
         """
         return await self._event_queue.get()
+
+    @action_executor()
+    async def wait_for_next_event(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Pause until at least one event is queued, then resume planning.
+
+        Consume-none semantics: this does NOT pull any event from the
+        queue. It only blocks until either the normal or the
+        high-priority queue becomes nonempty (or the timeout elapses).
+        The next ``plan_step`` iteration's observation path drains the
+        queue(s) and dispatches events to ``@event_handler`` methods
+        through the existing pipeline.
+
+        Call this when the agent has finished useful work and wants to
+        pause until new information arrives — for example after writing
+        a ``request_human_approval`` request, after spawning a
+        long-running child mission, or when a ``SessionAgent`` has
+        nothing else to do.
+
+        Args:
+            timeout_seconds: Optional deadline in seconds. When
+                ``None`` (default), block indefinitely. When set and
+                the deadline elapses with no event arrival, return
+                ``{"ok": True, "timed_out": True}`` so the LLM can
+                branch on the deadline.
+
+        Returns:
+            ``{"ok": True, "timed_out": False}`` on normal wakeup.
+            ``{"ok": True, "timed_out": True}`` on timeout. The
+            wakeup-side payload is intentionally empty — the events
+            themselves are delivered to the LLM by the next
+            ``plan_step``'s observation + handler-dispatch pipeline,
+            not as the return value of this action.
+        """
+        self.agent.idle_wait_counter += 1
+        try:
+            awoke = await self._queues.wait_nonempty(timeout=timeout_seconds)
+            return {"ok": True, "timed_out": not awoke}
+        finally:
+            self.agent.idle_wait_counter -= 1
 
     def has_pending_work(self) -> bool:
         """Whether this policy has unfinished work that the next
@@ -1057,13 +1119,15 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         """Plan next action with event-driven context enrichment.
 
         Flow:
-        1. Get next event from queue via get_next_event_nowait() (non-blocking)
-           In reactive_only mode, ``state.custom["continuation_requested"]`` bypasses the blocking wait so the LLM gets one more turn (budget enforced by ``ContinuationTracker``).
-        2. Extract session_id from event metadata and set up context
-        3. If event exists, broadcast to @event_handler methods in capabilities
+        1. Observe the prior iteration's outcome (empty-iteration tracker)
+        2. Get next pending event via ``get_next_event_nowait()`` (non-blocking).
+           If the LLM wants to pause, it calls the ``wait_for_next_event``
+           action from generated code — the framework never blocks here.
+        3. Extract session_id from event metadata and set up context
+        4. If event exists, broadcast to @event_handler methods in capabilities
            and action providers
-        4. Accumulate context and check for immediate actions
-        5. If no immediate action, invoke LLM planner with enriched context (via super().plan_step)
+        5. Accumulate context and check for immediate actions
+        6. If no immediate action, invoke LLM planner with enriched context (via super().plan_step)
 
         NOTE: Event handlers provide context only, not transactions.
         Transaction management belongs in action executors that need it.
@@ -1080,6 +1144,22 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         Returns:
             Action to execute, or None
         """
+        # 0. Observe the PRIOR iteration's outcome (if any). The
+        # codegen subclass mirrors ``len(self._run_call_trace)`` into
+        # ``state.custom["last_iteration_actions_called"]`` at the top
+        # of its own plan_step so we can read it here without coupling
+        # to subclass internals. ``self._last_observation_was_empty``
+        # is None on the very first call (no prior iteration to score),
+        # so we skip the tracker on iteration 0.
+        if self._last_observation_was_empty is not None:
+            actions_called = state.custom.pop(
+                "last_iteration_actions_called", 0,
+            )
+            await self._empty_iteration_tracker.observe_iteration(
+                actions_called_count=actions_called,
+                queue_was_empty_at_observation=self._last_observation_was_empty,
+            )
+
         # 1. Get next event
         if self.has_pending_work():
             # The subclass is mid-recovery (e.g., codegen retry after
@@ -1096,39 +1176,14 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             # state; the next ``plan_step`` then processes the
             # queued event with a clean slate.
             event = None
-        elif self._reactive_only:
-            # Continuation gate: if the LLM signaled signal_continuation()
-            # on the prior iteration, fire one more planning turn instead
-            # of blocking on the event queue. The flag is one-shot — popped
-            # at consumption — and the tracker decides whether the budget
-            # still allows it. See ContinuationTracker for the burst model.
-            continuation_requested = state.custom.pop("continuation_requested", False)
-            if continuation_requested:
-                reason = state.custom.pop("continuation_reason", "")
-                continuation_allowed = await self._continuation_tracker.record_continuation(
-                    reason,
-                )
-                if continuation_allowed:
-                    event = None
-                else:
-                    # Budget exhausted — diagnostic already emitted by the
-                    # tracker; fall through to blocking event-wait so the
-                    # agent commits on the next real event.
-                    event = await self.get_next_event()
-            else:
-                # Block until an event arrives — no LLM calls when idle.
-                # This makes the agent purely event-driven: it only acts
-                # when something happens (user message, child agent event, etc.)
-                event = await self.get_next_event()
         else:
             event = await self.get_next_event_nowait()
 
+        # Record whether observation pulled an event this iteration so
+        # the next plan_step can score the prior outcome.
+        self._last_observation_was_empty = (event is None)
+
         if event is not None:
-            # Any real event (not a self-triggered continuation) ends the
-            # current burst. The tracker resets so the next continuation
-            # chain gets a fresh budget.
-            if self._continuation_tracker is not None:
-                self._continuation_tracker.reset()
             logger.debug(
                 "plan_step received event: key=%s, value_type=%s, value_preview=%s, metadata=%s",
                 event.key,

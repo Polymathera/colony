@@ -65,7 +65,6 @@ async def create_default_action_policy(agent: Agent, **kwargs) -> ActionPolicy:
             code_timeout=kwargs.get("code_timeout", 30.0),
             max_code_iterations=kwargs.get("max_code_iterations", 50),
             allow_self_termination=kwargs.get("allow_self_termination", True),
-            reactive_only=kwargs.get("reactive_only", False),
             planning_capability_blueprints=kwargs.get("planning_capability_blueprints", None),
             consciousness_streams=kwargs.get("consciousness_streams", None),
         )

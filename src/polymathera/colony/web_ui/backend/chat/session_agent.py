@@ -30,7 +30,7 @@ from polymathera.colony.agents.blackboard import BlackboardEvent
 from polymathera.colony.agents.blackboard.protocol import (
     ActionPolicyLifecycleProtocol,
     AgentDiagnosticProtocol,
-    DIAGNOSTIC_CONTINUATION_BUDGET_EXHAUSTED,
+    DIAGNOSTIC_EMPTY_ITERATION_STREAK,
     DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK,
     HumanApprovalProtocol,
     SELF_RELEVANT_DIAGNOSTIC_KINDS,
@@ -1339,7 +1339,7 @@ class SessionOrchestratorCapability(AgentCapability):
                     "suggestion": payload.get("suggestion"),
                 },
             )
-        if kind == DIAGNOSTIC_CONTINUATION_BUDGET_EXHAUSTED:
+        if kind == DIAGNOSTIC_EMPTY_ITERATION_STREAK:
             return EventProcessingResult(
                 context_key=(
                     f"agent_diagnostic:{producer_id}:{kind}:{parsed['sequence']}"
@@ -1347,10 +1347,8 @@ class SessionOrchestratorCapability(AgentCapability):
                 context={
                     "producer_agent_id": producer_id,
                     "kind": kind,
-                    "consecutive_count": payload.get("consecutive_count"),
-                    "max_per_burst": payload.get("max_per_burst"),
-                    "last_reason": payload.get("last_reason"),
-                    "attempted_reason": payload.get("attempted_reason"),
+                    "streak": payload.get("streak"),
+                    "threshold": payload.get("threshold"),
                     "suggestion": payload.get("suggestion"),
                 },
             )
@@ -1571,7 +1569,7 @@ class SessionOrchestratorCapability(AgentCapability):
             "code_iteration_count",
             "queue_depth_normal", "queue_depth_high",
             "high_priority_loop_running",
-            "reactive_only", "has_pending_work",
+            "has_pending_work",
             "complete_signaled",
         ):
             if k in snapshot:
@@ -1585,7 +1583,7 @@ class SessionOrchestratorCapability(AgentCapability):
                 "code_iteration_count",
                 "queue_depth_normal", "queue_depth_high",
                 "high_priority_loop_running",
-                "reactive_only", "has_pending_work",
+                "has_pending_work",
                 "complete_signaled",
             }:
                 lines.append(f"- **{k}**: `{v}`")

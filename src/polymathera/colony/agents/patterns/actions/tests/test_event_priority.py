@@ -296,7 +296,6 @@ class TestHighPriorityLoop:
             policy._high_priority_restarts = 0
             policy._subscribed_callbacks = []
             policy._subscribed_providers = set()
-            policy._reactive_only = True
             policy._consciousness_streams = []
 
             cap = _Cap.__new__(_Cap)
@@ -401,7 +400,6 @@ class TestHighPriorityLoop:
             policy._high_priority_restarts = 0
             policy._subscribed_callbacks = []
             policy._subscribed_providers = set()
-            policy._reactive_only = True
             policy._consciousness_streams = []
 
             cap = _Cap.__new__(_Cap)
@@ -472,24 +470,14 @@ class TestStatusSnapshot:
         p._event_queue = asyncio.Queue()
         p._high_priority_event_queue = asyncio.Queue()
         p._high_priority_task = None
-        p._reactive_only = True
         p._consciousness_streams = []
-        # ContinuationTracker is hosted on EventDrivenActionPolicy when
-        # reactive_only=True; this __new__-based fixture must mirror the
-        # __init__ invariant explicitly.
-        from polymathera.colony.agents.patterns.actions.continuation_tracker import (
-            ContinuationTracker,
-        )
-        p._continuation_tracker = ContinuationTracker(agent)
         snap = p.get_status_snapshot()
         assert snap["agent_id"] == "a2"
         assert snap["policy_class"] == "EventDrivenActionPolicy"
         assert snap["queue_depth_normal"] == 0
         assert snap["queue_depth_high"] == 0
         assert snap["high_priority_loop_running"] is False
-        assert snap["reactive_only"] is True
         assert snap["has_pending_work"] is False
-        assert "continuation" in snap
 
 
 # ---------------------------------------------------------------------------
