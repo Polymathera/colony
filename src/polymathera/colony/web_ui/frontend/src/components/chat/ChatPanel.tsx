@@ -40,6 +40,20 @@ type RunningAction = {
   started_at?: number | null;
 };
 
+// Mission narrative published by ``MissionStatusCapability.emit_mission_status``
+// on the coordinator side. The protocol is singleton-per-mission: a new
+// message for the same ``mission_id`` REPLACES the prior status; the UI
+// shows the latest, not a history. Lifetime is framework-managed (the
+// backend relay clears on mission terminal state or new mission with the
+// same ``mission_id``), NOT LLM-managed.
+type MissionStatus = {
+  mission_id: string;
+  agent_id?: string | null;
+  message: string;
+  details?: Record<string, unknown>;
+  timestamp?: number | null;
+};
+
 export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
   const [width, setWidth] = useState(getStoredWidth);
   const [collapsed, setCollapsed] = useState(getStoredCollapsed);
@@ -49,6 +63,12 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
   // action_id → running record. Cleared on a "complete" / "failed"
   // record from the same action_id.
   const [runningActions, setRunningActions] = useState<Record<string, RunningAction>>({});
+  // mission_id → latest narrative status. Backend relay reads the
+  // session blackboard's ``chat:mission_status:*`` singletons and
+  // forwards every change; we keep the latest per mission_id. A
+  // backend-emitted ``{cleared: true}`` (mission terminal state or
+  // mission_id replay) removes the entry.
+  const [missionStatuses, setMissionStatuses] = useState<Record<string, MissionStatus>>({});
   const wsRef = useRef<WebSocket | null>(null);
   const isDragging = useRef(false);
 
@@ -186,6 +206,33 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
               delete next[id];
               return next;
             });
+          }
+        } else if (data.type === "mission_status") {
+          // Mission narrative: replace the per-mission singleton with
+          // the latest message. The backend relay handles lifetime
+          // (mission terminal state, replay) — we never time-out or
+          // age out client-side. A ``cleared`` payload from the
+          // backend removes the entry.
+          const missionId = data.mission_id as string | undefined;
+          if (!missionId) return;
+          if (data.cleared) {
+            setMissionStatuses((prev) => {
+              if (!(missionId in prev)) return prev;
+              const next = { ...prev };
+              delete next[missionId];
+              return next;
+            });
+          } else {
+            setMissionStatuses((prev) => ({
+              ...prev,
+              [missionId]: {
+                mission_id: missionId,
+                agent_id: data.agent_id ?? null,
+                message: typeof data.message === "string" ? data.message : "",
+                details: (data.details && typeof data.details === "object") ? data.details : {},
+                timestamp: typeof data.timestamp === "number" ? data.timestamp : null,
+              },
+            }));
           }
         } else if (data.type === "tab_activity" && onTabActivity) {
           onTabActivity(data.tab_id, data.count);
@@ -412,6 +459,12 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
           canAbort={status === "connected"}
         />
 
+        {/* Per-mission narrative status — placed directly above the
+            chat input where the user looks while waiting. Singleton
+            per mission_id; the backend relay manages lifetime (clears
+            on mission terminal state or mission_id replay). */}
+        <MissionStatusBanner statuses={missionStatuses} />
+
         {/* Controls + Input */}
         <ChatControls controls={chatControls} onChange={setChatControls} />
         <ChatInput
@@ -486,6 +539,31 @@ function ActionStatusBanner({
       >
         Abort
       </button>
+    </div>
+  );
+}
+
+
+function MissionStatusBanner({
+  statuses,
+}: {
+  statuses: Record<string, MissionStatus>;
+}) {
+  const entries = Object.values(statuses);
+  if (entries.length === 0) return null;
+  // Most recent first so the user sees the freshest mission narrative
+  // at the top — matches the ActionStatusBanner ordering convention.
+  entries.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  return (
+    <div className="flex items-start gap-2 border-t border-border bg-muted/40 px-3 py-2 text-xs">
+      <div className="flex-1 min-w-0 space-y-1">
+        {entries.map((m) => (
+          <div key={m.mission_id} className="flex items-center gap-2">
+            <span className="inline-block h-2 w-2 rounded-full bg-primary/60" />
+            <span className="truncate text-muted-foreground">{m.message}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

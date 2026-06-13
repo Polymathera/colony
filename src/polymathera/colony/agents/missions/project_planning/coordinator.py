@@ -40,6 +40,12 @@ from polymathera.colony.agents.patterns.capabilities.github import (
 from polymathera.colony.agents.patterns.capabilities.human_approval import (
     HumanApprovalCapability,
 )
+from polymathera.colony.agents.patterns.capabilities.mission_status import (
+    MissionStatusCapability,
+)
+from polymathera.colony.agents.missions.project_planning.mission_control import (
+    ProjectPlanningMissionControlCapability,
+)
 from polymathera.colony.agents.scopes import BlackboardScope
 from polymathera.colony.design_monorepo import (
     DesignProcessCapability,
@@ -117,6 +123,25 @@ class ProjectPlanningCoordinator(Agent):
         )
     )
 
+    # ---------- Canonical mission-param + mode names ----------
+    #
+    # Caller-parameter names + mode values consumed by code that knows
+    # this is the ``project_planning`` mission specifically: the
+    # ``DecomposeCompletionValidator``, the
+    # ``request_decompose_early_stop`` action, audit tools, regression
+    # pins. Consumers reference these ClassVars instead of bare
+    # string literals — single source of truth per
+    # [[colony-scoped-params-propagation]] applied to mission-param
+    # names. They live HERE (on the coordinator that owns the mission)
+    # rather than on the generic ``MissionSpec`` because they describe
+    # ``project_planning``-specific semantics; another mission's
+    # ``MissionSpec`` instance has a different parameter vocabulary
+    # and should not inherit any of these names.
+    ISSUE_NUMBERS_PARAM_NAME: ClassVar[str] = "issue_numbers"
+    MAX_PARENTS_PER_RUN_PARAM_NAME: ClassVar[str] = "max_parents_per_run"
+    MODE_PARAM_NAME: ClassVar[str] = "mode"
+    DECOMPOSE_MODE_VALUE: ClassVar[str] = "decompose"
+
     async def initialize(self) -> None:
         # Mount the approval guardrail BEFORE super().initialize()
         # — the base's ``_create_action_policy`` resolves
@@ -139,6 +164,20 @@ class ProjectPlanningCoordinator(Agent):
             )
         )
 
+        # Mount the decompose-mode completion validator. It rejects
+        # ``signal_completion`` until the in-scope issue set is
+        # drained (decomposed, classified non-decomposable, or
+        # explicitly early-stopped via ``request_decompose_early_stop``).
+        # For non-decompose modes it delegates to the default
+        # ``LLMCompletionValidator`` so existing flows are untouched.
+        # See ``decompose_one_and_done_and_spinner_plan.md`` Change 2.
+        from polymathera.colony.agents.missions.project_planning.completion_validator import (
+            DecomposeCompletionValidator,
+        )
+        self.action_policy_blueprints["completion_validator"] = (
+            DecomposeCompletionValidator()
+        )
+
         # The design-monorepo trio first so the per-agent clone path
         # is resolved before DesignProcessCapability /
         # SystemDesignCapability initialise (both inherit the shared
@@ -149,6 +188,25 @@ class ProjectPlanningCoordinator(Agent):
             DesignProcessCapability.bind(),
             GitHubCapability.bind(scope=BlackboardScope.SESSION),
             HumanApprovalCapability.bind(scope=BlackboardScope.SESSION),
+            # MissionStatusCapability exposes ``emit_mission_status`` so
+            # the coordinator's planner can publish a one-line narrative
+            # ("loading design context...", "classifying issues...")
+            # the chat UI surfaces in place of an opaque spinner. See
+            # the capability's module docstring for the design.
+            MissionStatusCapability.bind(scope=BlackboardScope.SESSION),
+            # ProjectPlanningMissionControlCapability owns the typed
+            # ``request_decompose_early_stop`` primitive (the LLM-
+            # callable contract that records an explicit user
+            # acknowledgement so the DecomposeCompletionValidator can
+            # accept signal_completion with remainders deferred). The
+            # primitive is mission-specific so it lives on a mission-
+            # specific capability, NOT on the generic
+            # ``DesignProcessCapability`` (the design-process surface
+            # hosts decompose OPERATIONS — create / classify / propose
+            # — not mission-control concerns).
+            ProjectPlanningMissionControlCapability.bind(
+                scope=BlackboardScope.SESSION,
+            ),
         ])
         await super().initialize()
         logger.info(

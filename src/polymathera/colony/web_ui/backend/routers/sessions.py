@@ -452,6 +452,9 @@ async def create_session(
             from polymathera.colony.agents.patterns.capabilities.user_plugin import (
                 UserPluginCapability,
             )
+            from polymathera.colony.agents.patterns.capabilities.mission_status import (
+                MissionStatusCapability,
+            )
             from polymathera.colony.agents.patterns.capabilities.github import (
                 GitHubCapability,
             )
@@ -846,6 +849,12 @@ async def create_session(
                 capability_blueprints=[
                     SessionOrchestratorCapability.bind(),
                     AgentPoolCapability.bind(),
+                    # ``emit_mission_status`` lets the SessionAgent
+                    # publish a one-line narrative for its own work
+                    # (in addition to relaying coordinator emissions
+                    # via the chat router). Mission_id under SESSION
+                    # scope is the SessionAgent's own agent_id.
+                    MissionStatusCapability.bind(scope=BlackboardScope.SESSION),
                     ConsciousnessCapability.bind(),
                     VCMCapability.bind(scope=BlackboardScope.SESSION),
                     WebSearchCapability.bind(scope=BlackboardScope.SESSION),

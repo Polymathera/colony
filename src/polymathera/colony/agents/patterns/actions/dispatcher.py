@@ -204,6 +204,7 @@ class MethodWrapperActionExecutor(ActionExecutor):
         exclude_from_planning: bool = False,
         planning_summary: str | None = None,
         interruptible: bool = False,
+        emits_lifecycle: bool = True,
     ):
         # Method wrappers don't carry an agent — the bound ``object``
         # is the action provider. Forward only ``interruptible`` to the
@@ -218,6 +219,7 @@ class MethodWrapperActionExecutor(ActionExecutor):
         self.writes = writes or []
         self.exclude_from_planning = exclude_from_planning
         self.planning_summary = planning_summary
+        self.emits_lifecycle = emits_lifecycle
 
     async def execute(self, action: Action, resolved_params: dict[str, Any] | None = None) -> ActionResult:
         """Execute the wrapped method.
@@ -362,6 +364,7 @@ class FunctionWrapperActionExecutor(ActionExecutor):
         exclude_from_planning: bool = False,
         planning_summary: str | None = None,
         interruptible: bool = False,
+        emits_lifecycle: bool = True,
     ):
         super().__init__(agent=agent, interruptible=interruptible)
         self.func = func
@@ -374,6 +377,7 @@ class FunctionWrapperActionExecutor(ActionExecutor):
         self.first_param_name = first_param_name
         self.exclude_from_planning = exclude_from_planning
         self.planning_summary = planning_summary
+        self.emits_lifecycle = emits_lifecycle
 
     async def execute(self, action: Action, resolved_params: dict[str, Any] | None = None) -> ActionResult:
         """Execute the wrapped function.
@@ -684,6 +688,7 @@ def action_executor(
     planning_summary: str | None = None,
     tags: frozenset[str] | None = None,
     interruptible: bool = False,
+    emits_lifecycle: bool = True,
 ):
     """Decorator to turn any method into an action executor.
 
@@ -715,6 +720,19 @@ def action_executor(
             in for genuinely long-running actions (LLM calls, network I/O,
             sandboxed shell, large analyses) where the user benefits from being
             able to interrupt them.
+        emits_lifecycle: If True (default), the codegen action policy
+            publishes ``policy:action_started`` and ``policy:action_completed``
+            lifecycle events around dispatch — the chat UI spinner and the
+            trace ring buffer both consume these. Set False for actions
+            whose semantics make a "running" badge wrong: idle waits
+            (``wait_for_next_event``), publish-only narrative emits
+            (``emit_mission_status``), etc. The protocol stops announcing
+            as "running" something that is by definition not running;
+            every subscriber inherits the fix. The LLM never sees this
+            flag — it is purely framework-facing. Per
+            [[fix-the-class-not-the-instance]] the invariant "idle waits
+            are not work" lives at the single emission source, not at
+            every subscriber.
 
     Example:
         ```python
@@ -766,6 +784,12 @@ def action_executor(
 
         # Store interruptibility flag — dispatched as a cancellable task when True.
         func._action_interruptible = bool(interruptible)
+
+        # Store lifecycle-emission flag — codegen policy reads this to
+        # decide whether to publish ``policy:action_started`` /
+        # ``policy:action_completed`` around dispatch. See the
+        # decorator's ``emits_lifecycle`` argument for the contract.
+        func._action_emits_lifecycle = bool(emits_lifecycle)
 
         return func
 
@@ -952,6 +976,7 @@ class ActionDispatcher:
             first_param_name=first_param_name,
             exclude_from_planning=getattr(func, '_action_exclude_from_planning', False),
             interruptible=getattr(func, '_action_interruptible', False),
+            emits_lifecycle=getattr(func, '_action_emits_lifecycle', True),
         )
 
     def _create_object_action_group(self, obj: Any) -> ActionGroup:
@@ -1009,6 +1034,7 @@ class ActionDispatcher:
                     exclude_from_planning=getattr(method, '_action_exclude_from_planning', False),
                     planning_summary=getattr(method, '_action_planning_summary', None),
                     interruptible=getattr(method, '_action_interruptible', False),
+                    emits_lifecycle=getattr(method, '_action_emits_lifecycle', True),
                 )
                 # We can have multiple capabilities of the same type (e.g., memory
                 # capabilities) and/or capabilities of different types but with same action key.
@@ -1063,6 +1089,22 @@ class ActionDispatcher:
             for key, executor in group.executors.items()
             if not getattr(executor, 'exclude_from_planning', False)
         }
+
+    def find_executor(self, action_key: str) -> ActionExecutor | None:
+        """Return the executor registered for ``action_key``, or ``None``.
+
+        Lookup is by exact key match across every :class:`ActionGroup` in
+        :attr:`action_map`. Used by lifecycle-event emission sites to
+        consult ``executor.emits_lifecycle`` before publishing
+        ``policy:action_started`` / ``policy:action_completed`` — the
+        invariant "idle waits are not work" lives at the executor's
+        canonical attribute, NOT at every emission subscriber.
+        """
+        for group in self.action_map:
+            executor = group.executors.get(action_key)
+            if executor is not None:
+                return executor
+        return None
 
     async def get_action_descriptions(
         self,

@@ -147,6 +147,14 @@ class SessionChatProtocol(BlackboardProtocol):
             return f"chat:action_status:{agent_id}:*"
         return "chat:action_status:*"
 
+    # NOTE: mission-status keys are owned by
+    # :class:`polymathera.colony.agents.blackboard.protocol.MissionStatusProtocol`
+    # in ``agents/`` so producers (capabilities under ``agents/``) and
+    # consumers (the chat router below) reference the same canonical
+    # owner without ``agents/`` having to depend on ``web_ui/``. The
+    # chat router imports ``MissionStatusProtocol`` directly; this
+    # class no longer mirrors those methods.
+
     @staticmethod
     def all_chat_pattern() -> str:
         """Pattern matching all chat activity (messages, replies, events)."""

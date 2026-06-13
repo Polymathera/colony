@@ -1004,7 +1004,7 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         """
         return await self._event_queue.get()
 
-    @action_executor()
+    @action_executor(emits_lifecycle=False)
     async def wait_for_next_event(
         self,
         *,

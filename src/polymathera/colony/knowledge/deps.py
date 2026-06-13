@@ -33,8 +33,8 @@ from .embedder import InMemoryEmbedder
 from .extractors.claims import (
     ClaimExtractor,
     DeterministicClaimExtractor,
-    LLMCallable,
     LLMClaimExtractor,
+    TypedLLMCallable,
 )
 from .ingestion import Ingestor
 from .models import KnowledgeFormat
@@ -44,6 +44,8 @@ from .stores.image import InMemoryImageStore, LocalFsImageStore
 from .stores.vector import InMemoryVectorStore, QdrantVectorStore
 
 if TYPE_CHECKING:
+    from pydantic import BaseModel
+
     from .embedder import Embedder
     from .stores import GraphStore, ImageStore, VectorStore
 
@@ -117,10 +119,14 @@ def _default_vector_store(embedder: "Embedder") -> "VectorStore":
 
 
 def build_default_llm_callable(
-    *, max_tokens: int, temperature: float,
-) -> LLMCallable:
-    """Build the lazy :data:`LLMCallable` the singleton Ingestor's
-    :class:`LLMClaimExtractor` invokes per chunk.
+    *,
+    max_tokens: int,
+    temperature: float,
+    deadline_s: float | None = None,
+) -> TypedLLMCallable:
+    """Build the lazy :data:`TypedLLMCallable` the singleton Ingestor's
+    :class:`LLMClaimExtractor` (and every future typed-schema extractor)
+    invokes per chunk.
 
     The wrapper:
 
@@ -129,23 +135,29 @@ def build_default_llm_callable(
        time (the Ray Serving cluster may not be deployed yet), so
        construction-time resolution would race; per-call resolution
        is safe — the handle is cached inside ``get_llm_cluster``.
-    2. Builds an :class:`InferenceRequest` with the active execution
-       context (carried by ``serving.require_execution_context()``
-       via the field's default factory).
-    3. Forwards to ``LLMCluster.infer`` and returns the generated
-       text — the shape :class:`LLMClaimExtractor` expects (raw
-       string of JSON-shaped claim list).
+    2. Builds an :class:`InferenceRequest` carrying the caller-supplied
+       schema as ``json_schema=schema.model_json_schema()``. The
+       deployment honors it natively (Anthropic tool-use, vLLM
+       ``guided_json``, OpenRouter ``response_format``); the returned
+       ``APIResponse.content`` is a JSON string that validates against
+       the schema by construction.
+    3. Returns ``schema.model_validate_json(response.generated_text)`` —
+       a typed instance. The consumer's contract is the schema, not a
+       raw string; no JSON-text parsing happens above this layer.
 
-    On failure (no cluster deployed, route refused, timeout, ...)
-    the call raises; :meth:`LLMClaimExtractor.extract` already wraps
-    in a ``try/except`` that logs + returns 0 claims for that chunk,
+    On failure (no cluster deployed, route refused, timeout,
+    schema-invalid response, ...) the call raises; the consumer
+    (:meth:`LLMClaimExtractor.extract` and equivalent) wraps in a
+    typed ``try/except`` that logs + returns 0 claims for that chunk,
     so graceful degradation is automatic — the deterministic
     extractor still runs.
     """
 
     import uuid
 
-    async def _llm_call(prompt: str) -> str:
+    async def _llm_call(
+        prompt: str, schema: type["BaseModel"],
+    ) -> "BaseModel":
         from .._handles import get_llm_cluster
         from ..cluster.models import InferenceRequest
 
@@ -155,9 +167,11 @@ def build_default_llm_callable(
             prompt=prompt,
             max_tokens=max_tokens,
             temperature=temperature,
+            json_schema=schema.model_json_schema(),
+            deadline_s=deadline_s,
         )
         response = await handle.infer(request)
-        return response.generated_text
+        return schema.model_validate_json(response.generated_text)
 
     return _llm_call
 
@@ -184,13 +198,9 @@ def _build_default_extractors(
         llm_callable = build_default_llm_callable(
             max_tokens=cfg.llm_claim_extraction_max_tokens,
             temperature=cfg.llm_claim_extraction_temperature,
+            deadline_s=cfg.llm_claim_extraction_timeout_s,
         )
-        extractors.append(
-            LLMClaimExtractor(
-                llm_callable,
-                timeout_s=cfg.llm_claim_extraction_timeout_s,
-            ),
-        )
+        extractors.append(LLMClaimExtractor(llm_callable))
     extractors.append(DeterministicClaimExtractor())
     return tuple(extractors)
 

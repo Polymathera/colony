@@ -276,8 +276,11 @@ def test_llm_callable_builds_inference_request_with_config_knobs(
 ) -> None:
     """``build_default_llm_callable`` lazily resolves the LLMCluster
     handle and builds an :class:`InferenceRequest` whose ``prompt``,
-    ``max_tokens``, and ``temperature`` mirror the config + the
-    inbound prompt argument."""
+    ``max_tokens``, ``temperature``, ``json_schema``, and ``deadline_s``
+    mirror the config + the inbound prompt + schema. Under the typed
+    contract (Change 7) the callable returns a validated pydantic
+    instance; the deployment's ``generated_text`` IS the tool-use JSON
+    string that round-trips through ``schema.model_validate_json``."""
 
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
@@ -287,12 +290,18 @@ def test_llm_callable_builds_inference_request_with_config_knobs(
     from polymathera.colony.knowledge.deps import (
         build_default_llm_callable,
     )
+    from polymathera.colony.knowledge.extractors.claims import ClaimList
 
-    # Capture the InferenceRequest the callable hands to the handle.
+    # The deployment's response under structured output is a JSON
+    # string that validates against the supplied schema. We return a
+    # minimal ``ClaimList`` payload here.
     fake_handle = MagicMock()
     fake_handle.infer = AsyncMock(return_value=InferenceResponse(
         request_id="x",
-        generated_text='[{"subject":"s","predicate":"is_a","object":"o","confidence":0.9}]',
+        generated_text=(
+            '{"claims": [{"subject":"s","predicate":"is_a",'
+            '"object":"o","confidence":0.9}]}'
+        ),
         tokens_generated=10,
         latency_ms=12.5,
     ))
@@ -304,17 +313,17 @@ def test_llm_callable_builds_inference_request_with_config_knobs(
     monkeypatch.setattr(handles_mod, "get_llm_cluster", _stub_get_llm_cluster)
 
     callable_ = build_default_llm_callable(
-        max_tokens=4096, temperature=0.2,
+        max_tokens=4096, temperature=0.2, deadline_s=15.0,
     )
 
     # InferenceRequest's syscontext field default-factories from
     # ``serving.require_execution_context()`` — provide one for the
     # test. Use a synthetic context tag for clarity.
-    async def _invoke() -> str:
+    async def _invoke() -> ClaimList:
         with _serving.execution_context(
             tenant_id="t", colony_id="c", session_id=None, origin="test",
         ):
-            return await callable_("hello prompt")
+            return await callable_("hello prompt", ClaimList)
 
     # Match the surrounding-test convention (deprecated but does NOT
     # close the global event loop, so subsequent tests in the same
@@ -322,12 +331,16 @@ def test_llm_callable_builds_inference_request_with_config_knobs(
     # don't break).
     result = asyncio.get_event_loop().run_until_complete(_invoke())
 
-    assert "is_a" in result
+    # The typed contract returns a validated ``ClaimList`` instance.
+    assert isinstance(result, ClaimList)
+    assert result.claims[0].predicate == "is_a"
     fake_handle.infer.assert_awaited_once()
     req = fake_handle.infer.await_args.args[0]
     assert req.prompt == "hello prompt"
     assert req.max_tokens == 4096
     assert req.temperature == 0.2
+    assert req.deadline_s == 15.0
+    assert req.json_schema == ClaimList.model_json_schema()
     assert req.request_id.startswith("claim_extract_")
 
 
@@ -360,10 +373,10 @@ def test_llm_claim_extractor_degrades_gracefully_when_no_cluster(
     )
 
     callable_ = build_default_llm_callable(
-        max_tokens=1024, temperature=0.0,
+        max_tokens=1024, temperature=0.0, deadline_s=5.0,
     )
     extractor = LLMClaimExtractor(
-        callable_, prompt=ExtractionPrompt(), timeout_s=5.0,
+        callable_, prompt=ExtractionPrompt(),
     )
     chunk = Chunk(
         text="A is a B.",

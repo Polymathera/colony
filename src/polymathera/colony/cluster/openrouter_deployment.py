@@ -98,6 +98,7 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         temperature: float = 0.7,
         top_p: float | None = None,
         json_schema: dict[str, Any] | None = None,
+        deadline_s: float | None = None,
         request_id: str | None = None,
     ) -> APIResponse:
         """Call the OpenRouter API (OpenAI-compatible).
@@ -167,7 +168,34 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         # Timeout is configured on the httpx client (see _initialize_client),
         # NOT via asyncio.wait_for — cancelling a mid-flight httpx request
         # can leave the connection in a dirty state, exhausting the pool.
-        response = await self._client.chat.completions.create(**kwargs)
+        # ``deadline_s`` overrides the client default on a per-request
+        # basis via the SDK's typed ``timeout=`` argument; on exhaustion
+        # the OpenAI-compatible SDK raises ``APITimeoutError`` (or the
+        # underlying ``httpx.TimeoutException``), which we map to the
+        # framework's typed ``LLMCallDeadlineExceeded``.
+        if deadline_s is not None:
+            kwargs["timeout"] = deadline_s
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            import httpx as _httpx
+            from .errors import LLMCallDeadlineExceeded
+
+            try:
+                from openai import APITimeoutError as _OpenAITimeoutError
+            except ImportError:  # pragma: no cover — SDK should be present
+                _OpenAITimeoutError = ()  # type: ignore[assignment]
+
+            is_timeout = isinstance(
+                exc,
+                (_OpenAITimeoutError, _httpx.TimeoutException),
+            )
+            if is_timeout and deadline_s is not None:
+                raise LLMCallDeadlineExceeded(
+                    request_id=request_id or "<unknown>",
+                    deadline_s=deadline_s,
+                ) from exc
+            raise
 
         # Extract usage information
         usage = response.usage

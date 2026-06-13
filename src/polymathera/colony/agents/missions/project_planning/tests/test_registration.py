@@ -137,21 +137,38 @@ def test_project_planning_declares_expected_caller_parameters() -> None:
     """``caller_parameters`` documents the mission_params the
     coordinator's planner reads. ``mode`` is required (no default);
     the other entries are optional with declared defaults so the
-    planner can omit them when the colony-level resolution fits."""
+    planner can omit them when the colony-level resolution fits.
+
+    The canonical names live on :class:`ProjectPlanningCoordinator`
+    as ClassVars (single source of truth). This test asserts the
+    registration dict's ``caller_parameters`` entries use the exact
+    canonical names — a rename of either the ClassVar or the literal
+    that does not propagate to the other fails this test loudly.
+    """
+
+    from polymathera.colony.agents.missions.project_planning.coordinator import (
+        ProjectPlanningCoordinator,
+    )
 
     spec = _builtin_missions()["project_planning"]
     by_name = {p.name: p for p in spec.caller_parameters}
     assert set(by_name) == {
-        "mode", "roadmap_path", "user_github_login",
+        ProjectPlanningCoordinator.MODE_PARAM_NAME,
+        "roadmap_path", "user_github_login",
         "direction", "decomposition_criteria",
+        # Decompose-mode typed scope.
+        ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME,
+        ProjectPlanningCoordinator.MAX_PARENTS_PER_RUN_PARAM_NAME,
     }
     # ``mode`` is the only required CALLER param.
-    assert by_name["mode"].required is True
+    assert by_name[ProjectPlanningCoordinator.MODE_PARAM_NAME].required is True
     # The others carry declared defaults (Pydantic-style:
     # required iff no default of any kind).
     for optional in (
         "roadmap_path", "user_github_login", "direction",
         "decomposition_criteria",
+        ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME,
+        ProjectPlanningCoordinator.MAX_PARENTS_PER_RUN_PARAM_NAME,
     ):
         assert by_name[optional].required is False
 

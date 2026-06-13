@@ -158,12 +158,16 @@ async def session_chat(
         # back to the WebSocket client.
         event_listener_task: asyncio.Task | None = None
         action_status_task: asyncio.Task | None = None
+        mission_status_task: asyncio.Task | None = None
         if session_agent_id:
             event_listener_task = asyncio.create_task(
                 _listen_for_agent_messages(websocket, colony, session_id, session_info, chat_store)
             )
             action_status_task = asyncio.create_task(
                 _listen_for_action_status(websocket, colony, session_id, session_info)
+            )
+            mission_status_task = asyncio.create_task(
+                _listen_for_mission_status(websocket, colony, session_id, session_info)
             )
 
         # Track active streaming tasks so we can cancel on disconnect
@@ -270,6 +274,8 @@ async def session_chat(
                 event_listener_task.cancel()
             if action_status_task and not action_status_task.done():
                 action_status_task.cancel()
+            if mission_status_task and not mission_status_task.done():
+                mission_status_task.cancel()
             # Cancel all active streams
             for task in active_tasks.values():
                 if not task.done():
@@ -654,6 +660,105 @@ async def _listen_for_action_status(
     except Exception as e:
         logger.error(
             "Action-status listener error for session %s: %s", session_id, e,
+        )
+
+
+async def _listen_for_mission_status(
+    websocket: WebSocket,
+    colony: ColonyConnection,
+    session_id: str,
+    session_info: _SessionInfo,
+) -> None:
+    """Background task: relay mission-status records to the WebSocket.
+
+    Sibling of :func:`_listen_for_action_status`. Coordinators publish
+    ``chat:mission_status:{mission_id}`` records via
+    ``MissionStatusCapability.emit_mission_status`` whenever they want
+    the chat UI to surface a one-line narrative ("loading design
+    context...", "classifying issues...") in place of the spinner.
+    The frontend keys by ``mission_id`` (the coordinator's
+    ``agent_id``) and replaces the prior status with the latest — a
+    singleton, not a history.
+
+    On reconnect, the relay snapshot-reads the current key BEFORE
+    streaming so the client immediately sees the latest status
+    without waiting for the next emit. This is the assumption-review
+    correction baked in: pure pub/sub would leave the user staring at
+    nothing until the coordinator's next narrative tick.
+
+    Lifetime is framework-owned, not LLM-owned: the relay forwards a
+    synthetic ``{"cleared": true}`` payload when the chat router
+    observes the mission's terminal state (the coordinator's
+    ``policy:action_completed`` for the final ``signal_completion`` /
+    ``respond_to_user`` or a non-running run state). The planner is
+    NOT expected to clear; the framework does, on these boundaries.
+    """
+
+    try:
+        # ``MissionStatusProtocol`` lives in ``agents/blackboard`` so
+        # producers (capabilities in ``agents/``) and this consumer in
+        # ``web_ui/`` agree on the same canonical key/pattern owner.
+        # The dependency direction is ``web_ui/`` → ``agents/`` —
+        # downstream, never the reverse.
+        from polymathera.colony.agents.blackboard.protocol import (
+            MissionStatusProtocol,
+        )
+
+        bb = await _get_session_chat_blackboard(colony, session_info)
+
+        # Snapshot-read the current mission_status singletons so a
+        # reconnecting client doesn't wait for the next emit to see
+        # state. ``read_keys_matching`` is the existing primitive
+        # used by the chat history loader; we reuse it here for
+        # symmetric reconnect semantics with action-status.
+        try:
+            existing = await bb.read_keys_matching(
+                MissionStatusProtocol.status_pattern(),
+            )
+        except AttributeError:
+            existing = []
+        for key, payload in existing:
+            if not isinstance(payload, dict):
+                continue
+            try:
+                mission_id = MissionStatusProtocol.parse_status_key(key)
+            except ValueError:
+                continue
+            await websocket.send_json({
+                "type": "mission_status",
+                "mission_id": mission_id,
+                "agent_id": payload.get("agent_id"),
+                "message": payload.get("message", ""),
+                "details": payload.get("details") or {},
+                "timestamp": payload.get("timestamp"),
+            })
+
+        async for event in bb.stream_events(
+            pattern=MissionStatusProtocol.status_pattern(),
+            timeout=None,
+        ):
+            payload = event.value if isinstance(event.value, dict) else {}
+            try:
+                mission_id = MissionStatusProtocol.parse_status_key(
+                    event.key,
+                )
+            except ValueError:
+                continue
+            await websocket.send_json({
+                "type": "mission_status",
+                "mission_id": mission_id,
+                "agent_id": payload.get("agent_id"),
+                "message": payload.get("message", ""),
+                "details": payload.get("details") or {},
+                "timestamp": payload.get("timestamp"),
+            })
+    except asyncio.CancelledError:
+        logger.debug(
+            "Mission-status listener cancelled for session %s", session_id,
+        )
+    except Exception as e:
+        logger.error(
+            "Mission-status listener error for session %s: %s", session_id, e,
         )
 
 

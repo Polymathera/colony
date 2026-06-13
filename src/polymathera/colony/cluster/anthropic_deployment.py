@@ -96,6 +96,7 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         temperature: float = 0.7,
         top_p: float | None = None,
         json_schema: dict[str, Any] | None = None,
+        deadline_s: float | None = None,
         request_id: str | None = None,
     ) -> APIResponse:
         """Call the Anthropic Messages API.
@@ -105,10 +106,31 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             top_p: Nucleus sampling parameter
-            json_schema: Accepted for interface compatibility but intentionally
-                         unused. Anthropic has no native schema enforcement at the decoding level.
-                         Callers include format instructions in the prompt, and
-                         responses are validated via model_validate_json().
+            json_schema: Optional JSON Schema (e.g. ``Model.model_json_schema()``).
+                         When supplied, the call uses Anthropic's dedicated
+                         structured-outputs feature via
+                         ``output_config={"format":{"type":"json_schema","schema":...}}``,
+                         which applies grammar-constrained sampling: the model is
+                         decoder-restricted to emit only schema-valid output. The
+                         returned ``APIResponse.content`` is the JSON string the model
+                         emitted (read from ``response.content[0].text`` — same shape
+                         as text mode). This is the idiomatic API for "I just want
+                         JSON conforming to my schema" — we are NOT pretending to
+                         invoke a tool. Reference:
+                         https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+                         Sibling deployments (vLLM ``guided_json``, OpenRouter
+                         ``response_format``) honor the same field via their
+                         provider-native mechanisms; the contract is uniform.
+
+                         JSON Schema limitations enforced by Anthropic (caller
+                         responsibility — surfaces as a 400 from the API at request
+                         time if violated): no ``minLength``/``maxLength`` (string
+                         constraints), no ``minimum``/``maximum``/``multipleOf``
+                         (numeric constraints), no recursive schemas, no external
+                         ``$ref``, ``additionalProperties`` MUST be ``false`` on
+                         every object. The pydantic models we feed in here
+                         (``ClaimList`` etc.) are shaped accordingly; value-range
+                         enforcement happens AFTER parse via field_validators.
 
         Returns:
             Normalized APIResponse with usage and cost data
@@ -126,27 +148,19 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         if "system" in messages:
             kwargs["system"] = messages["system"]
 
-        ### # When json_schema is provided, inject it as a constraint instruction
-        ### # into the last user message. Anthropic doesn't have native schema
-        ### # enforcement like OpenAI's strict mode, but Claude follows schema
-        ### # instructions reliably when given explicitly.
-        ### if json_schema:
-        ###     import json as _json
-        ###     schema_instruction = (
-        ###         "\n\nYou MUST respond with JSON that conforms to the following JSON schema. "
-        ###         "Do NOT include any text outside the JSON object.\n"
-        ###         f"```json\n{_json.dumps(json_schema, indent=2)}\n```"
-        ###     )
-        ###     msgs = kwargs["messages"]
-        ###     if msgs and isinstance(msgs[-1].get("content"), list):
-        ###         # Append to the last text block of the last user message
-        ###         last_content = msgs[-1]["content"]
-        ###         for block in reversed(last_content):
-        ###             if isinstance(block, dict) and block.get("type") == "text":
-        ###                 block["text"] += schema_instruction
-        ###                 break
-        ###     elif msgs and isinstance(msgs[-1].get("content"), str):
-        ###         msgs[-1]["content"] += schema_instruction
+        # Structured output via the dedicated structured-outputs API
+        # (grammar-constrained sampling). The model is decoder-restricted
+        # to emit schema-valid JSON; the response lands in the same
+        # text-block surface as plain text mode (no tool_use pretense).
+        # Reference:
+        # https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+        if json_schema is not None:
+            kwargs["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": json_schema,
+                },
+            }
 
         logger.info(
             f"Anthropic API request: model={self.config.model_name}, "
@@ -172,11 +186,38 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         # Timeout is configured on the httpx client (see _initialize_client),
         # NOT via asyncio.wait_for — cancelling a mid-flight httpx request
         # can leave the connection in a dirty state, exhausting the pool.
+        # When the caller supplies ``deadline_s`` we override the client's
+        # default timeout on a per-request basis via the SDK's typed
+        # ``timeout=`` argument — same mechanism, finer grain. On
+        # exhaustion the SDK raises ``anthropic.APITimeoutError`` (or
+        # ``httpx.TimeoutException``); we map both to the framework's
+        # typed ``LLMCallDeadlineExceeded`` so consumers can count and
+        # respond to deadline exhaustion separately from transport
+        # failures.
+        if deadline_s is not None:
+            kwargs["timeout"] = deadline_s
         logger.debug(
             f"[TRACE] AnthropicLLMDeployment._call_api: BEFORE messages.create() "
-            f"request_id={request_id} model={self.config.model_name} max_tokens={max_tokens}"
+            f"request_id={request_id} model={self.config.model_name} "
+            f"max_tokens={max_tokens} deadline_s={deadline_s}"
         )
-        response = await self._client.messages.create(**kwargs)
+        try:
+            response = await self._client.messages.create(**kwargs)
+        except Exception as exc:
+            import anthropic  # local import — anthropic SDK loaded lazily
+            import httpx as _httpx
+            from .errors import LLMCallDeadlineExceeded
+
+            is_timeout = isinstance(
+                exc,
+                (anthropic.APITimeoutError, _httpx.TimeoutException),
+            )
+            if is_timeout and deadline_s is not None:
+                raise LLMCallDeadlineExceeded(
+                    request_id=request_id or "<unknown>",
+                    deadline_s=deadline_s,
+                ) from exc
+            raise
         logger.debug(
             f"[TRACE] AnthropicLLMDeployment._call_api: AFTER messages.create() "
             f"request_id={request_id} model={self.config.model_name}"
@@ -197,15 +238,22 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
             cache_write_tokens=cache_write,
         )
 
-        # Extract content text
+        # Extract content. Both text mode and structured-outputs mode
+        # land their payload in the first text block; the difference is
+        # that structured-outputs guarantees the text validates against
+        # ``json_schema``. The caller's ``model_validate_json`` path is
+        # uniform across deployments (vLLM and OpenRouter return JSON
+        # strings the same way).
         content = ""
         if response.content:
-            content = response.content[0].text
+            content = getattr(response.content[0], "text", "") or ""
+        output_mode = "json_schema" if json_schema is not None else "text"
 
         logger.info(
             f"Anthropic API response: input={input_tokens}, output={output_tokens}, "
             f"cache_read={cache_read}, cache_write={cache_write}, "
-            f"cost=${cost_usd:.6f}, response_len={len(content)}"
+            f"cost=${cost_usd:.6f}, response_len={len(content)}, "
+            f"mode={output_mode}"
         )
 
         return APIResponse(

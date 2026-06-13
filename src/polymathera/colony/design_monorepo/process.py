@@ -8,7 +8,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Any, ClassVar, Literal, get_args
 
 from ..agents.base import Agent
 from ..agents.blackboard.protocol import (
@@ -1392,6 +1392,23 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
     fallback (same discipline as
     :class:`RepoStateProvider` / :class:`SystemDesignCapability`).
     """
+
+    # Canonical action-key constants. Consumers (the decompose-
+    # completion validator, the ``RunCallTrace`` view, audit tools)
+    # reference these instead of bare string literals so a future
+    # rename surfaces at import time, not as a silent miscount in a
+    # consumer that kept the stale string. Same shape as
+    # [[colony-scoped-params-propagation]] applied to action keys:
+    # single canonical owner, imported by every consumer.
+    CLASSIFY_ISSUES_DECOMPOSABILITY_ACTION_KEY: ClassVar[str] = (
+        "classify_issues_decomposability"
+    )
+    PROPOSE_DECOMPOSITIONS_ACTION_KEY: ClassVar[str] = (
+        "propose_decompositions"
+    )
+    CREATE_DECOMPOSITION_ACTION_KEY: ClassVar[str] = (
+        "create_decomposition"
+    )
 
     def __init__(
         self,

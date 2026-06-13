@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from ..distributed.config import Mutability, Tier, tier_metadata
 from ..distributed.ray_utils import serving
 
 
@@ -453,6 +454,37 @@ class ClusterConfig(BaseModel):
     cleanup_on_init: bool = Field(
         default=False,
         description="Cleanup all existing deployments and states before initializing (useful for testing)"
+    )
+
+    # Per-call wall-clock deadline applied to every inference request that
+    # does not carry its own ``InferenceRequest.deadline_s``. The invariant
+    # *"every remote LLM call has a bounded wall-clock"* lives at the
+    # deployment that owns the HTTP connection — this is the fallback
+    # default the cluster supplies on behalf of consumers who do not
+    # override per-call. On exhaustion the deployment raises
+    # ``LLMCallDeadlineExceeded``; consumers count and respond to deadline
+    # exhaustion separately from transport failures. Per
+    # [[no-bandaids-durable-solutions]] there is no ``0.0 = disable``
+    # escape hatch — if the bound is correct, it is not optional. Default
+    # 60s is generous for current Sonnet 4.6 p99 (~8-15s under structured
+    # output), tight enough that a stuck call surfaces inside a minute.
+    llm_per_call_deadline_s: float = Field(
+        default=60.0,
+        gt=0.0,
+        description=(
+            "Default per-call wall-clock deadline (seconds) for "
+            "LLMCluster.infer when InferenceRequest.deadline_s is unset. "
+            "Mandatory bound, mapped per-deployment to the SDK's typed "
+            "timeout. On exhaustion the deployment raises "
+            "LLMCallDeadlineExceeded."
+        ),
+        json_schema_extra={
+            "env": "POLYMATHERA_LLM_PER_CALL_DEADLINE_S",
+            **tier_metadata(
+                tier=Tier.L1_OPERATOR,
+                mutability=Mutability.RELOADABLE,
+            ),
+        },
     )
 
     def validate_config(self) -> None:

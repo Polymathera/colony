@@ -11,7 +11,7 @@ re-exported there so existing call sites keep indexing it as a plain
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -789,6 +789,56 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                 "json_type": "string",
                 "default": None,
             },
+            {
+                # The SessionAgent extracts ``issue_numbers`` from the
+                # user's prompt at ``spawn_mission`` time — same pattern
+                # already used for ``user_github_login`` /
+                # ``roadmap_path``. The coordinator inherits the scope
+                # as typed data; the LLM does NOT redefine scope by
+                # giving up early. Per [[no-llm-facing-framework-state]].
+                #
+                # When omitted (``None``), scope = "all currently-open
+                # roadmap issues at mission spawn" — snapshot once at
+                # spawn, do NOT re-resolve mid-run. New issues filed
+                # mid-run are out-of-scope and surface in a *next*
+                # mission. Drain predicate is set-difference of stable
+                # GitHub issue numbers.
+                "name": "issue_numbers",
+                "scope": "caller",
+                "description": (
+                    "'decompose' mode only: explicit list of GitHub "
+                    "issue numbers to decompose. When omitted, scope "
+                    "= all open roadmap issues at spawn time. The "
+                    "list is the framework's structural drain "
+                    "predicate — the validator allows "
+                    "signal_completion only after every entry has "
+                    "been processed (decomposed, classified as "
+                    "non-decomposable, or explicitly early-stopped)."
+                ),
+                "json_type": "array",
+                "default": None,
+            },
+            {
+                # Hard cap on the apply phase. When both
+                # ``issue_numbers`` and ``max_parents_per_run`` are
+                # set and the list exceeds the cap, the cap wins —
+                # remainder is treated as deferred-out-of-scope and
+                # surfaces in the mission-final summary.
+                "name": "max_parents_per_run",
+                "scope": "caller",
+                "description": (
+                    "'decompose' mode only: hard cap on the number "
+                    "of parents the coordinator may apply "
+                    "``create_decomposition`` to in this mission run. "
+                    "When None, the cap is the size of "
+                    "``issue_numbers`` (or the open-issues fallback). "
+                    "Caps below the candidate count surface the "
+                    "remainder as deferred-out-of-scope in the "
+                    "mission summary."
+                ),
+                "json_type": "integer",
+                "default": None,
+            },
         ],
         "self_concept": {
             "description": (
@@ -853,29 +903,30 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                 ),
                 (
                     "For decompose mode: there is NO single "
-                    "'decompose_issues' action — you compose the "
-                    "primitives. Suggested flow: (1) list_issues to "
-                    "discover open issues; (2) "
-                    "classify_issues_decomposability over the FULL "
-                    "candidate list — this primitive is batch-native "
-                    "and LLM-judged; it IS the decomposability filter, "
-                    "so Python-side pre-filtering (checkbox counts, "
-                    "body length, label heuristics) reintroduces the "
-                    "structural heuristic the primitive replaced and "
-                    "is the wrong tool. Read 'decomposable' + 'reason' for "
-                    "each; (3) IF zero decomposable, respond_to_user "
-                    "directly with a summary (no approval card for "
-                    "an empty proposal); (4) ELSE call "
-                    "propose_decompositions on the decomposable "
-                    "set — pass the FULL set for joint decomposition "
-                    "(with shared_concerns surfacing), or batch by "
-                    "small groups; (5) request_human_approval"
-                    "(action_type='create_decomposition', ...) with "
-                    "the full parent_proposals + shared_concerns as "
-                    "extra; (6) on approve_once/approve_all, call create_decomposition "
-                    "once per parent in parent_proposals; (7) report "
-                    "the created child issue numbers + the parent "
-                    "patches to the user"
+                    "'decompose_issues' action — you compose primitives. "
+                    "The mission's scope is the typed in-scope set "
+                    "(mission_params['issue_numbers'] if set, otherwise "
+                    "all open roadmap issues at mission spawn, capped "
+                    "by mission_params['max_parents_per_run'] if set). "
+                    "The mission is complete only when every in-scope "
+                    "issue has been decomposed (via create_decomposition "
+                    "with dry_run=False) or classified non-decomposable "
+                    "(via classify_issues_decomposability returning "
+                    "decomposable=False), OR the user has explicitly "
+                    "authorised early stop via "
+                    "request_decompose_early_stop (a verbatim user "
+                    "quote is required; you cannot self-certify). "
+                    "Available primitives: list_issues, "
+                    "classify_issues_decomposability, "
+                    "propose_decompositions, request_human_approval, "
+                    "create_decomposition, request_decompose_early_stop, "
+                    "respond_to_user. Compose them as the data warrants "
+                    "— discover incrementally or all at once; propose "
+                    "per-issue, per-batch, or scope-wide; request "
+                    "approval per-decision or batched; apply singly or "
+                    "in bulk under an active approve_all. The completion "
+                    "validator will not accept signal_completion() while "
+                    "the in-scope backlog has unaddressed issues."
                 ),
             ],
             "constraints": [

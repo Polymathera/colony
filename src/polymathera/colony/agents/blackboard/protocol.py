@@ -2705,6 +2705,65 @@ class AgentDiagnosticProtocol(BlackboardProtocol):
         }
 
 
+#: Canonical sub-namespace under the session blackboard for chat
+#: traffic — used both by the producer side (capabilities that emit
+#: chat-relevant events) and the consumer side (the web_ui chat
+#: router that listens). Single source of truth so the relay and the
+#: writers cannot drift. Lives in ``agents/`` so capabilities in
+#: ``agents/`` can reference it without depending on ``web_ui/``.
+CHAT_BLACKBOARD_NAMESPACE = "session_chat"
+
+
+class MissionStatusProtocol(BlackboardProtocol):
+    """Coordinator-authored narrative status for one running mission.
+
+    Producers: :class:`MissionStatusCapability` (mounted on every
+    mission coordinator). Consumers: the chat WebSocket relay in
+    ``web_ui/backend/routers/chat.py`` (snapshot-read on reconnect +
+    streamed via ``stream_events``).
+
+    The key is a SINGLETON per ``mission_id`` — the latest write
+    replaces the prior status; the protocol does NOT retain a history.
+    The ``mission_id`` is the coordinator's own ``agent_id`` —
+    framework-known, never threaded by the LLM. Lifetime is
+    framework-managed: cleared on mission terminal state or on a new
+    mission with the same ``mission_id``.
+
+    Scope: SESSION — narrative is per-session, mirrors the chat UI's
+    scope.
+
+    Key shape: ``chat:mission_status:<mission_id>``.
+
+    NOTE: This protocol lives in ``agents/blackboard`` (not in
+    ``web_ui/``) so any consumer in either layer can import it without
+    a backwards dependency. The chat-protocol ``SessionChatProtocol``
+    re-exposes the same methods for chat-side ergonomics but they
+    delegate to this canonical owner.
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.SESSION
+
+    _PREFIX = "chat:mission_status:"
+
+    @staticmethod
+    def status_key(mission_id: str) -> str:
+        return f"{MissionStatusProtocol._PREFIX}{mission_id}"
+
+    @staticmethod
+    def status_pattern(mission_id: str | None = None) -> str:
+        if mission_id:
+            return f"{MissionStatusProtocol._PREFIX}{mission_id}"
+        return f"{MissionStatusProtocol._PREFIX}*"
+
+    @staticmethod
+    def parse_status_key(key: str) -> str:
+        if not key.startswith(MissionStatusProtocol._PREFIX):
+            raise ValueError(
+                f"Not a MissionStatusProtocol key: {key!r}",
+            )
+        return key[len(MissionStatusProtocol._PREFIX):]
+
+
 # Diagnostic kinds — open enum. Add a constant per new kind so the
 # producer/consumer contract stays grep-able. v1 ships one kind; the
 # rest are documented for future producers.

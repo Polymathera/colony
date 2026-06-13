@@ -30,6 +30,7 @@ from polymathera.colony.agents.blackboard import BlackboardEvent
 from polymathera.colony.agents.blackboard.protocol import (
     ActionPolicyLifecycleProtocol,
     AgentDiagnosticProtocol,
+    CHAT_BLACKBOARD_NAMESPACE,
     DIAGNOSTIC_EMPTY_ITERATION_STREAK,
     DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK,
     HumanApprovalProtocol,
@@ -108,9 +109,12 @@ class SessionOrchestratorCapability(AgentCapability):
     """
 
     #: Default sub-namespace under the session blackboard for chat
-    #: traffic. Single source of truth — the chat router and any other
-    #: consumer reach this constant rather than repeating the literal.
-    DEFAULT_NAMESPACE = "session_chat"
+    #: traffic. Single source of truth lives at
+    #: ``CHAT_BLACKBOARD_NAMESPACE`` in
+    #: ``agents/blackboard/protocol.py`` — exported here so
+    #: chat-specific call sites that already imported
+    #: ``SessionOrchestratorCapability`` keep one indirection level.
+    DEFAULT_NAMESPACE = CHAT_BLACKBOARD_NAMESPACE
 
     # Key constants for the SESSION-scoped planner-loop state this
     # capability owns and refreshes. Read by ``_refresh_available_*``

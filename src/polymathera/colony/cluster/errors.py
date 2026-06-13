@@ -26,4 +26,34 @@ class LLMInferenceError(Exception):
         self.request_id = request_id
 
 
-__all__ = ("LLMInferenceError",)
+class LLMCallDeadlineExceeded(LLMInferenceError):
+    """Raised when an inference call exceeds its per-call wall-clock
+    deadline (``InferenceRequest.deadline_s`` or the cluster's
+    ``llm_per_call_deadline_s`` default).
+
+    Distinct from the generic :class:`LLMInferenceError` so consumers
+    (e.g. :class:`LLMClaimExtractor`) can count and respond to
+    deadline exhaustion separately from transport-level failures. The
+    deadline is enforced by the deployment at the SDK's per-request
+    timeout boundary — NOT via ``asyncio.wait_for``, which would leave
+    the HTTP connection in a dirty state and exhaust the pool. Per
+    [[no-bandaids-durable-solutions]] the deadline is mandatory: no
+    ``0.0 = disable`` escape hatch is provided. If the bound is
+    correct, it is not optional.
+    """
+
+    def __init__(self, *, request_id: str, deadline_s: float) -> None:
+        super().__init__(
+            request_id=request_id,
+            message=(
+                f"LLM call exceeded deadline of {deadline_s:.2f}s "
+                f"(request_id={request_id})"
+            ),
+        )
+        self.deadline_s = deadline_s
+
+
+__all__ = (
+    "LLMInferenceError",
+    "LLMCallDeadlineExceeded",
+)

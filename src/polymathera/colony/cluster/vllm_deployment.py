@@ -392,6 +392,30 @@ class VLLMDeployment(AgentManagerBase):
         """Report metadata for proxy routing (called by serving framework)."""
         return {"client_id": self.client_id}
 
+    async def _run_vllm_generation(
+        self, prompt: str, sampling_params: Any, request_id: str,
+    ) -> Any:
+        """Drive ``engine.generate()`` to completion and return the
+        final output.
+
+        Extracted from :meth:`infer` so the deadline-bounded path can
+        wrap the whole generation in a single awaitable
+        (``async with asyncio.timeout(...)``). The generator yields
+        intermediate outputs while vLLM is decoding; the final one is
+        what we hand back to the caller. Cancellation propagates
+        cleanly because the caller (``infer``) follows up with
+        ``engine.abort(request_id)`` to free vLLM's server-side
+        request slot.
+        """
+        final_output = None
+        async for output in self.engine.generate(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+        ):
+            final_output = output
+        return final_output
+
     @serving.endpoint
     @inference_circuit
     async def infer(self, request: InferenceRequest) -> InferenceResponse:
@@ -491,13 +515,32 @@ class VLLMDeployment(AgentManagerBase):
             # Generate using vLLM with automatic prefix caching
             # vLLM will automatically cache and reuse the prompt prefix across requests
             # engine.generate() returns an async generator that yields intermediate results
+            #
+            # ``deadline_s`` is enforced by racing the async generator
+            # against asyncio.timeout, and on exhaustion calling
+            # ``engine.abort(request_id)`` to free vLLM's server-side
+            # request reservation. (This is the local-engine equivalent
+            # of the SDK's per-request timeout in the remote deployments
+            # — different mechanism, same contract: a stuck call surfaces
+            # as a typed ``LLMCallDeadlineExceeded``, not as an unbounded
+            # wait or a leaked request-id slot.)
+            from .errors import LLMCallDeadlineExceeded as _Deadline
             final_output = None
-            async for output in self.engine.generate(
-                prompt=full_prompt,
-                sampling_params=sampling_params,
-                request_id=request.request_id,
-            ):
-                final_output = output
+            generation_task = self._run_vllm_generation(
+                full_prompt, sampling_params, request.request_id,
+            )
+            if request.deadline_s is not None:
+                try:
+                    async with asyncio.timeout(request.deadline_s):
+                        final_output = await generation_task
+                except asyncio.TimeoutError as exc:
+                    await self.engine.abort(request.request_id)
+                    raise _Deadline(
+                        request_id=request.request_id,
+                        deadline_s=request.deadline_s,
+                    ) from exc
+            else:
+                final_output = await generation_task
 
             # Extract generated text from final output
             generated_text = final_output.outputs[0].text if final_output and final_output.outputs else ""

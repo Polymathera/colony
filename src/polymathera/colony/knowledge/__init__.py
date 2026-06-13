@@ -60,10 +60,12 @@ from .embedder import (
 )
 from .extractors import (
     ClaimExtractor,
+    ClaimList,
     DeterministicClaimExtractor,
+    ExtractedClaim,
     ExtractionPrompt,
-    LLMCallable,
     LLMClaimExtractor,
+    TypedLLMCallable,
 )
 from .formats import (
     EXTENSION_MAP,
@@ -225,10 +227,12 @@ __all__ = (
     "default_token_counter",
     # Extractors
     "ClaimExtractor",
+    "ClaimList",
     "DeterministicClaimExtractor",
+    "ExtractedClaim",
     "ExtractionPrompt",
-    "LLMCallable",
     "LLMClaimExtractor",
+    "TypedLLMCallable",
     # Embedder
     "Embedder",
     "InMemoryEmbedder",

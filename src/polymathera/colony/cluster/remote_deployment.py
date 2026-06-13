@@ -565,6 +565,7 @@ class RemoteLLMDeployment(AgentManagerBase):
                     temperature=request.temperature,
                     top_p=request.top_p,
                     json_schema=request.json_schema,
+                    deadline_s=request.deadline_s,
                     request_id=request.request_id,
                 )
             finally:
@@ -1084,6 +1085,7 @@ class RemoteLLMDeployment(AgentManagerBase):
         temperature: float = 0.7,
         top_p: float | None = None,
         json_schema: dict[str, Any] | None = None,
+        deadline_s: float | None = None,
         request_id: str | None = None,
     ) -> APIResponse:
         """Call the remote LLM API.
@@ -1094,6 +1096,10 @@ class RemoteLLMDeployment(AgentManagerBase):
             temperature: Sampling temperature
             top_p: Nucleus sampling parameter
             json_schema: Optional JSON schema for structured output
+            deadline_s: Optional per-call wall-clock deadline in seconds.
+                When set, the deployment threads it to the underlying
+                SDK's per-request timeout. On exhaustion the deployment
+                raises ``LLMCallDeadlineExceeded``.
 
         Returns:
             Normalized APIResponse

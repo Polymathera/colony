@@ -389,6 +389,17 @@ class LLMCluster:
         if self.config.enable_tenant_isolation:
             await self._validate_tenant_access(request)
 
+        # Resolve the per-call wall-clock deadline. The invariant
+        # *"every remote LLM call has a bounded wall-clock"* lives here:
+        # caller-supplied ``request.deadline_s`` wins; otherwise the
+        # cluster config's ``llm_per_call_deadline_s`` default is
+        # injected so the deployment always sees a bound. No
+        # ``0.0 = disable`` escape hatch ([[no-bandaids-durable-solutions]]).
+        if request.deadline_s is None:
+            request = request.model_copy(
+                update={"deadline_s": self.config.llm_per_call_deadline_s},
+            )
+
         # Select deployment based on requirements
         deployment_name = self._select_deployment_for_request(request)
         deployment_handle = all_handles[deployment_name]

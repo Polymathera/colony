@@ -1323,23 +1323,43 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 action_type=action_key,
                 parameters=params,
             )
+            # Consult the executor's ``emits_lifecycle`` flag (set via
+            # the @action_executor decorator) to decide whether the
+            # generic ``policy:action_started:*`` /
+            # ``policy:action_completed:*`` lifecycle events fire for
+            # THIS action. Idle waits (``wait_for_next_event``) and
+            # publish-only narrative emits (``emit_mission_status``)
+            # declare ``emits_lifecycle=False`` so the spinner row
+            # never lies about what is actually running. Other
+            # subscribers (traces, log adapters) inherit the right
+            # behavior automatically — the invariant lives at one
+            # source ([[fix-the-class-not-the-instance]]). When the
+            # action_key is unknown to the dispatcher (a future
+            # synthetic or test-injected action), the conservative
+            # default is to emit.
+            _executor = self._action_dispatcher.find_executor(action_key)
+            _emits_lifecycle = (
+                _executor is None or _executor.emits_lifecycle
+            )
+
             # Publish a generic ``policy:action_started:*`` lifecycle
             # event on the agent's blackboard. Subscribers — chat UI
             # bridge, traces, log adapters — decide what to do with it.
             # The policy itself does not know what a chat or a UI is.
             _started_at = time.time()
-            await self._emit_lifecycle_event(
-                key=ActionPolicyLifecycleProtocol.action_started_key(
-                    action.action_id,
-                ),
-                payload={
-                    "agent_id": self.agent.agent_id,
-                    "action_id": action.action_id,
-                    "action_key": action_key,
-                    "parameters": dict(params),
-                    "started_at": _started_at,
-                },
-            )
+            if _emits_lifecycle:
+                await self._emit_lifecycle_event(
+                    key=ActionPolicyLifecycleProtocol.action_started_key(
+                        action.action_id,
+                    ),
+                    payload={
+                        "agent_id": self.agent.agent_id,
+                        "action_id": action.action_id,
+                        "action_key": action_key,
+                        "parameters": dict(params),
+                        "started_at": _started_at,
+                    },
+                )
 
             # Dispatch under a try/finally so the matching action_completed
             # event ALWAYS fires — even when dispatch raises CancelledError
@@ -1455,23 +1475,27 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 # Pair the started event with a terminal one so the
                 # downstream subscribers can finalize their state
                 # (clear a UI banner, close a span, write a log line).
+                # Mirrors the started gate above — if we didn't emit
+                # start, we don't emit completion either; subscribers
+                # never see one without the other.
                 ended_at = time.time()
-                await self._emit_lifecycle_event(
-                    key=ActionPolicyLifecycleProtocol.action_completed_key(
-                        action.action_id,
-                    ),
-                    payload={
-                        "agent_id": self.agent.agent_id,
-                        "action_id": action.action_id,
-                        "action_key": resolved_action_key,
-                        "success": result.success,
-                        "cancelled": result.cancelled,
-                        "started_at": _started_at,
-                        "ended_at": ended_at,
-                        "wall_time_ms": int((ended_at - _started_at) * 1000),
-                        "error": (result.error or None) if not result.success else None,
-                    },
-                )
+                if _emits_lifecycle:
+                    await self._emit_lifecycle_event(
+                        key=ActionPolicyLifecycleProtocol.action_completed_key(
+                            action.action_id,
+                        ),
+                        payload={
+                            "agent_id": self.agent.agent_id,
+                            "action_id": action.action_id,
+                            "action_key": resolved_action_key,
+                            "success": result.success,
+                            "cancelled": result.cancelled,
+                            "started_at": _started_at,
+                            "ended_at": ended_at,
+                            "wall_time_ms": int((ended_at - _started_at) * 1000),
+                            "error": (result.error or None) if not result.success else None,
+                        },
+                    )
             finally:
                 if exc_to_reraise is not None:
                     raise exc_to_reraise

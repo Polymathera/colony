@@ -197,7 +197,23 @@ class InferenceRequest(BaseModel):
         max_tokens: Maximum number of tokens to generate
         temperature: Sampling temperature
         top_p: Nucleus sampling parameter
-        json_schema: Optional JSON schema for structured output (vLLM guided decoding)
+        json_schema: Optional JSON schema for structured output. Each
+            deployment honors it via its provider-native mechanism
+            (Anthropic tool-use, vLLM ``guided_json``, OpenRouter
+            ``response_format``). Decoder-enforced — the returned
+            ``APIResponse.content`` validates against this schema by
+            construction, no consumer-side text parsing required.
+        deadline_s: Per-call wall-clock deadline in seconds. When set,
+            the deployment threads it to the underlying SDK's per-
+            request timeout (NOT ``asyncio.wait_for``, which leaves the
+            httpx connection in a dirty state). On exhaustion the
+            deployment raises ``LLMCallDeadlineExceeded``. When unset,
+            the deployment falls back to its config-level default
+            (``LLMClusterConfig.llm_per_call_deadline_s``). The
+            invariant *"every remote LLM call has a bounded wall-clock"*
+            lives at the deployment that owns the HTTP connection, so
+            every consumer of ``LLMCluster`` inherits the bound for
+            free.
         metadata: Additional request metadata
     """
 
@@ -217,7 +233,22 @@ class InferenceRequest(BaseModel):
     top_p: float | None = None
     json_schema: dict[str, Any] | None = Field(
         default=None,
-        description="JSON schema for structured output generation (vLLM guided decoding)"
+        description=(
+            "JSON schema for structured output. Decoder-enforced by every "
+            "deployment (Anthropic tool-use, vLLM guided_json, OpenRouter "
+            "response_format) — the returned content validates against "
+            "this schema by construction."
+        ),
+    )
+    deadline_s: float | None = Field(
+        default=None,
+        description=(
+            "Per-call wall-clock deadline in seconds. When set, the "
+            "deployment enforces it via the SDK's per-request timeout. "
+            "On exhaustion the deployment raises "
+            "LLMCallDeadlineExceeded. None = use the cluster config "
+            "default (llm_per_call_deadline_s)."
+        ),
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
