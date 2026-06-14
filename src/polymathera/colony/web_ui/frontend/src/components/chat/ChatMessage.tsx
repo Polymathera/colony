@@ -101,7 +101,8 @@ export interface ChatMessageData {
   //  - undefined / other → existing WebSocket reply lane
   kind?: "human_approval" | string;
   // Short action name (e.g. "create_decomposition"). Present iff the
-  // request was a typed approval — drives the 3-choice button labels.
+  // request was a typed approval — drives the 4-choice button labels
+  // (Approve once / Approve all / Reject / Abort).
   action_type?: string | null;
   // Run lifecycle
   run_status?: "submitted" | "spawning" | "running" | "completed" | "failed";
@@ -115,10 +116,15 @@ export interface ChatMessageData {
 interface ChatMessageProps {
   message: ChatMessageData;
   // Receives the source message so the host can route per ``kind``
-  // (human_approval vs freeform agent_question).
+  // (human_approval vs freeform agent_question). ``explanation`` is
+  // the operator's required justification on ``reject`` / ``abort``
+  // (matches the Pydantic ``HumanApprovalResponse.explanation``
+  // contract on the backend; the response validator rejects empty
+  // explanation for those choices with 422).
   onReply?: (
     message: ChatMessageData,
     content: string,
+    extra?: { explanation?: string },
   ) => void;
 }
 
@@ -137,6 +143,7 @@ function approvalButtonLabel(
   actionType: string | null,
 ): string {
   if (option === "reject") return "Reject";
+  if (option === "abort") return "Abort";
   if (option === "approve") return "Approve";
   if (option === "approve_once") {
     return actionType ? `Approve once: ${actionType}` : "Approve once";
@@ -149,8 +156,46 @@ function approvalButtonLabel(
   return option;
 }
 
+// ``reject`` and ``abort`` require a non-empty operator explanation —
+// the backend's ``HumanApprovalResponse`` Pydantic validator enforces
+// this and the HTTP endpoint surfaces a 422 on empty. The UI mirrors
+// the contract by switching the card into "compose explanation" mode
+// before submission.
+const CHOICES_REQUIRING_EXPLANATION = new Set(["reject", "abort"]);
+
 export function ChatMessage({ message, onReply }: ChatMessageProps) {
   const { role, content, agent_id, agent_type, username, timestamp, request_id, response_options, awaiting_reply, run_status, attachments, action_type } = message;
+
+  // When the operator clicks ``reject`` or ``abort``, switch the card
+  // into compose mode and require a non-empty explanation before
+  // submitting. ``null`` means no compose in progress (waiting for
+  // the operator's initial choice).
+  const [composeChoice, setComposeChoice] = useState<string | null>(null);
+  const [explanationDraft, setExplanationDraft] = useState("");
+
+  const handleChoice = (option: string) => {
+    if (!onReply) return;
+    if (CHOICES_REQUIRING_EXPLANATION.has(option)) {
+      setComposeChoice(option);
+      setExplanationDraft("");
+      return;
+    }
+    onReply(message, option);
+  };
+
+  const submitWithExplanation = () => {
+    if (!onReply || composeChoice === null) return;
+    const trimmed = explanationDraft.trim();
+    if (!trimmed) return;
+    onReply(message, composeChoice, { explanation: trimmed });
+    setComposeChoice(null);
+    setExplanationDraft("");
+  };
+
+  const cancelCompose = () => {
+    setComposeChoice(null);
+    setExplanationDraft("");
+  };
 
   return (
     <div className={cn("rounded-lg border px-3 py-2 text-xs", ROLE_COLORS[role] || ROLE_COLORS.system)}>
@@ -208,16 +253,18 @@ export function ChatMessage({ message, onReply }: ChatMessageProps) {
       )}
 
       {/* Agent question response options */}
-      {awaiting_reply && response_options && response_options.length > 0 && request_id && agent_id && onReply && (
+      {awaiting_reply && response_options && response_options.length > 0 && request_id && agent_id && onReply && composeChoice === null && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {response_options.map((option, i) => (
             <button
               key={i}
-              onClick={() => onReply(message, option)}
+              onClick={() => handleChoice(option)}
               className={cn(
                 "rounded border px-2.5 py-1 text-[10px] font-medium transition-colors",
                 option === "reject"
                   ? "border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20"
+                  : option === "abort"
+                  ? "border-red-700/50 bg-red-700/20 text-red-200 hover:bg-red-700/30"
                   : option === "approve_all"
                   ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
                   : "border-primary/30 bg-primary/10 text-primary hover:bg-primary/20",
@@ -226,6 +273,47 @@ export function ChatMessage({ message, onReply }: ChatMessageProps) {
               {approvalButtonLabel(option, action_type ?? null)}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* Explanation compose mode — operator picked reject or abort; a
+          non-empty justification is required before submission so the
+          agent's next iteration can react to "why". */}
+      {awaiting_reply && composeChoice !== null && request_id && agent_id && onReply && (
+        <div className="mt-2 flex flex-col gap-1.5">
+          <div className="text-[10px] text-muted-foreground">
+            {composeChoice === "abort"
+              ? "Aborting — explain why so the agent can record the rationale before winding down."
+              : "Rejecting — explain why so the agent can adjust the next attempt."}
+          </div>
+          <textarea
+            value={explanationDraft}
+            onChange={(e) => setExplanationDraft(e.target.value)}
+            placeholder="Required: operator justification"
+            rows={3}
+            className="w-full rounded border border-zinc-700/40 bg-zinc-900/50 px-2 py-1 text-[11px] leading-5 focus:outline-none focus:border-primary/50"
+          />
+          <div className="flex gap-1.5">
+            <button
+              onClick={submitWithExplanation}
+              disabled={!explanationDraft.trim()}
+              className={cn(
+                "rounded border px-2.5 py-1 text-[10px] font-medium transition-colors",
+                composeChoice === "abort"
+                  ? "border-red-700/50 bg-red-700/20 text-red-200 hover:bg-red-700/30"
+                  : "border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20",
+                "disabled:opacity-40 disabled:cursor-not-allowed",
+              )}
+            >
+              Submit {composeChoice === "abort" ? "Abort" : "Reject"}
+            </button>
+            <button
+              onClick={cancelCompose}
+              className="rounded border border-zinc-700/40 px-2.5 py-1 text-[10px] font-medium text-muted-foreground hover:bg-zinc-800/50"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
     </div>

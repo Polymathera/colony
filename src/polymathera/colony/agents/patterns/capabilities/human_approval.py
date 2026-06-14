@@ -50,7 +50,7 @@ from datetime import datetime, timezone
 from typing import Any, ClassVar
 
 from overrides import override
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ...base import Agent, AgentCapability
 from ...blackboard import BlackboardEvent
@@ -72,11 +72,17 @@ logger = logging.getLogger(__name__)
 class HumanApprovalRequest(BaseModel):
     """Payload an agent posts to ``human_approval:request:{request_id}``.
 
-    When ``action_type`` is set, the UI renders three choices
-    (``reject`` / ``approve_once`` / ``approve_all``) and ``approve_all``
-    auto-allows future dispatches whose ``action_key`` contains
-    ``action_type``. When ``None``, the legacy two-choice
-    (``approve`` / ``reject``) shape applies.
+    When ``action_type`` is set, the UI renders four choices
+    (``approve_once`` / ``approve_all`` / ``reject`` / ``abort``).
+    ``approve_all`` auto-allows future dispatches whose ``action_key``
+    contains ``action_type``. ``reject`` blocks the apply for this
+    request but does NOT terminate the agent; the operator's
+    ``explanation`` surfaces in the planner context binding so the
+    next iteration can adjust. ``abort`` signals the agent to wind
+    down via its mission-control surface; the explanation accompanies
+    the signal. When ``action_type`` is ``None``, the legacy
+    two-choice (``approve`` / ``reject``) shape applies and no
+    ``explanation`` is required.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -103,6 +109,13 @@ class HumanApprovalRequest(BaseModel):
         return self.action_type is not None
 
 
+CHOICES_REQUIRING_EXPLANATION: frozenset[str] = frozenset({"reject", "abort"})
+"""``HumanApprovalResponse.explanation`` is required and must be
+non-empty when ``choice`` is one of these. The validator below enforces
+it at the data-shape boundary so guardrail predicates and the chat-UI
+relay see the same contract."""
+
+
 class HumanApprovalResponse(BaseModel):
     """Payload the Web UI posts to ``human_approval:response:{request_id}``."""
 
@@ -110,6 +123,13 @@ class HumanApprovalResponse(BaseModel):
 
     request_id: str
     choice: str
+    explanation: str = ""
+    """Operator's justification. Required (non-empty) when ``choice``
+    is in :data:`CHOICES_REQUIRING_EXPLANATION` (``reject`` / ``abort``);
+    optional otherwise. Surfaces verbatim on the next planner iteration
+    as ``response.explanation`` in the
+    ``{RESPONSE_CONTEXT_KEY_PREFIX}{request_id}`` context binding."""
+
     note: str = ""
     decided_by: str = ""
     """User id (or display name) of the human who responded."""
@@ -117,6 +137,21 @@ class HumanApprovalResponse(BaseModel):
     decided_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
     )
+
+    @model_validator(mode="after")
+    def _require_explanation_on_reject_or_abort(self) -> "HumanApprovalResponse":
+        if (
+            self.choice in CHOICES_REQUIRING_EXPLANATION
+            and not self.explanation.strip()
+        ):
+            raise ValueError(
+                f"HumanApprovalResponse: choice={self.choice!r} requires a "
+                f"non-empty ``explanation`` (operator justification). The "
+                f"chat-UI approval card surfaces a textarea when the "
+                f"operator picks Reject or Abort; the explanation must "
+                f"reach the agent so its next iteration can react."
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +175,7 @@ def _render_get_response_envelope(
         "response": {
             "request_id": response.request_id,
             "choice": response.choice,
+            "explanation": response.explanation,
             "note": response.note,
             "decided_by": response.decided_by,
             "decided_at": (
@@ -181,6 +217,15 @@ class HumanApprovalCapability(AgentCapability):
     scope: ClassVar[BlackboardScope] = BlackboardScope.SESSION
 
     DEFAULT_NAMESPACE = "human_approval"
+
+    # Single source of truth for the planner-context key the
+    # ``@event_handler`` writes when the operator's response lands. The
+    # ``ApprovalRequiredGuardrail`` advisory references this prefix by
+    # attribute so the advisory text and the writer can't drift if the
+    # prefix is ever renamed. Pairs with
+    # ``[[fix-the-class-not-the-instance]]`` — canonical owner of the
+    # invariant.
+    RESPONSE_CONTEXT_KEY_PREFIX: ClassVar[str] = "human_approval_response:"
 
     def __init__(
         self,
@@ -228,13 +273,21 @@ class HumanApprovalCapability(AgentCapability):
         planning_summary=(
             "Submit a typed human-approval request. Returns immediately "
             "with ``{ok: True, request_id: '...'}``. The user's response "
-            "surfaces later via the capability's event handler — query "
-            "it with get_response or wait for the planner to observe "
-            "the new context. When ``action_type`` is set the UI offers "
-            "three choices (``reject`` / ``approve_once`` / "
-            "``approve_all``); ``approve_all`` covers every future "
-            "dispatch whose action_key contains ``action_type`` in "
-            "this session."
+            "surfaces later as a fresh "
+            "``human_approval_response:{request_id}`` planner-context "
+            "binding (key prefix on "
+            ":attr:`HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX`). "
+            "When ``action_type`` is set the UI offers four choices: "
+            "``approve_once`` (apply this dispatch), ``approve_all`` "
+            "(approve every future dispatch whose action_key contains "
+            "``action_type`` in this session), ``reject`` (block this "
+            "dispatch; the agent stays alive and the operator's "
+            "``explanation`` surfaces in the planner context so the "
+            "next iteration can adjust), and ``abort`` (signal the "
+            "agent to wind down via its mission-control surface; the "
+            "explanation accompanies the signal). ``reject`` and "
+            "``abort`` require a non-empty ``explanation`` from the "
+            "operator."
         ),
     )
     async def request_human_approval(
@@ -250,7 +303,7 @@ class HumanApprovalCapability(AgentCapability):
 
         if options is None:
             options = (
-                ("reject", "approve_once", "approve_all")
+                ("approve_once", "approve_all", "reject", "abort")
                 if action_type is not None
                 else ("approve", "reject")
             )
@@ -280,13 +333,21 @@ class HumanApprovalCapability(AgentCapability):
 
     @action_executor(
         planning_summary=(
-            "Return the typed envelope ``{ok, state: 'pending' | "
-            "'ready', response: {request_id, choice, note, decided_by, "
-            "decided_at} | None}``. ``state='ready'`` means the user "
-            "has responded — read ``response.choice``. ``state='pending'``"
-            " means keep polling. Falls back to a blackboard read so a "
-            "resumed agent can recover responses that landed during "
-            "suspension."
+            "On-demand lookup of a known request's current state. NOT a "
+            "wait primitive — calling it in a loop is wasted work. "
+            "Returns the typed envelope ``{ok, state: 'pending' | "
+            "'ready', response: {request_id, choice, explanation, note, "
+            "decided_by, decided_at} | None}``. ``state='ready'`` means "
+            "the operator has responded — read ``response.choice`` "
+            "(``approve_once`` / ``approve_all`` / ``reject`` / "
+            "``abort``) and ``response.explanation`` (non-empty on "
+            "``reject`` / ``abort``). ``state='pending'`` means the "
+            "operator has not yet responded; instead of re-calling "
+            "``get_response``, end the next code block with "
+            "``await run('wait_for_next_event')`` to pause until the "
+            "response arrives as planner context. Falls back to a "
+            "blackboard read so a resumed agent can recover responses "
+            "that landed during suspension."
         ),
     )
     async def get_response(
@@ -488,9 +549,10 @@ class HumanApprovalCapability(AgentCapability):
 
         The handler is deliberately small: it does not advance the
         agent state itself. The next planner iteration sees a fresh
-        ``human_approval_response:{request_id}`` context binding and
-        plans the appropriate downstream action (commit, retry,
-        abandon — domain-specific).
+        ``{RESPONSE_CONTEXT_KEY_PREFIX}{request_id}`` context binding
+        (prefix on :attr:`RESPONSE_CONTEXT_KEY_PREFIX`) and plans the
+        appropriate downstream action (commit, retry, abandon —
+        domain-specific).
         """
 
         try:
@@ -513,10 +575,11 @@ class HumanApprovalCapability(AgentCapability):
         # registered this request_id as pending.
         self._on_resolved(request_id)
         return EventProcessingResult(
-            context_key=f"human_approval_response:{request_id}",
+            context_key=f"{self.RESPONSE_CONTEXT_KEY_PREFIX}{request_id}",
             context={
                 "request_id": request_id,
                 "choice": response.choice,
+                "explanation": response.explanation,
                 "note": response.note,
                 "decided_by": response.decided_by,
             },

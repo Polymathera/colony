@@ -298,19 +298,27 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
     });
   }, [addMessage, chatControls]);
 
-  const sendReply = useCallback((message: ChatMessageData, content: string) => {
+  const sendReply = useCallback((
+    message: ChatMessageData,
+    content: string,
+    extra?: { explanation?: string },
+  ) => {
     const requestId = message.request_id;
     const agentId = message.agent_id;
     if (!requestId || !agentId) return;
 
-    // Echo the user's choice into the chat history. Identical for
-    // both reply lanes — the lane only differs on transport.
+    // Echo the user's choice into the chat history. For ``reject`` /
+    // ``abort`` we include the operator's explanation in the echo so
+    // the chat log records the rationale alongside the choice.
+    const echoContent = extra?.explanation
+      ? `${content}: ${extra.explanation}`
+      : content;
     const recordEcho = () => {
       addMessage({
         id: nextMessageId(),
         run_id: null,
         role: "user",
-        content,
+        content: echoContent,
         timestamp: Date.now(),
       });
       setMessages((prev) => prev.map((m) =>
@@ -324,11 +332,18 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
       // ``human_approval:response:*`` topic; the HTTP endpoint writes
       // there. The WebSocket reply lane is for freeform questions
       // only — using it here would route into the wrong listener.
+      // ``explanation`` is the operator's justification (non-empty on
+      // reject/abort, empty otherwise); the backend's
+      // ``HumanApprovalResponse`` validator surfaces 422 if a reject
+      // or abort arrives empty.
       apiFetch<unknown>(
         `/sessions/${encodeURIComponent(sessionId)}/human_approval/${encodeURIComponent(requestId)}/respond`,
         {
           method: "POST",
-          body: JSON.stringify({ choice: content }),
+          body: JSON.stringify({
+            choice: content,
+            explanation: extra?.explanation ?? "",
+          }),
         },
       ).then(
         () => recordEcho(),

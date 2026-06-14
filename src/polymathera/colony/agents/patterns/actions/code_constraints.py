@@ -1266,6 +1266,8 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
             if allowed:
                 return GuardrailDecision(allowed=True)
 
+        from ..capabilities.human_approval import HumanApprovalCapability
+        prefix = HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX
         return GuardrailDecision(
             allowed=False,
             reason=(
@@ -1274,40 +1276,66 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
                 f"covers this action."
             ),
             suggestion=(
-                "Call ``request_human_approval`` with the proposal "
-                "first (set ``action_type`` to gate the "
-                "approve_once / approve_all UI), poll "
-                "``get_response`` until the operator answers "
-                "``approve_once`` or ``approve_all``, THEN re-run "
-                "the action with ``dry_run=False``."
+                f"Apply is blocked until a ``{prefix}<request_id>`` "
+                "context binding shows ``choice in "
+                "{approve_once, approve_all}``. "
+                "Available primitives: "
+                "``request_human_approval(question, action_type, extra)`` "
+                "opens a request and returns immediately with a "
+                "``request_id``; the operator's answer surfaces later "
+                "as that planner-context binding (with "
+                "``explanation`` populated on ``reject`` / ``abort``). "
+                "``wait_for_next_event()`` pauses the agent on the "
+                "unified event queue and wakes on the next event of "
+                "any kind. ``get_response(request_id)`` is on-demand "
+                "lookup of a known request, not a wait — re-calling "
+                "it in a loop is wasted work. Compose whatever "
+                "strategy fits the situation."
             ),
         )
 
     def planner_context_advisory(self, call_history):
-        """Tell the planner the propose → approve → apply sequence
+        """Surface the approval-gate capability surface to the planner
         BEFORE it proposes a mutating call, so the loop doesn't have
-        to bounce off ``check``'s block message to learn it.
+        to bounce off ``check``'s block message to learn it. Describes
+        each primitive in isolation per
+        ``[[primitives-not-pipelines]]``: the LLM composes the strategy
+        (which may involve multiple in-flight approvals, status updates
+        between request and wait, waking on a non-approval event, etc.)
+        — the framework does not bake an ordering.
         """
 
         if not self._gated:
             return None
+        from ..capabilities.human_approval import HumanApprovalCapability
+        prefix = HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX
         gated_render = ", ".join(f"``{p}``" for p in self._gated)
         return (
             "**Human-approval gate active.** The following action "
             f"prefixes require operator approval before the apply "
             f"path will dispatch: {gated_render}. "
-            "Sequence every mutating call as: "
-            "(1) call the action with ``dry_run=True`` to compute the "
-            "proposal; "
-            "(2) call ``HumanApprovalCapability.request_human_approval("
-            "action_type='<gated_prefix_short_name>', question=..., "
-            "extra=<proposal>)``; "
-            "(3) poll ``HumanApprovalCapability.get_response("
-            "request_id=...)`` until the operator answers "
-            "``approve_once`` or ``approve_all``; "
-            "(4) re-call the action with ``dry_run=False`` to apply. "
-            "``approve_all`` covers every future dispatch of the same "
-            "``action_type`` in this session — no re-prompt."
+            "Available primitives for this gate: "
+            "``request_human_approval(question, action_type, extra)`` "
+            "— opens a typed request and returns immediately with a "
+            "``request_id``; the operator's answer surfaces later as "
+            f"a ``{prefix}<request_id>`` planner-context binding whose "
+            "``choice`` is one of ``approve_once`` / ``approve_all`` / "
+            "``reject`` / ``abort`` and whose ``explanation`` is "
+            "non-empty on ``reject`` / ``abort``. "
+            "``wait_for_next_event()`` — pauses the agent on the "
+            "unified event queue and wakes on the next event of any "
+            "kind (approval answer, child mission completion, chat "
+            "message, cancel). "
+            "``get_response(request_id)`` — on-demand lookup of a "
+            "known request's current state; not a wait primitive. "
+            "Re-calling ``get_response`` in a loop is wasted work — "
+            "the planner-context binding is the wake surface. "
+            "When the response arrives: ``approve_once`` / "
+            "``approve_all`` admits the apply (re-call the action "
+            "with ``dry_run=False``); ``reject`` blocks this dispatch "
+            "but keeps the agent alive (read ``explanation`` and "
+            "adjust); ``abort`` is the operator's request to wind "
+            "down via the mission-control surface."
         )
 
 

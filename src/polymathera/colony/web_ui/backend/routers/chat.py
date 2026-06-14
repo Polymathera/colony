@@ -589,8 +589,9 @@ async def _listen_for_agent_messages(
                 # WebSocket). Absent for legacy messages.
                 "kind": payload.get("kind"),
                 # Short action name for typed approvals; drives the
-                # 3-choice button labels on the frontend. Absent for
-                # legacy untyped approve/reject requests.
+                # 4-choice button labels on the frontend (Approve once
+                # / Approve all / Reject / Abort). Absent for legacy
+                # untyped approve/reject requests.
                 "action_type": payload.get("action_type"),
                 # Structured attachments emitted by ``respond_to_user``
                 # / ``respond_to_user_with_table`` / ``respond_to_user_with_diff``. The

@@ -140,7 +140,8 @@ async def test_provides_default_options_when_payload_omits_them(
 
 async def test_relays_typed_approval_with_action_type(_exec_ctx) -> None:
     """When the request carries ``action_type``, the chat message
-    forwards it so the frontend can label the 3-choice buttons."""
+    forwards it so the frontend can label the 4-choice buttons
+    (``approve_once`` / ``approve_all`` / ``reject`` / ``abort``)."""
 
     cap, chat_bb = await _make_capability_and_chat_bb(_exec_ctx)
     event = SimpleNamespace(
@@ -148,7 +149,9 @@ async def test_relays_typed_approval_with_action_type(_exec_ctx) -> None:
         value={
             "request_id": "appr_typed",
             "question": "Approve decomposition?",
-            "options": ["reject", "approve_once", "approve_all"],
+            "options": [
+                "approve_once", "approve_all", "reject", "abort",
+            ],
             "action_type": "create_decomposition",
             "requester_agent_id": "physics_agent_001",
         },
@@ -156,7 +159,7 @@ async def test_relays_typed_approval_with_action_type(_exec_ctx) -> None:
     await cap.handle_human_approval_request(event, None)
     payload = (await chat_bb.query(namespace="chat:agent:*"))[0].value
     assert payload["response_options"] == [
-        "reject", "approve_once", "approve_all",
+        "approve_once", "approve_all", "reject", "abort",
     ]
     assert payload["action_type"] == "create_decomposition"
 

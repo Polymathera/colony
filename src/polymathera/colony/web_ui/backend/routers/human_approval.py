@@ -60,11 +60,15 @@ router = APIRouter()
 class HumanApprovalSubmission(BaseModel):
     """Body of the POST endpoint. The user-supplied ``choice`` MUST
     be one of the options the original request declared; the agent's
-    capability re-validates on receive."""
+    capability re-validates on receive. ``explanation`` is required
+    (non-empty) when ``choice`` is ``reject`` or ``abort`` — the
+    ``HumanApprovalResponse`` validator enforces this at construction
+    time, so the endpoint surfaces a 422 if the SPA forgets the field."""
 
     model_config = ConfigDict(frozen=True)
 
     choice: str = Field(min_length=1)
+    explanation: str = ""
     note: str = ""
 
 
@@ -117,12 +121,20 @@ async def respond_to_human_approval(
         or "unknown"
     )
 
-    response = HumanApprovalResponse(
-        request_id=request_id,
-        choice=body.choice,
-        note=body.note,
-        decided_by=decided_by,
-    )
+    try:
+        response = HumanApprovalResponse(
+            request_id=request_id,
+            choice=body.choice,
+            explanation=body.explanation,
+            note=body.note,
+            decided_by=decided_by,
+        )
+    except ValueError as exc:
+        # The Pydantic ``_require_explanation_on_reject_or_abort``
+        # validator raises when ``choice`` is ``reject`` / ``abort``
+        # and ``explanation`` is empty. Surface as 422 so the SPA can
+        # show the operator a "please add an explanation" hint.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     with execution_context(
         ring=Ring.USER,

@@ -147,8 +147,11 @@ def test_noguardrail_has_no_advisory() -> None:
 
 def test_approval_advisory_describes_the_full_flow() -> None:
     """The advisory is standing context — it always surfaces when
-    there's a gated prefix, naming the action_type-scoped flow
-    (request_human_approval → poll → approve_once / approve_all)."""
+    there's a gated prefix, naming each primitive in isolation per
+    [[primitives-not-pipelines]]. The LLM composes the strategy; the
+    advisory describes the capability surface (request +
+    wait_for_next_event + get_response) and the four response
+    choices (approve_once / approve_all / reject / abort)."""
 
     g = ApprovalRequiredGuardrail(
         approval_required_action_prefixes=(
@@ -157,10 +160,70 @@ def test_approval_advisory_describes_the_full_flow() -> None:
     )
     advisory = g.planner_context_advisory([])
     assert advisory is not None
+    # Capability surface is named in full.
     assert "request_human_approval" in advisory
+    assert "wait_for_next_event" in advisory
+    assert "get_response" in advisory
+    # action_type-scoped four-way choice.
     assert "action_type" in advisory
     assert "approve_once" in advisory
     assert "approve_all" in advisory
+    assert "reject" in advisory
+    assert "abort" in advisory
+    # Explanation surface is named so the planner expects it on
+    # reject / abort context bindings.
+    assert "explanation" in advisory
+    # No "poll" instruction — the prompt must not teach the failure
+    # mode it caused on run 3.
+    lowered = advisory.lower()
+    assert "poll get_response" not in lowered
+    assert "keep polling" not in lowered
+    # The advisory references the ClassVar prefix, not an inline
+    # ``human_approval_response:`` literal — guards against a future
+    # rename silently rotting the prompt.
+    from polymathera.colony.agents.patterns.capabilities.human_approval import (
+        HumanApprovalCapability,
+    )
+    assert HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX in advisory
+
+
+def test_approval_block_suggestion_names_event_queue_as_wake_surface() -> None:
+    """The block-message suggestion fires when the LLM proposes a
+    mutating call without prior approval. It should teach the same
+    capability surface as the advisory — primitives in isolation,
+    no poll-then-apply recipe — so the LLM converges on the same
+    pattern from either path."""
+
+    import asyncio
+    from unittest.mock import MagicMock
+    from polymathera.colony.agents.patterns.capabilities.human_approval import (
+        HumanApprovalCapability,
+    )
+
+    g = ApprovalRequiredGuardrail(
+        approval_required_action_prefixes=(
+            "DesignProcessCapability.create_decomposition",
+        ),
+    )
+    # No HumanApprovalCapability mounted → the suggestion fires.
+    g.bind_speaker(MagicMock(get_capability_by_type=lambda _: None))
+    decision = asyncio.run(
+        g.check(
+            "DesignProcessCapability.create_decomposition",
+            params={"dry_run": False},
+            call_history=[],
+        )
+    )
+    assert decision.allowed is False
+    suggestion = decision.suggestion
+    assert "request_human_approval" in suggestion
+    assert "wait_for_next_event" in suggestion
+    assert "get_response" in suggestion
+    assert HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX in suggestion
+    lowered = suggestion.lower()
+    assert "poll get_response" not in lowered
+    assert "keep polling" not in lowered
+    assert "until the operator answers" not in lowered
 
 
 def test_approval_advisory_silent_with_empty_prefix_list() -> None:

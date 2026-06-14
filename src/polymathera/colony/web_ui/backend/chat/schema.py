@@ -29,8 +29,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     response_options JSONB,                  -- multiple-choice options
     awaiting_reply  BOOLEAN DEFAULT FALSE,
     -- Short action name for typed approvals (e.g. "create_decomposition").
-    -- Drives the 3-choice button labels (Reject / Approve once /
-    -- Approve all <action_type> this session). NULL for untyped
+    -- Drives the 4-choice button labels (Approve once / Approve all
+    -- <action_type> this session / Reject / Abort). NULL for untyped
     -- legacy approve/reject requests.
     action_type     TEXT,
     -- Run lifecycle

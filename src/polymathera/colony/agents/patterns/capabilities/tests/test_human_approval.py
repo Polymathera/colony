@@ -136,10 +136,13 @@ async def test_event_handler_caches_response_and_returns_context(
     result = await cap._on_response(fake_event, None)
 
     assert result is not None
-    assert result.context_key == f"human_approval_response:{rid}"
+    assert result.context_key == (
+        f"{HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX}{rid}"
+    )
     assert result.context == {
         "request_id": rid,
         "choice": "a",
+        "explanation": "",
         "note": "ok",
         "decided_by": "alice",
     }
@@ -278,7 +281,11 @@ async def test_end_to_end_via_blackboard_event_stream(_exec_ctx) -> None:
     )
 
     response = HumanApprovalResponse(
-        request_id=rid, choice="reject", note="not yet", decided_by="dan",
+        request_id=rid,
+        choice="reject",
+        explanation="not yet ready",
+        note="not yet",
+        decided_by="dan",
     )
     await bb.write(
         HumanApprovalProtocol.response_key(rid),
@@ -309,19 +316,28 @@ async def _seed_response(
     cap, *, rid: str, choice: str, action_type: str | None,
 ) -> None:
     """Plant a typed request + response on the blackboard, like a
-    real Web UI POST would."""
+    real Web UI POST would. ``reject`` / ``abort`` get a placeholder
+    ``explanation`` so the validator (which enforces non-empty
+    explanation on those choices) is satisfied — the seed helper is
+    for unit tests that exercise downstream consumers, not the
+    explanation contract itself (covered by dedicated tests)."""
 
     cap._requests[rid] = HumanApprovalRequest(
         request_id=rid,
         question="?",
         action_type=action_type,
         options=(
-            ("reject", "approve_once", "approve_all")
+            ("approve_once", "approve_all", "reject", "abort")
             if action_type is not None else ("approve", "reject")
         ),
     )
+    explanation = (
+        "test seed explanation"
+        if choice in {"reject", "abort"} else ""
+    )
     response = HumanApprovalResponse(
-        request_id=rid, choice=choice, decided_by="t",
+        request_id=rid, choice=choice, explanation=explanation,
+        decided_by="t",
     )
     bb = await cap.get_blackboard()
     await bb.write(
@@ -442,3 +458,197 @@ async def test_approve_all_preferred_over_unconsumed_approve_once(
     assert rid == "all"
     # approve_once stays unconsumed and ready for use elsewhere.
     assert await cap._is_consumed("once") is False
+
+
+# ---------------------------------------------------------------------------
+# 4-choice approval surface — reject / abort require explanation, the
+# validator enforces it, the typed-options tuple lists all four, and
+# the event-handler context surfaces the explanation verbatim.
+# ---------------------------------------------------------------------------
+
+
+def test_response_validator_rejects_empty_explanation_on_reject() -> None:
+    """``HumanApprovalResponse._require_explanation_on_reject_or_abort``
+    is the data-shape contract for Q1's reject/abort surface. Empty
+    explanation on ``reject`` must raise so the chat-UI relay and the
+    HTTP endpoint can't construct an invalid response object."""
+
+    with pytest.raises(ValueError, match="explanation"):
+        HumanApprovalResponse(
+            request_id="r1", choice="reject", explanation="", decided_by="u",
+        )
+
+
+def test_response_validator_rejects_empty_explanation_on_abort() -> None:
+    with pytest.raises(ValueError, match="explanation"):
+        HumanApprovalResponse(
+            request_id="r1", choice="abort", explanation="   ", decided_by="u",
+        )
+
+
+def test_response_validator_accepts_empty_explanation_on_approve() -> None:
+    """Approve choices do not require an explanation — the validator
+    must NOT raise. (Regression for a too-strict validator that
+    accidentally requires explanation on every choice.)"""
+
+    resp = HumanApprovalResponse(
+        request_id="r1", choice="approve_once", decided_by="u",
+    )
+    assert resp.explanation == ""
+
+    resp = HumanApprovalResponse(
+        request_id="r1", choice="approve_all", decided_by="u",
+    )
+    assert resp.explanation == ""
+
+
+def test_response_validator_accepts_non_empty_explanation_on_reject() -> None:
+    resp = HumanApprovalResponse(
+        request_id="r1",
+        choice="reject",
+        explanation="the proposal targets the wrong subsystem",
+        decided_by="u",
+    )
+    assert resp.choice == "reject"
+    assert resp.explanation.startswith("the proposal")
+
+
+async def test_typed_request_offers_four_choices(_exec_ctx) -> None:
+    """When ``action_type`` is set, the default options tuple lists
+    approve_once / approve_all / reject / abort — order matters because
+    the chat UI renders left-to-right and approve-first is the
+    operator-friendly default."""
+
+    cap = await _make_capability(_exec_ctx)
+    result = await cap.request_human_approval(
+        question="OK to apply?",
+        action_type="create_decomposition",
+    )
+    rid = result["request_id"]
+    req = cap._requests[rid]
+    assert req.options == (
+        "approve_once", "approve_all", "reject", "abort",
+    )
+
+
+async def test_response_context_includes_explanation(_exec_ctx) -> None:
+    """The event-handler context must include ``explanation`` so the
+    next planner iteration can read the operator's justification —
+    today's planner sees only a one-word ``choice``, which loses the
+    "why" on reject and abort."""
+
+    cap = await _make_capability(_exec_ctx)
+    result = await cap.request_human_approval(
+        question="OK?", action_type="create_decomposition",
+    )
+    rid = result["request_id"]
+
+    response = HumanApprovalResponse(
+        request_id=rid,
+        choice="reject",
+        explanation="docs are not engineering substance",
+        decided_by="alice",
+    )
+    fake_event = type("E", (), {})()
+    fake_event.key = HumanApprovalProtocol.response_key(rid)
+    fake_event.value = response.model_dump(mode="json")
+    handler_result = await cap._on_response(fake_event, None)
+
+    assert handler_result is not None
+    assert handler_result.context["choice"] == "reject"
+    assert handler_result.context["explanation"] == (
+        "docs are not engineering substance"
+    )
+
+
+def test_response_envelope_includes_explanation() -> None:
+    """The ``get_response`` envelope mirrors the validator's contract —
+    every consumer reading ``response.explanation`` (chat-UI relay,
+    guardrail predicates, LLM context) sees the same field. This also
+    documents the envelope shape for downstream tools."""
+
+    from polymathera.colony.agents.patterns.capabilities.human_approval import (
+        _render_get_response_envelope,
+    )
+
+    response = HumanApprovalResponse(
+        request_id="r1",
+        choice="abort",
+        explanation="operator changed their mind",
+        decided_by="alice",
+    )
+    envelope = _render_get_response_envelope(response)
+    assert envelope["state"] == "ready"
+    assert envelope["response"]["choice"] == "abort"
+    assert envelope["response"]["explanation"] == "operator changed their mind"
+
+
+# ---------------------------------------------------------------------------
+# RESPONSE_CONTEXT_KEY_PREFIX is the canonical owner of the planner-
+# context key shape — every consumer must reference the ClassVar so a
+# rename can't drift between writer and readers.
+# ---------------------------------------------------------------------------
+
+
+def test_response_context_key_prefix_is_classvar() -> None:
+    """``RESPONSE_CONTEXT_KEY_PREFIX`` is a ClassVar on
+    ``HumanApprovalCapability`` — readable on the class without an
+    instance and immutable per type annotation. Pairs with the repo-
+    wide grep test that no inline ``"human_approval_response:"`` string
+    survives outside this attribute and this test."""
+
+    assert hasattr(HumanApprovalCapability, "RESPONSE_CONTEXT_KEY_PREFIX")
+    assert HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX == (
+        "human_approval_response:"
+    )
+
+
+def test_no_inline_response_context_key_literal_in_workspace() -> None:
+    """Repo-wide grep test: no production source file (anything outside
+    a ``tests/`` directory and outside the canonical owner
+    ``human_approval.py``) may carry the literal string
+    ``"human_approval_response:"``. Test files are allowed to reference
+    the literal when describing the rule; production code must
+    reference ``HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX``.
+
+    Catches a future drop-in that re-introduces the inline literal and
+    bypasses the ClassVar. Pairs with
+    [[fix-the-class-not-the-instance]] — single source of truth for
+    the planner-context key shape."""
+
+    import subprocess
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[7]
+    # ``rg`` is available in dev environments; fall back to ``grep -r``
+    # so the test runs in CI without ripgrep on PATH.
+    rg = ["rg", "-l", "-F", "human_approval_response:", str(repo_root / "src")]
+    grep = ["grep", "-rl", "-F", "human_approval_response:", str(repo_root / "src")]
+    try:
+        out = subprocess.run(rg, capture_output=True, text=True, check=False)
+        hits = out.stdout
+    except FileNotFoundError:
+        out = subprocess.run(grep, capture_output=True, text=True, check=False)
+        hits = out.stdout
+    if not hits.strip():
+        return
+    offenders = []
+    for line in hits.splitlines():
+        if not line:
+            continue
+        path = Path(line)
+        if "__pycache__" in path.parts:
+            continue
+        # Test directories may reference the literal in prose / asserts.
+        if "tests" in path.parts:
+            continue
+        # Canonical owner.
+        if path.name == "human_approval.py":
+            continue
+        offenders.append(str(path))
+    assert not offenders, (
+        "Inline ``human_approval_response:`` literal found outside the "
+        "canonical owner. Reference "
+        "``HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX`` "
+        f"instead. Offenders: {offenders}"
+    )

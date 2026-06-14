@@ -119,3 +119,109 @@ def test_project_planning_mission_does_not_declare_repo_caller_param() -> None:
         "project_planning mission re-grew a 'repo' caller_parameter — "
         "the action surface resolves owner/repo from agent metadata."
     )
+
+
+def test_decompose_mode_self_concept_names_wait_for_next_event() -> None:
+    """Decompose-mode self-concept text MUST list
+    ``wait_for_next_event`` as an available primitive so the planner
+    LLM can compose request→wait without bouncing off the guardrail
+    block message. Regression for live run 3 Failure 1 (LLM poll-looped
+    ``get_response`` for 5 minutes because the static self-concept
+    omitted the wait primitive)."""
+
+    from polymathera.colony.agents.configs import _builtin_missions
+
+    spec = _builtin_missions()["project_planning"]
+    decompose_blocks = [
+        text for text in (spec.self_concept.goals or [])
+        if "decompose" in text.lower()
+    ]
+    assert decompose_blocks, "no decompose-mode self_concept.goals block found"
+    available_primitive_block = next(
+        (text for text in decompose_blocks if "Available primitives" in text),
+        None,
+    )
+    assert available_primitive_block is not None, (
+        "decompose-mode block does not name the 'Available primitives' "
+        "set — the planner has no enumerated surface to compose from."
+    )
+    assert "wait_for_next_event" in available_primitive_block, (
+        "decompose-mode primitives list omits ``wait_for_next_event`` — "
+        "the LLM has no named pause primitive and re-introduces the "
+        "live-run-3 poll-loop pattern."
+    )
+
+
+def test_decompose_mode_self_concept_does_not_teach_polling() -> None:
+    """The decompose-mode prompt MUST NOT instruct the LLM to keep
+    polling ``get_response``. Regression for live run 3 — the prompt
+    fix is the durable answer; structural counter-forces were
+    withdrawn as band-aids."""
+
+    from polymathera.colony.agents.configs import _builtin_missions
+
+    spec = _builtin_missions()["project_planning"]
+    for text in (spec.self_concept.goals or []):
+        lowered = text.lower()
+        assert "poll get_response" not in lowered, text
+        assert "keep polling" not in lowered, text
+        # The old "WAIT for the user's choice" recipe was the
+        # ambiguous shape the LLM interpreted as "poll" — must be
+        # replaced by an explicit wait_for_next_event mention.
+        if "wait for the user's choice" in lowered:
+            assert "wait_for_next_event" in text, text
+
+
+def test_decompose_mode_self_concept_carries_no_python_class_attribute_refs() -> None:
+    """LLM-facing self-concept text MUST NOT carry Python class-
+    attribute references (``ClassName.UPPER_CASE_ATTR``). The LLM
+    consumes the text verbatim — it cannot resolve a Python symbol at
+    inference time, so a leak provides zero information AND violates
+    [[no-llm-facing-framework-state]]: framework-known state must
+    not leak into the LLM-facing surface.
+
+    Regression for the original Q1 rewrite that referenced
+    ``HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX`` as a
+    literal string in the decompose-mode goal block — the operator
+    caught it during review and demanded the fix."""
+
+    import re
+    from polymathera.colony.agents.configs import _builtin_missions
+
+    spec = _builtin_missions()["project_planning"]
+    all_text = "\n".join(spec.self_concept.goals or [])
+    # Looks for ``<CamelCase>.<UPPER_SNAKE>`` — the shape of a Python
+    # ClassVar reference. Allows lowercase attribute references like
+    # ``response.choice`` and ``mission_params['issue_numbers']`` which
+    # are LLM-facing field references on values the LLM holds, not
+    # Python class attributes.
+    pattern = re.compile(r"\b[A-Z][A-Za-z0-9]+\.[A-Z][A-Z0-9_]+\b")
+    hits = pattern.findall(all_text)
+    assert not hits, (
+        f"decompose-mode self_concept.goals leaks Python class-"
+        f"attribute references into the LLM-facing prompt: {hits}. "
+        f"Hoist the mechanical contract into the standing guardrail "
+        f"advisory (single source of truth) and let the goal block "
+        f"point at it by description, not by Python symbol."
+    )
+
+
+def test_decompose_mode_self_concept_names_four_choice_surface() -> None:
+    """The Q1 four-choice surface (approve_once / approve_all /
+    reject / abort) must be named in the decompose-mode prompt so the
+    planner knows what choices to expect on the response binding."""
+
+    from polymathera.colony.agents.configs import _builtin_missions
+
+    spec = _builtin_missions()["project_planning"]
+    all_text = "\n".join(spec.self_concept.goals or [])
+    for choice in ("approve_once", "approve_all", "reject", "abort"):
+        assert choice in all_text, (
+            f"decompose-mode prompt does not name choice {choice!r}"
+        )
+    # Operator's required-on-reject/abort justification:
+    assert "explanation" in all_text, (
+        "decompose-mode prompt does not mention the operator's "
+        "explanation field — the LLM won't know to read it on "
+        "reject/abort responses."
+    )
