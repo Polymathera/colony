@@ -303,6 +303,7 @@ async def test_rejection_records_outcome_and_skips_commit(
     response = HumanApprovalResponse(
         request_id=pending.request_id, choice="reject",
         decided_by="alice", note="not approved",
+        explanation="rejected: not appropriate for protected branch",
     )
     bb = await cap.get_blackboard()
     await bb.write(

@@ -138,6 +138,7 @@ async def test_resolved_via_event_handler_decrements_counter(_exec_ctx) -> None:
 
     response = HumanApprovalResponse(
         request_id=rid, choice="reject", decided_by="bob",
+        explanation="Out of scope for this run.",
     )
     fake_event = type("E", (), {})()
     fake_event.key = HumanApprovalProtocol.response_key(rid)
@@ -200,6 +201,7 @@ async def test_n_concurrent_pollers_compose_independently(_exec_ctx) -> None:
     # Resolve B.
     resp_b = HumanApprovalResponse(
         request_id=rid_b, choice="reject", decided_by="x",
+        explanation="rejected for test",
     )
     await bb.write(
         HumanApprovalProtocol.response_key(rid_b),
