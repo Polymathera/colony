@@ -408,6 +408,131 @@ def test_list_issues_excludes_pull_requests():
     assert result["issues"][0]["number"] == 1
 
 
+# ---------------------------------------------------------------------------
+# snapshot_open_roadmap_issues — spawn-time scope snapshot helper.
+#
+# Framework-level primitive (NOT an @action_executor): paginates
+# exhaustively, filters via _extract_roadmap_task_marker, excludes PRs,
+# and raises rather than returns ``[]`` on setup errors. Used by
+# ``ProjectPlanningCoordinator.resolve_spawn_scope``; tested here so
+# the contract is pinned at the capability layer.
+# ---------------------------------------------------------------------------
+
+
+def _roadmap_marked_body(stable_id: str) -> str:
+    """Build a body string carrying the roadmap-task marker. The regex
+    requires exactly 12 lowercase hex chars; pad if a short id is
+    provided so the helper can be used with readable ids."""
+
+    if len(stable_id) < 12:
+        stable_id = (stable_id + "000000000000")[:12]
+    return f"Some task body.\n\n<!-- colony:roadmap-task: {stable_id} -->\n"
+
+
+def test_snapshot_open_roadmap_issues_filters_unmarked_and_prs():
+    """The snapshot only includes open issues that (a) carry the
+    roadmap-task marker AND (b) are not pull requests. Unmarked
+    issues and PRs are dropped — the operator-curated roadmap set
+    is the only thing the decompose validator should gate on."""
+
+    stub = _StubClient()
+    stub.responses[("ITER", "/repos/acme/proj/issues")] = [
+        # Roadmap-marked open issue → included
+        {"number": 44, "body": _roadmap_marked_body("aaaaaaaaaaaa")},
+        # Unmarked open issue → excluded (no marker)
+        {"number": 99, "body": "Some random discussion, no marker."},
+        # Roadmap-marked open issue → included
+        {"number": 45, "body": _roadmap_marked_body("bbbbbbbbbbbb")},
+        # PR that somehow carries a roadmap marker → still excluded
+        # by the pull_request short-circuit before the marker check.
+        {
+            "number": 7,
+            "body": _roadmap_marked_body("ccccccccccc1"),
+            "pull_request": {"url": "..."},
+        },
+        # Roadmap-marked but ``body`` missing (defensive) → excluded
+        {"number": 50},
+    ]
+    with _with_context():
+        cap = _make_cap(client=stub)
+        result = _run(cap.snapshot_open_roadmap_issues())
+    assert result == [44, 45]
+
+
+def test_snapshot_open_roadmap_issues_paginates_exhaustively():
+    """The snapshot helper does NOT apply the ``max_results`` cap that
+    ``list_issues`` uses for LLM consumption. Every paginated item
+    that survives the filter is included. Iterating ALL items from
+    the stub's ITER buffer (which represents the full Link-header
+    chain in the real client) is the contract."""
+
+    stub = _StubClient()
+    # 150 issues across the pagination chain — well past list_issues's
+    # default cap of 50, all of them roadmap-marked.
+    stub.responses[("ITER", "/repos/acme/proj/issues")] = [
+        {"number": n, "body": _roadmap_marked_body(f"{n:012x}")}
+        for n in range(1, 151)
+    ]
+    with _with_context():
+        cap = _make_cap(client=stub)
+        result = _run(cap.snapshot_open_roadmap_issues())
+    assert len(result) == 150
+    assert result[0] == 1 and result[-1] == 150
+
+
+def test_snapshot_open_roadmap_issues_raises_when_no_design_monorepo_url():
+    """Missing ``design_monorepo_url`` is a setup error — the snapshot
+    must NOT silently return ``[]`` because the validator would then
+    trivially drain on an empty set. Raise loudly per
+    [[no-bandaids-durable-solutions]] (adjacency A5 of the live-run-3
+    plan)."""
+
+    stub = _StubClient()
+    with _with_context():
+        cap = _make_cap(client=stub)
+        # Strip the URL the way the un-configured colony would be.
+        cap._agent.metadata.parameters = {}
+        with pytest.raises(RuntimeError, match=r"design_monorepo_url"):
+            _run(cap.snapshot_open_roadmap_issues())
+
+
+def test_snapshot_open_roadmap_issues_propagates_transport_errors():
+    """When ``iter_paginated`` raises (auth failure, 503, etc.), the
+    snapshot helper propagates rather than returning ``[]``. Caching
+    empty would let the validator trivially drain — same shape failure
+    as the original ``return frozenset()`` band-aid."""
+
+    stub = _StubClient()
+    stub.responses[("ITER", "/repos/acme/proj/issues")] = (
+        RuntimeError("GitHub 503")
+    )
+    with _with_context():
+        cap = _make_cap(client=stub)
+        with pytest.raises(RuntimeError, match=r"503"):
+            _run(cap.snapshot_open_roadmap_issues())
+
+
+def test_snapshot_open_roadmap_issues_is_decorated_as_action_executor():
+    """The snapshot is the FIRST action a decompose-mode coordinator's
+    LLM calls — the validator gates ``signal_completion`` on it being
+    recorded in the run_call_trace. Confirm decoration parity with a
+    known-decorated sibling (``list_issues``) so a future refactor
+    that strips the decorator surfaces here loudly."""
+
+    sibling_attrs = set(dir(GitHubCapability.list_issues))
+    snapshot_attrs = set(dir(GitHubCapability.snapshot_open_roadmap_issues))
+    # The action_executor decorator wraps the underlying coroutine and
+    # adds dispatcher-visible attributes. ``dir(list_issues)`` differs
+    # from a plain method's ``dir`` in exactly those attributes; the
+    # snapshot must mirror that delta.
+    missing_on_snapshot = sibling_attrs - snapshot_attrs
+    assert not missing_on_snapshot, (
+        "snapshot_open_roadmap_issues is missing @action_executor "
+        f"attributes present on list_issues: {missing_on_snapshot}. "
+        "The decompose-mode validator needs this to be LLM-callable."
+    )
+
+
 def test_create_issue_writes_audit_record():
     stub = _StubClient()
     stub.responses[("POST", "/repos/acme/proj/issues")] = {
@@ -684,6 +809,8 @@ def test_action_executors_are_registered():
         "claim_unassigned_issue", "release_claim",
         # P5d: identity + assignment
         "whoami", "assign_issue",
+        # Change 3: scope-establishing snapshot (decompose mode)
+        "snapshot_open_roadmap_issues",
     }
     assert keys == expected
 

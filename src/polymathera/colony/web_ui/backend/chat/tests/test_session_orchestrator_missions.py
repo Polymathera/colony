@@ -179,10 +179,8 @@ class _SyntheticCoordinator:
     """Stand-in coordinator class for spawn-gate integration tests.
 
     Declares a :class:`MissionExecutionPolicy` with a one-instance
-    cap and ``chains_with_modes=["bootstrap", "refresh"]`` so the
-    full Q1 scenario can be reproduced against the orchestrator's
-    spawn path without needing the real ProjectPlanningCoordinator's
-    capability stack.
+    cap + ``return_existing`` so a second spawn against the same
+    session re-binds to the running coordinator regardless of mode.
     """
 
     from polymathera.colony.agents.configs import (
@@ -193,7 +191,6 @@ class _SyntheticCoordinator:
         max_concurrent_instances=1,
         concurrency_scope=_Scope.SESSION,
         on_concurrency_violation="return_existing",
-        chains_with_modes=["bootstrap", "refresh"],
     )
 
 
@@ -878,8 +875,10 @@ async def test_spawn_mission_admits_first_spawn(
 async def test_spawn_mission_returns_existing_on_chained_mode(
     _exec_ctx, monkeypatch,
 ) -> None:
-    """Second spawn declaring a chained mode hands back the running
-    agent_id deterministically — no second coordinator spawned."""
+    """Second spawn declaring a different mode hands back the running
+    agent_id under cap=1 + return_existing — the gate is mode-agnostic,
+    so the LLM converges on one coordinator regardless of which mode
+    it asked for second."""
 
     cap = _make_cap(_exec_ctx)
     pool = _make_pool_stub(created_agent_id="child_first")
@@ -899,7 +898,7 @@ async def test_spawn_mission_returns_existing_on_chained_mode(
     assert second["created"] is False
     assert second["mission_gate"] == "return_existing"
     assert second["agent_id"] == first["agent_id"]
-    assert "auto-chain" in second["reason"]
+    assert "returning the running instance" in second["reason"]
 
 
 @pytest.mark.asyncio
@@ -939,3 +938,4 @@ async def test_spawn_mission_rejects_when_policy_says_reject(
     assert second["agent_id"] is None
     assert "currently in flight" in second["error"]
     assert second["suggested_action"]
+

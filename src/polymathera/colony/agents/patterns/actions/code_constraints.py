@@ -93,6 +93,10 @@ class CallRecord:
 
     action_key: str
     params: dict[str, Any]
+    action_id: str = ""
+    """The dispatched action's id — keys into
+    :attr:`PlanExecutionContext.action_results`. Empty for the
+    ``"blocked"`` status (no dispatch happened)."""
     start_wall: float = field(default_factory=time.time)
     end_wall: float | None = None
     status: Literal["pending", "ok", "error", "blocked"] = "pending"
@@ -1571,10 +1575,9 @@ class RuleBasedCompletionValidator(CompletionValidator):
         if not goals:
             return CompletionValidationResult(allowed=True, reason="No goals defined")
 
-        step_summaries = execution_context.custom_data.get("codegen_step_summaries", {})
         has_domain_work = any(
-            info.get("domain_actions") and not info.get("had_failures")
-            for info in step_summaries.values()
+            info.domain_actions and not info.had_failures
+            for info in execution_context.codegen_step_summaries.values()
         )
         if not has_domain_work:
             return CompletionValidationResult(
@@ -1610,12 +1613,13 @@ class LLMCompletionValidator(CompletionValidator):
             f"- {k}: {str(v)[:300]}" for k, v in list(results.items())[:20]
         )
 
-        step_summaries = execution_context.custom_data.get("codegen_step_summaries", {})
         history_text = "\n".join(
-            f"- {info.get('step_kind', '?')}: "
-            f"{', '.join(info.get('actions_called', []))}"
-            f" ({'success' if not info.get('had_failures') else 'failed'})"
-            for info in list(step_summaries.values())[-10:]
+            f"- {info.step_kind}: "
+            f"{', '.join(info.actions_called)}"
+            f" ({'success' if not info.had_failures else 'failed'})"
+            for info in list(
+                execution_context.codegen_step_summaries.values(),
+            )[-10:]
         )
 
         prompt = f"""Evaluate whether the following goals have been achieved based on the results and execution history.

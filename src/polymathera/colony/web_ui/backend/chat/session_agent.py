@@ -936,9 +936,9 @@ class SessionOrchestratorCapability(AgentCapability):
         # (``admit_and_spawn``), which both this chat path AND the
         # REST ``routers/jobs.py::_run_job`` path share. The gate
         # consults the cluster-shared :class:`MissionExecutionLedger`
-        # (Redis-backed via ``StateManager``) so concurrency caps,
-        # ``chains_with_modes``, etc. enforce uniformly across
-        # workers — the ``AgentPoolCapability.create_agent`` primitive
+        # (Redis-backed via ``StateManager``) so concurrency caps
+        # enforce uniformly across workers — the
+        # ``AgentPoolCapability.create_agent`` primitive
         # stays mission-unaware. Return shape is exactly what the
         # helper produces, so the LLM has one stable schema to
         # branch on: ``created`` + optional ``mission_gate``

@@ -352,7 +352,9 @@ async def test_classify_returns_empty_for_empty_input(
     result = await cap.classify_issues_decomposability(
         issue_numbers=[],
     )
-    assert result == {"ok": True, "classifications": []}
+    assert result == {
+        "ok": True, "classifications": [], "pre_filtered": [],
+    }
 
 
 async def test_classify_round_trips_two_issues(tmp_path: Path) -> None:

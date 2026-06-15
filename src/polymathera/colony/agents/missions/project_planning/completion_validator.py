@@ -61,6 +61,9 @@ from polymathera.colony.agents.patterns.actions.code_constraints import (
 from polymathera.colony.agents.patterns.actions.run_call_trace import (
     RunCallTrace,
 )
+from polymathera.colony.agents.patterns.capabilities.github import (
+    GitHubCapability,
+)
 from polymathera.colony.design_monorepo.process import DesignProcessCapability
 
 
@@ -220,7 +223,7 @@ class DecomposeCompletionValidator(CompletionValidator):
         execution_context: "PlanExecutionContext",
         params: dict[str, Any],
     ) -> DecomposeBacklogTracker:
-        in_scope = await self._resolve_scope(agent, params)
+        in_scope = await self._resolve_scope(agent, execution_context)
         trace = self._build_trace(execution_context)
         applied = self._extract_applied(trace)
         classified_non = self._extract_classified_non_decomposable(
@@ -241,24 +244,15 @@ class DecomposeCompletionValidator(CompletionValidator):
     def _build_trace(
         execution_context: "PlanExecutionContext",
     ) -> RunCallTrace:
-        """Construct the typed run-call-trace view from the codegen
-        policy's per-iteration custom_data. The trace is stamped into
-        ``codegen_step_summaries[step_id]['run_call_trace']`` and into
-        the policy's ``_run_call_trace`` field. Read from the policy's
-        field via the REPL namespace if available; otherwise reconstruct
-        from step summaries.
-        """
+        """Reconstruct the run-call trace by concatenating each step
+        summary's ``run_call_trace`` in insertion order."""
 
-        step_summaries: dict[str, Any] = execution_context.custom_data.get(
-            "codegen_step_summaries", {},
-        ) or {}
         entries: list[dict[str, Any]] = []
-        for info in step_summaries.values():
-            if not isinstance(info, dict):
-                continue
-            sub = info.get("run_call_trace")
-            if isinstance(sub, list):
-                entries.extend(item for item in sub if isinstance(item, dict))
+        for info in execution_context.codegen_step_summaries.values():
+            entries.extend(
+                item for item in info.run_call_trace
+                if isinstance(item, dict)
+            )
         return RunCallTrace(entries)
 
     @staticmethod
@@ -270,7 +264,7 @@ class DecomposeCompletionValidator(CompletionValidator):
         condition slightly harder to meet, but no false-positive
         completion)."""
 
-        action_key = DesignProcessCapability.CREATE_DECOMPOSITION_ACTION_KEY
+        action_key = DesignProcessCapability.create_decomposition._action_key
         applied: set[int] = set()
         for entry in trace:
             # The dispatch-key prefix is implementation-specific
@@ -301,64 +295,69 @@ class DecomposeCompletionValidator(CompletionValidator):
         """Issue numbers that ``classify_issues_decomposability``
         returned with ``decomposable=False``.
 
-        Read from ``execution_context.action_results`` (the FULL output
-        dict, not the truncated trace preview) keyed off the
-        successful ``classify_issues_decomposability`` entries' action
-        IDs. Output shape:
+        Walks the action outputs the planner LLM produced via
+        :meth:`PlanExecutionContext.iter_successful_action_outputs`
+        (the trace-indexed read path is the single canonical accessor;
+        the validator does not reach into ``custom_data`` or
+        ``action_results`` directly). Output shape per call:
         ``{"classifications": [{"number", "decomposable", "reason"}, ...]}``.
         """
 
         action_key = (
-            DesignProcessCapability.CLASSIFY_ISSUES_DECOMPOSABILITY_ACTION_KEY
+            DesignProcessCapability.classify_issues_decomposability._action_key
         )
         non_decomposable: set[int] = set()
-        # The trace + action_results are indexed by different keys
-        # (call_index vs action_id), so we walk the trace to find
-        # successful classify entries and look up their action_results
-        # via the step_summaries indirection.
-        step_summaries: dict[str, Any] = execution_context.custom_data.get(
-            "codegen_step_summaries", {},
-        ) or {}
-        for info in step_summaries.values():
-            if not isinstance(info, dict):
+        for output in execution_context.iter_successful_action_outputs(
+            action_key,
+        ):
+            if not isinstance(output, dict):
                 continue
-            actions_called = info.get("actions_called") or []
-            action_ids = info.get("action_ids") or []
-            for ak, aid in zip(actions_called, action_ids):
-                if not isinstance(ak, str) or not isinstance(aid, str):
+            for item in output.get("classifications") or []:
+                if not isinstance(item, dict):
                     continue
-                if not ak.endswith(action_key):
-                    continue
-                result = execution_context.action_results.get(aid)
-                if result is None or not getattr(result, "success", False):
-                    continue
-                output = getattr(result, "output", None)
-                if not isinstance(output, dict):
-                    continue
-                classifications = output.get("classifications") or []
-                for item in classifications:
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get("decomposable") is False:
-                        n = item.get("number")
-                        if isinstance(n, int):
-                            non_decomposable.add(n)
+                if item.get("decomposable") is False:
+                    n = item.get("number")
+                    if isinstance(n, int):
+                        non_decomposable.add(n)
         return frozenset(non_decomposable)
 
     async def _resolve_scope(
-        self, agent: "Agent", params: dict[str, Any],
+        self,
+        agent: "Agent",
+        execution_context: "PlanExecutionContext",
     ) -> frozenset[int]:
-        explicit = params.get(ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME)
-        if isinstance(explicit, (list, tuple)):
-            return frozenset(int(n) for n in explicit if isinstance(n, int))
-        # Spec'd fallback: "all currently-open roadmap issues at
-        # mission spawn". Snapshot was stored in agent.metadata.parameters
-        # by spawn_mission OR resolved at validator-init time. Until
-        # the spawn-time snapshot is wired, fall back to an EMPTY
-        # scope and rely on early-stop or the LLM to recover. We
-        # explicitly do NOT call GitHub here — that would re-resolve
-        # mid-run, violating the snapshot-at-spawn invariant.
-        return frozenset()
+        """Return the in-scope issue-number set the validator gates
+        completion on.
+
+        Sole source of truth: the FIRST successful
+        ``snapshot_open_roadmap_issues`` call recorded in the
+        coordinator's run-call trace. The coordinator's LLM-generated
+        code calls the snapshot as its first action per the
+        ``project_planning`` decompose-mode goal block. Pinning the
+        first successful call means a re-snapshot later in the run
+        cannot silently extend or shrink scope.
+
+        Raises ``RuntimeError`` when no successful snapshot is
+        recorded — the rejection names the snapshot action as the
+        missing prerequisite so the LLM's next iteration can recover.
+        """
+
+        action_key = (
+            GitHubCapability.snapshot_open_roadmap_issues._action_key
+        )
+        for output in execution_context.iter_successful_action_outputs(
+            action_key,
+        ):
+            if isinstance(output, list):
+                return frozenset(n for n in output if isinstance(n, int))
+        raise RuntimeError(
+            f"DecomposeCompletionValidator: in-scope issue set is "
+            f"unestablished — call ``GitHubCapability.{action_key}`` "
+            f"as the first action of decompose mode so the validator "
+            f"has a fixed in-scope set to drain against. "
+            f"signal_completion() will not be accepted until the "
+            f"snapshot is recorded."
+        )
 
     async def _read_early_stop(self, agent: "Agent") -> bool:
         """True iff ``request_decompose_early_stop`` has been recorded

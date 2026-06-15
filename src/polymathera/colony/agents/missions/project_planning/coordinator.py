@@ -72,14 +72,11 @@ class ProjectPlanningCoordinator(Agent):
     # ``colony/mission_and_action_guardrails_plan.md`` Part 1). Read
     # by ``resolve_mission_execution_policy`` at spawn time.
     #
-    # - One instance per SESSION (not per AGENT): if the SessionAgent's
-    #   planner emits three sequential ``spawn_mission`` calls for
-    #   bootstrap / refresh / assignments, only the first lands.
-    # - ``chains_with_modes`` tells the gate "these three modes are
-    #   parameters of ONE coordinator, not three sibling coordinators"
-    # - ``return_existing`` means the second + third spawn calls get
-    #   the running coordinator's ``agent_id`` back so the LLM's chain
-    #   converges on a single agent instead of erroring out.
+    # - One instance per SESSION (not per AGENT). With
+    #   ``max_concurrent_instances=1`` + ``return_existing``, any
+    #   sibling ``spawn_mission`` against this session resolves to
+    #   the running coordinator's ``agent_id`` regardless of mode —
+    #   the LLM's chain converges on a single agent.
     # - ``preemptible=False`` because a mid-apply preemption would
     #   leave the GitHub roadmap in a half-written state. ``cancel``
     #   is still honoured.
@@ -90,7 +87,6 @@ class ProjectPlanningCoordinator(Agent):
             max_concurrent_instances=1,
             concurrency_scope=MissionConcurrencyScope.SESSION,
             on_concurrency_violation="return_existing",
-            chains_with_modes=["bootstrap", "refresh", "assignments"],
             preemptible=False,
             interruptible=True,
             cancel_propagates_to_children=True,

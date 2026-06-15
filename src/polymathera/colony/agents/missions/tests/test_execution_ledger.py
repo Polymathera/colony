@@ -19,10 +19,13 @@ from polymathera.colony.agents.configs import (
 )
 from polymathera.colony.agents.missions.execution_ledger import (
     AdmissionAllowed,
+    AdmissionAwait,
     AdmissionRejected,
     AdmissionReturnExisting,
     MissionExecutionLedger,
     MissionLedgerState,
+    PendingReservation,
+    RunningMissionEntry,
     RunningMissionKey,
 )
 from polymathera.colony.distributed.state_management import StateManager
@@ -140,61 +143,25 @@ def test_running_mission_key_scope_id_may_contain_dashes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# chains_with_modes
+# Deleted-field invariants — pin that the new minimal model stays minimal.
 # ---------------------------------------------------------------------------
 
 
-async def test_chains_with_modes_returns_existing_on_chained_mode(
-    ledger: MissionExecutionLedger,
-) -> None:
-    """When the second spawn declares a mode the running mission's
-    ``chains_with_modes`` enumerates, the gate hands back the
-    running agent_id — the deterministic answer to the Q1
-    one-coordinator-per-mode LLM drift."""
+def test_chains_with_modes_field_does_not_exist() -> None:
+    """``chains_with_modes`` was the symptom of "treat mode as a
+    separate spawn key" — deleted in favour of mode-agnostic cap +
+    return_existing. Pin its absence so a future refactor can't
+    quietly resurrect the field."""
 
-    policy = MissionExecutionPolicy(
-        chains_with_modes=["bootstrap", "refresh", "assignments"],
-    )
-    d1, r1 = await ledger.try_admit(
-        key=_key(), mode="bootstrap", policy=policy,
-    )
-    assert isinstance(d1, AdmissionAllowed)
-    assert r1 is not None
-    await ledger.register(
-        reservation_id=r1, agent_id="agent-A", mode="bootstrap",
-    )
-
-    for mode in ("refresh", "assignments"):
-        d, _ = await ledger.try_admit(
-            key=_key(), mode=mode, policy=policy,
-        )
-        assert isinstance(d, AdmissionReturnExisting), (mode, d)
-        assert d.agent_id == "agent-A"
-        assert "auto-chain" in d.reason
+    assert "chains_with_modes" not in MissionExecutionPolicy.model_fields
 
 
-async def test_chains_with_modes_does_not_fire_for_unlisted_mode(
-    ledger: MissionExecutionLedger,
-) -> None:
-    """A mode NOT in ``chains_with_modes`` falls through to the
-    concurrency-cap check rather than coupling with the chain."""
+def test_idempotent_field_does_not_exist() -> None:
+    """``idempotent`` was advisory only; the cap + on_concurrency_violation
+    pair already expresses every gate decision the field claimed to
+    drive. Pin its absence."""
 
-    policy = MissionExecutionPolicy(
-        chains_with_modes=["bootstrap"],
-        max_concurrent_instances=2,
-    )
-    _, r1 = await ledger.try_admit(
-        key=_key(), mode="bootstrap", policy=policy,
-    )
-    await ledger.register(
-        reservation_id=r1, agent_id="agent-A", mode="bootstrap",
-    )
-    # "audit" mode is not in chains; cap is 2; this is the second
-    # in-flight slot → still admitted.
-    d2, _ = await ledger.try_admit(
-        key=_key(), mode="audit", policy=policy,
-    )
-    assert isinstance(d2, AdmissionAllowed)
+    assert "idempotent" not in MissionExecutionPolicy.model_fields
 
 
 # ---------------------------------------------------------------------------
@@ -211,41 +178,62 @@ async def test_max_concurrent_one_rejects_second_with_reject_policy(
     policy = MissionExecutionPolicy(
         max_concurrent_instances=1, on_concurrency_violation="reject",
     )
-    _, r = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
+    d = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d, AdmissionAllowed)
     await ledger.register(
-        reservation_id=r, agent_id="agent-A", mode=None,
+        reservation_id=d.reservation_id, agent_id="agent-A", mode=None,
     )
-    d, _ = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
-    assert isinstance(d, AdmissionRejected)
-    assert "currently in flight" in d.reason
-    assert d.suggested_action  # non-empty hint for the LLM
+    d2 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d2, AdmissionRejected)
+    assert "currently in flight" in d2.reason
+    assert d2.suggested_action  # non-empty hint for the LLM
 
 
 async def test_max_concurrent_one_returns_existing_with_return_policy(
     ledger: MissionExecutionLedger,
 ) -> None:
-    """``on_concurrency_violation=return_existing`` is the idempotent
-    shape: hands back the already-running agent."""
+    """``on_concurrency_violation=return_existing`` hands back the
+    already-running agent."""
 
     policy = MissionExecutionPolicy(
         max_concurrent_instances=1,
         on_concurrency_violation="return_existing",
     )
-    _, r = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
+    d = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d, AdmissionAllowed)
     await ledger.register(
-        reservation_id=r, agent_id="agent-A", mode=None,
+        reservation_id=d.reservation_id, agent_id="agent-A", mode=None,
     )
-    d, _ = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
+    d2 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d2, AdmissionReturnExisting)
+    assert d2.agent_id == "agent-A"
+
+
+async def test_return_existing_treats_modes_as_one_coordinator(
+    ledger: MissionExecutionLedger,
+) -> None:
+    """With cap=1 + return_existing, the gate is mode-agnostic: every
+    subsequent spawn — regardless of mode — resolves to the one
+    running coordinator. Replaces the old chains_with_modes behaviour
+    without a per-mode allow-list."""
+
+    policy = MissionExecutionPolicy(
+        max_concurrent_instances=1,
+        concurrency_scope=MissionConcurrencyScope.SESSION,
+        on_concurrency_violation="return_existing",
     )
-    assert isinstance(d, AdmissionReturnExisting)
-    assert d.agent_id == "agent-A"
+    d = await ledger.try_admit(key=_key(), mode="bootstrap", policy=policy)
+    assert isinstance(d, AdmissionAllowed)
+    await ledger.register(
+        reservation_id=d.reservation_id, agent_id="agent-A",
+        mode="bootstrap",
+    )
+    for mode in ("refresh", "assignments", "decompose"):
+        d_other = await ledger.try_admit(
+            key=_key(), mode=mode, policy=policy,
+        )
+        assert isinstance(d_other, AdmissionReturnExisting), (mode, d_other)
+        assert d_other.agent_id == "agent-A"
 
 
 async def test_unbounded_cap_admits_unlimited(
@@ -255,12 +243,11 @@ async def test_unbounded_cap_admits_unlimited(
 
     policy = MissionExecutionPolicy(max_concurrent_instances=None)
     for n in range(5):
-        d, r = await ledger.try_admit(
-            key=_key(), mode=None, policy=policy,
-        )
+        d = await ledger.try_admit(key=_key(), mode=None, policy=policy)
         assert isinstance(d, AdmissionAllowed), n
         await ledger.register(
-            reservation_id=r, agent_id=f"agent-{n}", mode=None,
+            reservation_id=d.reservation_id,
+            agent_id=f"agent-{n}", mode=None,
         )
 
 
@@ -275,38 +262,38 @@ async def test_different_mission_types_have_independent_buckets(
     """One running ``project_planning`` doesn't block ``impact``."""
 
     policy = MissionExecutionPolicy(max_concurrent_instances=1)
-    _, r = await ledger.try_admit(
+    d = await ledger.try_admit(
         key=_key(mission_type="project_planning"),
         mode=None, policy=policy,
     )
-    await ledger.register(
-        reservation_id=r, agent_id="agent-PP", mode=None,
-    )
-    d, _ = await ledger.try_admit(
-        key=_key(mission_type="impact"),
-        mode=None, policy=policy,
-    )
     assert isinstance(d, AdmissionAllowed)
+    await ledger.register(
+        reservation_id=d.reservation_id, agent_id="agent-PP", mode=None,
+    )
+    d2 = await ledger.try_admit(
+        key=_key(mission_type="impact"), mode=None, policy=policy,
+    )
+    assert isinstance(d2, AdmissionAllowed)
 
 
 async def test_different_scope_ids_have_independent_buckets(
     ledger: MissionExecutionLedger,
 ) -> None:
-    """Two sessions can each run their own
-    ``project_planning`` coordinator under
-    ``concurrency_scope=SESSION``."""
+    """Two sessions can each run their own ``project_planning``
+    coordinator under ``concurrency_scope=SESSION``."""
 
     policy = MissionExecutionPolicy(max_concurrent_instances=1)
-    _, r = await ledger.try_admit(
+    d = await ledger.try_admit(
         key=_key(scope_id="session_A"), mode=None, policy=policy,
     )
+    assert isinstance(d, AdmissionAllowed)
     await ledger.register(
-        reservation_id=r, agent_id="agent-A", mode=None,
+        reservation_id=d.reservation_id, agent_id="agent-A", mode=None,
     )
-    d, _ = await ledger.try_admit(
+    d2 = await ledger.try_admit(
         key=_key(scope_id="session_B"), mode=None, policy=policy,
     )
-    assert isinstance(d, AdmissionAllowed)
+    assert isinstance(d2, AdmissionAllowed)
 
 
 # ---------------------------------------------------------------------------
@@ -322,16 +309,40 @@ async def test_reservation_counts_toward_cap_until_register(
     see an empty bucket and both admit."""
 
     policy = MissionExecutionPolicy(max_concurrent_instances=1)
-    d1, r1 = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
+    d1 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
     assert isinstance(d1, AdmissionAllowed)
-    assert r1 is not None
-
-    d2, _ = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
+    d2 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
     assert isinstance(d2, AdmissionRejected)
+
+
+async def test_reservation_in_admit_register_window_returns_await(
+    ledger: MissionExecutionLedger,
+) -> None:
+    """Hole 2 — during the admit → register window, a sibling
+    try_admit under return_existing policy now returns AdmissionAwait
+    (was AdmissionRejected pre-Change-2). The Await carries the
+    blocking reservation_id so the caller can correlate."""
+
+    policy = MissionExecutionPolicy(
+        max_concurrent_instances=1,
+        on_concurrency_violation="return_existing",
+    )
+    d1 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d1, AdmissionAllowed)
+
+    # d1 is still a pending reservation — never called register.
+    d2 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d2, AdmissionAwait)
+    assert d2.reservation_id == d1.reservation_id
+
+    # After register lands, the next admit sees the running slot and
+    # gets ReturnExisting (not Await).
+    await ledger.register(
+        reservation_id=d1.reservation_id, agent_id="agent-A", mode=None,
+    )
+    d3 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d3, AdmissionReturnExisting)
+    assert d3.agent_id == "agent-A"
 
 
 async def test_release_reservation_returns_slot_without_registering(
@@ -340,18 +351,14 @@ async def test_release_reservation_returns_slot_without_registering(
     """A failed spawn between admit and register releases the slot."""
 
     policy = MissionExecutionPolicy(max_concurrent_instances=1)
-    _, r = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
+    d = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d, AdmissionAllowed)
+    # snapshot excludes pending reservations
     snap = await ledger.snapshot()
     assert _key() not in snap or not snap[_key()]
-    # The reservation is the only thing holding the slot; releasing
-    # it frees the slot for a fresh admit.
-    await ledger.release_reservation(r)
-    d, _ = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
-    assert isinstance(d, AdmissionAllowed)
+    await ledger.release_reservation(d.reservation_id)
+    d2 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d2, AdmissionAllowed)
 
 
 async def test_release_reservation_is_idempotent(
@@ -360,38 +367,31 @@ async def test_release_reservation_is_idempotent(
     """Double-release is a no-op (callers don't need to track state)."""
 
     policy = MissionExecutionPolicy(max_concurrent_instances=1)
-    _, r = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
-    await ledger.release_reservation(r)
-    await ledger.release_reservation(r)  # no raise
+    d = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d, AdmissionAllowed)
+    await ledger.release_reservation(d.reservation_id)
+    await ledger.release_reservation(d.reservation_id)  # no raise
 
 
 async def test_unregister_drops_entry_and_frees_slot(
     ledger: MissionExecutionLedger,
 ) -> None:
-    """Coordinator termination releases the bucket entry so the next
-    spawn admits."""
+    """Coordinator termination releases the slot."""
 
     policy = MissionExecutionPolicy(
         max_concurrent_instances=1, on_concurrency_violation="reject",
     )
-    _, r = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
+    d = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d, AdmissionAllowed)
     await ledger.register(
-        reservation_id=r, agent_id="agent-A", mode=None,
+        reservation_id=d.reservation_id, agent_id="agent-A", mode=None,
     )
-    d, _ = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
-    assert isinstance(d, AdmissionRejected)
+    d2 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d2, AdmissionRejected)
 
     await ledger.unregister("agent-A")
-    d2, _ = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
-    assert isinstance(d2, AdmissionAllowed)
+    d3 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d3, AdmissionAllowed)
 
 
 async def test_unregister_unknown_agent_id_is_noop(
@@ -412,13 +412,12 @@ async def test_register_after_release_raises(
     against the same id is a programmer error worth surfacing."""
 
     policy = MissionExecutionPolicy(max_concurrent_instances=1)
-    _, r = await ledger.try_admit(
-        key=_key(), mode=None, policy=policy,
-    )
-    await ledger.release_reservation(r)
+    d = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d, AdmissionAllowed)
+    await ledger.release_reservation(d.reservation_id)
     with pytest.raises(KeyError):
         await ledger.register(
-            reservation_id=r, agent_id="agent-A", mode=None,
+            reservation_id=d.reservation_id, agent_id="agent-A", mode=None,
         )
 
 
@@ -430,25 +429,47 @@ async def test_register_after_release_raises(
 async def test_snapshot_exposes_current_state(
     ledger: MissionExecutionLedger,
 ) -> None:
-    """``snapshot`` returns a typed copy of the live ledger."""
+    """``snapshot`` returns a typed copy of the live ledger,
+    excluding pending reservations."""
 
     policy = MissionExecutionPolicy(max_concurrent_instances=2)
-    _, r1 = await ledger.try_admit(
-        key=_key(), mode="bootstrap", policy=policy,
-    )
-    _, r2 = await ledger.try_admit(
-        key=_key(), mode="refresh", policy=policy,
+    d1 = await ledger.try_admit(key=_key(), mode="bootstrap", policy=policy)
+    d2 = await ledger.try_admit(key=_key(), mode="refresh", policy=policy)
+    assert isinstance(d1, AdmissionAllowed)
+    assert isinstance(d2, AdmissionAllowed)
+    await ledger.register(
+        reservation_id=d1.reservation_id, agent_id="agent-A",
+        mode="bootstrap",
     )
     await ledger.register(
-        reservation_id=r1, agent_id="agent-A", mode="bootstrap",
-    )
-    await ledger.register(
-        reservation_id=r2, agent_id="agent-B", mode="refresh",
+        reservation_id=d2.reservation_id, agent_id="agent-B",
+        mode="refresh",
     )
     snap = await ledger.snapshot()
     assert _key() in snap
     agent_ids = {entry.agent_id for entry in snap[_key()]}
     assert agent_ids == {"agent-A", "agent-B"}
+
+
+async def test_snapshot_excludes_pending_reservations(
+    ledger: MissionExecutionLedger,
+) -> None:
+    """Snapshot is the planner's "what coordinators are alive?" view.
+    Pending reservations are a gate internal — never surfaced."""
+
+    policy = MissionExecutionPolicy(max_concurrent_instances=2)
+    d1 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    d2 = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d1, AdmissionAllowed)
+    assert isinstance(d2, AdmissionAllowed)
+    # Only register the second one; first remains pending.
+    await ledger.register(
+        reservation_id=d2.reservation_id, agent_id="agent-B", mode=None,
+    )
+    snap = await ledger.snapshot()
+    assert _key() in snap
+    agent_ids = {entry.agent_id for entry in snap[_key()]}
+    assert agent_ids == {"agent-B"}
 
 
 # ---------------------------------------------------------------------------
@@ -464,21 +485,21 @@ async def test_list_for_scope_filters_by_mission_type(
     are live in the same scope."""
 
     policy = MissionExecutionPolicy(max_concurrent_instances=2)
-    # Two missions live under the same session scope: project_planning
-    # and impact.
-    _, r1 = await ledger.try_admit(
+    d1 = await ledger.try_admit(
         key=_key(mission_type="project_planning"),
         mode="bootstrap", policy=policy,
     )
-    _, r2 = await ledger.try_admit(
-        key=_key(mission_type="impact"),
-        mode=None, policy=policy,
+    d2 = await ledger.try_admit(
+        key=_key(mission_type="impact"), mode=None, policy=policy,
+    )
+    assert isinstance(d1, AdmissionAllowed)
+    assert isinstance(d2, AdmissionAllowed)
+    await ledger.register(
+        reservation_id=d1.reservation_id, agent_id="agent-PP",
+        mode="bootstrap",
     )
     await ledger.register(
-        reservation_id=r1, agent_id="agent-PP", mode="bootstrap",
-    )
-    await ledger.register(
-        reservation_id=r2, agent_id="agent-IM", mode=None,
+        reservation_id=d2.reservation_id, agent_id="agent-IM", mode=None,
     )
 
     pp_only = await ledger.list_for_scope(
@@ -497,33 +518,35 @@ async def test_list_for_scope_returns_all_for_scope_when_mission_type_none(
     ledger: MissionExecutionLedger,
 ) -> None:
     """``mission_type=None`` returns every live entry under
-    ``(scope, scope_id)`` regardless of registry key — the planner's
-    "what's running in my scope at all?" query."""
+    ``(scope, scope_id)`` regardless of registry key."""
 
     policy = MissionExecutionPolicy(max_concurrent_instances=2)
-    _, r1 = await ledger.try_admit(
+    d1 = await ledger.try_admit(
         key=_key(mission_type="project_planning"),
         mode="bootstrap", policy=policy,
     )
-    _, r2 = await ledger.try_admit(
-        key=_key(mission_type="impact"),
-        mode=None, policy=policy,
+    d2 = await ledger.try_admit(
+        key=_key(mission_type="impact"), mode=None, policy=policy,
+    )
+    assert isinstance(d1, AdmissionAllowed)
+    assert isinstance(d2, AdmissionAllowed)
+    await ledger.register(
+        reservation_id=d1.reservation_id, agent_id="agent-PP",
+        mode="bootstrap",
     )
     await ledger.register(
-        reservation_id=r1, agent_id="agent-PP", mode="bootstrap",
+        reservation_id=d2.reservation_id, agent_id="agent-IM", mode=None,
     )
-    await ledger.register(
-        reservation_id=r2, agent_id="agent-IM", mode=None,
-    )
-    # A different session's entry must NOT leak in.
-    _, r3 = await ledger.try_admit(
+    d3 = await ledger.try_admit(
         key=_key(
             scope_id="session_other", mission_type="project_planning",
         ),
         mode=None, policy=policy,
     )
+    assert isinstance(d3, AdmissionAllowed)
     await ledger.register(
-        reservation_id=r3, agent_id="agent-OTHER", mode=None,
+        reservation_id=d3.reservation_id, agent_id="agent-OTHER",
+        mode=None,
     )
 
     all_in_scope = await ledger.list_for_scope(
@@ -540,9 +563,7 @@ async def test_list_for_scope_returns_all_for_scope_when_mission_type_none(
 async def test_list_for_scope_empty_when_no_entries(
     ledger: MissionExecutionLedger,
 ) -> None:
-    """A scope with nothing running returns ``[]`` — not a raise.
-    "No live missions" is a normal answer the planner branches on,
-    not an error condition."""
+    """A scope with nothing running returns ``[]`` — not a raise."""
 
     result = await ledger.list_for_scope(
         scope=MissionConcurrencyScope.SESSION,
@@ -551,13 +572,32 @@ async def test_list_for_scope_empty_when_no_entries(
     )
     assert result == []
 
-    # Same shape with mission_type filter applied to an empty bucket.
     result_filtered = await ledger.list_for_scope(
         scope=MissionConcurrencyScope.SESSION,
         scope_id="session_empty",
         mission_type="project_planning",
     )
     assert result_filtered == []
+
+
+async def test_list_for_scope_excludes_pending_reservations(
+    ledger: MissionExecutionLedger,
+) -> None:
+    """Pending reservations don't appear in the planner's read view.
+    Otherwise the LLM would see "coordinator already running" before
+    the spawn actually landed and stop chaining work."""
+
+    policy = MissionExecutionPolicy(max_concurrent_instances=2)
+    d = await ledger.try_admit(key=_key(), mode=None, policy=policy)
+    assert isinstance(d, AdmissionAllowed)
+    # Never call register — leave d as a pending reservation.
+
+    result = await ledger.list_for_scope(
+        scope=MissionConcurrencyScope.SESSION,
+        scope_id="session_test",
+        mission_type=None,
+    )
+    assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -581,7 +621,41 @@ async def test_parallel_admits_under_cap_one_serialise(
         ledger.try_admit(key=_key(), mode=None, policy=policy),
         ledger.try_admit(key=_key(), mode=None, policy=policy),
     )
-    allowed = [d for d, _ in results if isinstance(d, AdmissionAllowed)]
-    rejected = [d for d, _ in results if isinstance(d, AdmissionRejected)]
-    assert len(allowed) == 1, [type(d).__name__ for d, _ in results]
+    allowed = [d for d in results if isinstance(d, AdmissionAllowed)]
+    rejected = [d for d in results if isinstance(d, AdmissionRejected)]
+    assert len(allowed) == 1, [type(d).__name__ for d in results]
     assert len(rejected) == 1
+
+
+async def test_three_parallel_admits_under_return_existing_converge(
+    ledger: MissionExecutionLedger,
+) -> None:
+    """Three parallel ``try_admit`` calls (e.g. SessionAgent emits
+    bootstrap+refresh+assignments concurrently) under cap=1 +
+    return_existing converge: exactly one Allowed; the rest are
+    Await (slot held by reservation) or ReturnExisting (slot bound
+    after register lands). No Rejected — that was the Hole 2 bug.
+    """
+
+    policy = MissionExecutionPolicy(
+        max_concurrent_instances=1,
+        on_concurrency_violation="return_existing",
+    )
+
+    results = await asyncio.gather(
+        ledger.try_admit(key=_key(), mode="bootstrap", policy=policy),
+        ledger.try_admit(key=_key(), mode="refresh", policy=policy),
+        ledger.try_admit(key=_key(), mode="assignments", policy=policy),
+    )
+    allowed = [d for d in results if isinstance(d, AdmissionAllowed)]
+    awaits = [d for d in results if isinstance(d, AdmissionAwait)]
+    rejected = [d for d in results if isinstance(d, AdmissionRejected)]
+    assert len(allowed) == 1
+    assert len(rejected) == 0, (
+        "Hole 2: parallel admit under return_existing must never "
+        "reject — the slot-holder is recoverable."
+    )
+    # The other two land as Await (no running slot yet) referencing
+    # the one allowed reservation.
+    assert len(awaits) == 2
+    assert all(a.reservation_id == allowed[0].reservation_id for a in awaits)

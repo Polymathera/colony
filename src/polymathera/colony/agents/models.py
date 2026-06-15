@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from enum import Enum
-from typing import Any, ClassVar, Literal, AsyncContextManager
+from typing import Any, ClassVar, Iterator, Literal, AsyncContextManager
 from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, Field, ConfigDict, model_validator
@@ -565,6 +565,34 @@ class SpawnedChildInfo(BaseModel):
     spawned_at: float = Field(default_factory=time.time)
     # Note: Status is tracked via event subscriptions, NOT stored here
 
+CodegenStepKind = Literal["planning", "execution", "mixed", "noop"]
+
+
+class CodegenStepSummary(BaseModel):
+    """Per-iteration summary written by
+    :func:`_build_codegen_step_summary`. Stored on
+    :attr:`PlanExecutionContext.codegen_step_summaries` keyed by the
+    code-step's action_id.
+
+    ``actions_called`` + ``action_ids`` are parallel lists indexing
+    into :attr:`PlanExecutionContext.action_results` — readers iterate
+    in lock-step (see
+    :meth:`PlanExecutionContext.iter_successful_action_outputs`).
+    """
+
+    actions_called: list[str] = Field(default_factory=list)
+    action_ids: list[str] = Field(default_factory=list)
+    planning_actions: list[str] = Field(default_factory=list)
+    domain_actions: list[str] = Field(default_factory=list)
+    step_kind: CodegenStepKind = "noop"
+    had_failures: bool = False
+    repl_success: bool = False
+    errors: list[str] = Field(default_factory=list)
+    mode_before: str = ""
+    mode_after: str = ""
+    run_call_trace: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class PlanExecutionContext(BaseModel):
     """Strongly-typed execution context (replaces dict[str, Any])."""
 
@@ -575,7 +603,30 @@ class PlanExecutionContext(BaseModel):
     findings: dict[str, Any] = Field(default_factory=dict)
     analyzed_pages: set[str] = Field(default_factory=set)
     synthesis_results: dict[str, Any] = Field(default_factory=dict)
+    codegen_step_summaries: dict[str, CodegenStepSummary] = Field(
+        default_factory=dict,
+    )
     custom_data: dict[str, Any] = Field(default_factory=dict)  # Escape hatch
+
+    def iter_successful_action_outputs(
+        self, action_key: str,
+    ) -> Iterator[Any]:
+        """Yield the ``output`` of each successful action call whose
+        dispatched key endswith ``action_key``, in trace-recorded
+        order.
+
+        Matching is suffix-based to handle the dispatcher's
+        ``<CapabilityKey>.<CapabilityName>.<action_name>`` shape.
+        """
+
+        for summary in self.codegen_step_summaries.values():
+            for ak, aid in zip(summary.actions_called, summary.action_ids):
+                if not ak.endswith(action_key):
+                    continue
+                result = self.action_results.get(aid)
+                if result is None or not result.success:
+                    continue
+                yield result.output
 
 
 class ManualPlanSpec(BaseModel):

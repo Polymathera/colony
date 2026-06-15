@@ -294,6 +294,7 @@ def _extract_run_action_keys_from_code(code: str) -> list[str]:
 def _build_codegen_step_summary(
     *,
     actions_called: list[str],
+    action_ids: list[str],
     planning_action_keys: set[str],
     had_failures: bool,
     repl_success: bool,
@@ -301,8 +302,16 @@ def _build_codegen_step_summary(
     mode_before: str,
     mode_after: str,
     run_call_trace: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Build a structured summary for one generated-code iteration."""
+) -> "CodegenStepSummary":
+    """Build a structured summary for one generated-code iteration.
+
+    ``actions_called`` and ``action_ids`` are parallel lists — same
+    length, same order — so readers can iterate in lock-step to map
+    each call to its result in
+    :attr:`PlanExecutionContext.action_results`.
+    """
+    from polymathera.colony.agents.models import CodegenStepSummary
+
     planning_actions = [key for key in actions_called if key in planning_action_keys]
     domain_actions = [key for key in actions_called if key not in planning_action_keys]
 
@@ -315,43 +324,36 @@ def _build_codegen_step_summary(
     else:
         step_kind = "noop"
 
-    return {
-        "actions_called": list(actions_called),
-        "planning_actions": planning_actions,
-        "domain_actions": domain_actions,
-        "step_kind": step_kind,
-        "had_failures": had_failures,
-        "repl_success": repl_success,
-        "errors": list(errors),
-        "mode_before": mode_before,
-        "mode_after": mode_after,
-        "run_call_trace": list(run_call_trace) if run_call_trace else [],
-    }
+    return CodegenStepSummary(
+        actions_called=list(actions_called),
+        action_ids=list(action_ids),
+        planning_actions=planning_actions,
+        domain_actions=domain_actions,
+        step_kind=step_kind,
+        had_failures=had_failures,
+        repl_success=repl_success,
+        errors=list(errors),
+        mode_before=mode_before,
+        mode_after=mode_after,
+        run_call_trace=list(run_call_trace) if run_call_trace else [],
+    )
 
 
-def _format_codegen_step_history(step_info: dict[str, Any]) -> list[str]:
+def _format_codegen_step_history(
+    step_info: "CodegenStepSummary",
+) -> list[str]:
     """Render one stored step summary into prompt-friendly history lines."""
-    ok = step_info.get("repl_success", False) and not step_info.get("had_failures", False)
+    ok = step_info.repl_success and not step_info.had_failures
     status = "✓" if ok else "✗"
-    errors = [str(err) for err in step_info.get("errors", []) if err]
+    errors = [str(err) for err in step_info.errors if err]
 
-    planning_actions = list(step_info.get("planning_actions", []))
-    domain_actions = list(step_info.get("domain_actions", []))
-    actions = list(step_info.get("actions_called", []))
+    planning_actions = list(step_info.planning_actions)
+    domain_actions = list(step_info.domain_actions)
+    actions = list(step_info.actions_called)
 
-    step_kind = step_info.get("step_kind")
-    if step_kind not in {"planning", "execution", "mixed", "noop"}:
-        if planning_actions and domain_actions:
-            step_kind = "mixed"
-        elif planning_actions:
-            step_kind = "planning"
-        elif domain_actions or actions:
-            step_kind = "execution"
-        else:
-            step_kind = "noop"
-
-    mode_before = step_info.get("mode_before")
-    mode_after = step_info.get("mode_after")
+    step_kind = step_info.step_kind
+    mode_before = step_info.mode_before
+    mode_after = step_info.mode_after
     mode_change = bool(mode_before and mode_after and mode_before != mode_after)
 
     lines: list[str] = []
@@ -385,13 +387,15 @@ def _format_codegen_step_history(step_info: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _should_store_skill_from_step_summary(step_info: dict[str, Any] | None) -> bool:
+def _should_store_skill_from_step_summary(
+    step_info: "CodegenStepSummary | None",
+) -> bool:
     """Store only iterations that actually performed domain work."""
-    if not step_info:
+    if step_info is None:
         return False
-    if step_info.get("had_failures"):
+    if step_info.had_failures:
         return False
-    return bool(step_info.get("domain_actions"))
+    return bool(step_info.domain_actions)
 
 
 def _select_prompt_skills(
@@ -483,8 +487,9 @@ def format_planning_context_for_codegen(
     # Execution progress — show what actions each code step called,
     # Only render code steps (codegen_plan_step_*), not internal actions.
     exec_ctx = planning_context.execution_context
-    step_summaries = (exec_ctx.custom_data.get("codegen_step_summaries", {})
-                      if exec_ctx else {})
+    step_summaries = (
+        exec_ctx.codegen_step_summaries if exec_ctx else {}
+    )
     if step_summaries:
         history_lines = []
         # Iterate step summaries in insertion order (Python 3.7+ dict)
@@ -1430,6 +1435,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 self._call_history.append(CallRecord(
                     action_key=resolved_action_key,
                     params=dict(params),
+                    action_id=action.action_id,
                     end_wall=time.time(),
                     status="ok" if result.success else "error",
                     error=(result.error or "")[:200]
@@ -1647,10 +1653,10 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         exec_ctx = planning_context.execution_context
         if exec_ctx:
             # Use step summaries to get real action names, not codegen_internal_* IDs
-            step_summaries = exec_ctx.custom_data.get("codegen_step_summaries", {})
+            step_summaries = exec_ctx.codegen_step_summaries
             recent_actions: list[str] = []
             for step_info in list(step_summaries.values())[-3:]:  # TODO: Make this configurable
-                for action_key in step_info.get("actions_called", []):
+                for action_key in step_info.actions_called:
                     recent_actions.append(action_key.rsplit(".", 1)[-1])
             if recent_actions:
                 parts.append("Recent actions: " + ", ".join(recent_actions))
@@ -1976,9 +1982,6 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             step_id = result.action_executed.action_id
             self._execution_context.completed_action_ids.append(step_id)
             self._execution_context.action_results[step_id] = result.result
-            summaries = self._execution_context.custom_data.setdefault(
-                "codegen_step_summaries", {}
-            )
             # Collect all errors: internal run() failures + REPL crash error.
             # Without the REPL error, the execution history shows [✗] with no
             # explanation — the LLM can't learn what went wrong and repeats
@@ -1987,15 +1990,18 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             if result.result and not result.result.success and result.result.error:
                 step_errors.append(result.result.error)
 
-            summaries[step_id] = _build_codegen_step_summary(
-                actions_called=[c.action_key for c in self._call_history],
-                planning_action_keys=planning_action_keys,
-                had_failures=self._had_internal_failures,
-                repl_success=result.result.success if result.result else False,
-                errors=step_errors,
-                mode_before=mode_before,
-                mode_after=self._mode,
-                run_call_trace=list(self._run_call_trace),
+            self._execution_context.codegen_step_summaries[step_id] = (
+                _build_codegen_step_summary(
+                    actions_called=[c.action_key for c in self._call_history],
+                    action_ids=[c.action_id for c in self._call_history],
+                    planning_action_keys=planning_action_keys,
+                    had_failures=self._had_internal_failures,
+                    repl_success=result.result.success if result.result else False,
+                    errors=step_errors,
+                    mode_before=mode_before,
+                    mode_after=self._mode,
+                    run_call_trace=list(self._run_call_trace),
+                )
             )
 
         # Feed this iteration's action calls to every consciousness
@@ -2071,8 +2077,9 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             self._consecutive_failures = 0
             self._error_history.clear()
             executed_code = result.action_executed.parameters.get("code", "")
-            step_summaries = self._execution_context.custom_data.get("codegen_step_summaries", {})
-            step_info = step_summaries.get(result.action_executed.action_id)
+            step_info = self._execution_context.codegen_step_summaries.get(
+                result.action_executed.action_id,
+            )
 
             # Dimension 3: Skill Library — store successful code for reuse.
             # Only store if no run() calls inside the code failed and the step

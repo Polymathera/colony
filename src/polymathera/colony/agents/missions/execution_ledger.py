@@ -39,7 +39,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -98,36 +98,70 @@ class RunningMissionKey:
         )
 
 
+class PendingReservation(BaseModel):
+    """A slot held by an admit that hasn't yet bound to an agent_id.
+
+    Counts toward ``max_concurrent_instances`` so two parallel
+    admit-then-spawn races can't both see an empty slot list."""
+
+    kind: Literal["reservation"] = "reservation"
+    reservation_id: str
+    reserved_at: float = Field(default_factory=time.time)
+
+
 class RunningMissionEntry(BaseModel):
-    """One in-flight coordinator's bookkeeping row.
+    """A slot bound to a live coordinator. Pydantic for JSON
+    round-trip through :class:`StateManager`."""
 
-    Pydantic model (not dataclass) so it round-trips cleanly through
-    :class:`StateManager`'s JSON serialisation."""
-
+    kind: Literal["running"] = "running"
     agent_id: str
-    mode: str | None = None # ``mission_params['mode']``, or ``None`` when absent.
+    mode: str | None = None
     started_at: float = Field(default_factory=time.time)
+
+
+# The unified slot type stored in MissionLedgerState.slots. Indexing
+# pending + running in the same list (not two parallel dicts) closes
+# the admit-then-register window where the bucket-only cap check
+# undercounted in-flight work.
+Slot = Annotated[
+    PendingReservation | RunningMissionEntry,
+    Field(discriminator="kind"),
+]
 
 
 @dataclass(frozen=True)
 class AdmissionAllowed:
-    """The spawn gate approves a fresh spawn."""
+    """Spawn approved. ``reservation_id`` is what the caller passes
+    to :meth:`MissionExecutionLedger.register` (or
+    :meth:`release_reservation` on spawn failure)."""
 
+    reservation_id: str
     kind: Literal["spawn"] = "spawn"
 
 
 @dataclass(frozen=True)
 class AdmissionReturnExisting:
-    """Policy is ``return_existing`` and a compatible instance is
-    already running — the gate hands back that running coordinator's
-    ``agent_id`` instead of spawning a new one. Used both for
-    :class:`MissionExecutionPolicy.idempotent` matches and for
-    ``chains_with_modes`` collisions where the LLM emitted spawns
-    for additional modes that are auto-chained internally."""
+    """A live coordinator already covers this spawn; hand back its
+    ``agent_id`` instead of spawning anew."""
 
     agent_id: str
     reason: str
     kind: Literal["return_existing"] = "return_existing"
+
+
+@dataclass(frozen=True)
+class AdmissionAwait:
+    """Cap reached, but the only thing holding the slot is a pending
+    reservation under ``return_existing`` policy — the caller should
+    wait for the reservation to resolve (either to a running
+    coordinator the caller can return, or to a freed slot) rather
+    than reject. Returned to keep the LLM-facing gate semantics
+    monotonic: a race shouldn't surface as a different outcome than
+    the deterministic path."""
+
+    reservation_id: str
+    reason: str
+    kind: Literal["await"] = "await"
 
 
 @dataclass(frozen=True)
@@ -140,7 +174,10 @@ class AdmissionRejected:
 
 
 AdmissionDecision = (
-    AdmissionAllowed | AdmissionReturnExisting | AdmissionRejected
+    AdmissionAllowed
+    | AdmissionReturnExisting
+    | AdmissionAwait
+    | AdmissionRejected
 )
 
 
@@ -155,24 +192,25 @@ class MissionLedgerState(SharedState):
     Stored once per Polymathera app (the state_key is keyed off the
     serving app name) so every Ray worker in the same cluster shares
     the same view. ``MissionConcurrencyScope`` is encoded in the
-    bucket key itself, so one ledger state handles every scope level
+    slot key itself, so one ledger state handles every scope level
     uniformly without needing N separate state managers.
+
+    A single ``slots`` dict holds both pending reservations and
+    running coordinators (discriminated by :attr:`Slot.kind`). The
+    cap is checked against ``len(slots[storage_key])`` so the
+    admit-then-register window can't undercount in-flight work.
     """
 
-    # Bucket key format: ``RunningMissionKey.to_storage_key()`` —
+    # ``{storage_key: [Slot, ...]}``. Key format:
+    # ``RunningMissionKey.to_storage_key()`` —
     # ``"{scope}|{scope_id}|{mission_type}"``.
-    buckets: dict[str, list[RunningMissionEntry]] = Field(
+    slots: dict[str, list[Slot]] = Field(
         default_factory=dict,
-        description="Live mission entries grouped by bucket key.",
-    )
-
-    # ``{reservation_id: storage_key}``. A reservation counts toward
-    # the cap until it is either :meth:`register`-ed against a real
-    # agent_id or :meth:`release_reservation`-d, so two parallel
-    # spawn attempts can't both see an empty bucket and both admit.
-    reservations: dict[str, str] = Field(
-        default_factory=dict,
-        description="Outstanding admit-but-not-yet-registered reservations.",
+        description=(
+            "In-flight slot list per bucket. Each slot is either a "
+            "PendingReservation (admitted, not yet bound) or a "
+            "RunningMissionEntry (bound to a live coordinator)."
+        ),
     )
 
     @classmethod
@@ -222,88 +260,89 @@ class MissionExecutionLedger:
         key: RunningMissionKey,
         mode: str | None,
         policy: MissionExecutionPolicy,
-    ) -> tuple[AdmissionDecision, str | None]:
+    ) -> AdmissionDecision:
         """Atomically apply ``policy`` to a proposed spawn.
 
-        Returns ``(decision, reservation_id)``. On
-        :class:`AdmissionAllowed` the ``reservation_id`` is the token
-        the caller passes to :meth:`register` (or
-        :meth:`release_reservation` if the spawn ultimately fails).
-        On the other decision shapes, ``reservation_id`` is ``None``.
+        Returns one of:
 
-        Order of checks:
+        - :class:`AdmissionAllowed` — caller passes its
+          ``reservation_id`` to :meth:`register` on success or
+          :meth:`release_reservation` on failure.
+        - :class:`AdmissionReturnExisting` — a running coordinator
+          already covers this spawn; caller returns its ``agent_id``.
+        - :class:`AdmissionAwait` — cap is at limit but the only
+          slot-holder is a pending reservation under
+          ``return_existing`` policy; caller waits + re-calls.
+        - :class:`AdmissionRejected` — cap reached under a
+          non-recoverable policy.
 
-        1. ``chains_with_modes`` — if ``mode`` is in the declared
-           list AND an entry of the same mission_type+scope is
-           already running, return the existing entry's ``agent_id``.
-        2. ``max_concurrent_instances`` against the bucket size +
-           outstanding reservations. Reservations count so we don't
-           admit beyond the cap during a parallel spawn race.
-        3. ``on_concurrency_violation`` shapes the rejection:
-           ``reject`` (default), ``return_existing`` (hands back the
-           oldest live entry's ``agent_id``), or ``preempt_oldest`` /
-           ``queue`` (not yet implemented — fall through to reject).
+        Non-blocking: the wait loop lives in :func:`admit_and_spawn`
+        for callers that want the spawn-or-return-or-wait flow.
+
+        ``mode`` is recorded on the slot for observability and is
+        not consulted by the cap check — every spawn against the
+        same key+scope contributes one slot regardless of mode. The
+        "one coordinator for all modes" behaviour falls out of
+        ``max_concurrent_instances=1`` + ``return_existing``; no
+        separate chain knob is needed.
         """
 
         storage_key = key.to_storage_key()
         decision_holder: AdmissionDecision | None = None
-        reservation_holder: str | None = None
 
         # IMPORTANT: never ``return`` or ``break`` from inside the
-        # write_transaction loop body — Python async generators
-        # skip the post-yield compare_and_swap when the caller
-        # short-circuits. See the standing rule in this repo's
-        # ``.CLAUDE.md`` / memory: assign to outer-scope holders
-        # and let the loop body complete naturally.
+        # write_transaction loop body — Python async generators skip
+        # the post-yield compare_and_swap when the caller
+        # short-circuits. Assign to the outer holder and let the
+        # body complete naturally.
         async for state in self._state_manager.write_transaction():
-            bucket = state.buckets.setdefault(storage_key, [])
-            reservation_count = sum(
-                1 for k in state.reservations.values() if k == storage_key
-            )
-            in_flight = len(bucket) + reservation_count
-
-            # ---- chains_with_modes ------------------------------
-            if (
-                policy.chains_with_modes is not None
-                and mode is not None
-                and mode in policy.chains_with_modes
-                and bucket
-            ):
-                existing = bucket[0]
-                decision_holder = AdmissionReturnExisting(
-                    agent_id=existing.agent_id,
-                    reason=(
-                        f"Mission {key.mission_type!r}'s modes "
-                        f"{policy.chains_with_modes!r} auto-chain "
-                        f"internally — the running coordinator "
-                        f"{existing.agent_id!r} drives the sequence. "
-                        f"Re-spawning per-mode would violate the "
-                        f"mission's declared control flow."
-                    ),
-                )
-                continue  # falls through to natural loop end
+            slots = state.slots.setdefault(storage_key, [])
+            running = [
+                s for s in slots if isinstance(s, RunningMissionEntry)
+            ]
+            reservations = [
+                s for s in slots if isinstance(s, PendingReservation)
+            ]
+            in_flight = len(slots)
 
             # --- concurrency cap ---------------------------------
             cap = policy.max_concurrent_instances
             if cap is not None and in_flight >= cap:
-                if policy.on_concurrency_violation == "return_existing" and bucket:
-                    existing = bucket[0]
-                    decision_holder = AdmissionReturnExisting(
-                        agent_id=existing.agent_id,
+                if policy.on_concurrency_violation == "return_existing":
+                    if running:
+                        existing = running[0]
+                        decision_holder = AdmissionReturnExisting(
+                            agent_id=existing.agent_id,
+                            reason=(
+                                f"At most {cap} concurrent "
+                                f"{key.mission_type!r} per "
+                                f"{key.scope.value} ({key.scope_id!r}); "
+                                f"returning the running instance "
+                                f"{existing.agent_id!r}."
+                            ),
+                        )
+                        continue
+                    # Only reservations hold the slot — wait for one
+                    # to resolve. The caller will see the outcome
+                    # (ReturnExisting or a freed slot) on its next
+                    # try_admit. Without this branch, the parallel
+                    # admit case under return_existing would surface
+                    # as Rejected, which the LLM has no way to retry
+                    # against. Hole 2 in fix_plan.md.
+                    decision_holder = AdmissionAwait(
+                        reservation_id=reservations[0].reservation_id,
                         reason=(
                             f"At most {cap} concurrent "
                             f"{key.mission_type!r} per "
                             f"{key.scope.value} ({key.scope_id!r}); "
-                            f"returning the running instance "
-                            f"{existing.agent_id!r}."
+                            f"slot held by pending reservation "
+                            f"{reservations[0].reservation_id!r} — "
+                            f"awaiting resolution."
                         ),
                     )
                     continue
-                # ``preempt_oldest`` and ``queue`` not implemented in
-                # this layer — fall through to reject with a clear
-                # hint. (Preemption needs the coordinator-side
-                # cancel plumbing; queue needs a separate dispatcher
-                # process.)
+                # ``preempt_oldest`` / ``queue`` not implemented in
+                # this layer — fall through to reject with a hint.
                 decision_holder = AdmissionRejected(
                     reason=(
                         f"At most {cap} concurrent "
@@ -322,17 +361,18 @@ class MissionExecutionLedger:
             reservation_id = (
                 f"resv_{key.mission_type}_{uuid.uuid4().hex[:12]}"
             )
-            state.reservations[reservation_id] = storage_key
-            decision_holder = AdmissionAllowed()
-            reservation_holder = reservation_id
+            slots.append(
+                PendingReservation(reservation_id=reservation_id),
+            )
+            decision_holder = AdmissionAllowed(
+                reservation_id=reservation_id,
+            )
 
-        # Belt-and-braces: an empty transaction (no iterations) means
-        # the StateManager wasn't initialised — surface that loudly.
         assert decision_holder is not None, (
             "MissionExecutionLedger.try_admit: state_manager yielded "
             "no state — was ``state_manager.initialize()`` awaited?"
         )
-        return decision_holder, reservation_holder
+        return decision_holder
 
     # -- post-admit bookkeeping --------------------------------------
 
@@ -343,7 +383,7 @@ class MissionExecutionLedger:
         agent_id: str,
         mode: str | None,
     ) -> None:
-        """Bind the reserved slot to the concrete spawned agent.
+        """Replace the pending reservation with a bound running slot.
 
         Raises :class:`KeyError` if the reservation has already been
         released — that's a programmer error worth surfacing rather
@@ -353,20 +393,28 @@ class MissionExecutionLedger:
         not_found = object()
         outcome: object = not_found
         async for state in self._state_manager.write_transaction():
-            storage_key = state.reservations.pop(reservation_id, None)
-            if storage_key is None:
-                outcome = None  # signal "not found" without raising mid-loop
-                continue
-            bucket = state.buckets.setdefault(storage_key, [])
-            bucket.append(
-                RunningMissionEntry(agent_id=agent_id, mode=mode),
-            )
-            outcome = storage_key
-            logger.info(
-                "MissionExecutionLedger: registered agent_id=%s "
-                "storage_key=%s mode=%s in_flight=%d",
-                agent_id, storage_key, mode, len(bucket),
-            )
+            # Reset every CAS retry — the prior iteration's
+            # mutation rolls back when compare_and_swap fails.
+            outcome = None
+            for storage_key, slots in state.slots.items():
+                for i, slot in enumerate(slots):
+                    if (
+                        isinstance(slot, PendingReservation)
+                        and slot.reservation_id == reservation_id
+                    ):
+                        slots[i] = RunningMissionEntry(
+                            agent_id=agent_id, mode=mode,
+                        )
+                        outcome = storage_key
+                        logger.info(
+                            "MissionExecutionLedger: registered "
+                            "agent_id=%s storage_key=%s mode=%s "
+                            "in_flight=%d",
+                            agent_id, storage_key, mode, len(slots),
+                        )
+                        break
+                if outcome is not None:
+                    break
 
         if outcome is not_found:
             # The transaction never yielded — see try_admit's assert.
@@ -388,44 +436,60 @@ class MissionExecutionLedger:
         no-op if the reservation has already been released."""
 
         async for state in self._state_manager.write_transaction():
-            state.reservations.pop(reservation_id, None)
+            self._drop_slot(
+                state.slots,
+                predicate=lambda s: (
+                    isinstance(s, PendingReservation)
+                    and s.reservation_id == reservation_id
+                ),
+            )
 
     async def unregister(self, agent_id: str) -> None:
-        """Drop the running entry for ``agent_id`` from the ledger.
+        """Drop the running slot for ``agent_id``. Idempotent.
 
         Called when the coordinator terminates (normal completion,
-        cancellation, error). Idempotent — extra calls for the same
-        ``agent_id`` are no-ops, so callers don't have to track
-        whether they've already cleaned up.
-        """
+        cancellation, error)."""
 
         async for state in self._state_manager.write_transaction():
-            empty_keys: list[str] = []
-            for storage_key, entries in state.buckets.items():
-                filtered = [e for e in entries if e.agent_id != agent_id]
-                if len(filtered) != len(entries):
-                    state.buckets[storage_key] = filtered
-                if not state.buckets[storage_key]:
-                    empty_keys.append(storage_key)
-            for k in empty_keys:
-                state.buckets.pop(k, None)
+            self._drop_slot(
+                state.slots,
+                predicate=lambda s: (
+                    isinstance(s, RunningMissionEntry)
+                    and s.agent_id == agent_id
+                ),
+            )
+
+    @staticmethod
+    def _drop_slot(slots_map, *, predicate) -> None:
+        """Remove every slot matching ``predicate`` and clean up
+        emptied buckets. Mutates ``slots_map`` in place."""
+
+        for storage_key in list(slots_map.keys()):
+            new_slots = [s for s in slots_map[storage_key] if not predicate(s)]
+            if len(new_slots) != len(slots_map[storage_key]):
+                if new_slots:
+                    slots_map[storage_key] = new_slots
+                else:
+                    del slots_map[storage_key]
 
     # -- inspection helpers (tests + future observability) -----------
 
     async def snapshot(self) -> dict[RunningMissionKey, list[RunningMissionEntry]]:
-        """Return a copy of the current ledger state. Read-only —
-        does not bump the version. Decoded back into the typed
-        :class:`RunningMissionKey` shape for ergonomics."""
+        """Return a copy of the live ledger state. Read-only — does
+        not bump the version. Pending reservations are excluded;
+        callers reason about coordinators, not gate internals."""
 
         result: dict[RunningMissionKey, list[RunningMissionEntry]] = {}
         async for state in self._state_manager.read_transaction():
-            for storage_key, entries in state.buckets.items():
-                result[
-                    RunningMissionKey.from_storage_key(storage_key)
-                ] = [
-                    RunningMissionEntry(**e.model_dump())
-                    for e in entries
+            for storage_key, slots in state.slots.items():
+                running = [
+                    RunningMissionEntry(**s.model_dump())
+                    for s in slots if isinstance(s, RunningMissionEntry)
                 ]
+                if running:
+                    result[
+                        RunningMissionKey.from_storage_key(storage_key)
+                    ] = running
         return result
 
     async def list_for_scope(
@@ -437,34 +501,24 @@ class MissionExecutionLedger:
     ) -> list[tuple[RunningMissionKey, RunningMissionEntry]]:
         """Return every live ``(key, entry)`` pair under ``(scope, scope_id)``.
 
-        The READ primitive the LLM planner uses to answer "did I
-        already spawn this mission in my scope?" before calling
-        :meth:`SessionOrchestratorCapability.spawn_mission` a second
-        time. Returns tuples (not bare entries) so ``mission_type`` —
-        which lives in the key, not the entry — is always visible on
-        the result without forcing the caller to re-derive it.
-
-        When ``mission_type`` is ``None``, every mission type in the
-        scope matches; otherwise the filter is exact-match on the
-        registry key (``project_planning``, ``opm_meg``, …). An empty
-        scope returns ``[]`` (NOT a raise) — "no missions running" is
-        a normal answer, not an error.
-
-        Read-only — uses ``read_transaction()`` so it does not bump
-        the version, matching :meth:`snapshot`."""
+        Filters to :class:`RunningMissionEntry` only — the LLM
+        planner's "what's running in my scope?" query doesn't see
+        pending reservations. Empty scopes return ``[]`` (no raise).
+        """
 
         result: list[tuple[RunningMissionKey, RunningMissionEntry]] = []
         async for state in self._state_manager.read_transaction():
-            for storage_key, entries in state.buckets.items():
+            for storage_key, slots in state.slots.items():
                 key = RunningMissionKey.from_storage_key(storage_key)
                 if key.scope is not scope or key.scope_id != scope_id:
                     continue
                 if mission_type is not None and key.mission_type != mission_type:
                     continue
-                for entry in entries:
-                    result.append(
-                        (key, RunningMissionEntry(**entry.model_dump())),
-                    )
+                for slot in slots:
+                    if isinstance(slot, RunningMissionEntry):
+                        result.append(
+                            (key, RunningMissionEntry(**slot.model_dump())),
+                        )
         return result
 
 
@@ -615,27 +669,23 @@ async def admit_and_spawn(
       label}`` — spawn succeeded.
     - ``{agent_id: <existing>, ..., created: False,
       mission_gate: "return_existing", reason}`` — the gate handed
-      back a running coordinator (chains_with_modes or
-      return_existing on cap collision).
+      back a running coordinator on cap collision under
+      ``return_existing`` policy.
     - ``{agent_id: None, ..., created: False,
       mission_gate: "rejected", error, suggested_action}`` —
       explicit rejection. Includes a hint for the LLM's next
-      iteration.
+      iteration. Also covers the case where a sibling reservation
+      never resolved within :data:`_AWAIT_RESERVATION_TIMEOUT_S`.
     - ``{agent_id: None, ..., created: False, error}`` — the spawn
       itself failed (e.g. the coordinator class couldn't be
-      imported). Distinct from a ``mission_gate`` rejection
-      because the failure mode is different.
+      imported).
 
     ``create_agent_kwargs`` is the extra-kwargs bag forwarded to
-    :meth:`AgentPoolCapability.create_agent` for callers that need to
-    set non-default options (resource requirements, soft_affinity,
-    etc.).
+    :meth:`AgentPoolCapability.create_agent`.
     """
 
     from ..configs import resolve_mission_execution_policy
 
-    # Resolve the coordinator class so we can read its
-    # ``MISSION_EXECUTION_POLICY`` ClassVar.
     agent_cls = pool.resolve_agent_class(agent_type)
     policy = resolve_mission_execution_policy(
         spec=None, coordinator_class=agent_cls,
@@ -648,17 +698,12 @@ async def admit_and_spawn(
         mission_type=mission_type,
     )
 
-    # Canonical serving-framework lookup for the app name. This call
-    # raises outside a deployment context, which is exactly what we
-    # want — admit_and_spawn must run inside the spawning agent's
-    # runtime (a serving deployment), so a missing app_name is a
-    # setup bug worth surfacing loudly rather than papering over.
     from polymathera.colony.distributed.ray_utils import serving
     app_name = serving.get_my_app_name()
     ledger = await get_mission_execution_ledger(app_name)
 
-    decision, reservation_id = await ledger.try_admit(
-        key=key, mode=mode, policy=policy,
+    decision = await _await_admission(
+        ledger=ledger, key=key, mode=mode, policy=policy,
     )
 
     if isinstance(decision, AdmissionReturnExisting):
@@ -702,6 +747,7 @@ async def admit_and_spawn(
     # has generic stop callbacks to fire. The user-supplied
     # ``create_agent_kwargs`` can carry additional callbacks; we
     # prepend ours so the ledger unregister fires first.
+    reservation_id = decision.reservation_id
     extra_kwargs = dict(create_agent_kwargs or {})
     caller_callbacks = extra_kwargs.pop("stop_callbacks", None) or []
     extra_kwargs["stop_callbacks"] = [
@@ -761,6 +807,59 @@ async def admit_and_spawn(
     }
 
 
+# ---------------------------------------------------------------------------
+# Await-admission helper — converts the non-blocking 4-outcome try_admit
+# into the 3-outcome shape both spawn paths actually want (Granted /
+# ReturnExisting / Rejected). Lives at module scope so both
+# admit_and_spawn and admit_mission_spawn share it without a separate
+# public concept.
+# ---------------------------------------------------------------------------
+
+_AWAIT_RESERVATION_TIMEOUT_S = 30.0
+_AWAIT_POLL_INTERVAL_S = 0.05
+
+
+async def _await_admission(
+    *,
+    ledger: "MissionExecutionLedger",
+    key: RunningMissionKey,
+    mode: str | None,
+    policy: MissionExecutionPolicy,
+) -> AdmissionDecision:
+    """Drive :meth:`MissionExecutionLedger.try_admit` to a terminal
+    outcome, polling through any :class:`AdmissionAwait` returns.
+
+    Returns Granted / ReturnExisting / Rejected — never Await. If the
+    sibling reservation doesn't resolve within
+    :data:`_AWAIT_RESERVATION_TIMEOUT_S`, surfaces a Rejected with a
+    diagnostic reason so the caller's LLM can decide what to do next.
+    """
+
+    import asyncio
+
+    deadline = time.monotonic() + _AWAIT_RESERVATION_TIMEOUT_S
+    while True:
+        decision = await ledger.try_admit(
+            key=key, mode=mode, policy=policy,
+        )
+        if not isinstance(decision, AdmissionAwait):
+            return decision
+        if time.monotonic() >= deadline:
+            return AdmissionRejected(
+                reason=(
+                    f"Reservation {decision.reservation_id!r} for "
+                    f"{key.mission_type!r} did not resolve within "
+                    f"{_AWAIT_RESERVATION_TIMEOUT_S:.0f}s; the holding "
+                    f"spawn likely crashed. {decision.reason}"
+                ),
+                suggested_action=(
+                    "Retry the spawn after verifying the previous "
+                    "attempt's logs."
+                ),
+            )
+        await asyncio.sleep(_AWAIT_POLL_INTERVAL_S)
+
+
 async def admit_mission_spawn(
     *,
     agent_cls: type,
@@ -769,21 +868,15 @@ async def admit_mission_spawn(
     syscontext: "ExecutionContext",
     agent_id_for_agent_scope: str,
     app_name: str,
-) -> tuple[AdmissionDecision, str | None, MissionExecutionLedger]:
-    """Pool-agnostic ``try_admit`` for spawn paths that don't go
-    through :class:`AgentPoolCapability` (the REST
-    ``/api/jobs/submit`` path is the main caller).
+) -> tuple[AdmissionDecision, MissionExecutionLedger]:
+    """Pool-agnostic ``try_admit`` (with await-loop) for spawn paths
+    that don't go through :class:`AgentPoolCapability` — the REST
+    ``/api/jobs/submit`` path is the main caller.
 
-    Returns ``(decision, reservation_id, ledger)``. The caller is
-    responsible for:
-
-    - On :class:`AdmissionAllowed`: spawning the coordinator, then
-      calling ``ledger.register(reservation_id=..., agent_id=...,
-      mode=...)`` on success or ``ledger.release_reservation(...)``
-      on spawn failure.
-    - On :class:`AdmissionRejected` / :class:`AdmissionReturnExisting`:
-      skipping the spawn and surfacing the decision to its own
-      caller.
+    Returns ``(decision, ledger)``. On :class:`AdmissionAllowed` the
+    caller reads ``decision.reservation_id`` to feed register /
+    release_reservation. The decision is never :class:`AdmissionAwait`
+    — the helper drives the gate to a terminal outcome.
 
     The chat-side path uses :func:`admit_and_spawn` instead, which
     bakes the create_agent + register flow into one call. This entry
@@ -830,21 +923,24 @@ async def admit_mission_spawn(
         scope=scope, scope_id=scope_id, mission_type=mission_type,
     )
     ledger = await get_mission_execution_ledger(app_name)
-    decision, reservation_id = await ledger.try_admit(
-        key=key, mode=mode, policy=policy,
+    decision = await _await_admission(
+        ledger=ledger, key=key, mode=mode, policy=policy,
     )
-    return decision, reservation_id, ledger
+    return decision, ledger
 
 
 __all__ = (
     "AdmissionAllowed",
+    "AdmissionAwait",
     "AdmissionDecision",
     "AdmissionRejected",
     "AdmissionReturnExisting",
     "MissionExecutionLedger",
     "MissionLedgerState",
+    "PendingReservation",
     "RunningMissionEntry",
     "RunningMissionKey",
+    "Slot",
     "admit_and_spawn",
     "admit_mission_spawn",
     "get_mission_execution_ledger",

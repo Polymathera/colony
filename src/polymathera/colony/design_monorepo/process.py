@@ -123,6 +123,59 @@ _PARENT_OF_MARKER_RE = re.compile(
 )
 
 
+def _extract_decomposed_into_children(body: str | None) -> list[int] | None:
+    """Read-side counterpart of :func:`_render_parent_body_with_children`.
+
+    Returns the list of child issue numbers stamped in a
+    ``<!-- colony:decomposed-into: A,B,C -->`` marker, or ``None`` when
+    the body has no marker. Single canonical owner of the read-side
+    invariant — both the classifier (skip already-decomposed parents)
+    and the proposer (refuse to re-decompose) call this helper so the
+    contract can't drift between the read and write sides. Pairs with
+    [[fix-the-class-not-the-instance]] — one helper, every call site
+    routes through it.
+    """
+
+    if not body:
+        return None
+    m = _DECOMPOSED_INTO_MARKER_RE.search(body)
+    if m is None:
+        return None
+    csv = m.group("numbers") or ""
+    out: list[int] = []
+    for token in csv.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            out.append(int(token))
+        except ValueError:
+            continue
+    return out
+
+
+def _extract_parent_of(body: str | None) -> int | None:
+    """Read-side counterpart for the ``<!-- colony:parent-of: N -->``
+    marker stamped on each CHILD body by
+    :func:`_render_child_body`. Returns the parent issue number, or
+    ``None`` when no marker is present. Used by the classifier to
+    flag child-of-a-prior-decomposition issues as
+    ``kind="child_of_decomposition"`` — re-decomposing a child is
+    almost never what the operator wants (the parent's split was
+    already approved); surfacing it as a structural pre-filter keeps
+    the LLM judge from inventing a justification for the re-split."""
+
+    if not body:
+        return None
+    m = _PARENT_OF_MARKER_RE.search(body)
+    if m is None:
+        return None
+    try:
+        return int(m.group("parent"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _stable_task_id(milestone_title: str, task_title: str) -> str:
     """Generate the stable-id stamped into the roadmap-task marker
     (resolution of design-doc Q4). Content-hash so:
@@ -1039,8 +1092,9 @@ _DECOMPOSE_CLASSIFY_SYSTEM = (
     "You are classifying GitHub issues for sub-issue decomposition. "
     "For EACH issue below, decide whether it should be decomposed "
     "into smaller sub-issues — according to the criteria the operator "
-    "supplied. Return a single JSON object (no prose, no markdown "
-    "fence) with this shape:\n\n"
+    "supplied AND the design context that frames what 'substantive "
+    "progress' means for this project. Return a single JSON object "
+    "(no prose, no markdown fence) with this shape:\n\n"
     '{"classifications": [\n'
     '  {"number": <int>, "decomposable": <bool>, '
     '"kind": "<short free-text label>", '
@@ -1049,26 +1103,102 @@ _DECOMPOSE_CLASSIFY_SYSTEM = (
     "]}\n\n"
     "Rules:\n"
     "- One entry per input issue. Preserve the input order.\n"
+    "- Weigh the design context: prefer decomposing issues that "
+    "touch SUBSTANTIVE design seams the design-context summary "
+    "surfaces (named subsystems, signal-chain stages, failure "
+    "modes, interface boundaries, regulatory / supply-chain "
+    "constraints). Deprioritise documentation, scaffolding, or "
+    "process-only issues even when their bodies look 'big'.\n"
     "- ``kind`` is a short label you pick: anything that names the "
     "judgement (e.g. ``too_high_level``, ``too_vague``, "
     "``too_big_for_one_pr``, ``ongoing_work_item``, ``already_focused``, "
     "``bug_report``, ``documentation``, etc.). Free-form — not a "
-    "closed enum — pick the label that best fits.\n"
+    "closed enum — pick the label that best fits. If the issue "
+    "advances a substantive design seam, use a kind that names the "
+    "seam (e.g. ``subsystem:vapor_cell``, "
+    "``signal_chain:source_localisation``, ``failure_mode:motion_artifact``, "
+    "``interface:tool_adapter``, ``regulatory:510k_evidence``, "
+    "``supply_chain:vendor_yield``).\n"
     "- ``reason`` quotes or summarises specifics from the issue body "
-    "that drove the judgement. Don't paraphrase the criteria back."
+    "AND the design context that drove the judgement. Don't "
+    "paraphrase the criteria back."
 )
+
+
+def _render_design_context_block(
+    design_context_summary: dict[str, Any] | None,
+    *,
+    max_chars: int = 6000,
+) -> str:
+    """Render the compact design-context summary as a markdown block
+    for the classifier / proposer prompts. Same shape
+    :meth:`SystemDesignCapability.summarise_design_context` (and the
+    inlined :func:`_build_design_context_summary` used by
+    ``bootstrap_roadmap_from_objectives``) produces: per-source name +
+    hint + the list of files with their top markdown headings.
+
+    Returns ``""`` when the summary is ``None`` or contains no
+    sources — caller can drop the block entirely. Caps the final
+    text at ``max_chars`` so a sprawling repo can't blow the context
+    window of the classifier (which judges N issues + the design
+    context in ONE LLM call)."""
+
+    if not design_context_summary:
+        return ""
+    sources = design_context_summary.get("sources") or []
+    if not sources:
+        return ""
+    lines: list[str] = [
+        "## Design context",
+        (
+            "The substantive design seams below are what 'meaningful "
+            "decomposition' should advance. Issues that touch the "
+            "named subsystems / signal-chain stages / failure modes "
+            "/ interfaces / regulatory / supply-chain concerns "
+            "below are the ones worth splitting; documentation or "
+            "scaffolding issues are not."
+        ),
+        "",
+    ]
+    for src in sources:
+        name = src.get("name", "")
+        hint = (src.get("hint") or "").strip()
+        file_count = src.get("file_count")
+        lines.append(f"### Source: `{name}` (files: {file_count})")
+        if hint:
+            lines.append(f"_Operator hint_: {hint}")
+        for f in (src.get("files") or []):
+            path = f.get("path", "")
+            headings = ", ".join(f.get("headings") or [])
+            line = f"- `{path}`"
+            if headings:
+                line = f"{line} — headings: {headings}"
+            lines.append(line)
+        lines.append("")
+    block = "\n".join(lines).rstrip()
+    if len(block) > max_chars:
+        block = block[:max_chars].rstrip() + "\n…(design context truncated)"
+    return block
 
 
 def _build_classify_decomposability_prompt(
     *,
     issues: list[dict[str, Any]],
     decomposition_criteria: str,
+    design_context_summary: dict[str, Any] | None = None,
 ) -> str:
     """Render the batch classification prompt. Each issue contributes
-    ``#<n>: <title>`` + the first ~1500 chars of its body."""
+    ``#<n>: <title>`` + the first ~1500 chars of its body. When
+    ``design_context_summary`` is provided, the compact design-
+    context block (subsystem / signal-chain headings) is injected so
+    the LLM judge weighs 'does this issue advance a substantive
+    design seam?', not just 'does the body look big?'."""
 
     lines = [_DECOMPOSE_CLASSIFY_SYSTEM]
     lines.append(f"\n## Operator criteria\n\n{decomposition_criteria}")
+    dc_block = _render_design_context_block(design_context_summary)
+    if dc_block:
+        lines.append(f"\n{dc_block}")
     lines.append("\n## Issues to classify\n")
     for issue in issues:
         number = issue.get("number", "?")
@@ -1178,6 +1308,15 @@ _DECOMPOSE_PROPOSAL_SYSTEM = (
     "- Each child must be independently actionable — someone picking "
     "it up should not need to read the parent or the other children "
     "to make progress.\n"
+    "- Split along the design seams the design-context summary "
+    "surfaces (subsystem, signal-chain stage, failure mode, "
+    "interface boundary, regulatory step, supply-chain step). DO "
+    "NOT produce generic 'Part 1 / Part 2' / 'Phase A / Phase B' "
+    "splits — those are a tell that the LLM didn't ground in the "
+    "design context. Each child title SHOULD name the seam it "
+    "covers (e.g. ``Design vapor-cell wall-relaxation budget``, "
+    "``Implement OPM-specific MNE forward solver``, ``Bind FDA "
+    "510(k) predicate-device claim to budget node``).\n"
     "- Titles short, imperative, unique within the cohort.\n"
     "- Bodies self-contained: restate the relevant context from the "
     "parent inline; do NOT just write 'see parent issue'.\n"
@@ -1194,17 +1333,25 @@ def _build_decomposition_prompt(
     parent_issues: list[dict[str, Any]],
     max_children_per_parent: int,
     decomposition_criteria: str,
+    design_context_summary: dict[str, Any] | None = None,
 ) -> str:
     """Render the batch decomposition prompt for N parents. For
     ``N=1`` this is plain per-parent decomposition (``shared_concerns``
     is empty by construction); for ``N>1`` the prompt invites the
-    LLM to dedupe scope across siblings."""
+    LLM to dedupe scope across siblings. When
+    ``design_context_summary`` is provided, the compact design-
+    context block is injected so the LLM splits along subsystem /
+    signal-chain / failure-mode seams instead of the generic 'Part
+    1 / Part 2' shape."""
 
     lines = [_DECOMPOSE_PROPOSAL_SYSTEM]
     lines.append(
         f"\nmax_children_per_parent = {max_children_per_parent}\n"
     )
     lines.append(f"\n## Operator criteria\n\n{decomposition_criteria}")
+    dc_block = _render_design_context_block(design_context_summary)
+    if dc_block:
+        lines.append(f"\n{dc_block}")
     lines.append("\n## Parent issues to decompose\n")
     for issue in parent_issues:
         number = issue.get("number", "?")
@@ -2891,14 +3038,24 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         planning_summary=(
             "Classify N GitHub issues for sub-issue decomposition in "
             "ONE LLM call. Returns ``{ok, classifications: "
-            "[{number, decomposable, kind, reason}, ...]}`` in input "
-            "order. ``decomposition_criteria`` is operator-tunable "
-            "free-text describing what counts as 'decomposable'; "
-            "when None, the canonical default is used. ``kind`` is "
-            "an LLM-picked free-form label (e.g. ``too_high_level``, "
-            "``already_focused``, ``bug_report``), NOT a closed enum. "
-            "Batch the issues into one call when they fit in context; "
-            "split into multiple calls for very large repos."
+            "[{number, decomposable, kind, reason}, ...], "
+            "pre_filtered: [{number, kind, reason, ...}]}`` — "
+            "``pre_filtered`` lists issues skipped by the STRUCTURAL "
+            "read-side check (kinds ``already_decomposed`` and "
+            "``child_of_decomposition``) WITHOUT an LLM call. "
+            "``classifications`` is in input order over the issues "
+            "that reached the LLM. ``decomposition_criteria`` is "
+            "operator-tunable free-text describing what counts as "
+            "'decomposable'; when None, the canonical default is "
+            "used. The compact design-context summary "
+            "(``include_design_context=True`` by default) is injected "
+            "into the prompt so the LLM judges 'does this issue "
+            "advance a substantive design seam?' instead of judging "
+            "on surface scope alone. ``kind`` is an LLM-picked free-"
+            "form label (e.g. ``too_high_level``, ``already_focused``, "
+            "``subsystem:vapor_cell``), NOT a closed enum. Batch the "
+            "issues into one call when they fit in context; split "
+            "into multiple calls for very large repos."
         ),
     )
     async def classify_issues_decomposability(
@@ -2906,21 +3063,46 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         *,
         issue_numbers: list[int],
         decomposition_criteria: str | None = None,
+        include_design_context: bool = True,
         llm_max_tokens: int = 2048,
         llm_temperature: float = 0.2,
         llm_timeout_s: float = 60.0,
     ) -> dict[str, Any]:
         """LLM-judged classification primitive. The planner agent
-        decides how many and which issues to pass per call."""
+        decides how many and which issues to pass per call.
+
+        Before the LLM call, a STRUCTURAL pre-filter skips issues
+        whose body already carries the
+        ``<!-- colony:decomposed-into: ... -->`` marker (the write-
+        side stamp left by :meth:`create_decomposition`); they
+        surface in the response as ``pre_filtered`` entries with
+        ``kind="already_decomposed"`` so the planner sees them as
+        processed without burning an LLM call to re-judge a
+        decision the operator already approved. Children of a prior
+        decomposition (issues carrying
+        ``<!-- colony:parent-of: N -->``) are similarly surfaced as
+        ``kind="child_of_decomposition"`` so re-decomposing them
+        requires an explicit operator choice, not a default.
+
+        When ``include_design_context=True`` (the default), the
+        compact design-context summary is loaded from ``repo_map.yaml``
+        and injected into the classifier prompt so the LLM weighs
+        'does this issue advance a substantive design seam the
+        project cares about?', not just 'does the body look big?'.
+        Operators can pass ``False`` to disable for tactical Q&A on a
+        finished doc set."""
 
         if not issue_numbers:
-            return {"ok": True, "classifications": []}
+            return {
+                "ok": True, "classifications": [], "pre_filtered": [],
+            }
 
         github = self._sibling_github_capability()
         if github is None:
             return {
                 "ok": False,
                 "classifications": [],
+                "pre_filtered": [],
                 "error": "no_github_capability",
                 "message": (
                     "No GitHubCapability sibling found on the agent; "
@@ -2932,6 +3114,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             return {
                 "ok": False,
                 "classifications": [],
+                "pre_filtered": [],
                 **self._no_github_repo_error(),
             }
 
@@ -2939,21 +3122,85 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         # GitHubCapability primitive. The planner can choose to
         # call list_issues first to discover candidates and then
         # pass a subset here.
-        issues: list[dict[str, Any]] = []
+        hydrated: list[dict[str, Any]] = []
         for number in issue_numbers:
             resp = await github.get_issue(number)
             if not resp.get("ok"):
                 continue
             issue = resp.get("issue") or {}
-            issues.append({
+            hydrated.append({
                 "number": number,
                 "title": issue.get("title", ""),
                 "body": issue.get("body") or "",
             })
 
+        # Structural pre-filter: skip already-decomposed parents and
+        # children of a prior decomposition. The read-side counterpart
+        # of :func:`_render_parent_body_with_children` and
+        # :func:`_render_child_body` — same canonical owner of the
+        # marker contract, so the read/write halves can't drift.
+        pre_filtered: list[dict[str, Any]] = []
+        issues: list[dict[str, Any]] = []
+        for h in hydrated:
+            decomposed_into = _extract_decomposed_into_children(h["body"])
+            if decomposed_into:
+                pre_filtered.append({
+                    "number": h["number"],
+                    "decomposable": False,
+                    "kind": "already_decomposed",
+                    "reason": (
+                        f"Issue body carries colony:decomposed-into "
+                        f"marker → already split into "
+                        f"{decomposed_into}. Skipping LLM judge."
+                    ),
+                    "decomposed_into": decomposed_into,
+                })
+                continue
+            parent_of = _extract_parent_of(h["body"])
+            if parent_of is not None:
+                pre_filtered.append({
+                    "number": h["number"],
+                    "decomposable": False,
+                    "kind": "child_of_decomposition",
+                    "reason": (
+                        f"Issue body carries colony:parent-of marker "
+                        f"→ this is a child of #{parent_of} created "
+                        f"by a prior decomposition. Re-decomposing a "
+                        f"child requires an explicit operator choice."
+                    ),
+                    "parent_of": parent_of,
+                })
+                continue
+            issues.append(h)
+
+        # Optional design-context summary — loaded ONCE per call from
+        # the agent's design monorepo (same primitive
+        # ``bootstrap_roadmap_from_objectives`` uses, ship the
+        # existing helper instead of reinventing). When
+        # ``include_design_context=False`` or the repo has no
+        # ``design_context_sources``, the prompt degrades cleanly to
+        # the legacy domain-agnostic shape.
+        design_context_summary: dict[str, Any] | None = None
+        if include_design_context:
+            design_context_summary = await self._load_design_context_for_prompt()
+
+        # Short-circuit when EVERY hydrated issue was structurally
+        # pre-filtered — no LLM call to make. The planner sees the
+        # full ``pre_filtered`` list and an empty ``classifications``
+        # → matches the "all-already-decomposed" replay shape without
+        # spending tokens.
+        if not issues:
+            return {
+                "ok": True,
+                "classifications": [],
+                "pre_filtered": pre_filtered,
+            }
+
         criteria = decomposition_criteria or DEFAULT_DECOMPOSITION_CRITERIA
         prompt = _build_classify_decomposability_prompt(
-            issues=issues, decomposition_criteria=criteria,
+            issues=issues,
+            decomposition_criteria=criteria,
+            design_context_summary=design_context_summary,
         )
         try:
             response = await asyncio.wait_for(
@@ -2969,6 +3216,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             return {
                 "ok": False,
                 "classifications": [],
+                "pre_filtered": pre_filtered,
                 "error": "llm_timeout",
                 "message": (
                     f"Classifier LLM exceeded the {llm_timeout_s}s "
@@ -2982,6 +3230,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             return {
                 "ok": False,
                 "classifications": [],
+                "pre_filtered": pre_filtered,
                 "error": "llm_call_failed",
                 "message": str(exc),
             }
@@ -2992,6 +3241,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             return {
                 "ok": False,
                 "classifications": [],
+                "pre_filtered": pre_filtered,
                 "error": "llm_proposal_parse_failed",
                 "message": (
                     "Classifier output did not parse. Retry with a "
@@ -2999,7 +3249,11 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 ),
                 "raw_excerpt": raw[:500] if raw else "",
             }
-        return {"ok": True, "classifications": classifications}
+        return {
+            "ok": True,
+            "classifications": classifications,
+            "pre_filtered": pre_filtered,
+        }
 
     @action_executor(
         planning_summary=(
@@ -3011,7 +3265,19 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             "``shared_concerns`` list naming concerns that span "
             "multiple parents. Returns ``{ok, parent_proposals: "
             "[{parent_number, children: [{title, body}, ...], "
-            "reason}, ...], shared_concerns: [str]}``. The planner "
+            "reason}, ...], shared_concerns: [str], pre_filtered: "
+            "[{parent_number, kind, reason, ...}]}`` — "
+            "``pre_filtered`` lists parents skipped by the STRUCTURAL "
+            "read-side check (kind ``already_decomposed`` — the "
+            "parent already carries the colony:decomposed-into "
+            "marker). Pass ``allow_already_decomposed=True`` to "
+            "re-propose anyway. The compact design-context summary "
+            "(``include_design_context=True`` by default) is injected "
+            "into the prompt so the LLM splits along the substantive "
+            "design seams the project surfaces (subsystem / signal-"
+            "chain stage / failure mode / interface boundary / "
+            "regulatory step / supply-chain step) instead of "
+            "producing generic 'Part 1 / Part 2' splits. The planner "
             "decides whether to pass one parent at a time or batch "
             "a cluster — both work with this primitive."
         ),
@@ -3022,15 +3288,38 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         parent_issue_numbers: list[int],
         max_children_per_parent: int = 8,
         decomposition_criteria: str | None = None,
+        include_design_context: bool = True,
+        allow_already_decomposed: bool = False,
         llm_max_tokens: int = 2048,
         llm_temperature: float = 0.2,
         llm_timeout_s: float = 60.0,
     ) -> dict[str, Any]:
-        """Proposer primitive. Joint mode for N>1; per-parent for N=1."""
+        """Proposer primitive. Joint mode for N>1; per-parent for N=1.
+
+        Structural pre-filter: parents whose body already carries the
+        ``<!-- colony:decomposed-into: ... -->`` marker surface as
+        ``pre_filtered`` entries (kind ``already_decomposed``) and
+        are dropped from the LLM call by default. The operator can
+        opt in by passing ``allow_already_decomposed=True`` (e.g.
+        when re-decomposing after closing some children) — the
+        primitive then includes them in the LLM call AND surfaces
+        them in ``pre_filtered`` so the approval card still sees
+        that the operator chose to override the read-side guard.
+
+        When ``include_design_context=True`` (the default), the
+        compact design-context summary is loaded and injected into
+        the proposer prompt so the LLM splits along the substantive
+        seams the design surfaces (subsystem / signal-chain stage /
+        failure mode / interface boundary / regulatory step /
+        supply-chain step) instead of producing generic 'Part 1 /
+        Part 2' splits."""
 
         if not parent_issue_numbers:
             return {
-                "ok": True, "parent_proposals": [], "shared_concerns": [],
+                "ok": True,
+                "parent_proposals": [],
+                "shared_concerns": [],
+                "pre_filtered": [],
             }
 
         github = self._sibling_github_capability()
@@ -3039,6 +3328,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 "ok": False,
                 "parent_proposals": [],
                 "shared_concerns": [],
+                "pre_filtered": [],
                 "error": "no_github_capability",
                 "message": (
                     "No GitHubCapability sibling found on the agent; "
@@ -3051,38 +3341,86 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 "ok": False,
                 "parent_proposals": [],
                 "shared_concerns": [],
+                "pre_filtered": [],
                 **self._no_github_repo_error(),
             }
 
-        parents: list[dict[str, Any]] = []
+        hydrated_parents: list[dict[str, Any]] = []
         for number in parent_issue_numbers:
             resp = await github.get_issue(number)
             if not resp.get("ok"):
                 continue
             issue = resp.get("issue") or {}
-            parents.append({
+            hydrated_parents.append({
                 "number": number,
                 "title": issue.get("title", ""),
                 "body": issue.get("body") or "",
             })
+
+        # Structural pre-filter — same read-side helper the
+        # classifier uses (single canonical owner of the marker
+        # contract). Without ``allow_already_decomposed=True``,
+        # already-decomposed parents are DROPPED from the LLM call
+        # so the proposer can't be tricked into re-splitting work
+        # the operator already approved.
+        pre_filtered: list[dict[str, Any]] = []
+        parents: list[dict[str, Any]] = []
+        for p in hydrated_parents:
+            decomposed_into = _extract_decomposed_into_children(p["body"])
+            if decomposed_into:
+                pre_filtered.append({
+                    "parent_number": p["number"],
+                    "kind": "already_decomposed",
+                    "reason": (
+                        f"Parent #{p['number']} already split into "
+                        f"{decomposed_into}. Set "
+                        f"allow_already_decomposed=True to re-propose."
+                    ),
+                    "decomposed_into": decomposed_into,
+                })
+                if not allow_already_decomposed:
+                    continue
+            parents.append(p)
 
         if not parents:
             return {
                 "ok": False,
                 "parent_proposals": [],
                 "shared_concerns": [],
-                "error": "no_parents_found",
+                "pre_filtered": pre_filtered,
+                "error": (
+                    "all_parents_already_decomposed"
+                    if pre_filtered
+                    else "no_parents_found"
+                ),
                 "message": (
-                    "None of the requested parent_issue_numbers "
-                    "could be fetched from GitHub."
+                    "Every requested parent already carries the "
+                    "colony:decomposed-into marker. Pass "
+                    "allow_already_decomposed=True to re-propose."
+                    if pre_filtered
+                    else (
+                        "None of the requested parent_issue_numbers "
+                        "could be fetched from GitHub."
+                    )
                 ),
             }
+
+        # Optional design-context summary — loaded ONCE per call from
+        # the agent's design monorepo (same primitive
+        # ``bootstrap_roadmap_from_objectives`` uses). When
+        # ``include_design_context=False`` or the repo has no
+        # ``design_context_sources``, the prompt degrades cleanly to
+        # the legacy domain-agnostic shape.
+        design_context_summary: dict[str, Any] | None = None
+        if include_design_context:
+            design_context_summary = await self._load_design_context_for_prompt()
 
         criteria = decomposition_criteria or DEFAULT_DECOMPOSITION_CRITERIA
         prompt = _build_decomposition_prompt(
             parent_issues=parents,
             max_children_per_parent=max_children_per_parent,
             decomposition_criteria=criteria,
+            design_context_summary=design_context_summary,
         )
         try:
             response = await asyncio.wait_for(
@@ -3099,6 +3437,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 "ok": False,
                 "parent_proposals": [],
                 "shared_concerns": [],
+                "pre_filtered": pre_filtered,
                 "error": "llm_timeout",
                 "message": (
                     f"Proposer LLM exceeded the {llm_timeout_s}s "
@@ -3113,6 +3452,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 "ok": False,
                 "parent_proposals": [],
                 "shared_concerns": [],
+                "pre_filtered": pre_filtered,
                 "error": "llm_call_failed",
                 "message": str(exc),
             }
@@ -3126,6 +3466,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 "ok": False,
                 "parent_proposals": [],
                 "shared_concerns": [],
+                "pre_filtered": pre_filtered,
                 "error": "llm_proposal_parse_failed",
                 "message": (
                     "Proposer output did not parse. Retry with a "
@@ -3144,6 +3485,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             "ok": True,
             "parent_proposals": parsed["parent_proposals"],
             "shared_concerns": parsed["shared_concerns"],
+            "pre_filtered": pre_filtered,
         }
 
     @action_executor(
@@ -3346,6 +3688,67 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                 *(("applied",) if applied else ("dry_run",)),
             },
         )
+
+    async def _load_design_context_for_prompt(
+        self,
+    ) -> dict[str, Any] | None:
+        """Load the compact design-context summary for the
+        classifier / proposer prompts. Returns ``None`` when the
+        agent's working dir isn't a git repo (detached / mis-bound
+        capability) or has no ``design_context_sources`` rows — both
+        are valid states (operator hasn't set up the design monorepo
+        yet) and the caller-side prompt degrades cleanly to the
+        legacy domain-agnostic shape.
+
+        Same shape :meth:`bootstrap_roadmap_from_objectives` uses —
+        reuses :func:`_build_design_context_summary` so the read path
+        is a single canonical helper, not parallel implementations.
+        Errors are logged + swallowed so the classifier / proposer
+        primitives stay decision-driven (a torn repo_map should NOT
+        prevent classification of issues whose bodies the LLM can
+        still judge from). Per [[search-before-writing]] —
+        ``_build_design_context_summary`` already does the work, so
+        we ship the existing primitive.
+        """
+
+        repo_root = self._working_dir
+        if not (repo_root / ".git").is_dir():
+            try:
+                self._lazy_clone_from_agent_metadata()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "_load_design_context_for_prompt: lazy clone "
+                    "failed; classifier / proposer fall back to "
+                    "domain-agnostic prompts.",
+                    exc_info=True,
+                )
+                return None
+        if not (repo_root / ".git").is_dir():
+            return None
+        try:
+            repo_map = await asyncio.to_thread(RepoMap.load, repo_root)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "_load_design_context_for_prompt: RepoMap.load failed; "
+                "classifier / proposer fall back to domain-agnostic "
+                "prompts.",
+                exc_info=True,
+            )
+            return None
+        if not repo_map.design_context_sources:
+            return None
+        try:
+            return await asyncio.to_thread(
+                _build_design_context_summary, repo_root, repo_map,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "_load_design_context_for_prompt: "
+                "_build_design_context_summary failed; classifier / "
+                "proposer fall back to domain-agnostic prompts.",
+                exc_info=True,
+            )
+            return None
 
     def _sibling_github_capability(self) -> Any:
         """Look up the ``GitHubCapability`` mounted on the same agent.

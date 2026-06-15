@@ -87,26 +87,72 @@ class _StubAgent:
         return self.blackboard
 
 
+_SNAPSHOT_ACTION_ID = "act-snapshot-1"
+
+
+def _snapshot_entry() -> dict[str, Any]:
+    """A run_call_trace entry for a successful
+    ``snapshot_open_roadmap_issues`` call."""
+
+    from polymathera.colony.agents.patterns.capabilities.github import (
+        GitHubCapability,
+    )
+    action_name = (
+        GitHubCapability.snapshot_open_roadmap_issues._action_key
+    )
+    return {
+        "call_index": 0,
+        "action_key": f"GitHubCapability.GitHubCapability.{action_name}",
+        "parameters": {},
+        "success": True,
+        "error": None,
+        "output_preview": "",
+        "blocked": False,
+    }
+
+
 def _exec_ctx(
     *,
     classify_action_id: str = "act-classify-1",
     create_action_id: str = "act-create-1",
     trace_entries: list[dict[str, Any]] | None = None,
     action_results: dict[str, _FakeActionResult] | None = None,
+    scope_numbers: list[int] | None = None,
 ) -> PlanExecutionContext:
+    """Build a ``PlanExecutionContext`` carrying a typed
+    :class:`CodegenStepSummary`. ``scope_numbers``, when set, prepends
+    a successful snapshot whose action_result is that list."""
+
+    from polymathera.colony.agents.models import CodegenStepSummary
+
     ctx = PlanExecutionContext()
-    summaries: dict[str, dict[str, Any]] = {}
+    combined_entries: list[dict[str, Any]] = []
+    if scope_numbers is not None:
+        combined_entries.append(_snapshot_entry())
     if trace_entries:
-        summaries["step-1"] = {
-            "actions_called": [e["action_key"] for e in trace_entries],
-            "action_ids": [
-                classify_action_id if "classify" in e["action_key"]
-                else create_action_id
-                for e in trace_entries
+        offset = 1 if scope_numbers is not None else 0
+        for i, e in enumerate(trace_entries):
+            shifted = dict(e)
+            shifted["call_index"] = i + offset
+            combined_entries.append(shifted)
+    if combined_entries:
+        ctx.codegen_step_summaries["step-1"] = CodegenStepSummary(
+            actions_called=[e["action_key"] for e in combined_entries],
+            action_ids=[
+                _SNAPSHOT_ACTION_ID
+                if "snapshot_open_roadmap_issues" in e["action_key"]
+                else (
+                    classify_action_id if "classify" in e["action_key"]
+                    else create_action_id
+                )
+                for e in combined_entries
             ],
-            "run_call_trace": trace_entries,
-        }
-    ctx.custom_data["codegen_step_summaries"] = summaries
+            run_call_trace=combined_entries,
+        )
+    if scope_numbers is not None:
+        ctx.action_results[_SNAPSHOT_ACTION_ID] = _FakeActionResult(
+            success=True, output=list(scope_numbers),
+        )
     if action_results:
         for aid, result in action_results.items():
             ctx.action_results[aid] = result
@@ -217,9 +263,9 @@ def test_tracker_is_drained_when_early_stopped() -> None:
 async def test_allows_completion_when_scope_drained() -> None:
     agent = _StubAgent(params={
         ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
-        ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME: [44, 45],
     })
     ctx = _exec_ctx(
+        scope_numbers=[44, 45],
         trace_entries=[
             _create_entry(44, call_index=0),
             _create_entry(45, call_index=1),
@@ -236,9 +282,9 @@ async def test_allows_completion_when_scope_drained() -> None:
 async def test_rejects_completion_with_remaining_set_in_message() -> None:
     agent = _StubAgent(params={
         ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
-        ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME: [44, 45, 46],
     })
     ctx = _exec_ctx(
+        scope_numbers=[44, 45, 46],
         trace_entries=[_create_entry(44, call_index=0)],
     )
     validator = DecomposeCompletionValidator()
@@ -255,9 +301,9 @@ async def test_rejects_completion_with_remaining_set_in_message() -> None:
 async def test_dry_run_create_decomposition_does_not_count_as_applied() -> None:
     agent = _StubAgent(params={
         ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
-        ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME: [44, 45],
     })
     ctx = _exec_ctx(
+        scope_numbers=[44, 45],
         trace_entries=[
             _create_entry(44, dry_run=True, call_index=0),
             _create_entry(45, dry_run=False, call_index=1),
@@ -274,9 +320,9 @@ async def test_dry_run_create_decomposition_does_not_count_as_applied() -> None:
 async def test_blocked_create_does_not_count_as_applied() -> None:
     agent = _StubAgent(params={
         ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
-        ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME: [44],
     })
     ctx = _exec_ctx(
+        scope_numbers=[44],
         trace_entries=[
             _create_entry(44, blocked=True, success=False, call_index=0),
         ],
@@ -295,7 +341,6 @@ async def test_classified_non_decomposable_counts_toward_drain() -> None:
 
     agent = _StubAgent(params={
         ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
-        ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME: [44, 45, 46],
     })
     classify_result = _FakeActionResult(
         success=True,
@@ -306,6 +351,7 @@ async def test_classified_non_decomposable_counts_toward_drain() -> None:
         ]},
     )
     ctx = _exec_ctx(
+        scope_numbers=[44, 45, 46],
         classify_action_id="act-classify-1",
         create_action_id="act-create-1",
         trace_entries=[
@@ -327,10 +373,10 @@ async def test_classified_non_decomposable_counts_toward_drain() -> None:
 async def test_max_parents_per_run_caps_required_applies() -> None:
     agent = _StubAgent(params={
         ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
-        ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME: [44, 45, 46, 47, 48],
         ProjectPlanningCoordinator.MAX_PARENTS_PER_RUN_PARAM_NAME: 2,
     })
     ctx = _exec_ctx(
+        scope_numbers=[44, 45, 46, 47, 48],
         trace_entries=[
             _create_entry(44, call_index=0),
             _create_entry(45, call_index=1),
@@ -347,7 +393,6 @@ async def test_max_parents_per_run_caps_required_applies() -> None:
 async def test_early_stop_state_allows_completion() -> None:
     agent = _StubAgent(params={
         ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
-        ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME: [44, 45, 46],
     })
     agent.blackboard.store[DecomposeEarlyStopProtocol.signal_key(agent.agent_id)] = {
         "agent_id": agent.agent_id,
@@ -355,6 +400,7 @@ async def test_early_stop_state_allows_completion() -> None:
         "remaining_in_scope": [45, 46],
     }
     ctx = _exec_ctx(
+        scope_numbers=[44, 45, 46],
         trace_entries=[_create_entry(44, call_index=0)],
     )
     validator = DecomposeCompletionValidator()
@@ -372,9 +418,9 @@ async def test_no_recorded_early_stop_blocks_completion() -> None:
 
     agent = _StubAgent(params={
         ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
-        ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME: [44, 45],
     })
     ctx = _exec_ctx(
+        scope_numbers=[44, 45],
         trace_entries=[_create_entry(44, call_index=0)],
     )
     validator = DecomposeCompletionValidator()
@@ -431,9 +477,11 @@ async def test_rejection_publishes_drain_state_to_blackboard() -> None:
 
     agent = _StubAgent(params={
         ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
-        ProjectPlanningCoordinator.ISSUE_NUMBERS_PARAM_NAME: [44, 45, 46],
     })
-    ctx = _exec_ctx(trace_entries=[_create_entry(44, call_index=0)])
+    ctx = _exec_ctx(
+        scope_numbers=[44, 45, 46],
+        trace_entries=[_create_entry(44, call_index=0)],
+    )
     validator = DecomposeCompletionValidator()
     await validator.validate(
         agent=agent, goals=[], results={}, execution_context=ctx,
@@ -453,17 +501,188 @@ async def test_rejection_publishes_drain_state_to_blackboard() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_validator_reads_canonical_action_keys_only() -> None:
-    """The validator MUST reference the canonical action-key constants
-    on ``DesignProcessCapability`` (Change 4), NOT bare strings. A
-    rename of either constant breaks compilation here loudly."""
+def test_validator_resolves_action_keys_via_decorator_attribute() -> None:
+    """The validator MUST recover action keys from the canonical
+    ``@action_executor``-decorated methods themselves via the
+    decorator-attached ``_action_key`` attribute — NOT via bare
+    string literals (would silently rot on a rename) and NOT via a
+    parallel ClassVar constant (duplicates the method name spelling).
+    A rename of the method surfaces here at import time because the
+    attribute access targets the named method directly."""
 
     import polymathera.colony.agents.missions.project_planning.completion_validator as mod
     source = (mod.__file__ or "").rstrip("c")
     with open(source, "r", encoding="utf-8") as fh:
         text = fh.read()
-    assert "CREATE_DECOMPOSITION_ACTION_KEY" in text
-    assert "CLASSIFY_ISSUES_DECOMPOSABILITY_ACTION_KEY" in text
-    # And no bare string literal of the keys themselves
-    assert '"create_decomposition"' not in text
-    assert '"classify_issues_decomposability"' not in text
+    # The validator must reach the action keys via the decorator
+    # attribute on the canonical method, not a duplicated string.
+    assert ".create_decomposition._action_key" in text
+    assert ".classify_issues_decomposability._action_key" in text
+    assert ".snapshot_open_roadmap_issues._action_key" in text
+    # And NO bare string literal of any of the action names.
+    for forbidden in (
+        '"create_decomposition"',
+        '"classify_issues_decomposability"',
+        '"snapshot_open_roadmap_issues"',
+    ):
+        assert forbidden not in text, forbidden
+
+
+# ---------------------------------------------------------------------------
+# _resolve_scope: trace-read snapshot contract (Change 3)
+# ---------------------------------------------------------------------------
+#
+# The validator reads the in-scope set from the FIRST successful
+# ``snapshot_open_roadmap_issues`` call recorded in the run trace's
+# action_results — same shape it uses for classify results. The
+# coordinator's goal block teaches the LLM to call snapshot as the
+# FIRST action; the validator's rejection on a missing snapshot
+# tells the LLM what to do next.
+
+
+async def test_validate_raises_when_snapshot_not_recorded() -> None:
+    """Without a snapshot in the trace the in-scope set is
+    unestablished — the validator raises with an action-key-named
+    rejection so the LLM's next iteration can call the snapshot and
+    recover. Regression for the pre-Change-3 band-aid that returned
+    ``frozenset()`` here and let ``is_drained()`` trivially go True."""
+
+    agent = _StubAgent(params={
+        ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
+    })
+    ctx = _exec_ctx(trace_entries=[])
+    validator = DecomposeCompletionValidator()
+    with pytest.raises(RuntimeError, match=r"snapshot_open_roadmap_issues"):
+        await validator.validate(
+            agent=agent, goals=[], results={}, execution_context=ctx,
+        )
+
+
+async def test_validate_uses_first_snapshot_result_as_scope() -> None:
+    """The validator pins on the FIRST successful snapshot — a
+    subsequent re-snapshot does NOT silently extend or shrink the
+    in-scope set mid-run. This is the canonical contract the
+    coordinator's goal block teaches."""
+
+    agent = _StubAgent(params={
+        ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
+    })
+    # Seed: first snapshot returns [44, 45] (that is the canonical
+    # scope). Then synthesise a SECOND snapshot at a later step
+    # returning [44, 45, 99] (a new issue filed mid-run) — the
+    # validator must ignore the re-snapshot.
+    from polymathera.colony.agents.patterns.capabilities.github import (
+        GitHubCapability,
+    )
+    from polymathera.colony.agents.models import CodegenStepSummary
+
+    snapshot_action_key = (
+        f"GitHubCapability.GitHubCapability."
+        f"{GitHubCapability.snapshot_open_roadmap_issues._action_key}"
+    )
+    ctx = _exec_ctx(scope_numbers=[44, 45])
+    # Append a second snapshot step.
+    ctx.codegen_step_summaries["step-2"] = CodegenStepSummary(
+        actions_called=[snapshot_action_key],
+        action_ids=["act-snapshot-2"],
+        run_call_trace=[{
+            "call_index": 1,
+            "action_key": snapshot_action_key,
+            "parameters": {},
+            "success": True,
+            "error": None,
+            "output_preview": "",
+            "blocked": False,
+        }],
+    )
+    ctx.action_results["act-snapshot-2"] = _FakeActionResult(
+        success=True, output=[44, 45, 99],
+    )
+
+    validator = DecomposeCompletionValidator()
+    in_scope = await validator._resolve_scope(agent, ctx)
+    assert in_scope == frozenset({44, 45})  # first snapshot wins; #99 ignored
+
+
+async def test_validate_ignores_failed_snapshot_attempts() -> None:
+    """A snapshot call whose ``success`` is False is skipped — the
+    validator picks the first SUCCESSFUL call. A transport failure
+    that left a trace entry must not silently establish an empty
+    scope."""
+
+    from polymathera.colony.agents.patterns.capabilities.github import (
+        GitHubCapability,
+    )
+    from polymathera.colony.agents.models import CodegenStepSummary
+
+    agent = _StubAgent(params={
+        ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
+    })
+    # First call failed; second succeeded.
+    ctx = PlanExecutionContext()
+    snapshot_key = (
+        f"GitHubCapability.GitHubCapability."
+        f"{GitHubCapability.snapshot_open_roadmap_issues._action_key}"
+    )
+    ctx.codegen_step_summaries["step-1"] = CodegenStepSummary(
+        actions_called=[snapshot_key, snapshot_key],
+        action_ids=["act-snap-failed", "act-snap-ok"],
+        run_call_trace=[
+            {
+                "call_index": 0, "action_key": snapshot_key,
+                "parameters": {}, "success": False,
+                "error": "503", "output_preview": "", "blocked": False,
+            },
+            {
+                "call_index": 1, "action_key": snapshot_key,
+                "parameters": {}, "success": True,
+                "error": None, "output_preview": "", "blocked": False,
+            },
+        ],
+    )
+    ctx.action_results["act-snap-failed"] = _FakeActionResult(
+        success=False, output=None,
+    )
+    ctx.action_results["act-snap-ok"] = _FakeActionResult(
+        success=True, output=[44, 45],
+    )
+
+    validator = DecomposeCompletionValidator()
+    in_scope = await validator._resolve_scope(agent, ctx)
+    assert in_scope == frozenset({44, 45})
+
+
+def test_resolve_scope_does_not_return_empty_frozenset_bandaid() -> None:
+    """Regression pin: the pre-Change-3 ``return frozenset()`` fallback
+    inside ``_resolve_scope`` was the band-aid that defeated the
+    validator's drained-set semantics (with ``in_scope == frozenset()``,
+    ``is_drained()`` was True on the first ``signal_completion()`` call).
+    It must not come back to THIS METHOD.
+
+    Other ``return frozenset()`` sites in the file (e.g.,
+    ``DecomposeBacklogTracker.remaining()``'s early-stop
+    short-circuit at line 111) are legitimate — they describe a
+    deliberately-empty remainder, not a missing scope."""
+
+    import inspect
+
+    source = inspect.getsource(
+        DecomposeCompletionValidator._resolve_scope,
+    )
+    assert "return frozenset()" not in source, (
+        "DecomposeCompletionValidator._resolve_scope contains "
+        "``return frozenset()`` — the pre-Change-3 band-aid was "
+        "restored. Delete it; raise instead per the method's "
+        "docstring."
+    )
+    # And the inline confession the band-aid carried must also not
+    # return (per [[dont-ship-with-inline-todos]]).
+    for marker in (
+        "Until the spawn-time snapshot is wired",
+        "fall back to an EMPTY scope",
+    ):
+        assert marker not in source, (
+            f"DecomposeCompletionValidator._resolve_scope contains "
+            f"stale band-aid prose ({marker!r}); the snapshot IS "
+            f"wired (Change 3)."
+        )

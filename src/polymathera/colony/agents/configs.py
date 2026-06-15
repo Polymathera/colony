@@ -74,8 +74,8 @@ class MissionExecutionPolicy(BaseModel):
     ``AgentPoolCapability.create_agent`` BEFORE the agent system
     instantiates the coordinator. Every field has a conservative
     default so coordinators that do not declare a policy keep the
-    pre-policy semantics (single instance per parent agent, no
-    auto-chained modes, no cost cap, etc.).
+    pre-policy semantics (single instance per parent agent, no cost
+    cap, etc.).
 
     The recommended source of truth is a
     ``MISSION_EXECUTION_POLICY: ClassVar[MissionExecutionPolicy]`` on
@@ -151,28 +151,13 @@ class MissionExecutionPolicy(BaseModel):
         ),
     )
 
-    # --- chaining / sequencing -----------------------------------------
-    chains_with_modes: list[str] | None = Field(
-        default=None,
-        description=(
-            "When set, declares 'this mission's modes auto-chain "
-            "internally — do NOT spawn one coordinator per mode'. The "
-            "spawn gate rejects subsequent spawns of the same mission "
-            "type whose ``mission_params['mode']`` differs only by an "
-            "already-running mode in the same scope. The exact list of "
-            "mode strings declared here is what the gate matches "
-            "against."
-        ),
-    )
-
     # --- dependencies + ordering ---------------------------------------
     requires_mission_complete: list[str] = Field(
         default_factory=list,
         description=(
             "Mission-type names that must have reached terminal state "
-            "in the same scope before this one can spawn. Used for the "
-            "'bootstrap before assignments' pattern when modes are NOT "
-            "chained internally."
+            "in the same scope before this one can spawn. Used for "
+            "the 'mission B requires mission A complete' pattern."
         ),
     )
 
@@ -196,16 +181,7 @@ class MissionExecutionPolicy(BaseModel):
         ),
     )
 
-    # --- idempotency / reentrance --------------------------------------
-    idempotent: bool = Field(
-        default=False,
-        description=(
-            "Re-running with the same ``mission_params`` is safe. When "
-            "True, the spawn gate may return the existing run's handle "
-            "instead of spawning a new one (subject to "
-            "``on_concurrency_violation``)."
-        ),
-    )
+    # --- reentrance ----------------------------------------------------
     reentrant: bool = Field(
         default=False,
         description=(
@@ -274,26 +250,6 @@ class MissionExecutionPolicy(BaseModel):
                 f"``pure`` may be True; got {truthy!r}.",
             )
         return self
-
-    @model_validator(mode="after")
-    def _chains_with_modes_entries_are_non_empty(
-        self,
-    ) -> "MissionExecutionPolicy":
-        if self.chains_with_modes is None:
-            return self
-        if not self.chains_with_modes:
-            raise ValueError(
-                "MissionExecutionPolicy.chains_with_modes: empty list "
-                "is ambiguous — use ``None`` to disable the gate.",
-            )
-        offenders = [m for m in self.chains_with_modes if not m]
-        if offenders:
-            raise ValueError(
-                "MissionExecutionPolicy.chains_with_modes: every entry "
-                "must be a non-empty mode string.",
-            )
-        return self
-
 
 class MissionSpec(BaseModel):
     """Definition of one mission type (coordinator + worker classes + metadata).
@@ -926,30 +882,48 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                 (
                     "For decompose mode: there is NO single "
                     "'decompose_issues' action — you compose primitives. "
-                    "The mission's scope is the typed in-scope set "
-                    "(mission_params['issue_numbers'] if set, otherwise "
-                    "all open roadmap issues at mission spawn, capped "
-                    "by mission_params['max_parents_per_run'] if set). "
-                    "The mission is complete only when every in-scope "
-                    "issue has been decomposed (via create_decomposition "
-                    "with dry_run=False) or classified non-decomposable "
-                    "(via classify_issues_decomposability returning "
+                    "Your FIRST action establishes the in-scope set: "
+                    "``snapshot = await run('snapshot_open_roadmap_issues')`` "
+                    "returns a list[int] of open roadmap-marked issue "
+                    "numbers AT CALL TIME. The completion validator "
+                    "reads the result of THIS call from the run trace "
+                    "and uses it as the canonical in-scope set for the "
+                    "run; the validator will not accept signal_completion() "
+                    "until the snapshot is recorded. "
+                    "If the snapshot returns ``[]``, no roadmap-marked "
+                    "issues exist (the operator hasn't bootstrapped a "
+                    "roadmap yet) — call "
+                    "``await run('request_decompose_early_stop', "
+                    "verbatim_user_quote=<the user's own words "
+                    "authorising the stop>)`` and then "
+                    "signal_completion(); do not invent a quote. "
+                    "If mission_params['issue_numbers'] is set (the "
+                    "SessionAgent populates it when the user named "
+                    "specific issue numbers), still call snapshot "
+                    "first, then process the named subset via classify"
+                    "/propose/create_decomposition and call "
+                    "request_decompose_early_stop with the user's "
+                    "verbatim quote authorising the partial run. "
+                    "The mission is complete only when every "
+                    "in-scope issue has been decomposed (via "
+                    "create_decomposition with dry_run=False) or "
+                    "classified non-decomposable (via "
+                    "classify_issues_decomposability returning "
                     "decomposable=False), OR the user has explicitly "
-                    "authorised early stop via "
-                    "request_decompose_early_stop (a verbatim user "
-                    "quote is required; you cannot self-certify). "
-                    "Available primitives: list_issues, "
+                    "authorised early stop. ``mission_params["
+                    "'max_parents_per_run']`` caps the apply count if "
+                    "set. "
+                    "Available primitives: "
+                    "snapshot_open_roadmap_issues, list_issues, "
                     "classify_issues_decomposability, "
                     "propose_decompositions, request_human_approval, "
                     "wait_for_next_event, "
                     "create_decomposition, request_decompose_early_stop, "
                     "respond_to_user. Compose them as the data warrants "
-                    "— discover incrementally or all at once; propose "
-                    "per-issue, per-batch, or scope-wide; request "
-                    "approval per-decision or batched; apply singly or "
-                    "in bulk under an active approve_all. The completion "
-                    "validator will not accept signal_completion() while "
-                    "the in-scope backlog has unaddressed issues."
+                    "after the snapshot — propose per-issue, per-batch, "
+                    "or scope-wide; request approval per-decision or "
+                    "batched; apply singly or in bulk under an active "
+                    "approve_all."
                 ),
             ],
             "constraints": [
@@ -1028,7 +1002,7 @@ def resolve_mission_execution_policy(
     2. ``coordinator_class.MISSION_EXECUTION_POLICY`` ClassVar — the
        coordinator's declared default.
     3. ``MissionExecutionPolicy()`` defaults — pre-policy semantics
-       (one instance per parent agent, no auto-chaining, no caps).
+       (one instance per parent agent, no caps).
 
     Accepts ``spec`` as either a :class:`MissionSpec` or a plain dict
     (the legacy ``MISSION_REGISTRY`` shape — call sites that haven't

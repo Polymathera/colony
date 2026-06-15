@@ -720,6 +720,96 @@ class GitHubCapability(AgentCapability):
             return self._shape_error(e) | {"issues": []}
         return _ok(issues=issues, count=len(issues))
 
+    @action_executor(
+        planning_summary=(
+            "Snapshot all open roadmap-marked issues on the design "
+            "monorepo and return their numbers as a list. Paginates "
+            "exhaustively, excludes PRs, and includes only issues "
+            "carrying the ``<!-- colony:roadmap-task: <stable-id> -->`` "
+            "marker (filed by the bootstrap or sync flows). The "
+            "result is a ``list[int]`` of issue numbers — pass the "
+            "list straight to ``classify_issues_decomposability`` or "
+            "``propose_decompositions``. "
+            "For decompose mode this is the FIRST action you call: "
+            "the completion validator gates ``signal_completion`` on "
+            "having a recorded snapshot. If the snapshot returns an "
+            "empty list, call "
+            "``ProjectPlanningMissionControlCapability.request_decompose_early_stop`` "
+            "with the user's verbatim quote authorising the early "
+            "stop (the validator will not accept a self-certified "
+            "termination)."
+        ),
+    )
+    async def snapshot_open_roadmap_issues(self) -> list[int]:
+        """Return the numbers of every open roadmap-marked issue.
+
+        Paginates exhaustively via the underlying client's
+        ``iter_paginated`` (no ``max_results`` cap; the snapshot is a
+        scope-setting primitive, not a discovery-paged listing).
+        Filters via
+        :func:`polymathera.colony.design_monorepo.process._extract_roadmap_task_marker`
+        so only issues carrying the
+        ``<!-- colony:roadmap-task: <stable-id> -->`` marker are
+        included; PRs are excluded by the marker filter (their bodies
+        don't carry it) and by GitHub's ``pull_request`` field on
+        the response.
+
+        Snapshot semantics: the returned list reflects state AT CALL
+        TIME. Issues filed after the snapshot are NOT included; the
+        next decompose run picks them up. The decompose mode's
+        completion validator uses the FIRST successful call's result
+        as the in-scope set for the run — a freshly-filed issue
+        cannot silently extend the scope mid-run.
+
+        Raises:
+            RuntimeError: When no ``design_monorepo_url`` is
+                configured or the GitHub client can't be constructed.
+                These are setup errors and MUST surface loudly per
+                [[no-bandaids-durable-solutions]] rather than returning
+                an empty list (which would let the validator trivially
+                drain — adjacency A5 of the live-run-3 plan).
+            Underlying client exceptions on transport failure also
+                propagate for the same reason.
+        """
+
+        repo = self._resolve_repo()
+        if not repo:
+            raise RuntimeError(
+                f"GitHubCapability.snapshot_open_roadmap_issues: "
+                f"colony has no {DESIGN_MONOREPO_URL_KEY} configured "
+                f"(or it is not a github.com URL). The decompose-mode "
+                f"spawn-time scope snapshot cannot proceed."
+            )
+        client, err = await self._ensure_client()
+        if client is None:
+            raise RuntimeError(
+                f"GitHubCapability.snapshot_open_roadmap_issues: "
+                f"GitHub client unavailable: {err!r}"
+            )
+        # Import the canonical marker-extraction function from the
+        # design-monorepo module. The function is module-private
+        # (underscore prefix) by convention; this is one of the few
+        # cross-module call sites that's part of the marker
+        # contract — same source of truth for read + write per
+        # [[fix-the-class-not-the-instance]].
+        from polymathera.colony.design_monorepo.process import (
+            _extract_roadmap_task_marker,
+        )
+        numbers: list[int] = []
+        async for it in client.iter_paginated(
+            f"/repos/{repo}/issues",
+            page_size=100,
+            state="open",
+        ):
+            if it.get("pull_request"):
+                continue
+            if _extract_roadmap_task_marker(it.get("body")) is None:
+                continue
+            n = it.get("number")
+            if isinstance(n, int):
+                numbers.append(n)
+        return numbers
+
     @action_executor()
     async def get_issue(
         self, issue_number: int,

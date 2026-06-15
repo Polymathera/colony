@@ -197,18 +197,23 @@ async def _seed_entry(
         RunningMissionKey,
     )
 
+    from polymathera.colony.agents.missions.execution_ledger import (
+        AdmissionAllowed,
+    )
+
     policy = MissionExecutionPolicy(max_concurrent_instances=None)
     key = RunningMissionKey(
         scope=MissionConcurrencyScope.SESSION,
         scope_id=scope_id,
         mission_type=mission_type,
     )
-    _, reservation = await ledger.try_admit(
+    decision = await ledger.try_admit(
         key=key, mode=mode, policy=policy,
     )
-    assert reservation is not None
+    assert isinstance(decision, AdmissionAllowed)
     await ledger.register(
-        reservation_id=reservation, agent_id=agent_id, mode=mode,
+        reservation_id=decision.reservation_id,
+        agent_id=agent_id, mode=mode,
     )
 
 

@@ -344,11 +344,8 @@ async def _run_job(
                 # Mission spawn-gate. Consults the same cluster-shared
                 # ledger the chat path uses (see
                 # ``colony/agents/missions/execution_ledger.py``) so
-                # ``max_concurrent_instances`` / ``chains_with_modes``
-                # / ``return_existing`` enforce uniformly across both
-                # paths. REST jobs aren't owned by a SessionAgent, so
-                # we use the pool-agnostic ``admit_mission_spawn``
-                # entry point rather than ``admit_and_spawn``.
+                # ``max_concurrent_instances`` / ``return_existing``
+                # enforce uniformly across both paths.
                 from polymathera.colony.agents.missions.execution_ledger import (
                     AdmissionAllowed,
                     AdmissionRejected,
@@ -357,7 +354,7 @@ async def _run_job(
                     mission_stop_callback,
                 )
                 mode = mission.parameters.get("mode")
-                admission, reservation_id, ledger = await admit_mission_spawn(
+                admission, ledger = await admit_mission_spawn(
                     agent_cls=agent_cls,
                     mission_type=mission.type,
                     mode=str(mode) if mode is not None else None,
@@ -382,6 +379,7 @@ async def _run_job(
                     )
                     continue
                 assert isinstance(admission, AdmissionAllowed)
+                reservation_id = admission.reservation_id
 
                 cap_blueprints = [resolve_class(path).bind() for path in capability_paths]
                 # Attach the generic ledger-unregister callback so
