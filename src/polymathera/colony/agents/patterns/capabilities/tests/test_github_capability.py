@@ -139,7 +139,7 @@ def _make_cap(
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def _with_context():
@@ -200,7 +200,7 @@ def test_token_cache_refreshes_when_expiring():
         await client.aclose()
         return t1, t1b, t2
 
-    t1, t1b, t2 = asyncio.get_event_loop().run_until_complete(run())
+    t1, t1b, t2 = asyncio.run(run())
     assert t1 == t1b
     assert t2 != t1
     assert call_counter["n"] == 2
@@ -224,7 +224,7 @@ def test_token_cache_surfaces_exchange_errors():
             await client.aclose()
 
     with pytest.raises(RuntimeError, match="installation-token exchange"):
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +262,7 @@ def test_client_refreshes_token_on_401_once():
         await client.close()
         return data
 
-    data = asyncio.get_event_loop().run_until_complete(run())
+    data = asyncio.run(run())
     assert data == {"hello": "world"}
     assert calls["install_tokens"] == 2  # original + force-refresh
     assert calls["api"] == 2
@@ -299,7 +299,7 @@ def test_client_raises_rate_limit_error_on_primary_exhaustion():
             await client.close()
 
     with pytest.raises(RateLimitError):
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 def test_client_iter_paginated_stops_when_page_is_short():
@@ -335,7 +335,7 @@ def test_client_iter_paginated_stops_when_page_is_short():
         await client.close()
         return out
 
-    items = asyncio.get_event_loop().run_until_complete(run())
+    items = asyncio.run(run())
     assert len(items) == 102
 
 

@@ -329,7 +329,7 @@ def test_llm_callable_builds_inference_request_with_config_knobs(
     # close the global event loop, so subsequent tests in the same
     # session that also use ``get_event_loop().run_until_complete``
     # don't break).
-    result = asyncio.get_event_loop().run_until_complete(_invoke())
+    result = asyncio.run(_invoke())
 
     # The typed contract returns a validated ``ClaimList`` instance.
     assert isinstance(result, ClaimList)
@@ -389,7 +389,7 @@ def test_llm_claim_extractor_degrades_gracefully_when_no_cluster(
     )
     # Match surrounding-test convention — see note in the previous
     # test about not closing the global event loop.
-    claims = asyncio.get_event_loop().run_until_complete(
+    claims = asyncio.run(
         extractor.extract(chunk),
     )
     assert claims == ()  # graceful empty, not crash

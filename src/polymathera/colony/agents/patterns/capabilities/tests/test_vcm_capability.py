@@ -195,7 +195,7 @@ def _run(coro):
     helper. Non-watcher tests are fine here because no tasks outlive
     the call.
     """
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------

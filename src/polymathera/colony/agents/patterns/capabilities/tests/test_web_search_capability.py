@@ -82,7 +82,7 @@ def _make_capability(
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +105,7 @@ def test_token_bucket_admits_one_then_refuses_within_deadline():
         second = await bucket.acquire(deadline_s=0.1)
         return first, second
 
-    first, second = asyncio.get_event_loop().run_until_complete(run())
+    first, second = asyncio.run(run())
     assert first is True
     assert second is False
 
