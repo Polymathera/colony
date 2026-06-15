@@ -183,11 +183,16 @@ class TestStreamEventsToQueueRouting:
     def test_with_high_queue_routes_split(self):
         bb = _CaptureBlackboard("scope:x")
         cap = self._make_cap(bb)
-        normal_q: asyncio.Queue = asyncio.Queue()
-        high_q: asyncio.Queue = asyncio.Queue()
-        asyncio.get_event_loop().run_until_complete(
-            cap.stream_events_to_queue(normal_q, high_priority_queue=high_q)
-        )
+
+        async def setup():
+            normal_q: asyncio.Queue = asyncio.Queue()
+            high_q: asyncio.Queue = asyncio.Queue()
+            await cap.stream_events_to_queue(
+                normal_q, high_priority_queue=high_q,
+            )
+            return normal_q, high_q
+
+        normal_q, high_q = asyncio.run(setup())
         # One subscription per pattern; no double subscription.
         normal_subs = [s for s in bb.subscriptions if s[1] == "normal:*"]
         high_subs = [s for s in bb.subscriptions if s[1] == "urgent:*"]
@@ -200,10 +205,13 @@ class TestStreamEventsToQueueRouting:
         queue (degraded but functional)."""
         bb = _CaptureBlackboard("scope:y")
         cap = self._make_cap(bb)
-        normal_q: asyncio.Queue = asyncio.Queue()
-        asyncio.get_event_loop().run_until_complete(
-            cap.stream_events_to_queue(normal_q)
-        )
+
+        async def setup():
+            normal_q: asyncio.Queue = asyncio.Queue()
+            await cap.stream_events_to_queue(normal_q)
+            return normal_q
+
+        normal_q = asyncio.run(setup())
         for _, pattern, _ in bb.subscriptions:
             # Only one queue was provided; both patterns land on it.
             pass
@@ -350,7 +358,7 @@ class TestHighPriorityLoop:
                 except asyncio.CancelledError:
                     pass
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_handler_immediate_action_is_ignored_with_warning(self, caplog):
         """High-priority handlers MUST NOT dispatch actions. If one
@@ -429,7 +437,7 @@ class TestHighPriorityLoop:
                 for rec in caplog.records
             )
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 # ---------------------------------------------------------------------------
