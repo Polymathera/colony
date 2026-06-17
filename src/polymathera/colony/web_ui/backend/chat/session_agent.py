@@ -802,9 +802,35 @@ class SessionOrchestratorCapability(AgentCapability):
                 (default 20).
 
         Returns:
-            ``{"agent_id", "mission_type", "coordinator_class",
-            "created", "label"}``. On failure: ``created=False`` plus
-            an ``error`` field.
+            A dict whose ``outcome`` field is the canonical
+            discriminator. Branch on it before reading per-outcome
+            fields:
+
+            - ``outcome="spawned"``: coordinator just started. Use
+              ``result["agent_id"]`` to address it.
+            - ``outcome="return_existing"``: a coordinator is ALREADY
+              running for this mission_type + scope; the gate handed
+              it back instead of starting a duplicate. Use
+              ``result["agent_id"]`` (same field as ``spawned``);
+              do NOT call ``spawn_mission`` again.
+              ``result["reason"]`` carries the gate's rationale.
+            - ``outcome="rejected"``: the spawn gate refused (e.g.
+              cap reached under ``on_concurrency_violation="reject"``,
+              or a sibling reservation never resolved within the
+              await window). Tell the user
+              ``result["error"]``; ``result["suggested_action"]``
+              is the gate's hint for next steps. Do NOT retry blindly.
+            - ``outcome="error"``: configuration / dispatch / mission-
+              registry failure (unknown mission_type, missing
+              ``coordinator_v2``, no AgentPoolCapability mounted).
+              Tell the user ``result["error"]``. One retry is
+              reasonable; then escalate.
+
+            Legacy ``result["created"]`` (bool) and
+            ``result["mission_gate"]`` are preserved as computed
+            properties on :class:`SpawnOutcome` for back-compat with
+            consumers that predate the discriminator; new code SHOULD
+            branch on ``outcome``.
         """
 
         from polymathera.colony.agents.mission_registry import (
@@ -815,6 +841,9 @@ class SessionOrchestratorCapability(AgentCapability):
         )
         from polymathera.colony.agents.patterns.capabilities.agent_pool import (
             AgentPoolCapability,
+        )
+        from polymathera.colony.agents.missions.execution_ledger import (
+            SpawnOutcome,
         )
         from polymathera.colony.agents.models import AgentMetadata
 
@@ -828,31 +857,29 @@ class SessionOrchestratorCapability(AgentCapability):
                 registry.update(snapshot.missions)
         if mission_type not in registry:
             available = sorted(registry.keys())
-            return {
-                "agent_id": None,
-                "mission_type": mission_type,
-                "coordinator_class": "",
-                "created": False,
-                "label": "",
-                "error": (
+            return SpawnOutcome(
+                outcome="error",
+                mission_type=mission_type,
+                coordinator_class="",
+                label="",
+                error=(
                     f"Unknown mission type {mission_type!r}. "
                     f"Available: {available}"
                 ),
-            }
+            ).model_dump()
         reg = registry[mission_type]
         coord_class = reg.get("coordinator_v2") or reg.get("coordinator_v1") or ""
         if not coord_class:
-            return {
-                "agent_id": None,
-                "mission_type": mission_type,
-                "coordinator_class": "",
-                "created": False,
-                "label": reg.get("label", ""),
-                "error": (
+            return SpawnOutcome(
+                outcome="error",
+                mission_type=mission_type,
+                coordinator_class="",
+                label=reg.get("label", ""),
+                error=(
                     f"Mission {mission_type!r} has no coordinator_v2 "
                     f"or coordinator_v1 in its registry entry."
                 ),
-            }
+            ).model_dump()
 
         # 2) Build the coordinator's metadata.
         #
@@ -921,17 +948,16 @@ class SessionOrchestratorCapability(AgentCapability):
         # at session-create time), so the lookup is safe.
         pool = self.agent.get_capability_by_type(AgentPoolCapability)
         if pool is None:
-            return {
-                "agent_id": None,
-                "mission_type": mission_type,
-                "coordinator_class": coord_class,
-                "created": False,
-                "label": reg.get("label", ""),
-                "error": (
+            return SpawnOutcome(
+                outcome="error",
+                mission_type=mission_type,
+                coordinator_class=coord_class,
+                label=reg.get("label", ""),
+                error=(
                     "AgentPoolCapability is not mounted on this agent; "
                     "spawn_mission requires it for dispatch."
                 ),
-            }
+            ).model_dump()
         # Funnel through the mission spawn-gate
         # (``admit_and_spawn``), which both this chat path AND the
         # REST ``routers/jobs.py::_run_job`` path share. The gate

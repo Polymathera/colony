@@ -99,3 +99,65 @@ def test_decompose_goal_text_does_not_use_arrow_sequence_markers() -> None:
             f"Decompose-mode goal contains ordering marker {marker!r} — "
             "the contract shape is a flat menu, not a sequence."
         )
+
+
+# ---------------------------------------------------------------------------
+# Approval-wait bullet (Bucket A.2 / Fix F3 prevention) — the bullet
+# teaches the request_human_approval → wait_for_next_event → read
+# planner-context binding sequence. The F3 forensic failure was the
+# coordinator polling get_response 25× after state=ready already
+# returned; the prevention is the actionable "advance after reading"
+# contract pinned below.
+# ---------------------------------------------------------------------------
+
+
+def _approval_wait_goal_text() -> str:
+    from polymathera.colony.agents.configs import _BUILTIN_MISSIONS
+
+    goals = _BUILTIN_MISSIONS["project_planning"]["self_concept"]["goals"]
+    for goal in goals:
+        if isinstance(goal, str) and goal.startswith(
+            "Post one HumanApprovalRequest",
+        ):
+            return goal
+    raise AssertionError(
+        "No 'Post one HumanApprovalRequest' goal found in "
+        "project_planning.self_concept.goals — Bucket A.2's "
+        "regression target has moved."
+    )
+
+
+_APPROVAL_WAIT_REQUIRED_PHRASES = (
+    # Read-once-then-terminal contract: the planner-context binding is
+    # the durable record; get_response is on-demand lookup, not a wake
+    # surface that benefits from polling.
+    "treat it as terminal",
+    "planner-context binding persists across iterations",
+    "burning an iteration",
+    # Positive instruction: name the next action explicitly so the LLM
+    # has somewhere to go after reading choice.
+    "Your NEXT action MUST be the per-choice branch",
+    # Negative instruction in the same sentence as the positive:
+    # bullet N+1 uses choice, bullet N must produce it AND signal
+    # "advance now". Per [[llm-prompts-must-be-actionable]].
+    "do NOT call get_response for the same request_id again",
+)
+
+
+def test_approval_wait_goal_text_states_advance_after_choice_contract() -> None:
+    """The F3 prevention contract: after reading ``response.choice``
+    once for a request_id, the LLM treats the answer as terminal and
+    advances to the per-choice branch. Re-polling ``get_response`` is
+    explicitly forbidden — that's the precondition for the F3 forensic
+    25-iteration poll-loop. Pairs with the shipped
+    ``ApprovalAdvanceAdvisor`` (Slice E) which provides the recovery
+    side when the LLM ignores this prevention."""
+
+    text = _approval_wait_goal_text()
+    for phrase in _APPROVAL_WAIT_REQUIRED_PHRASES:
+        assert phrase in text, (
+            f"Approval-wait goal is missing required phrase {phrase!r} — "
+            "the F3 prevention contract (Bucket A.2 of "
+            "agent_error_detect_prevent_recover_architecture_plan.md) "
+            "has drifted."
+        )

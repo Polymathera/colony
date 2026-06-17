@@ -27,6 +27,7 @@ from polymathera.colony.agents.missions.execution_ledger import (
     PendingReservation,
     RunningMissionEntry,
     RunningMissionKey,
+    SpawnOutcome,
 )
 from polymathera.colony.distributed.state_management import StateManager
 from polymathera.colony.distributed.stores.state_base import (
@@ -659,3 +660,111 @@ async def test_three_parallel_admits_under_return_existing_converge(
     # the one allowed reservation.
     assert len(awaits) == 2
     assert all(a.reservation_id == allowed[0].reservation_id for a in awaits)
+
+# ---------------------------------------------------------------------------
+# SpawnOutcome typed shape — Bucket A.1 / Fix F1 prevention. Pins the
+# discriminator contract returned by spawn_mission / admit_and_spawn
+# so the LLM branches on outcome instead of the legacy created /
+# mission_gate pair (which were the lie that drove the F1 forensic
+# failure — see refine_github_issues_failure_fixes_plan.md).
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_outcome_spawned_dumps_with_computed_fields() -> None:
+    out = SpawnOutcome(
+        outcome="spawned",
+        mission_type="m",
+        coordinator_class="pkg.C",
+        label="L",
+        agent_id="agent-1",
+    ).model_dump()
+    assert out["outcome"] == "spawned"
+    assert out["created"] is True
+    assert out["mission_gate"] is None
+    assert out["agent_id"] == "agent-1"
+    # Per-outcome optional fields are present + None so the schema is
+    # uniform across variants — the LLM never has to KeyError-check.
+    assert out["error"] is None
+    assert out["reason"] is None
+    assert out["suggested_action"] is None
+
+
+def test_spawn_outcome_return_existing_back_compat() -> None:
+    out = SpawnOutcome(
+        outcome="return_existing",
+        mission_type="m",
+        coordinator_class="pkg.C",
+        label="L",
+        agent_id="agent-1",
+        reason="cap reached",
+    ).model_dump()
+    assert out["outcome"] == "return_existing"
+    assert out["created"] is False
+    assert out["mission_gate"] == "return_existing"
+    assert out["agent_id"] == "agent-1"
+    assert out["reason"] == "cap reached"
+
+
+def test_spawn_outcome_rejected_carries_suggested_action() -> None:
+    out = SpawnOutcome(
+        outcome="rejected",
+        mission_type="m",
+        coordinator_class="pkg.C",
+        label="L",
+        error="At most 1 concurrent",
+        suggested_action="Wait for the running mission to complete",
+    ).model_dump()
+    assert out["outcome"] == "rejected"
+    assert out["created"] is False
+    assert out["mission_gate"] == "rejected"
+    assert out["agent_id"] is None
+    assert out["error"] == "At most 1 concurrent"
+    assert out["suggested_action"] == "Wait for the running mission to complete"
+
+
+def test_spawn_outcome_error_has_no_mission_gate() -> None:
+    """The error outcome is for failures BEFORE the gate (unknown
+    mission_type, missing coordinator class, dispatch raised). The
+    mission_gate field is None — the gate never decided anything."""
+    out = SpawnOutcome(
+        outcome="error",
+        mission_type="m",
+        coordinator_class="",
+        label="",
+        error="Unknown mission type 'm'",
+    ).model_dump()
+    assert out["outcome"] == "error"
+    assert out["created"] is False
+    assert out["mission_gate"] is None
+    assert out["agent_id"] is None
+    assert out["error"] == "Unknown mission type 'm'"
+    assert out["suggested_action"] is None
+
+
+def test_spawn_outcome_rejects_unknown_discriminator() -> None:
+    """The Literal type bans typos in outcome values — a fifth case
+    cannot be silently introduced."""
+    import pydantic
+    with pytest.raises(pydantic.ValidationError):
+        SpawnOutcome(
+            outcome="queued",  # not in the Literal
+            mission_type="m",
+            coordinator_class="",
+            label="",
+        )
+
+
+def test_spawn_outcome_is_frozen() -> None:
+    """Each outcome is an immutable snapshot — callers cannot mutate
+    the discriminator after the gate decided."""
+    out = SpawnOutcome(
+        outcome="spawned",
+        mission_type="m",
+        coordinator_class="pkg.C",
+        label="L",
+        agent_id="agent-1",
+    )
+    import pydantic
+    with pytest.raises((pydantic.ValidationError, TypeError, AttributeError)):
+        out.outcome = "rejected"  # type: ignore[misc]
+

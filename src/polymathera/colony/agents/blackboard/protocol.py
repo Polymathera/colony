@@ -375,6 +375,73 @@ class HumanApprovalProtocol(BlackboardProtocol):
         return key[len(prefix):]
 
 
+class HumanHelpProtocol(BlackboardProtocol):
+    """Protocol for typed human-help requests / responses on the
+    session blackboard.
+
+    Sibling of :class:`HumanApprovalProtocol` — same session-scoped
+    request/response shape, but semantically distinct: ``request_help``
+    is the agent's escalation channel for "I'm stuck on a judgment
+    call, what should I do?". Distinct from
+    ``request_human_approval`` (authorize a specific action) and
+    ``respond_to_user`` (fire-and-forget update — operator may not be
+    listening). Per [[reactive-as-special-case-of-proactive]], the
+    agent's code calls ``wait_for_next_event`` after submitting to
+    pause; the response surfaces as planner context.
+
+    Key formats:
+
+    - ``human_help:request:{request_id}`` — agent posts a typed
+      ``HumanHelpRequest`` payload.
+    - ``human_help:response:{request_id}`` — UI / REST endpoint
+      writes the operator's typed ``HumanHelpResponse`` payload.
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.SESSION
+
+    # --- Key construction ---
+
+    @staticmethod
+    def request_key(request_id: str) -> str:
+        """Key for a human-help request."""
+        return f"human_help:request:{request_id}"
+
+    @staticmethod
+    def response_key(request_id: str) -> str:
+        """Key for the operator's typed help response."""
+        return f"human_help:response:{request_id}"
+
+    # --- Pattern construction ---
+
+    @staticmethod
+    def request_pattern() -> str:
+        return "human_help:request:*"
+
+    @staticmethod
+    def response_pattern() -> str:
+        return "human_help:response:*"
+
+    # --- Key parsing ---
+
+    @staticmethod
+    def parse_request_key(key: str) -> str:
+        prefix = "human_help:request:"
+        if not key.startswith(prefix):
+            raise ValueError(
+                f"Not a HumanHelpProtocol request key: {key!r}"
+            )
+        return key[len(prefix):]
+
+    @staticmethod
+    def parse_response_key(key: str) -> str:
+        prefix = "human_help:response:"
+        if not key.startswith(prefix):
+            raise ValueError(
+                f"Not a HumanHelpProtocol response key: {key!r}"
+            )
+        return key[len(prefix):]
+
+
 class WorkAssignmentProtocol(BlackboardProtocol):
     """Protocol for coordinator <-> worker communication via ``AgentPoolCapability``.
 

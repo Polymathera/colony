@@ -504,7 +504,9 @@ async def test_spawn_mission_unknown_type_returns_error(
     monkeypatch.setattr(mr, "get_mission_registry", lambda: {})
 
     result = await _run_spawn(cap, mission_type="never_registered")
+    assert result["outcome"] == "error"
     assert result["created"] is False
+    assert result["mission_gate"] is None
     assert result["agent_id"] is None
     assert "Unknown mission type" in result["error"]
     assert "opm_meg" in result["error"]
@@ -527,6 +529,7 @@ async def test_spawn_mission_missing_coordinator_returns_error(
     monkeypatch.setattr(mr, "get_mission_registry", lambda: {})
 
     result = await _run_spawn(cap, mission_type="shapeless")
+    assert result["outcome"] == "error"
     assert result["created"] is False
     assert "no coordinator_v2" in result["error"]
 
@@ -866,9 +869,10 @@ async def test_spawn_mission_admits_first_spawn(
         cap, mission_type="test_mission",
         mission_params={"mode": "bootstrap"},
     )
+    assert result["outcome"] == "spawned"
     assert result["created"] is True
     assert result["agent_id"] == "child_first"
-    assert "mission_gate" not in result
+    assert result["mission_gate"] is None
 
 
 @pytest.mark.asyncio
@@ -895,6 +899,7 @@ async def test_spawn_mission_returns_existing_on_chained_mode(
         cap, mission_type="test_mission",
         mission_params={"mode": "refresh"},
     )
+    assert second["outcome"] == "return_existing"
     assert second["created"] is False
     assert second["mission_gate"] == "return_existing"
     assert second["agent_id"] == first["agent_id"]
@@ -933,6 +938,7 @@ async def test_spawn_mission_rejects_when_policy_says_reject(
         cap, mission_type="test_mission",
         mission_params={},
     )
+    assert second["outcome"] == "rejected"
     assert second["created"] is False
     assert second["mission_gate"] == "rejected"
     assert second["agent_id"] is None

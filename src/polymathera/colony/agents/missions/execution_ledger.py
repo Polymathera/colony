@@ -41,7 +41,7 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from ...distributed.state_management import SharedState, StateManager
 from ..configs import (
@@ -179,6 +179,120 @@ AdmissionDecision = (
     | AdmissionAwait
     | AdmissionRejected
 )
+
+
+# ---------------------------------------------------------------------------
+# SpawnOutcome — typed shape of the result that ``spawn_mission`` /
+# ``admit_and_spawn`` return to LLM planners. The LLM branches on
+# ``outcome``; the legacy ``created`` and ``mission_gate`` fields stay
+# as computed properties for back-compat with the dict-shaped consumers
+# that predate the typed discriminator.
+# ---------------------------------------------------------------------------
+
+
+class SpawnOutcome(BaseModel):
+    """Discriminated-union return shape for ``spawn_mission``.
+
+    The four outcomes map 1:1 onto the four ways a spawn can end
+    (post-Change-2 admission gate + Pool dispatch). ``outcome`` is the
+    canonical discriminator. The optional per-outcome fields are set
+    only when the outcome warrants them; the LLM branches on ``outcome``
+    BEFORE reading any of them.
+
+    Legacy ``created`` (bool) and ``mission_gate`` (str | None) are
+    computed properties: they appear in :meth:`model_dump` output so
+    pre-typed-contract consumers keep working without code changes."""
+
+    model_config = ConfigDict(frozen=True)
+
+    outcome: Literal["spawned", "return_existing", "rejected", "error"]
+
+    mission_type: str
+    coordinator_class: str
+    label: str
+
+    agent_id: str | None = None
+    """Set for ``spawned`` and ``return_existing``. The id the caller
+    addresses the coordinator with."""
+
+    reason: str | None = None
+    """Set for ``return_existing`` and ``rejected``. Rationale from
+    the spawn gate."""
+
+    error: str | None = None
+    """Set for ``rejected`` and ``error``. Describes the failure."""
+
+    suggested_action: str | None = None
+    """Set for ``rejected``. The gate's hint for the LLM's next step."""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def created(self) -> bool:
+        """Legacy: True iff the outcome is ``spawned``. Prefer
+        branching on ``outcome`` directly."""
+        return self.outcome == "spawned"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def mission_gate(self) -> Literal["return_existing", "rejected"] | None:
+        """Legacy: the gate path when the outcome was gate-driven."""
+        if self.outcome == "return_existing":
+            return "return_existing"
+        if self.outcome == "rejected":
+            return "rejected"
+        return None
+
+
+def _spawned_outcome(
+    *, agent_id: str, mission_type: str, coordinator_class: str, label: str,
+) -> dict[str, Any]:
+    return SpawnOutcome(
+        outcome="spawned",
+        mission_type=mission_type,
+        coordinator_class=coordinator_class,
+        label=label,
+        agent_id=agent_id,
+    ).model_dump()
+
+
+def _return_existing_outcome(
+    *, agent_id: str, mission_type: str, coordinator_class: str,
+    label: str, reason: str,
+) -> dict[str, Any]:
+    return SpawnOutcome(
+        outcome="return_existing",
+        mission_type=mission_type,
+        coordinator_class=coordinator_class,
+        label=label,
+        agent_id=agent_id,
+        reason=reason,
+    ).model_dump()
+
+
+def _rejected_outcome(
+    *, mission_type: str, coordinator_class: str, label: str,
+    error: str, suggested_action: str,
+) -> dict[str, Any]:
+    return SpawnOutcome(
+        outcome="rejected",
+        mission_type=mission_type,
+        coordinator_class=coordinator_class,
+        label=label,
+        error=error,
+        suggested_action=suggested_action,
+    ).model_dump()
+
+
+def _error_outcome(
+    *, mission_type: str, coordinator_class: str, label: str, error: str,
+) -> dict[str, Any]:
+    return SpawnOutcome(
+        outcome="error",
+        mission_type=mission_type,
+        coordinator_class=coordinator_class,
+        label=label,
+        error=error,
+    ).model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -663,22 +777,25 @@ async def admit_and_spawn(
     - :meth:`SessionOrchestratorCapability.spawn_mission` (chat).
     - :func:`web_ui.backend.routers.jobs._run_job` (REST).
 
-    Returns the contract every caller can branch on directly:
+    Returns :class:`SpawnOutcome`-shaped dict. The canonical
+    discriminator is ``result["outcome"]``; callers branch on it:
 
-    - ``{agent_id, mission_type, coordinator_class, created: True,
-      label}`` — spawn succeeded.
-    - ``{agent_id: <existing>, ..., created: False,
-      mission_gate: "return_existing", reason}`` — the gate handed
-      back a running coordinator on cap collision under
-      ``return_existing`` policy.
-    - ``{agent_id: None, ..., created: False,
-      mission_gate: "rejected", error, suggested_action}`` —
-      explicit rejection. Includes a hint for the LLM's next
-      iteration. Also covers the case where a sibling reservation
-      never resolved within :data:`_AWAIT_RESERVATION_TIMEOUT_S`.
-    - ``{agent_id: None, ..., created: False, error}`` — the spawn
-      itself failed (e.g. the coordinator class couldn't be
-      imported).
+    - ``outcome="spawned"``: ``agent_id`` set; coordinator started.
+    - ``outcome="return_existing"``: ``agent_id`` set; a coordinator
+      already exists for this mission_type + scope under
+      ``on_concurrency_violation="return_existing"``. ``reason``
+      carries the gate's rationale.
+    - ``outcome="rejected"``: explicit rejection (cap reached under
+      ``reject`` policy, or a sibling reservation never resolved
+      within :data:`_AWAIT_RESERVATION_TIMEOUT_S`). ``error`` +
+      ``suggested_action`` describe how to recover.
+    - ``outcome="error"``: the spawn itself failed (coordinator
+      class couldn't be imported, pool dispatch raised, etc.).
+
+    Legacy ``result["created"]`` and ``result["mission_gate"]`` are
+    preserved as computed properties on :class:`SpawnOutcome` for
+    back-compat with consumers that predate the discriminator; new
+    code SHOULD branch on ``outcome``.
 
     ``create_agent_kwargs`` is the extra-kwargs bag forwarded to
     :meth:`AgentPoolCapability.create_agent`.
@@ -712,30 +829,25 @@ async def admit_and_spawn(
             "%s for mission %s (%s)",
             decision.agent_id, mission_type, decision.reason,
         )
-        return {
-            "agent_id": decision.agent_id,
-            "mission_type": mission_type,
-            "coordinator_class": agent_type,
-            "created": False,
-            "label": label or "",
-            "mission_gate": "return_existing",
-            "reason": decision.reason,
-        }
+        return _return_existing_outcome(
+            agent_id=decision.agent_id,
+            mission_type=mission_type,
+            coordinator_class=agent_type,
+            label=label or "",
+            reason=decision.reason,
+        )
     if isinstance(decision, AdmissionRejected):
         logger.info(
             "admit_and_spawn: gate rejected spawn of mission %s (%s)",
             mission_type, decision.reason,
         )
-        return {
-            "agent_id": None,
-            "mission_type": mission_type,
-            "coordinator_class": agent_type,
-            "created": False,
-            "label": label or "",
-            "mission_gate": "rejected",
-            "error": decision.reason,
-            "suggested_action": decision.suggested_action,
-        }
+        return _rejected_outcome(
+            mission_type=mission_type,
+            coordinator_class=agent_type,
+            label=label or "",
+            error=decision.reason,
+            suggested_action=decision.suggested_action,
+        )
 
     # ---- AdmissionAllowed: actually spawn -----------------------
     assert isinstance(decision, AdmissionAllowed)
@@ -781,14 +893,12 @@ async def admit_and_spawn(
         # forward the error verbatim.
         if reservation_id is not None:
             await ledger.release_reservation(reservation_id)
-        return {
-            "agent_id": None,
-            "mission_type": mission_type,
-            "coordinator_class": agent_type,
-            "created": False,
-            "label": spawn_result.get("label") or label or "",
-            "error": spawn_result.get("error") or "spawn failed",
-        }
+        return _error_outcome(
+            mission_type=mission_type,
+            coordinator_class=agent_type,
+            label=spawn_result.get("label") or label or "",
+            error=spawn_result.get("error") or "spawn failed",
+        )
 
     spawned_agent_id = spawn_result["agent_id"]
     if reservation_id is not None:
@@ -798,13 +908,12 @@ async def admit_and_spawn(
             mode=mode,
         )
 
-    return {
-        "agent_id": spawned_agent_id,
-        "mission_type": mission_type,
-        "coordinator_class": agent_type,
-        "created": True,
-        "label": spawn_result.get("label") or label or "",
-    }
+    return _spawned_outcome(
+        agent_id=spawned_agent_id,
+        mission_type=mission_type,
+        coordinator_class=agent_type,
+        label=spawn_result.get("label") or label or "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -941,6 +1050,7 @@ __all__ = (
     "RunningMissionEntry",
     "RunningMissionKey",
     "Slot",
+    "SpawnOutcome",
     "admit_and_spawn",
     "admit_mission_spawn",
     "get_mission_execution_ledger",

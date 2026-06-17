@@ -66,7 +66,18 @@ def _make_capability(
     *,
     github: Any = None,
     llm_response: str | None = None,
+    llm_responses: list[str | Exception] | None = None,
 ) -> DesignProcessCapability:
+    """Build a `DesignProcessCapability` with optional LLM stubbing.
+
+    Pass ``llm_response`` for a single canned response (all calls
+    return the same payload — fine when the test only triggers ONE
+    LLM call). Pass ``llm_responses`` for a per-call list (the mock
+    uses ``side_effect`` so each call pops the next entry); entries
+    may be strings (returned via a fake response object) or
+    Exception instances (raised on that call). Required for the
+    per-parent chunking path which now triggers N LLM calls."""
+
     _make_repo(tmp_path)
     agent = MagicMock()
     agent.metadata.parameters = {
@@ -83,7 +94,17 @@ def _make_capability(
         agent._capabilities = {}
         agent.get_capability = lambda _cls: None
         agent.capability_by_class = None
-    if llm_response is not None:
+    if llm_responses is not None:
+        side_effects: list[Any] = []
+        for entry in llm_responses:
+            if isinstance(entry, Exception):
+                side_effects.append(entry)
+            else:
+                fake = MagicMock()
+                fake.generated_text = entry
+                side_effects.append(fake)
+        agent.infer = AsyncMock(side_effect=side_effects)
+    elif llm_response is not None:
         fake_response = MagicMock()
         fake_response.generated_text = llm_response
         agent.infer = AsyncMock(return_value=fake_response)
@@ -447,37 +468,151 @@ async def test_propose_round_trips_single_parent(tmp_path: Path) -> None:
     assert result["shared_concerns"] == []
 
 
-async def test_propose_round_trips_joint_decomposition_with_shared_concerns(
+async def test_propose_chunks_per_parent_for_n_greater_than_one(
     tmp_path: Path,
 ) -> None:
+    """Per-parent chunking — N=2 triggers TWO LLM calls (one per
+    parent), each prompted as a single-parent decomposition. The
+    aggregate ``parent_proposals`` carries both successes;
+    ``shared_concerns`` is ``[]`` (cross-parent insight is not
+    collected under chunking — durability over cohort-level
+    coordination, per Bucket A.4 / Fix F2 prevention)."""
+
     github = _make_github_stub(
         issues_by_number={
             1: {"title": "Sensor A", "body": "..."},
             2: {"title": "Sensor B", "body": "..."},
         },
     )
-    llm_response = (
+    response_for_1 = (
         '{"parent_proposals": ['
         '{"parent_number": 1, "children": ['
         '{"title": "A1", "body": "a1"}, {"title": "A2", "body": "a2"}'
-        '], "reason": "r1"},'
+        '], "reason": "r1"}'
+        '], "shared_concerns": []}'
+    )
+    response_for_2 = (
+        '{"parent_proposals": ['
         '{"parent_number": 2, "children": ['
         '{"title": "B1", "body": "b1"}, {"title": "B2", "body": "b2"}'
         '], "reason": "r2"}'
-        '],'
-        '"shared_concerns": ["both need a calibration procedure"]}'
+        '], "shared_concerns": []}'
     )
     cap = _make_capability(
-        tmp_path, github=github, llm_response=llm_response,
+        tmp_path,
+        github=github,
+        llm_responses=[response_for_1, response_for_2],
     )
     result = await cap.propose_decompositions(
         parent_issue_numbers=[1, 2],
     )
     assert result["ok"] is True
-    assert len(result["parent_proposals"]) == 2
-    assert result["shared_concerns"] == [
-        "both need a calibration procedure",
+    proposals = result["parent_proposals"]
+    assert len(proposals) == 2
+    assert {p["parent_number"] for p in proposals} == {1, 2}
+    # Per-parent chunking: shared_concerns is empty by design.
+    assert result["shared_concerns"] == []
+    # Each parent succeeded and carries its own children.
+    by_number = {p["parent_number"]: p for p in proposals}
+    assert [c["title"] for c in by_number[1]["children"]] == ["A1", "A2"]
+    assert [c["title"] for c in by_number[2]["children"]] == ["B1", "B2"]
+    # The agent's infer was called exactly twice — one per parent.
+    assert cap._agent.infer.await_count == 2
+
+
+async def test_propose_per_parent_failure_attributed_with_success(
+    tmp_path: Path,
+) -> None:
+    """The F2 forensic case: large cohort where ONE parent's LLM
+    output truncates and parses to failure while OTHERS succeed.
+    Per-parent chunking surfaces the success / failure split in
+    ``parent_proposals``: successful parents carry ``children``,
+    failed parents carry ``error`` + ``raw_excerpt``. The cohort-
+    level ``ok`` is True because at least one succeeded — the LLM
+    can retry just the failed parents without losing the successes.
+    Pairs with the ErrorRewriterAdvisor F2 rule (now matches
+    ``ok=True`` with per-parent errors)."""
+
+    github = _make_github_stub(
+        issues_by_number={
+            10: {"title": "Parent A", "body": "a"},
+            20: {"title": "Parent B", "body": "b"},
+            30: {"title": "Parent C", "body": "c"},
+        },
+    )
+    response_ok_10 = (
+        '{"parent_proposals": ['
+        '{"parent_number": 10, "children": ['
+        '{"title": "A1", "body": "a1"}'
+        '], "reason": "ok"}'
+        '], "shared_concerns": []}'
+    )
+    # Parent 20: truncated mid-JSON — _parse_decomposition_proposal
+    # returns None and the per-parent helper attributes the failure.
+    response_truncated_20 = (
+        '{"parent_proposals": [{"parent_number": 20, "children": '
+        '[{"title": "B1", "body": "b1'
+    )
+    response_ok_30 = (
+        '{"parent_proposals": ['
+        '{"parent_number": 30, "children": ['
+        '{"title": "C1", "body": "c1"}'
+        '], "reason": "ok"}'
+        '], "shared_concerns": []}'
+    )
+    cap = _make_capability(
+        tmp_path,
+        github=github,
+        llm_responses=[
+            response_ok_10, response_truncated_20, response_ok_30,
+        ],
+    )
+    result = await cap.propose_decompositions(
+        parent_issue_numbers=[10, 20, 30],
+    )
+    # Mixed-success cohort: ``ok`` is True (at least one succeeded)
+    # but per-parent attribution captures the failure.
+    assert result["ok"] is True
+    assert result["shared_concerns"] == []
+    by_number = {p["parent_number"]: p for p in result["parent_proposals"]}
+    assert "children" in by_number[10]
+    assert "children" in by_number[30]
+    assert by_number[20]["error"] == "llm_proposal_parse_failed"
+    assert by_number[20]["raw_excerpt"]  # non-empty preview for the LLM
+
+
+async def test_propose_all_parents_failing_sets_cohort_ok_false(
+    tmp_path: Path,
+) -> None:
+    """Cohort-level ``ok=False`` only when EVERY parent failed.
+    Carries a top-level ``error="all_parents_failed"`` so the F2
+    matcher's legacy ``ok=False`` predicate keeps firing on the
+    fully-broken case."""
+
+    github = _make_github_stub(
+        issues_by_number={
+            1: {"title": "P1", "body": "..."},
+            2: {"title": "P2", "body": "..."},
+        },
+    )
+    truncated = (
+        '{"parent_proposals": [{"parent_number": 1, "children": '
+        '[{"title": "X1", "body": "x1'
+    )
+    cap = _make_capability(
+        tmp_path,
+        github=github,
+        llm_responses=[truncated, truncated],
+    )
+    result = await cap.propose_decompositions(
+        parent_issue_numbers=[1, 2],
+    )
+    assert result["ok"] is False
+    assert result["error"] == "all_parents_failed"
+    failures = [
+        p for p in result["parent_proposals"] if p.get("error")
     ]
+    assert len(failures) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -621,20 +756,30 @@ async def test_planner_can_compose_primitives_end_to_end(
         '{"number": 3, "decomposable": false, "kind": "already_focused", "reason": "single typo"}'
         ']}'
     )
-    fake_propose_resp = MagicMock()
-    fake_propose_resp.generated_text = (
+    # Per-parent chunking — propose_decompositions makes one LLM call
+    # per parent. Two parents (1, 2) → two propose responses.
+    fake_propose_resp_1 = MagicMock()
+    fake_propose_resp_1.generated_text = (
         '{"parent_proposals": ['
         '{"parent_number": 1, "children": ['
         '{"title": "A1", "body": "a1"}, {"title": "A2", "body": "a2"}'
-        '], "reason": "r1"},'
+        '], "reason": "r1"}'
+        '], "shared_concerns": []}'
+    )
+    fake_propose_resp_2 = MagicMock()
+    fake_propose_resp_2.generated_text = (
+        '{"parent_proposals": ['
         '{"parent_number": 2, "children": ['
         '{"title": "B1", "body": "b1"}, {"title": "B2", "body": "b2"}'
         '], "reason": "r2"}'
-        '],'
-        '"shared_concerns": []}'
+        '], "shared_concerns": []}'
     )
     cap._agent.infer = AsyncMock(
-        side_effect=[fake_classify_resp, fake_propose_resp],
+        side_effect=[
+            fake_classify_resp,
+            fake_propose_resp_1,
+            fake_propose_resp_2,
+        ],
     )
 
     # 1) Planner classifies all open issues.

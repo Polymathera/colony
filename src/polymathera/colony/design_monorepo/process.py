@@ -3257,29 +3257,32 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
 
     @action_executor(
         planning_summary=(
-            "Propose sub-issue decomposition for N parent issues in "
-            "ONE LLM call. For ``N=1``: plain per-parent decomposition. "
-            "For ``N>1``: joint decomposition — the LLM is told the "
-            "parents are related, produces children that don't "
-            "redundantly cover the same scope, and emits a "
-            "``shared_concerns`` list naming concerns that span "
-            "multiple parents. Returns ``{ok, parent_proposals: "
-            "[{parent_number, children: [{title, body}, ...], "
-            "reason}, ...], shared_concerns: [str], pre_filtered: "
-            "[{parent_number, kind, reason, ...}]}`` — "
+            "Propose sub-issue decomposition for the given parents. "
+            "The primitive runs ONE LLM call per parent internally "
+            "(durable against the single-call output truncation that "
+            "the F2 forensic case hit) and aggregates the per-parent "
+            "results — the LLM-facing surface stays the same: pass "
+            "the cohort, get back a per-parent proposal list. "
+            "Returns ``{ok, parent_proposals: [...], shared_concerns: "
+            "[str], pre_filtered: [...]}`` where each "
+            "``parent_proposals`` entry is EITHER ``{parent_number, "
+            "children: [{title, body}, ...], reason, parent_title}`` "
+            "(success) OR ``{parent_number, error: <signature>, "
+            "message, raw_excerpt?, parent_title}`` (this parent's "
+            "LLM call failed). ``ok`` is True iff AT LEAST ONE parent "
+            "succeeded. ``shared_concerns`` is ``[]`` — per-parent "
+            "chunking does not collect cross-parent insight; the "
+            "approval card sees the per-parent breakdown instead. "
             "``pre_filtered`` lists parents skipped by the STRUCTURAL "
             "read-side check (kind ``already_decomposed`` — the "
             "parent already carries the colony:decomposed-into "
             "marker). Pass ``allow_already_decomposed=True`` to "
             "re-propose anyway. The compact design-context summary "
             "(``include_design_context=True`` by default) is injected "
-            "into the prompt so the LLM splits along the substantive "
-            "design seams the project surfaces (subsystem / signal-"
-            "chain stage / failure mode / interface boundary / "
-            "regulatory step / supply-chain step) instead of "
-            "producing generic 'Part 1 / Part 2' splits. The planner "
-            "decides whether to pass one parent at a time or batch "
-            "a cluster — both work with this primitive."
+            "into each per-parent prompt so the LLM splits along "
+            "subsystem / signal-chain / failure-mode / interface / "
+            "regulatory / supply-chain seams instead of generic "
+            "'Part 1 / Part 2' splits."
         ),
     )
     async def propose_decompositions(
@@ -3407,17 +3410,74 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
 
         # Optional design-context summary — loaded ONCE per call from
         # the agent's design monorepo (same primitive
-        # ``bootstrap_roadmap_from_objectives`` uses). When
-        # ``include_design_context=False`` or the repo has no
-        # ``design_context_sources``, the prompt degrades cleanly to
-        # the legacy domain-agnostic shape.
+        # ``bootstrap_roadmap_from_objectives`` uses). The same summary
+        # is injected into EVERY per-parent prompt.
         design_context_summary: dict[str, Any] | None = None
         if include_design_context:
             design_context_summary = await self._load_design_context_for_prompt()
 
         criteria = decomposition_criteria or DEFAULT_DECOMPOSITION_CRITERIA
+
+        # Per-parent chunking. One LLM call per parent, durable against
+        # the single-call output truncation that the F2 forensic case
+        # hit. Per-parent failures attach as ``error`` entries in
+        # ``parent_proposals`` so the LLM (and the ErrorRewriterAdvisor
+        # F2 rule) get per-parent attribution and can retry the
+        # specific failures without losing the successes.
+        proposals: list[dict[str, Any]] = []
+        for parent in parents:
+            proposal = await self._propose_for_one_parent(
+                parent=parent,
+                criteria=criteria,
+                design_context_summary=design_context_summary,
+                max_children_per_parent=max_children_per_parent,
+                llm_max_tokens=llm_max_tokens,
+                llm_temperature=llm_temperature,
+                llm_timeout_s=llm_timeout_s,
+            )
+            proposals.append(proposal)
+
+        any_succeeded = any("children" in p for p in proposals)
+        result: dict[str, Any] = {
+            "ok": any_succeeded,
+            "parent_proposals": proposals,
+            # Cross-parent shared concerns are not collected under
+            # per-parent chunking; the per-parent breakdown in
+            # ``parent_proposals`` is what the approval card consumes.
+            "shared_concerns": [],
+            "pre_filtered": pre_filtered,
+        }
+        if not any_succeeded:
+            result["error"] = "all_parents_failed"
+            result["message"] = (
+                "Every parent's proposer call failed; see "
+                "parent_proposals[i].error for the per-parent reason."
+            )
+        return result
+
+    async def _propose_for_one_parent(
+        self,
+        *,
+        parent: dict[str, Any],
+        criteria: str,
+        design_context_summary: dict[str, Any] | None,
+        max_children_per_parent: int,
+        llm_max_tokens: int,
+        llm_temperature: float,
+        llm_timeout_s: float,
+    ) -> dict[str, Any]:
+        """Run ONE proposer LLM call for ONE parent. Returns a per-
+        parent entry suitable for inclusion in
+        ``parent_proposals``: either ``{parent_number, parent_title,
+        children, reason}`` on success, or ``{parent_number,
+        parent_title, error, message, raw_excerpt?}`` on per-parent
+        failure (LLM timeout, infer exception, parse failure, missing
+        entry in the parsed payload)."""
+
+        parent_number = parent["number"]
+        parent_title = parent.get("title", "") or ""
         prompt = _build_decomposition_prompt(
-            parent_issues=parents,
+            parent_issues=[parent],
             max_children_per_parent=max_children_per_parent,
             decomposition_criteria=criteria,
             design_context_summary=design_context_summary,
@@ -3434,58 +3494,59 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             raw = response.generated_text
         except asyncio.TimeoutError:
             return {
-                "ok": False,
-                "parent_proposals": [],
-                "shared_concerns": [],
-                "pre_filtered": pre_filtered,
+                "parent_number": parent_number,
+                "parent_title": parent_title,
                 "error": "llm_timeout",
                 "message": (
                     f"Proposer LLM exceeded the {llm_timeout_s}s "
-                    f"timeout. Try a smaller cohort."
+                    f"timeout for parent #{parent_number}."
                 ),
             }
         except Exception as exc:  # noqa: BLE001
             logger.exception(
-                "propose_decompositions: LLM call failed",
+                "propose_decompositions: LLM call failed for "
+                "parent #%s",
+                parent_number,
             )
             return {
-                "ok": False,
-                "parent_proposals": [],
-                "shared_concerns": [],
-                "pre_filtered": pre_filtered,
+                "parent_number": parent_number,
+                "parent_title": parent_title,
                 "error": "llm_call_failed",
                 "message": str(exc),
             }
         parsed = _parse_decomposition_proposal(
             raw,
-            expected_parents=[p["number"] for p in parents],
+            expected_parents=[parent_number],
             max_children_per_parent=max_children_per_parent,
         )
         if parsed is None:
             return {
-                "ok": False,
-                "parent_proposals": [],
-                "shared_concerns": [],
-                "pre_filtered": pre_filtered,
+                "parent_number": parent_number,
+                "parent_title": parent_title,
                 "error": "llm_proposal_parse_failed",
                 "message": (
-                    "Proposer output did not parse. Retry with a "
-                    "smaller cohort."
+                    f"Proposer output did not parse for parent "
+                    f"#{parent_number}."
                 ),
                 "raw_excerpt": raw[:500] if raw else "",
             }
-        # Decorate per-parent entries with the parent_title so the
-        # operator's approval card has human-readable context.
-        title_by_number = {p["number"]: p["title"] for p in parents}
-        for entry in parsed["parent_proposals"]:
-            entry["parent_title"] = title_by_number.get(
-                entry["parent_number"], "",
-            )
+        if not parsed["parent_proposals"]:
+            return {
+                "parent_number": parent_number,
+                "parent_title": parent_title,
+                "error": "llm_proposal_missing_parent",
+                "message": (
+                    f"LLM returned no proposal entry for parent "
+                    f"#{parent_number}."
+                ),
+                "raw_excerpt": raw[:500] if raw else "",
+            }
+        entry = parsed["parent_proposals"][0]
         return {
-            "ok": True,
-            "parent_proposals": parsed["parent_proposals"],
-            "shared_concerns": parsed["shared_concerns"],
-            "pre_filtered": pre_filtered,
+            "parent_number": parent_number,
+            "parent_title": parent_title,
+            "children": entry["children"],
+            "reason": entry.get("reason", ""),
         }
 
     @action_executor(
