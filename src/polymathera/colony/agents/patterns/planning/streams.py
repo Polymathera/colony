@@ -53,6 +53,15 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable
 
 from ...blueprint import Blueprint
+from .models import (
+    IterationObservation,
+    ReflectMoment,
+    StreamReflection,
+)
+from .reflection import (
+    StreamReflector,
+    RenderOnlyReflector,
+)
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from ....cluster.tokenization import TokenizerProtocol
@@ -175,19 +184,22 @@ class ConsciousnessStream:
         "vcm_update",
         "monorepo_commit",
         "domain_state",
+        "iteration_boundary",
     )
 
     def __init__(
         self,
         name: str,
-        formatter: ConsciousnessStreamFormatter | Blueprint,
+        formatter: ConsciousnessStreamFormatter | Blueprint | None = None,
         event_filter: Callable[[dict[str, Any]], bool] | None = None,
         action_filter: Callable[[dict[str, Any]], bool] | None = None,
         tool_output_filter: Callable[[dict[str, Any]], bool] | None = None,
         vcm_update_filter: Callable[[dict[str, Any]], bool] | None = None,
         monorepo_commit_filter: Callable[[dict[str, Any]], bool] | None = None,
         domain_state_filter: Callable[[dict[str, Any]], bool] | None = None,
+        iteration_boundary_filter: Callable[[dict[str, Any]], bool] | None = None,
         filters: dict[str, Callable[[dict[str, Any]], bool]] | None = None,
+        reflector: StreamReflector | Blueprint | None = None,
         max_entries: int = 20,
         compaction_budget_tokens: int | None = None,
         compaction_keep_recent: int = 12,
@@ -195,9 +207,11 @@ class ConsciousnessStream:
         """
         Args:
             name: Unique identifier for this stream. Used for logging.
-            formatter: Renders captured entries into a prompt section. May be
-                a Blueprint — resolved here so bind()-constructed streams can
-                nest a formatter blueprint without manual unwrapping upstream.
+            formatter: Legacy display-only formatter. Renders captured entries
+                into a prompt section. May be a Blueprint. Resolved +
+                auto-wrapped in :class:`RenderOnlyReflector` so display streams
+                pass through to the unified reflector contract without
+                per-call-site migration. Mutually exclusive with ``reflector``.
             event_filter: Predicate on accumulated event context. Accepted
                 events are recorded. ``None`` means accept no events.
             action_filter: Predicate on action-dispatcher call trace entries.
@@ -214,11 +228,21 @@ class ConsciousnessStream:
             domain_state_filter: Predicate on a domain state-machine
                 transition payload (``state_machine_name`` / ``transition`` /
                 ``payload``). ``None`` = accept none.
+            iteration_boundary_filter: Predicate on the per-iteration
+                ``IterationObservation`` dict the policy records as the
+                ``iteration_boundary`` entry. ``None`` means accept none.
+                Reflectors that need per-iteration coherent batches subscribe
+                via this filter.
             filters: Unified per-kind filter dict. Overrides any
                 ``<kind>_filter`` kwarg with the same key. Use for
                 programmatic configuration (e.g. when subclassing a
                 shared stream helper that wants to selectively override
                 one kind without re-specifying the others).
+            reflector: :class:`StreamReflector` that produces the typed
+                :class:`StreamReflection` the policy aggregates. May be a
+                Blueprint — resolved here. Mutually exclusive with
+                ``formatter``. Inference-shaped streams (contract drift,
+                inconsistency, cliff guard, …) pass a reflector directly.
             max_entries: Rolling window size before old entries are dropped.
                 Only used in *legacy* mode (``compaction_budget_tokens``
                 is ``None``). With compaction enabled, the durable log
@@ -232,8 +256,31 @@ class ConsciousnessStream:
                 auto-compaction policy never compacts (kept verbatim in
                 the view). Only meaningful when compaction is enabled.
         """
+        if formatter is None and reflector is None:
+            raise ValueError(
+                f"ConsciousnessStream {name!r}: must supply either "
+                f"formatter= (legacy display) or reflector= (unified contract).",
+            )
+        if formatter is not None and reflector is not None:
+            raise ValueError(
+                f"ConsciousnessStream {name!r}: formatter= and reflector= "
+                f"are mutually exclusive; pick one.",
+            )
         self.name = name
-        self.formatter = formatter.local_instance() if isinstance(formatter, Blueprint) else formatter
+        if formatter is not None:
+            self.formatter = (
+                formatter.local_instance() if isinstance(formatter, Blueprint)
+                else formatter
+            )
+            self.reflector: StreamReflector = RenderOnlyReflector(
+                self.formatter, name=f"{name}_render",
+            )
+        else:
+            self.formatter = None
+            self.reflector = (
+                reflector.local_instance() if isinstance(reflector, Blueprint)
+                else reflector
+            )
         # Per-kind filter map — the source of truth. Per-kind kwargs
         # above are sugar that lifts into this dict; ``filters=`` takes
         # precedence per-key when both are supplied.
@@ -245,6 +292,7 @@ class ConsciousnessStream:
             ("vcm_update", vcm_update_filter),
             ("monorepo_commit", monorepo_commit_filter),
             ("domain_state", domain_state_filter),
+            ("iteration_boundary", iteration_boundary_filter),
         ):
             if fn is not None:
                 kwarg_filters[kind] = fn
@@ -406,8 +454,73 @@ class ConsciousnessStream:
                 "payload": payload,
             })
 
+    def consider_iteration_boundary(self, payload: dict[str, Any]) -> None:
+        """Invoked by the action policy after each codegen iteration
+        finishes, with payload = ``IterationObservation.model_dump()``.
+
+        The per-iteration coherent batch detector-shaped reflectors look
+        at. Streams that don't care about iteration boundaries leave
+        ``iteration_boundary_filter=None`` and never record this kind.
+        """
+        f = self._filters.get("iteration_boundary")
+        if f is None:
+            return
+        if f(payload):
+            self._append({
+                "kind": "iteration_boundary",
+                "timestamp": time.time(),
+                "payload": payload,
+            })
+
+    def reflect(
+        self,
+        *,
+        moment: ReflectMoment,
+        observation: IterationObservation | None = None,
+    ) -> StreamReflection:
+        """Dispatch the stream's reflector at ``moment`` and return its
+        typed :class:`StreamReflection`.
+
+        Returns the empty reflection when the reflector did not declare
+        ``moment`` in :attr:`StreamReflector.REFLECT_AT` — the policy's
+        aggregation step skips empty reflections without further work.
+
+        Entries passed to the reflector match the stream's current view
+        (interleaved with compaction summaries when compaction is on),
+        the same shape :meth:`render` uses.
+        """
+        if moment not in self.reflector.REFLECT_AT:
+            return StreamReflection()
+        entries = self._render_entries()
+        try:
+            return self.reflector.reflect(
+                entries=entries,
+                observation=observation,
+                moment=moment,
+            )
+        except Exception:  # noqa: BLE001 — isolate plugin failures
+            logger.exception(
+                "ConsciousnessStream %r: reflector %r raised at moment "
+                "%r; emitting empty reflection.",
+                self.name, self.reflector.name, moment,
+            )
+            return StreamReflection()
+
+    def _render_entries(self) -> list[dict[str, Any]]:
+        """Internal: the entry list the reflector / formatter sees."""
+        return (
+            sorted(self._entries, key=self._view_sort_key)
+            if self._compaction_enabled
+            else list(self._entries)
+        )
+
     def render(self) -> str:
         """Render this stream's entries into a prompt section.
+
+        Equivalent to ``reflect(moment="planning_step").section_markdown``
+        for display-only streams. Retained for legacy callers that still
+        ask for the rendered markdown directly; new code uses
+        :meth:`reflect` and reads ``StreamReflection.section_markdown``.
 
         In compaction mode the hot view mixes raw entries with
         synthesized ``compaction_summary`` stand-ins, so it is rendered
@@ -415,12 +528,10 @@ class ConsciousnessStream:
         entries by their seq) — keeping correct interleaving even after
         an arbitrary :meth:`expand_span`.
         """
-        entries = (
-            sorted(self._entries, key=self._view_sort_key)
-            if self._compaction_enabled
-            else list(self._entries)
-        )
-        return self.formatter.format(entries)
+        if self.formatter is not None:
+            return self.formatter.format(self._render_entries())
+        # Reflector-only streams render via the planning_step moment.
+        return self.reflect(moment="planning_step").section_markdown
 
     def _append(self, entry: dict[str, Any]) -> None:
         if self._compaction_enabled:
@@ -483,7 +594,9 @@ class ConsciousnessStream:
         """Restore the view from the durable log (suspend/resume +
         restart). Loads every active summary plus a bounded tail of the
         most-recent uncovered raw entries; older uncovered entries stay
-        in the log (retrievable via :meth:`expand_span`)."""
+        in the log (retrievable via :meth:`expand_span`). Also restores
+        the reflector's cross-iteration state from the index's
+        ``reflector_state`` blob."""
         if self._store is None:
             return
         index = await self._store.read_index()
@@ -505,6 +618,15 @@ class ConsciousnessStream:
                 raw = raw[-tail_budget:]
                 break
         self._entries = sorted(raw + summaries, key=self._view_sort_key)
+        if index.reflector_state:
+            try:
+                self.reflector.deserialize_state(index.reflector_state)
+            except Exception:  # noqa: BLE001 — bad blob must not block rehydrate
+                logger.exception(
+                    "ConsciousnessStream %r: reflector %r failed to "
+                    "deserialize_state; starting with fresh state.",
+                    self.name, self.reflector.name,
+                )
 
     async def flush(self) -> None:
         """Persist newly-recorded raw entries to the durable log + sync
@@ -704,8 +826,19 @@ class ConsciousnessStream:
 
     def _index(self) -> Any:
         from .stream_log import StreamLogIndex
+        try:
+            reflector_state = self.reflector.serialize_state()
+        except Exception:  # noqa: BLE001 — bad serialize must not block flush
+            logger.exception(
+                "ConsciousnessStream %r: reflector %r failed to "
+                "serialize_state; persisting empty state.",
+                self.name, self.reflector.name,
+            )
+            reflector_state = {}
         return StreamLogIndex(
-            next_seq=self._next_seq, compactions=list(self._compactions),
+            next_seq=self._next_seq,
+            compactions=list(self._compactions),
+            reflector_state=reflector_state,
         )
 
     @staticmethod

@@ -69,10 +69,6 @@ from .policies import (
 from ..planning.context import PlanningContextBuilder
 from ....distributed.hooks import hookable
 from .code_constraints import (
-    BlockedDispatch,
-    CallRecord,
-    _BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES,
-    _CALL_RECORD_RESULT_PREVIEW_BYTES,
     CodeGenerator,
     FreeFormCodeGenerator,
     CodeValidator,
@@ -87,6 +83,25 @@ from .code_constraints import (
     CompletionValidator,
     NoOpCompletionValidator,
     LLMCompletionValidator,
+)
+from ..planning.models import (
+    BlockedDispatch,
+    CallRecord,
+    AdvisoryEntry,
+    Diagnostic,
+    BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES,
+    CALL_RECORD_RESULT_PREVIEW_BYTES,
+)
+from ..planning.reflection import (
+    build_iteration_observation,
+    outer_error_from_action_result,
+)
+from ..planning.reflectors import (
+    approval_advance_stream,
+    cliff_guard_stream,
+    contract_drift_stream,
+    error_rewriter_stream,
+    inconsistency_stream,
 )
 
 
@@ -700,6 +715,30 @@ def _first_action_key(planning_context: PlanningContext) -> str | None:
     return None
 
 
+def _render_advisories_section(
+    advisories: list[AdvisoryEntry],
+) -> str:
+    """Render the rolled-up ``## Last-Iteration Advisories`` section.
+
+    All streams' :class:`AdvisoryEntry` outputs flatten into ONE section,
+    preserving stream registration order then per-stream advisor order
+    (the substrate guarantees this — see
+    :meth:`BaseActionPolicy.collect_stream_reflections`)."""
+
+    lines: list[str] = ["## Last-Iteration Advisories", ""]
+    for adv in advisories:
+        lines.append(f"**{adv.kind}** (from `{adv.source}`)")
+        lines.append("")
+        lines.append(adv.body)
+        if adv.next_action_code:
+            lines.append("")
+            lines.append("```python")
+            lines.append(adv.next_action_code)
+            lines.append("```")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 # ---------------------------------------------------------------------------
 # CodeGenerationActionPolicy
 # ---------------------------------------------------------------------------
@@ -726,6 +765,18 @@ class BlockStreakTracker:
         dispatch or when a different action_key is blocked."""
         self._block_streak_action_key = None
         self._block_streak_count = 0
+
+    def snapshot(self) -> dict[str, Any]:
+        """Read-only summary of the streak's current state.
+
+        Same shape as :meth:`EmptyIterationTracker.snapshot`. Returned
+        dict is a fresh copy — callers may mutate freely without
+        affecting the tracker's internal state."""
+        return {
+            "action_key": self._block_streak_action_key,
+            "count": self._block_streak_count,
+            "threshold": self._block_streak_threshold,
+        }
 
     async def track(
         self, *, action_key: str, reason: str, suggestion: str,
@@ -899,6 +950,35 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self._last_blocked_dispatches: list[BlockedDispatch] = []
         self._block_streak_tracker = BlockStreakTracker(agent)
         self._run_call_trace: list[dict[str, Any]] = []
+        # Self-reflection layer: a list of reflector-shaped consciousness
+        # streams attached to this policy. Each runs at the iteration
+        # boundary, observes the prior iteration's coherent slice via
+        # ``IterationObservation``, and returns typed advisories +
+        # diagnostics the substrate rolls up into the next prompt
+        # (advisories) and onto the cross-agent diagnostic blackboard
+        # (diagnostics). Order matters: cliff_guard last so its "you
+        # have N iterations left" advisory renders at the bottom of the
+        # rolled-up "Last-Iteration Advisories" block — the spot the
+        # LLM reads last and weights most.
+        for reflector_stream in (
+            error_rewriter_stream(),
+            approval_advance_stream(),
+            inconsistency_stream(),
+            contract_drift_stream(),
+            cliff_guard_stream(
+                max_iterations=self.max_code_iterations,
+            ),
+        ):
+            self._consciousness_streams.append(reflector_stream)
+        # Index into ``_call_history`` marking the boundary between the
+        # prior iteration's calls and earlier iterations' calls. Updated
+        # after the boundary observation is recorded so the next
+        # iteration's slice starts at the right offset.
+        self._iteration_history_boundary: int = 0
+        # Monotonic sequence for reflector-emitted diagnostics, mirroring
+        # the per-namespace ``_block_diagnostic_seq`` shape on
+        # ``BlockStreakTracker``.
+        self._reflection_diagnostic_seq: int = 0
         self._had_internal_failures: bool = False
         self._internal_errors: list[str] = []
         self._browser: CapabilityBrowser | None = None
@@ -1297,12 +1377,12 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     params_preview = json.loads(
                         json.dumps(
                             dict(params),
-                        )[:_BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES]
+                        )[:BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES]
                     )
                 except (json.JSONDecodeError, TypeError):
                     params_preview = (
                         str(params)[
-                            :_BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES
+                            :BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES
                         ]
                     )
                 self._last_blocked_dispatches.append(BlockedDispatch(
@@ -1416,7 +1496,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 # the truncated view; full payloads remain in the
                 # span store.
                 preview_bytes = (
-                    _CALL_RECORD_RESULT_PREVIEW_BYTES
+                    CALL_RECORD_RESULT_PREVIEW_BYTES
                 )
                 output = result.output
                 if isinstance(output, (dict, list)):
@@ -1671,6 +1751,91 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
 
         return " | ".join(parts) if parts else "general agent task"
 
+    def _build_prior_iteration_observation(self):
+        """Build the :class:`IterationObservation` for the iteration
+        that just finished.
+
+        Returns ``None`` on the very first ``plan_step`` (no prior
+        iteration yet)."""
+
+        if self._code_iteration_count == 0:
+            return None
+        actions = self._call_history[self._iteration_history_boundary:]
+        # ``execute_iteration`` stored the wrapping ``execute_code``
+        # action's result under this id. A non-success entry means the
+        # LLM-generated code itself raised (KeyError, NameError, …);
+        # surface that to the observation so reflectors see the cause.
+        prior_action_id = (
+            f"codegen_plan_step_{self._code_iteration_count}"
+        )
+        outer_err = outer_error_from_action_result(
+            self._execution_context.action_results.get(prior_action_id),
+            prior_action_id,
+        )
+        status_counts: dict[str, int] = {}
+        for rec in actions:
+            status_counts[rec.status] = status_counts.get(rec.status, 0) + 1
+        logger.info(
+            "[Reflect:%s] iter=%d obs_built: actions=%s blocks=%d outer_err=%s",
+            self.agent.agent_id,
+            self._code_iteration_count,
+            status_counts,
+            len(self._last_blocked_dispatches),
+            "yes" if outer_err is not None else "no",
+        )
+        return build_iteration_observation(
+            iter_index=self._code_iteration_count,
+            actions_called=actions,
+            guardrail_blocks=self._last_blocked_dispatches,
+            outer_action_error=outer_err,
+        )
+
+    async def _emit_reflection_diagnostic(
+        self, diagnostic: Diagnostic,
+    ) -> None:
+        """Publish one reflector-emitted :class:`Diagnostic` on the
+        session's ``AgentDiagnosticProtocol`` namespace. Same shape as
+        :meth:`BlockStreakTracker._emit_diagnostic`; best-effort."""
+
+        try:
+            from ...scopes import BlackboardScope, get_scope_prefix
+            scope_id = get_scope_prefix(
+                BlackboardScope.SESSION,
+                self.agent,
+                namespace=BlockStreakTracker.DIAGNOSTIC_NAMESPACE,
+            )
+            self._reflection_diagnostic_seq += 1
+            seq = self._reflection_diagnostic_seq
+            bb = await self.agent.get_blackboard(scope_id=scope_id)
+            await bb.write(
+                AgentDiagnosticProtocol.event_key(
+                    self.agent.agent_id, diagnostic.kind, seq,
+                ),
+                {
+                    "agent_id": self.agent.agent_id,
+                    "kind": diagnostic.kind,
+                    "severity": diagnostic.severity,
+                    **diagnostic.payload,
+                },
+                tags={"agent_diagnostic", diagnostic.kind},
+                metadata={
+                    "agent_id": self.agent.agent_id,
+                    "kind": diagnostic.kind,
+                },
+            )
+            logger.info(
+                "[Reflect:%s] diagnostic_emitted: kind=%s severity=%s seq=%d",
+                self.agent.agent_id,
+                diagnostic.kind,
+                diagnostic.severity,
+                seq,
+            )
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning(
+                "[Reflect:%s] diagnostic_emit_failed: kind=%s err=%s",
+                self.agent.agent_id, diagnostic.kind, e,
+            )
+
     @override
     async def plan_step(
         self,
@@ -1775,6 +1940,63 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         if advisory:
             prompt += "\n\n## Runtime Guardrails\n" + advisory
 
+        # Self-reflection roll-up: record the per-iteration coherent
+        # batch as an ``iteration_boundary`` entry into every stream,
+        # then dispatch every stream's ``reflect()`` for the boundary
+        # moment. The substrate aggregates the typed reflections into
+        # per-stream prompt sections + a unified
+        # ``## Last-Iteration Advisories`` block + cross-agent
+        # diagnostics. This replaces the prior ``LastIterationDigest``
+        # builder: streams own observation rendering AND advisory
+        # synthesis under one substrate.
+        observation = self._build_prior_iteration_observation()
+        if observation is not None:
+            self.record_stream_entry(
+                "iteration_boundary", observation.model_dump(),
+            )
+            logger.info(
+                "[Reflect:%s] iter=%d boundary_recorded: streams=%d",
+                self.agent.agent_id,
+                self._code_iteration_count,
+                len(self._consciousness_streams),
+            )
+            sections, advisories, diagnostics = (
+                self.collect_stream_reflections(
+                    moment="iteration_boundary",
+                    observation=observation,
+                )
+            )
+            logger.info(
+                "[Reflect:%s] iter=%d reflections: sections=%s advisories=%s diagnostics=%s",
+                self.agent.agent_id,
+                self._code_iteration_count,
+                [name for name, _ in sections],
+                [(a.source, a.kind) for a in advisories],
+                [(d.kind, d.severity) for d in diagnostics],
+            )
+            for stream_name, section_markdown in sections:
+                # Streams that contribute their own section (display
+                # streams; today only reflector streams populate, but
+                # the substrate uniformly supports either side).
+                prompt += f"\n\n{section_markdown}"
+            if advisories:
+                rendered = _render_advisories_section(advisories)
+                prompt += "\n\n" + rendered
+                logger.info(
+                    "[Reflect:%s] iter=%d advisories_rendered_into_prompt: chars=%d",
+                    self.agent.agent_id,
+                    self._code_iteration_count,
+                    len(rendered),
+                )
+            for diagnostic in diagnostics:
+                # Best-effort fire-and-forget emit; failures are logged
+                # by the helper. Spawned as background tasks so a slow
+                # blackboard write doesn't block prompt assembly.
+                asyncio.create_task(
+                    self._emit_reflection_diagnostic(diagnostic),
+                )
+            self._iteration_history_boundary = len(self._call_history)
+
         # Clear completion rejection after it's been rendered into the prompt
         self._execution_context.custom_data.pop("last_completion_rejection", None)
 
@@ -1803,6 +2025,28 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 for s in skills:
                     skill_section += f"# Goal: {s.goal}\n{s.code}\n\n"
                 prompt += skill_section
+
+            # TODO: Find a better way to probe the prompts without hardcoding header names.
+            # Prompt-section manifest — log which top-level
+            # headers actually landed in the prompt the LLM will see, so
+            # forensics can confirm reflector output / guardrail advisories
+            # / blocked-dispatch context reached the model without
+            # logging the full prompt content.
+            _section_headers = [
+                "## Mode", "## Conversation", "## Instructions",
+                "## Action Map", "## Recent Errors",
+                "## Blocked Dispatches", "## Runtime Guardrails",
+                "## Last-Iteration Advisories",
+                "## Relevant Examples from Prior Runs",
+            ]
+            _sections_present = [h for h in _section_headers if h in prompt]
+            logger.info(
+                "[PromptManifest:%s] iter=%d sections=%s total_len=%d",
+                self.agent.agent_id,
+                self._code_iteration_count,
+                _sections_present,
+                len(prompt),
+            )
 
             # Dimension 1: CodeGenerator. Wrap the LLM call in a tracked task
             # so /abort can interrupt it mid-request — codegen prompts can take

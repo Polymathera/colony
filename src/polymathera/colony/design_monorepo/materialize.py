@@ -28,6 +28,7 @@ the discipline; the materialiser stays unconcerned with identity.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -614,12 +615,16 @@ async def materialize_design_context_sources(
     (``knowledge.graph_db_path`` → KuzuGraphStore, or InMemory).
     """
 
-    outcomes: list[DesignContextRowOutcome] = []
+    # Per-row fan-out. Each row has independent VCM-mapping + Kùzu KG
+    # paths; they don't share mutable state at this level (the per-file
+    # gather inside ``_materialize_kuzu_path`` already caps Anthropic
+    # concurrency at 10 via its own semaphore, and Kùzu writes serialize
+    # at ``threading.RLock``). Running rows in parallel collapses the
+    # outer wall-time too.
 
-    for src in repo_map.design_context_sources:
-        if enabled_sources is not None and src.name not in enabled_sources:
-            continue
-
+    async def _materialize_one(
+        src: DesignContextSource,
+    ) -> tuple[DesignContextRowOutcome, DesignContextRowOutcome]:
         files = list(_iter_design_context_files(repo_root, src))
         num_files = len(files)
 
@@ -635,7 +640,6 @@ async def materialize_design_context_sources(
             mmap_config=mmap_config,
             renewer=renewer,
         )
-        outcomes.append(vcm_outcome)
 
         # ----------------- Path 1: Kuzu KG ingestion --------------------
         kuzu_outcome = await _materialize_kuzu_path(
@@ -645,6 +649,19 @@ async def materialize_design_context_sources(
             include_kuzu=include_kuzu,
             ingestor=ingestor,
         )
+        return vcm_outcome, kuzu_outcome
+
+    selected_sources = [
+        s for s in repo_map.design_context_sources
+        if enabled_sources is None or s.name in enabled_sources
+    ]
+    per_row = await asyncio.gather(
+        *(_materialize_one(s) for s in selected_sources),
+    )
+
+    outcomes: list[DesignContextRowOutcome] = []
+    for vcm_outcome, kuzu_outcome in per_row:
+        outcomes.append(vcm_outcome)
         outcomes.append(kuzu_outcome)
 
     return DesignContextMaterialisationReport(rows=tuple(outcomes))
@@ -817,10 +834,19 @@ async def _materialize_kuzu_path(
             error="",
         )
 
-    total_claims = 0
-    successes = 0
-    failures: list[str] = []
-    for file_path in files:
+    # Bounded-concurrency fan-out. Each ``ingest_file`` issues one
+    # ``LLMClaimExtractor`` Anthropic call (~10s) + a Kùzu graph write.
+    # The Anthropic deployment already caps concurrent inference at
+    # ``max_concurrent_requests=10`` (remote_config.py) and shapes the
+    # rate via its token bucket; KuzuGraphStore serializes writes via
+    # ``threading.RLock`` (stores/graph.py:501). So gathering the file-
+    # level coroutines is safe: the deployment + the store are the
+    # actual throttles. The semaphore here just keeps the file-level
+    # gather from queuing thousands of pending coroutines on huge repos.
+    _INGEST_CONCURRENCY = 10
+    sem = asyncio.Semaphore(_INGEST_CONCURRENCY)
+
+    async def _ingest_one(file_path: Path) -> tuple[str, Any | None, str | None]:
         try:
             rel = file_path.relative_to(repo_root).as_posix()
         except ValueError:
@@ -828,23 +854,36 @@ async def _materialize_kuzu_path(
         source_uri = (
             f"{DESIGN_CONTEXT_URI_SCHEME}://{src.name}/{rel}"
         )
-        try:
-            record = await ingestor.ingest_file(
-                file_path,
-                # Hand-authored design context is the foundational
-                # design layer for the project — high retrieval weight,
-                # consistent with how the master pipeline treats
-                # tier-1 foundational sources.
-                tier=CorpusTier.TIER_1_FOUNDATIONS,
-                source_uri=source_uri,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "materialize_design_context_sources: ingest_file failed "
-                "for %s in row %r; continuing with the next file.",
-                file_path, src.name,
-            )
-            failures.append(f"{rel}: {exc}")
+        async with sem:
+            try:
+                record = await ingestor.ingest_file(
+                    file_path,
+                    # Hand-authored design context is the foundational
+                    # design layer for the project — high retrieval weight,
+                    # consistent with how the master pipeline treats
+                    # tier-1 foundational sources.
+                    tier=CorpusTier.TIER_1_FOUNDATIONS,
+                    source_uri=source_uri,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "materialize_design_context_sources: ingest_file failed "
+                    "for %s in row %r; continuing with the next file.",
+                    file_path, src.name,
+                )
+                return rel, None, str(exc)
+        return rel, record, None
+
+    results = await asyncio.gather(
+        *(_ingest_one(p) for p in files), return_exceptions=False,
+    )
+
+    total_claims = 0
+    successes = 0
+    failures: list[str] = []
+    for rel, record, exc_msg in results:
+        if exc_msg is not None:
+            failures.append(f"{rel}: {exc_msg}")
             continue
         status = getattr(record, "status", None)
         # ``IngestionStatus`` enum values: pending, parsing, completed,

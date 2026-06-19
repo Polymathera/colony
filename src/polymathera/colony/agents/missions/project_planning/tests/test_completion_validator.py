@@ -686,3 +686,180 @@ def test_resolve_scope_does_not_return_empty_frozenset_bandaid() -> None:
             f"stale band-aid prose ({marker!r}); the snapshot IS "
             f"wired (Change 3)."
         )
+
+
+# ---------------------------------------------------------------------------
+# pre_filtered drain semantics — the head5 regression
+# ---------------------------------------------------------------------------
+
+
+def _classify_entry_with_output(
+    *,
+    call_index: int,
+    action_id: str,
+) -> dict[str, Any]:
+    """A ``classify_issues_decomposability`` trace entry whose
+    ``action_id`` keys into ``action_results`` so the validator's
+    ``iter_successful_action_outputs`` can read its typed output."""
+
+    return {
+        "call_index": call_index,
+        "action_key": (
+            f"DesignProcessCapability.DesignProcessCapability."
+            f"{DesignProcessCapability.CLASSIFY_ISSUES_DECOMPOSABILITY_ACTION_KEY}"
+        ),
+        "parameters": {},
+        "success": True,
+        "error": None,
+        "output_preview": "",
+        "blocked": False,
+    }
+
+
+def test_tracker_pre_filtered_counts_as_drained() -> None:
+    """The head5 bug: 8 issues structurally pre-filtered as
+    already_decomposed must count toward the drain set. Before this
+    fix, ``remaining()`` only subtracted applied + non_decomposable,
+    so a run whose only "addressed" issues were structurally
+    pre-filtered would loop forever or be rubber-stamped by the
+    fallback validator."""
+
+    t = DecomposeBacklogTracker(
+        in_scope=frozenset({33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46}),
+        applied=frozenset(),
+        classified_non_decomposable=frozenset({33, 34, 35, 36, 45, 46}),
+        pre_filtered=frozenset({37, 38, 39, 40, 41, 42, 43, 44}),
+        early_stopped=False,
+        max_parents_per_run=None,
+    )
+    assert t.remaining() == frozenset()
+    assert t.is_drained() is True
+
+
+def test_tracker_pre_filtered_alone_drains_scope() -> None:
+    """Edge case: every in-scope issue was structurally pre-filtered
+    (operator launched a re-run after a prior decomposition swept the
+    backlog). No applied, no LLM-judged classifications. The drain
+    predicate must still accept — ``applied`` and
+    ``classified_non_decomposable`` carry no load."""
+
+    t = DecomposeBacklogTracker(
+        in_scope=frozenset({44, 45, 46}),
+        applied=frozenset(),
+        classified_non_decomposable=frozenset(),
+        pre_filtered=frozenset({44, 45, 46}),
+        early_stopped=False,
+        max_parents_per_run=None,
+    )
+    assert t.remaining() == frozenset()
+    assert t.is_drained() is True
+
+
+async def test_validator_credits_pre_filtered_from_classifier_output() -> None:
+    """End-to-end: the validator reads ``pre_filtered`` straight off the
+    classifier's typed action output (same trace path as
+    ``classifications``). Pins the contract so a future refactor of
+    the classifier's return shape can't silently strand pre-filtered
+    issues as ``remaining``.
+
+    Scenario mirrors head5 (2026-06-18 19:01-19:03): in-scope set is
+    {33..46}; the LLM judged {33,34,35,36,45,46} as non-decomposable;
+    the structural pre-filter caught {37..44} as already_decomposed.
+    With both signals credited, the validator must accept."""
+
+    classify_action_id = "act-classify-1"
+    in_scope_numbers = list(range(33, 47))
+    non_decomp_numbers = [33, 34, 35, 36, 45, 46]
+    pre_filtered_numbers = [37, 38, 39, 40, 41, 42, 43, 44]
+    classifier_output = {
+        "ok": True,
+        "classifications": [
+            {
+                "number": n,
+                "decomposable": False,
+                "kind": "already_focused",
+                "reason": "stub",
+            }
+            for n in non_decomp_numbers
+        ],
+        "pre_filtered": [
+            {
+                "number": n,
+                "decomposable": False,
+                "kind": "already_decomposed",
+                "reason": "stub",
+            }
+            for n in pre_filtered_numbers
+        ],
+    }
+    ctx = _exec_ctx(
+        scope_numbers=in_scope_numbers,
+        trace_entries=[
+            _classify_entry_with_output(
+                call_index=0, action_id=classify_action_id,
+            ),
+        ],
+        classify_action_id=classify_action_id,
+        action_results={
+            classify_action_id: _FakeActionResult(
+                success=True, output=classifier_output,
+            ),
+        },
+    )
+    agent = _StubAgent(params={
+        ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
+    })
+    validator = DecomposeCompletionValidator()
+    verdict = await validator.validate(
+        agent=agent, goals=[], results={}, execution_context=ctx,
+    )
+    assert verdict.allowed is True, verdict.reason
+    assert "drained" in verdict.reason
+    assert "pre_filtered 8" in verdict.reason
+
+
+async def test_validator_rejection_message_lists_pre_filtered_set() -> None:
+    """When the validator rejects, the rejection prose must surface the
+    pre-filtered set as its own line so the LLM's next iteration sees
+    what was credited (and what is still remaining) without inferring
+    from arithmetic."""
+
+    classify_action_id = "act-classify-1"
+    classifier_output = {
+        "ok": True,
+        "classifications": [],
+        "pre_filtered": [
+            {
+                "number": 44,
+                "decomposable": False,
+                "kind": "already_decomposed",
+                "reason": "stub",
+            },
+        ],
+    }
+    ctx = _exec_ctx(
+        scope_numbers=[44, 45, 46],
+        trace_entries=[
+            _classify_entry_with_output(
+                call_index=0, action_id=classify_action_id,
+            ),
+        ],
+        classify_action_id=classify_action_id,
+        action_results={
+            classify_action_id: _FakeActionResult(
+                success=True, output=classifier_output,
+            ),
+        },
+    )
+    agent = _StubAgent(params={
+        ProjectPlanningCoordinator.MODE_PARAM_NAME: ProjectPlanningCoordinator.DECOMPOSE_MODE_VALUE,
+    })
+    validator = DecomposeCompletionValidator()
+    verdict = await validator.validate(
+        agent=agent, goals=[], results={}, execution_context=ctx,
+    )
+    assert verdict.allowed is False
+    assert "Pre-filtered" in verdict.reason
+    assert "[44]" in verdict.reason
+    # Remaining set excludes the pre-filtered 44.
+    assert "Remaining: [45, 46]" in verdict.reason

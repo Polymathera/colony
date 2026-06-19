@@ -61,6 +61,7 @@ async def create_default_action_policy(agent: Agent, **kwargs) -> ActionPolicy:
             skill_library=skill_library,
             recovery_strategy=recovery_strategy,
             runtime_guardrail=runtime_guardrail,
+            completion_validator=kwargs.get("completion_validator", None),
             max_retries=kwargs.get("max_retries", 2),
             code_timeout=kwargs.get("code_timeout", 30.0),
             max_code_iterations=kwargs.get("max_code_iterations", 50),

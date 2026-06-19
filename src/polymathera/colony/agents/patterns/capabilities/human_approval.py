@@ -45,6 +45,7 @@ The redesign matches the protocol shape of
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, ClassVar
@@ -114,6 +115,112 @@ CHOICES_REQUIRING_EXPLANATION: frozenset[str] = frozenset({"reject", "abort"})
 non-empty when ``choice`` is one of these. The validator below enforces
 it at the data-shape boundary so guardrail predicates and the chat-UI
 relay see the same contract."""
+
+
+_HEADER_RE = re.compile(r"^\s*#{1,6}\s+\S")
+"""Match a markdown header line (e.g. ``## Proposed Decompositions``).
+Headers are template scaffolding, not body content — the validator
+strips them when counting substantive characters."""
+
+_LIST_ITEM_RE = re.compile(r"^\s*([-*+]|\d+[.)])\s+\S")
+"""Match a markdown list item: bullet (``- foo`` / ``* foo`` / ``+
+foo``) or numbered (``1. foo`` / ``1) foo``). Each line that matches
+is an enumerated item the operator can actually evaluate."""
+
+_SUBSECTION_RE = re.compile(r"^\s*#{2,6}\s+\S")
+"""Match a sub-section header (``## ...`` and deeper). The LLM also
+enumerates items as `### #42: title` sub-sections, not just bullets."""
+
+_SEPARATOR_RE = re.compile(r"^\s*[-=*_]{3,}\s*$")
+"""Match a markdown horizontal-rule / separator line. Scaffolding."""
+
+_MIN_BODY_CHARS = 8
+"""Minimum non-scaffolding character count an approval body must
+contain. Set low (admits ``"Approve?"`` and similar brief substantive
+questions) because the structural template-empty check below catches
+the actual forensic shape — header announcing items + footer + zero
+items between."""
+
+
+def _strip_scaffolding(text: str) -> str:
+    """Return ``text`` with markdown headers, separators, blank lines,
+    and surrounding whitespace removed. What remains is the substantive
+    body the operator actually reads to make a decision."""
+
+    out_lines: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if _HEADER_RE.match(raw):
+            continue
+        if _SEPARATOR_RE.match(raw):
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def _has_enumerated_items(text: str) -> bool:
+    """Return True if the question contains at least one enumerated
+    item shape. The structural test for "does this body show items":
+
+    - Any bullet / numbered list item → an item.
+    - Two or more markdown headers → the second+ are item sub-sections
+      (the LLM uses ``## Item 1`` / ``## Item 2`` / ... or ``## Header``
+      followed by ``### #42: title`` ``### #43: title`` ... — both
+      patterns enumerate items via headers).
+    """
+
+    has_list = False
+    header_count = 0
+    for raw in text.splitlines():
+        if _LIST_ITEM_RE.match(raw):
+            has_list = True
+        if _HEADER_RE.match(raw):
+            header_count += 1
+    return has_list or header_count >= 2
+
+
+_ENUMERATION_CLAIM_RE = re.compile(
+    r"\(\s*\d+\s+\w+\s*\)|"           # "(4 issues)", "(2 proposals)"
+    r"\b\d+\s+(?:issues?|proposals?|"  # "4 issues", "2 proposals", etc.
+    r"items?|decompositions?|tasks?|"
+    r"changes?|files?|edits?)\b|"
+    r"\b(?:proposed|the following|each of the following)\s+"
+    r"(?:issues?|proposals?|items?|decompositions?|"
+    r"tasks?|changes?|files?|edits?)\b",
+    re.IGNORECASE,
+)
+"""Match phrases that PROMISE enumeration: count patterns like
+``(4 issues)`` / ``2 proposals``, or framing phrases like ``Proposed
+Decompositions`` / ``The following issues``. When a question contains
+one of these AND has no enumerated items in the body, it's the
+templated-empty-items shape from head4.log. A header alone (e.g. ``##
+Approve this change``) without an enumeration claim is fine — the
+operator can act on the descriptive text below it."""
+
+
+def _claims_enumeration(text: str) -> bool:
+    return bool(_ENUMERATION_CLAIM_RE.search(text))
+
+
+class RequestHumanApprovalEmpty(ValueError):
+    """``request_human_approval`` was called with no substantive
+    content for the operator to evaluate.
+
+    A question is rejected when, after stripping markdown headers /
+    separators / blank lines, the remaining substantive body is shorter
+    than :data:`_MIN_BODY_CHARS`. This catches the forensic shape where
+    an LLM generates a header + footer scaffold but the loop that fills
+    the body has zero items (e.g., ``successful_proposals`` was empty
+    or the code was truncated by an iteration-shape limit).
+
+    Raised at the action-executor boundary so the framework converts
+    the exception into ``ActionResult(success=False, error=...)``;
+    the ``ErrorRewriterReflector`` rule then surfaces a typed
+    recovery recipe in the next iteration's prompt — either build
+    the body from existing proposals or stop the run cleanly via
+    the mission's terminal-stop primitive."""
 
 
 class HumanApprovalResponse(BaseModel):
@@ -277,6 +384,18 @@ class HumanApprovalCapability(AgentCapability):
             "``human_approval_response:{request_id}`` planner-context "
             "binding (key prefix on "
             ":attr:`HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX`). "
+            "PRECONDITION: ``question`` MUST contain substantive content "
+            "the operator can act on — at least one concrete description "
+            "of what is being approved. A markdown header (``## ...``) "
+            "plus a generic footer (``Approving will create ...``) with "
+            "NOTHING ITEMIZED between them is rejected at the action "
+            "boundary with ``RequestHumanApprovalEmpty``. Before "
+            "calling, verify the list of items you are looping over is "
+            "non-empty (e.g., ``assert len(successful_proposals) > 0``) "
+            "and that each item's title / body fields are populated. "
+            "If your upstream computation produced zero items, do NOT "
+            "request approval for nothing — stop the run cleanly via "
+            "your mission's terminal-stop primitive instead. "
             "When ``action_type`` is set the UI offers four choices: "
             "``approve_once`` (apply this dispatch), ``approve_all`` "
             "(approve every future dispatch whose action_key contains "
@@ -299,7 +418,68 @@ class HumanApprovalCapability(AgentCapability):
         deadline: datetime | None = None,
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Post a request and return the typed envelope ``{ok, request_id}``."""
+        """Post a request and return the typed envelope ``{ok, request_id}``.
+
+        Raises:
+            RequestHumanApprovalEmpty: if the ``question`` body is
+                empty / whitespace, or matches the templated-empty-
+                body pattern (3+ consecutive newlines, signature of
+                a header + footer with nothing between them).
+        """
+
+        question_substance = question.strip() if question else ""
+        if not question_substance:
+            raise RequestHumanApprovalEmpty(
+                "request_human_approval: question is empty or "
+                "whitespace; the operator has nothing to evaluate. "
+                "Build the body from your proposals before "
+                "re-requesting, or — if upstream computation failed "
+                "— stop the run cleanly via your mission's "
+                "terminal-stop primitive."
+            )
+        substantive_body = _strip_scaffolding(question)
+        if len(substantive_body) < _MIN_BODY_CHARS:
+            raise RequestHumanApprovalEmpty(
+                f"request_human_approval: after stripping markdown "
+                f"headers / separators / blank lines, only "
+                f"{len(substantive_body)} chars of substantive body "
+                f"remain (minimum: {_MIN_BODY_CHARS}). The operator "
+                f"has no content to evaluate. Either build the body "
+                f"from the real proposals you computed, or — if "
+                f"upstream computation failed — stop the run cleanly "
+                f"via your mission's terminal-stop primitive."
+            )
+        # Structural check for the forensic empty-items shape: when
+        # the question PROMISES enumeration (e.g., ``Proposed
+        # Decompositions``, ``(4 issues)``, ``the following items``)
+        # but has NO enumerated items in the body, the operator sees
+        # only a header + footer with nothing between. The forensic
+        # shape from head4.log:
+        # ``"## Proposed Issue Decompositions\n\nApproving will create
+        # sub-issues and patch parent bodies with checklists."`` —
+        # header present, footer present, ZERO list items between.
+        # The triple-newline regex misses this because there are only
+        # TWO consecutive newlines. Gating on ``_claims_enumeration``
+        # avoids over-rejecting legitimate single-header questions
+        # (e.g., ``"## Approve this change\n\nSummary: ..."``).
+        if _claims_enumeration(question) and not _has_enumerated_items(question):
+            raise RequestHumanApprovalEmpty(
+                "request_human_approval: question promises enumerated "
+                "items (e.g., 'Proposed ...', '(N items)', 'the "
+                "following ...') but the body has NO enumerated items "
+                "(no list bullets, no numbered items, no sub-section "
+                "headers). The operator sees a header + footer with "
+                "nothing between to evaluate. Common causes: the "
+                "proposals list you looped over was empty; the "
+                "template's interpolation produced a blank string; "
+                "the IterationShapeValidator truncated the code that "
+                "emits the list items. Either rebuild the body to "
+                "include the actual items (one bullet or sub-section "
+                "per item), or — if upstream computation produced "
+                "zero items — stop the run cleanly via your mission's "
+                "terminal-stop primitive. NEVER submit a header + "
+                "footer with no items between."
+            )
 
         if options is None:
             options = (
@@ -329,6 +509,13 @@ class HumanApprovalCapability(AgentCapability):
             },
         )
         self._requests[request.request_id] = request
+        logger.info(
+            "[Approval] request_published: rid=%s action_type=%s options=%s requester=%s",
+            request.request_id,
+            action_type or "",
+            list(options),
+            request.requester_agent_id or "",
+        )
         return {"ok": True, "request_id": request.request_id}
 
     @action_executor(
@@ -468,6 +655,10 @@ class HumanApprovalCapability(AgentCapability):
                 and atype
                 and atype.lower() in action_lower
             ):
+                logger.info(
+                    "[Approval] has_active_approval_for: action_key=%s → MATCH rid=%s choice=approve_all atype=%s",
+                    action_key, rid, atype,
+                )
                 return True, rid
 
         for rid, resp in responses:
@@ -479,8 +670,16 @@ class HumanApprovalCapability(AgentCapability):
                 and atype.lower() in action_lower
             ):
                 if await self._is_consumed(rid):
+                    logger.info(
+                        "[Approval] has_active_approval_for: action_key=%s → SKIP rid=%s choice=approve_once already_consumed=true",
+                        action_key, rid,
+                    )
                     continue
                 await self._mark_consumed(rid)
+                logger.info(
+                    "[Approval] has_active_approval_for: action_key=%s → MATCH rid=%s choice=approve_once consumed_now=true atype=%s",
+                    action_key, rid, atype,
+                )
                 return True, rid
 
         for rid, resp in responses:
@@ -489,8 +688,16 @@ class HumanApprovalCapability(AgentCapability):
             if atype:
                 continue  # typed responses already considered above
             if resp.choice.lower() in self._APPROVE_COMPAT_CHOICES:
+                logger.info(
+                    "[Approval] has_active_approval_for: action_key=%s → MATCH rid=%s choice=%s (legacy untyped)",
+                    action_key, rid, resp.choice,
+                )
                 return True, rid
 
+        logger.info(
+            "[Approval] has_active_approval_for: action_key=%s → NOT_FOUND known_responses=%d",
+            action_key, len(responses),
+        )
         return False, None
 
     async def _all_known_responses(
@@ -536,6 +743,10 @@ class HumanApprovalCapability(AgentCapability):
             tags={"human_approval", "consumed"},
             metadata={"request_id": request_id},
         )
+        logger.info(
+            "[Approval] consumption_marker_written: rid=%s",
+            request_id,
+        )
 
     # ---- Receive side -------------------------------------------------
 
@@ -570,6 +781,13 @@ class HumanApprovalCapability(AgentCapability):
             )
             return None
         self._responses[request_id] = response
+        logger.info(
+            "[Approval] response_cached: rid=%s choice=%s decided_by=%s explanation_len=%d",
+            request_id,
+            response.choice,
+            response.decided_by,
+            len(response.explanation or ""),
+        )
         # Resolution arrived via the event stream — decrement the
         # idle-wait counter if a prior get_response poll had
         # registered this request_id as pending.

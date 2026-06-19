@@ -150,7 +150,7 @@ def test_approval_wait_goal_text_states_advance_after_choice_contract() -> None:
     advances to the per-choice branch. Re-polling ``get_response`` is
     explicitly forbidden — that's the precondition for the F3 forensic
     25-iteration poll-loop. Pairs with the shipped
-    ``ApprovalAdvanceAdvisor`` (Slice E) which provides the recovery
+    ``ApprovalAdvanceReflector`` (Slice E) which provides the recovery
     side when the LLM ignores this prevention."""
 
     text = _approval_wait_goal_text()

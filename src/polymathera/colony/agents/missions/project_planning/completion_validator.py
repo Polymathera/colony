@@ -42,7 +42,7 @@ the early stop, and the framework records it for audit.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from overrides import override
@@ -106,13 +106,25 @@ class DecomposeBacklogTracker:
     classified_non_decomposable: frozenset[int]
     early_stopped: bool
     max_parents_per_run: int | None
+    # Issues the classifier returned in its ``pre_filtered`` list:
+    # already_decomposed parents (carry ``colony:decomposed-into``
+    # marker) and children of a prior decomposition (carry
+    # ``colony:parent-of`` marker). They count toward drain alongside
+    # applied + classified_non_decomposable — the read-side marker
+    # check is as authoritative as the writer that stamped it.
+    pre_filtered: frozenset[int] = field(default_factory=frozenset)
 
     def remaining(self) -> frozenset[int]:
         """Issues still in scope and unaddressed."""
 
         if self.early_stopped:
             return frozenset()
-        return self.in_scope - self.applied - self.classified_non_decomposable
+        return (
+            self.in_scope
+            - self.applied
+            - self.classified_non_decomposable
+            - self.pre_filtered
+        )
 
     def is_drained(self) -> bool:
         """True iff there is nothing left to do.
@@ -190,7 +202,8 @@ class DecomposeCompletionValidator(CompletionValidator):
                 reason=(
                     "Decompose mission scope drained "
                     f"(applied {len(tracker.applied)}, "
-                    f"non_decomposable {len(tracker.classified_non_decomposable)}"
+                    f"non_decomposable {len(tracker.classified_non_decomposable)}, "
+                    f"pre_filtered {len(tracker.pre_filtered)}"
                     + (
                         ", cap reached"
                         if (
@@ -213,6 +226,8 @@ class DecomposeCompletionValidator(CompletionValidator):
                 f"Applied (decomposed): {sorted(tracker.applied)}. "
                 f"Classified non-decomposable: "
                 f"{sorted(tracker.classified_non_decomposable)}. "
+                f"Pre-filtered (already_decomposed): "
+                f"{sorted(tracker.pre_filtered)}. "
                 f"Remaining: {sorted(tracker.remaining())}."
             ),
         )
@@ -229,6 +244,7 @@ class DecomposeCompletionValidator(CompletionValidator):
         classified_non = self._extract_classified_non_decomposable(
             trace, execution_context,
         )
+        pre_filtered = self._extract_pre_filtered(execution_context)
         early_stopped = await self._read_early_stop(agent)
         cap = params.get(ProjectPlanningCoordinator.MAX_PARENTS_PER_RUN_PARAM_NAME)
         max_parents_per_run = int(cap) if isinstance(cap, int) else None
@@ -236,6 +252,7 @@ class DecomposeCompletionValidator(CompletionValidator):
             in_scope=in_scope,
             applied=applied,
             classified_non_decomposable=classified_non,
+            pre_filtered=pre_filtered,
             early_stopped=early_stopped,
             max_parents_per_run=max_parents_per_run,
         )
@@ -321,6 +338,50 @@ class DecomposeCompletionValidator(CompletionValidator):
                         non_decomposable.add(n)
         return frozenset(non_decomposable)
 
+    @staticmethod
+    def _extract_pre_filtered(
+        execution_context: "PlanExecutionContext",
+    ) -> frozenset[int]:
+        """Issue numbers the classifier reported in its ``pre_filtered``
+        list — issues whose body carries the ``colony:decomposed-into``
+        marker (kind=already_decomposed). The marker is stamped by
+        ``create_decomposition`` on the parent; the classifier's
+        structural check skips these to avoid burning an LLM call on
+        a decision the operator already approved.
+
+        These count toward drain alongside ``applied`` and
+        ``classified_non_decomposable``: the structural marker check
+        run inside ``classify_issues_decomposability`` is as
+        authoritative as the writer (``create_decomposition``) that
+        stamped the marker. Without this, a run that correctly skips
+        N already-decomposed parents would fail the drain predicate —
+        the validator would treat the pre-filtered issues as
+        ``remaining`` and reject ``signal_completion`` indefinitely.
+
+        Walks the same trace-indexed action outputs as
+        :meth:`_extract_classified_non_decomposable`. Output shape per
+        call: ``{"pre_filtered": [{"number", "kind", "reason", ...},
+        ...]}``. The reason text is not consumed here; only the typed
+        ``number`` field gates the drain math.
+        """
+
+        action_key = (
+            DesignProcessCapability.classify_issues_decomposability._action_key
+        )
+        pre_filtered: set[int] = set()
+        for output in execution_context.iter_successful_action_outputs(
+            action_key,
+        ):
+            if not isinstance(output, dict):
+                continue
+            for item in output.get("pre_filtered") or []:
+                if not isinstance(item, dict):
+                    continue
+                n = item.get("number")
+                if isinstance(n, int):
+                    pre_filtered.add(n)
+        return frozenset(pre_filtered)
+
     async def _resolve_scope(
         self,
         agent: "Agent",
@@ -397,6 +458,7 @@ class DecomposeCompletionValidator(CompletionValidator):
                     "classified_non_decomposable": sorted(
                         tracker.classified_non_decomposable,
                     ),
+                    "pre_filtered": sorted(tracker.pre_filtered),
                     "remaining": sorted(tracker.remaining()),
                     "max_parents_per_run": tracker.max_parents_per_run,
                     "early_stopped": tracker.early_stopped,

@@ -63,6 +63,17 @@ from .prompts import (
     NumericIDPromptFormatting,
     AliasPromptFormatting,
 )
+from .models import (
+    BlockedDispatch,
+    CallRecord,
+    IterationObservation,
+    AdvisoryEntry,
+    Diagnostic,
+    ReflectMoment,
+    StreamReflection,
+    BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES,
+    CALL_RECORD_RESULT_PREVIEW_BYTES,
+)
 
 __all__ = [
     # Core classes
@@ -89,4 +100,14 @@ __all__ = [
     # Scope selection
     "ScopeSelectionResponse",
     "SCOPE_SELECTION_THRESHOLD",
+    # Models
+    "BlockedDispatch",
+    "CallRecord",
+    "IterationObservation",
+    "AdvisoryEntry",
+    "Diagnostic",
+    "ReflectMoment",
+    "StreamReflection",
+    "BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES",
+    "CALL_RECORD_RESULT_PREVIEW_BYTES",
 ]

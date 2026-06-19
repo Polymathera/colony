@@ -119,11 +119,19 @@ class StreamLogIndex:
 
     next_seq: int = 0
     compactions: list[CompactionDescriptor] = field(default_factory=list)
+    reflector_state: dict[str, Any] = field(default_factory=dict)
+    """Opaque per-stream reflector state — whatever the bound
+    :class:`~polymathera.colony.agents.patterns.planning.reflection.StreamReflector`
+    returned from ``serialize_state()`` at the last :meth:`flush`. Restored
+    on rehydrate via the reflector's ``deserialize_state``. Default empty
+    for stateless reflectors. Schema is the reflector's responsibility —
+    the substrate just round-trips the JSON shape."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "next_seq": self.next_seq,
             "compactions": [c.to_dict() for c in self.compactions],
+            "reflector_state": dict(self.reflector_state),
         }
 
     @classmethod
@@ -134,6 +142,7 @@ class StreamLogIndex:
                 CompactionDescriptor.from_dict(c)
                 for c in (d.get("compactions") or [])
             ],
+            reflector_state=dict(d.get("reflector_state") or {}),
         )
 
     def covered_ranges(self) -> list[tuple[int, int]]:

@@ -411,11 +411,13 @@ def test_list_issues_excludes_pull_requests():
 # ---------------------------------------------------------------------------
 # snapshot_open_roadmap_issues — spawn-time scope snapshot helper.
 #
-# Framework-level primitive (NOT an @action_executor): paginates
-# exhaustively, filters via _extract_roadmap_task_marker, excludes PRs,
-# and raises rather than returns ``[]`` on setup errors. Used by
-# ``ProjectPlanningCoordinator.resolve_spawn_scope``; tested here so
-# the contract is pinned at the capability layer.
+# Framework-level primitive: paginates exhaustively, excludes PRs, and
+# raises rather than returns ``[]`` on setup errors. Returns every open
+# non-PR issue at every depth — top-level roadmap items, ad-hoc filings,
+# and children of prior decompositions alike. The classifier
+# (``classify_issues_decomposability``) is the per-issue judge, so
+# depth-gating here would be redundant and would prevent iterative
+# refinement of substantive child issues.
 # ---------------------------------------------------------------------------
 
 
@@ -429,34 +431,48 @@ def _roadmap_marked_body(stable_id: str) -> str:
     return f"Some task body.\n\n<!-- colony:roadmap-task: {stable_id} -->\n"
 
 
-def test_snapshot_open_roadmap_issues_filters_unmarked_and_prs():
-    """The snapshot only includes open issues that (a) carry the
-    roadmap-task marker AND (b) are not pull requests. Unmarked
-    issues and PRs are dropped — the operator-curated roadmap set
-    is the only thing the decompose validator should gate on."""
+def test_snapshot_open_roadmap_issues_excludes_prs_only():
+    """The snapshot includes every open non-PR issue regardless of
+    marker presence. Depth-independence: top-level roadmap items,
+    ad-hoc filings, and children of prior decompositions all flow
+    through — the classifier evaluates each on its own merits via
+    body + design-context summary. PRs are the only exclusion
+    (they aren't decomposition candidates)."""
 
     stub = _StubClient()
     stub.responses[("ITER", "/repos/acme/proj/issues")] = [
-        # Roadmap-marked open issue → included
+        # Top-level roadmap-marked → included
         {"number": 44, "body": _roadmap_marked_body("aaaaaaaaaaaa")},
-        # Unmarked open issue → excluded (no marker)
+        # Ad-hoc unmarked open issue → included (depth-independent)
         {"number": 99, "body": "Some random discussion, no marker."},
+        # Child of a prior decomposition (parent-of marker) → included
+        # for further LLM judgment, not auto-pre-filtered. The
+        # classifier's depth-independent judge decides whether this
+        # specific child is itself too big to ship in one PR.
+        {
+            "number": 100,
+            "body": (
+                "Child task body.\n\n"
+                "<!-- colony:parent-of: 44 -->\n"
+            ),
+        },
         # Roadmap-marked open issue → included
         {"number": 45, "body": _roadmap_marked_body("bbbbbbbbbbbb")},
         # PR that somehow carries a roadmap marker → still excluded
-        # by the pull_request short-circuit before the marker check.
+        # by the pull_request short-circuit.
         {
             "number": 7,
             "body": _roadmap_marked_body("ccccccccccc1"),
             "pull_request": {"url": "..."},
         },
-        # Roadmap-marked but ``body`` missing (defensive) → excluded
+        # No body field at all → included (missing body is not an
+        # exclusion criterion).
         {"number": 50},
     ]
     with _with_context():
         cap = _make_cap(client=stub)
         result = _run(cap.snapshot_open_roadmap_issues())
-    assert result == [44, 45]
+    assert result == [44, 99, 100, 45, 50]
 
 
 def test_snapshot_open_roadmap_issues_paginates_exhaustively():

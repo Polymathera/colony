@@ -70,6 +70,12 @@ class EventBus:
                     return True  # Continue listening
 
                 if update and update.data:
+                    logger.info(
+                        "[Bus] on_state_update: namespace=%s event_type=%s key=%s",
+                        self.namespace,
+                        update.data.get("event_type"),
+                        update.data.get("key"),
+                    )
                     # Enqueue event for local dispatch
                     try:
                         event = BlackboardEvent(
@@ -85,10 +91,24 @@ class EventBus:
                         # Non-blocking enqueue (will drop if full)
                         try:
                             self.event_queue.put_nowait(event)
+                            logger.info(
+                                "[Bus] event_queue_enqueued: namespace=%s key=%s qsize=%d",
+                                self.namespace, event.key,
+                                self.event_queue.qsize(),
+                            )
                         except asyncio.QueueFull:
-                            logger.warning("Event queue full, dropping distributed event")
+                            logger.warning(
+                                "[Bus] event_queue_full_drop: namespace=%s "
+                                "key=%s qsize=%d",
+                                self.namespace, event.key,
+                                self.event_queue.qsize(),
+                            )
                     except Exception as e:
-                        logger.error(f"Error processing distributed event: {e}", exc_info=True)
+                        logger.exception(
+                            "[Bus] on_state_update_raised: namespace=%s "
+                            "key=%s err=%s",
+                            self.namespace, update.data.get("key"), e,
+                        )
 
                 return True  # Continue listening
 
@@ -216,6 +236,12 @@ class EventBus:
         while True:
             try:
                 event = await self.event_queue.get()
+                logger.info(
+                    "[Bus] dispatch_loop_pulled: namespace=%s key=%s "
+                    "event_type=%s listeners=%d",
+                    self.namespace, event.key, event.event_type,
+                    len(self.listeners),
+                )
 
                 # Dispatch to matching listeners
                 # The same callback should only be invoked once per event even if
@@ -223,17 +249,35 @@ class EventBus:
                 # multiple times with different filters.
                 invoked = []
                 for filter, callback in self.listeners:
-                    if filter is None or (filter.matches(event) and callback not in invoked):
+                    matched = filter is None or filter.matches(event)
+                    logger.info(
+                        "[Bus] dispatch_filter_check: namespace=%s key=%s "
+                        "filter=%s callback=%s matched=%s already_invoked=%s",
+                        self.namespace, event.key,
+                        type(filter).__name__ if filter is not None else None,
+                        getattr(callback, "__qualname__", repr(callback)),
+                        matched, callback in invoked,
+                    )
+                    if matched and callback not in invoked:
                         try:
                             await callback(event)
                             invoked.append(callback)
                         except Exception as e:
-                            logger.error(f"Error in event listener: {e}", exc_info=True)
+                            logger.exception(
+                                "[Bus] dispatch_callback_raised: namespace=%s "
+                                "key=%s callback=%s err=%s",
+                                self.namespace, event.key,
+                                getattr(callback, "__qualname__", repr(callback)),
+                                e,
+                            )
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error dispatching event: {e}", exc_info=True)
+                logger.exception(
+                    "[Bus] dispatch_loop_raised: namespace=%s err=%s",
+                    self.namespace, e,
+                )
 
     async def stream_events_via_consumer_group(
         self,

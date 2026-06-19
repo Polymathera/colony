@@ -1022,6 +1022,11 @@ class EnhancedBlackboard:
         async def queue_event(event: BlackboardEvent) -> None:
             try:
                 event_queue.put_nowait(event)
+                logger.info(
+                    "[Bus] capability_queue_enqueued: scope_id=%s pattern=%s "
+                    "key=%s qsize=%d",
+                    self.scope_id, pattern, event.key, event_queue.qsize(),
+                )
             except asyncio.QueueFull:
                 logger.warning(f"Event queue full, dropping event: {event.key}")
 

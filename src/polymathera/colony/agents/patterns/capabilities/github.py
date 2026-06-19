@@ -722,14 +722,18 @@ class GitHubCapability(AgentCapability):
 
     @action_executor(
         planning_summary=(
-            "Snapshot all open roadmap-marked issues on the design "
-            "monorepo and return their numbers as a list. Paginates "
-            "exhaustively, excludes PRs, and includes only issues "
-            "carrying the ``<!-- colony:roadmap-task: <stable-id> -->`` "
-            "marker (filed by the bootstrap or sync flows). The "
-            "result is a ``list[int]`` of issue numbers — pass the "
-            "list straight to ``classify_issues_decomposability`` or "
-            "``propose_decompositions``. "
+            "Snapshot all open issues on the design monorepo and "
+            "return their numbers as a list. Paginates exhaustively "
+            "and excludes PRs; includes every open issue at every "
+            "depth (top-level roadmap items and children of prior "
+            "decompositions alike). Depth-independence is intentional: "
+            "``classify_issues_decomposability`` judges each issue on "
+            "its own body + the design-context summary, so a child "
+            "issue that is itself too big to ship in one PR is just "
+            "as eligible for further decomposition as its parent was. "
+            "The result is a ``list[int]`` of issue numbers — pass "
+            "the list straight to ``classify_issues_decomposability`` "
+            "or ``propose_decompositions``. "
             "For decompose mode this is the FIRST action you call: "
             "the completion validator gates ``signal_completion`` on "
             "having a recorded snapshot. If the snapshot returns an "
@@ -741,18 +745,23 @@ class GitHubCapability(AgentCapability):
         ),
     )
     async def snapshot_open_roadmap_issues(self) -> list[int]:
-        """Return the numbers of every open roadmap-marked issue.
+        """Return the numbers of every open issue on the monorepo.
 
         Paginates exhaustively via the underlying client's
         ``iter_paginated`` (no ``max_results`` cap; the snapshot is a
-        scope-setting primitive, not a discovery-paged listing).
-        Filters via
-        :func:`polymathera.colony.design_monorepo.process._extract_roadmap_task_marker`
-        so only issues carrying the
-        ``<!-- colony:roadmap-task: <stable-id> -->`` marker are
-        included; PRs are excluded by the marker filter (their bodies
-        don't carry it) and by GitHub's ``pull_request`` field on
-        the response.
+        scope-setting primitive, not a discovery-paged listing). PRs
+        are excluded via GitHub's ``pull_request`` field on the
+        response; everything else is included regardless of depth or
+        decomposition-marker state. The depth-independence is
+        deliberate: the LLM judge in
+        :meth:`DesignProcessCapability.classify_issues_decomposability`
+        evaluates each issue on its own merits (body + design-context
+        seams), so a child of a prior decomposition that is itself
+        too big to ship in one PR can be further refined without a
+        contrived depth gate. Structural idempotency (already-
+        decomposed parents) is preserved by the classifier's
+        ``colony:decomposed-into`` pre-filter — not by trimming
+        scope here.
 
         Snapshot semantics: the returned list reflects state AT CALL
         TIME. Issues filed after the snapshot are NOT included; the
@@ -786,15 +795,6 @@ class GitHubCapability(AgentCapability):
                 f"GitHubCapability.snapshot_open_roadmap_issues: "
                 f"GitHub client unavailable: {err!r}"
             )
-        # Import the canonical marker-extraction function from the
-        # design-monorepo module. The function is module-private
-        # (underscore prefix) by convention; this is one of the few
-        # cross-module call sites that's part of the marker
-        # contract — same source of truth for read + write per
-        # [[fix-the-class-not-the-instance]].
-        from polymathera.colony.design_monorepo.process import (
-            _extract_roadmap_task_marker,
-        )
         numbers: list[int] = []
         async for it in client.iter_paginated(
             f"/repos/{repo}/issues",
@@ -802,8 +802,6 @@ class GitHubCapability(AgentCapability):
             state="open",
         ):
             if it.get("pull_request"):
-                continue
-            if _extract_roadmap_task_marker(it.get("body")) is None:
                 continue
             n = it.get("number")
             if isinstance(n, int):

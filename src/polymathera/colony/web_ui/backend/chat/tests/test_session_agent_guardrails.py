@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from polymathera.colony.agents.patterns.actions.code_constraints import (
+from polymathera.colony.agents.patterns.planning.models import (
     CallRecord,
 )
 from polymathera.colony.web_ui.backend.chat.session_agent_guardrails import (

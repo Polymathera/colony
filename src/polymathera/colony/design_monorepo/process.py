@@ -3041,8 +3041,10 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
             "[{number, decomposable, kind, reason}, ...], "
             "pre_filtered: [{number, kind, reason, ...}]}`` — "
             "``pre_filtered`` lists issues skipped by the STRUCTURAL "
-            "read-side check (kinds ``already_decomposed`` and "
-            "``child_of_decomposition``) WITHOUT an LLM call. "
+            "read-side check (kind ``already_decomposed`` — parents "
+            "carrying the ``colony:decomposed-into`` marker stamped "
+            "by a prior ``create_decomposition``) WITHOUT an LLM "
+            "call. "
             "``classifications`` is in input order over the issues "
             "that reached the LLM. ``decomposition_criteria`` is "
             "operator-tunable free-text describing what counts as "
@@ -3080,9 +3082,12 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         processed without burning an LLM call to re-judge a
         decision the operator already approved. Children of a prior
         decomposition (issues carrying
-        ``<!-- colony:parent-of: N -->``) are similarly surfaced as
-        ``kind="child_of_decomposition"`` so re-decomposing them
-        requires an explicit operator choice, not a default.
+        ``<!-- colony:parent-of: N -->``) are NOT pre-filtered: the
+        LLM judge evaluates each issue on its own body + the design-
+        context summary, depth-independent, so a child that is itself
+        too big to ship in one PR can be refined further. The
+        ``colony:parent-of`` marker stays in the child's body for
+        lineage / audit purposes; it does not gate decomposability.
 
         When ``include_design_context=True`` (the default), the
         compact design-context summary is loaded from ``repo_map.yaml``
@@ -3156,21 +3161,21 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
                     "decomposed_into": decomposed_into,
                 })
                 continue
-            parent_of = _extract_parent_of(h["body"])
-            if parent_of is not None:
-                pre_filtered.append({
-                    "number": h["number"],
-                    "decomposable": False,
-                    "kind": "child_of_decomposition",
-                    "reason": (
-                        f"Issue body carries colony:parent-of marker "
-                        f"→ this is a child of #{parent_of} created "
-                        f"by a prior decomposition. Re-decomposing a "
-                        f"child requires an explicit operator choice."
-                    ),
-                    "parent_of": parent_of,
-                })
-                continue
+            # parent_of = _extract_parent_of(h["body"])
+            # if parent_of is not None:
+            #     pre_filtered.append({
+            #         "number": h["number"],
+            #         "decomposable": False,
+            #         "kind": "child_of_decomposition",
+            #         "reason": (
+            #             f"Issue body carries colony:parent-of marker "
+            #             f"→ this is a child of #{parent_of} created "
+            #             f"by a prior decomposition. Re-decomposing a "
+            #             f"child requires an explicit operator choice."
+            #         ),
+            #         "parent_of": parent_of,
+            #     })
+            #     continue
             issues.append(h)
 
         # Optional design-context summary — loaded ONCE per call from
@@ -3421,7 +3426,7 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
         # Per-parent chunking. One LLM call per parent, durable against
         # the single-call output truncation that the F2 forensic case
         # hit. Per-parent failures attach as ``error`` entries in
-        # ``parent_proposals`` so the LLM (and the ErrorRewriterAdvisor
+        # ``parent_proposals`` so the LLM (and the ErrorRewriterReflector
         # F2 rule) get per-parent attribution and can retry the
         # specific failures without losing the successes.
         proposals: list[dict[str, Any]] = []

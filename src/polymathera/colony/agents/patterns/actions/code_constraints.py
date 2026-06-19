@@ -45,107 +45,14 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ...base import Agent, AgentCapability
+    from ...base import Agent
     from ...models import ActionResult, PlanExecutionContext
+    from ..planning.models import CallRecord
 
 logger = logging.getLogger(__name__)
-
-
-# ============================================================================
-# Call history record — the shared data shape every RuntimeGuardrail reads.
-# ============================================================================
-
-
-@dataclass
-class CallRecord:
-    """One entry in ``CodeGenerationActionPolicy._call_history``.
-
-    Replaces the previous ``list[str]`` shape so guardrails can make
-    args-aware decisions (e.g. "did get_agent_status get called for
-    THIS agent_id?") rather than only matching on action-key
-    substrings.
-
-    Status semantics:
-
-    - ``"pending"`` — record was created at admit time but the action
-      hasn't returned yet. Rare for guardrail reads since check()
-      runs BEFORE dispatch; the field exists so the policy can
-      pre-create the record at admit time without lying about status.
-    - ``"ok"`` / ``"error"`` — terminal states populated when the
-      dispatch returns.
-    - ``"blocked"`` — the guardrail itself refused the call. Lets
-      downstream guardrails distinguish "the LLM tried X but a gate
-      stopped it" from "the LLM never tried X".
-
-    ``result`` carries a small snapshot of the action's return value
-    so guardrails can inspect the OUTCOME of prior calls — e.g.
-    ``ApprovalRequiredGuardrail`` keys off
-    ``HumanApprovalCapability.get_response`` returning
-    ``{"choice": "Approve"}``. Capped at
-    :data:`_CALL_RECORD_RESULT_PREVIEW_BYTES` so a single big LLM
-    payload can't blow the per-iteration history budget; guardrails
-    that need the full payload should query the span store, not
-    ``call_history``.
-    """
-
-    action_key: str
-    params: dict[str, Any]
-    action_id: str = ""
-    """The dispatched action's id — keys into
-    :attr:`PlanExecutionContext.action_results`. Empty for the
-    ``"blocked"`` status (no dispatch happened)."""
-    start_wall: float = field(default_factory=time.time)
-    end_wall: float | None = None
-    status: Literal["pending", "ok", "error", "blocked"] = "pending"
-    error: str | None = None
-    result: Any = None
-
-
-_CALL_RECORD_RESULT_PREVIEW_BYTES = 4096
-"""Per-call truncation cap on ``CallRecord.result``. 4 KiB easily fits
-typed envelopes like ``{request_id, choice, decided_by, decided_at}``
-that guardrails inspect, while keeping the policy's in-memory
-history bounded across long-running coordinators."""
-
-
-@dataclass
-class BlockedDispatch:
-    """One entry in
-    :attr:`CodeGenerationActionPolicy._last_blocked_dispatches`.
-
-    Captured at the moment the runtime guardrail refuses a ``run()``
-    call inside the REPL. Survives exactly one iteration — cleared at
-    the start of the next code-generation cycle, same lifecycle as
-    :attr:`CodeGenerationActionPolicy._call_history`. Rendered into
-    the planner prompt under "## Blocked Dispatches (last iteration)"
-    so the LLM sees the block AND the guardrail's suggestion BEFORE
-    proposing its next cell — instead of having to infer the block
-    after the fact from a ``result.success=False`` in the cell's own
-    code.
-
-    The ``params_preview`` is a JSON-truncated snapshot of the
-    proposed call's params capped at
-    :data:`_BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES`; full payloads
-    stay in the span store, not in this in-memory list.
-    """
-
-    action_key: str
-    params_preview: Any
-    reason: str
-    suggestion: str
-    wall_time: float = field(default_factory=time.time)
-
-
-_BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES = 1024
-"""Per-block truncation cap on ``BlockedDispatch.params_preview``.
-Smaller than ``_CALL_RECORD_RESULT_PREVIEW_BYTES`` because blocked
-dispatches usually carry the LLM's proposed args verbatim and
-typically a few short fields (action_key + content + a few kwargs)
-are enough to recover; long-tail payloads (entire decomposition
-proposals) get truncated."""
 
 
 # ============================================================================
@@ -1258,6 +1165,10 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
         # "this is an apply call" and gate.
         dry_run = params.get("dry_run")
         if dry_run is True:
+            logger.info(
+                "[ApprovalGate] check: action_key=%s → ALLOW reason=dry_run gated_prefix=%s",
+                action_key, gated,
+            )
             return GuardrailDecision(allowed=True)
 
         cap = (
@@ -1266,10 +1177,18 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
             else None
         )
         if cap is not None:
-            allowed, _ = await cap.has_active_approval_for(action_key)
+            allowed, rid = await cap.has_active_approval_for(action_key)
             if allowed:
+                logger.info(
+                    "[ApprovalGate] check: action_key=%s → ALLOW rid=%s gated_prefix=%s",
+                    action_key, rid, gated,
+                )
                 return GuardrailDecision(allowed=True)
 
+        logger.info(
+            "[ApprovalGate] check: action_key=%s → BLOCK gated_prefix=%s reason=no_active_approval",
+            action_key, gated,
+        )
         from ..capabilities.human_approval import HumanApprovalCapability
         prefix = HumanApprovalCapability.RESPONSE_CONTEXT_KEY_PREFIX
         return GuardrailDecision(

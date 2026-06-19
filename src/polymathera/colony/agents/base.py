@@ -4288,8 +4288,16 @@ class AgentManagerBase:
                     else:
                         iteration += 1
                 except Exception as e:
-                    error_msg = f"{type(e).__name__}: {e}"
-                    logger.error(f"Error in agent {agent.agent_id} step: {error_msg}")
+                    # Use logger.exception so the full traceback +
+                    # exception class are captured. The prior
+                    # ``logger.error`` printed only the message, which
+                    # is why the silent F-B handler-block exception
+                    # never surfaced — the agent transitioned to
+                    # FAILED but we never saw the offending line.
+                    logger.exception(
+                        "Error in agent %s step: %s",
+                        agent.agent_id, e,
+                    )
                     agent.state = AgentState.FAILED
                     break
 

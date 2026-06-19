@@ -20,11 +20,11 @@ from polymathera.colony.agents.patterns.actions.code_constraints import (
     ApprovalRequiredGuardrail,
     ArgsAwareOrderingRule,
     ArgsAwareTemporalOrderGuardrail,
-    CallRecord,
     CompositeGuardrail,
     IterationShapeValidator,
     NoGuardrail,
 )
+from polymathera.colony.agents.patterns.planning.models import CallRecord
 
 
 @pytest.mark.asyncio

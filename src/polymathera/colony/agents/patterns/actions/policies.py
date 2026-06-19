@@ -51,8 +51,18 @@ from ..planning import (
 )
 from ..planning.planner import create_cache_aware_planner
 from ..planning.context import PlanningContextBuilder
-from ..planning.streams import ConsciousnessStream
 if TYPE_CHECKING:
+    # Type-only imports — ``streams`` / ``reflection`` form an import
+    # cycle with ``policies`` via ``code_constraints``; we only resolve
+    # them for type checking. ``from __future__ import annotations``
+    # keeps the runtime annotations as strings.
+    from ..planning.streams import ConsciousnessStream
+    from ..planning.models import (
+        AdvisoryEntry,
+        Diagnostic,
+        IterationObservation,
+        ReflectMoment,
+    )
     from ..planning.capabilities import ReplanningDecision
 
 
@@ -378,6 +388,53 @@ class BaseActionPolicy(ActionPolicy):
                     stream.name, method_name, payload,
                 )
 
+    def collect_stream_reflections(
+        self,
+        *,
+        moment: "ReflectMoment",
+        observation: "IterationObservation | None" = None,
+    ) -> "tuple[list[tuple[str, str]], list[AdvisoryEntry], list[Diagnostic]]":
+        """Run every mounted stream's ``reflect()`` for ``moment`` and
+        return three aggregated views:
+
+        - **sections**: ``list[(stream_name, section_markdown)]`` for
+          streams whose reflection populated ``section_markdown``.
+          Stream registration order preserved.
+        - **advisories**: flattened ``list[AdvisoryEntry]`` across all
+          streams, ordered by (stream registration order, per-stream
+          advisor order). Rolled up under one ``## Last-Iteration
+          Advisories`` prompt section by the caller.
+        - **diagnostics**: flattened ``list[Diagnostic]`` across all
+          streams. Each is intended to be emitted on the cross-agent
+          diagnostic blackboard by the caller, keyed by ``Diagnostic.kind``.
+
+        Skips streams whose reflector did not declare ``moment`` in
+        :attr:`StreamReflector.REFLECT_AT` (their reflect() returns the
+        empty reflection — no contribution).
+        """
+        from ...patterns.planning.models import AdvisoryEntry, Diagnostic  # noqa: F401 — local import for type
+        sections: list[tuple[str, str]] = []
+        advisories: list[AdvisoryEntry] = []
+        diagnostics: list[Diagnostic] = []
+        for stream in self._consciousness_streams:
+            try:
+                reflection = stream.reflect(
+                    moment=moment, observation=observation,
+                )
+            except Exception:  # noqa: BLE001 — one bad stream must not poison the rest
+                logger.exception(
+                    "Stream %s.reflect raised at moment %r; skipping",
+                    stream.name, moment,
+                )
+                continue
+            if reflection.is_empty:
+                continue
+            if reflection.section_markdown:
+                sections.append((stream.name, reflection.section_markdown))
+            advisories.extend(reflection.advisories)
+            diagnostics.extend(reflection.diagnostics)
+        return sections, advisories, diagnostics
+
     def get_status_snapshot(self) -> dict[str, Any]:
         """Read-only summary of policy state.
 
@@ -617,6 +674,18 @@ class BaseActionPolicy(ActionPolicy):
                 return ActionPolicyIterationResult(
                     success=False, policy_completed=False, idle=True,
                 )
+            except Exception as exc:
+                # ANY other exception from plan_step. Previously these
+                # propagated up silently (caller agent.run_step has no
+                # try/except), which is what allowed the F-B handler-
+                # broadcast failure to hide. Log here with full
+                # traceback + the agent id so the next forensic round
+                # surfaces the offending exception class + line.
+                logger.exception(
+                    "[Bus] plan_step_raised: agent=%s err=%s",
+                    self.agent.agent_id, exc,
+                )
+                raise
             self._llm_failure_backoff.record_success()
             action_str, trunc = pydantic_model_to_str(next_action)
             logger.info(f"    ⚙ EXEC_ITER: plan_step returned → {type(next_action).__name__}: {action_str} ({trunc})")
@@ -914,6 +983,11 @@ class EventDrivenActionPolicy(BaseActionPolicy):
                     continue
 
                 handlers = self._get_event_handlers()
+                logger.info(
+                    "[Bus] high_priority_broadcast: agent=%s key=%s handlers=%s",
+                    self.agent.agent_id, event.key,
+                    [h.__name__ for h in handlers],
+                )
                 # repl is None in this lane: high-priority handlers
                 # MUST NOT touch REPL state, since the main loop owns it.
                 # Handlers that need to write chat replies use their own
@@ -921,13 +995,18 @@ class EventDrivenActionPolicy(BaseActionPolicy):
                 for handler in handlers:
                     try:
                         result = await handler(event, None)
+                        logger.info(
+                            "[Bus] high_priority_handler_invoked: agent=%s "
+                            "key=%s handler=%s returned=%s",
+                            self.agent.agent_id, event.key, handler.__name__,
+                            "None" if result is None
+                            else f"context_key={getattr(result, 'context_key', '?')}",
+                        )
                     except Exception as e:
-                        logger.warning(
-                            "high-priority handler %s raised on event "
-                            "%s: %s",
-                            handler.__name__,
-                            event.key, e,
-                            exc_info=True,
+                        logger.exception(
+                            "[Bus] high_priority_handler_raised: agent=%s "
+                            "key=%s handler=%s err=%s",
+                            self.agent.agent_id, event.key, handler.__name__, e,
                         )
                         continue
                     if result is None:
@@ -1099,18 +1178,78 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         return handlers
     
     def _get_object_event_handlers(self, obj: Any) -> list[Callable]:
-        """Get event handlers from an object.
-        
+        """Get event handlers from an object — ``@event_handler``-decorated
+        methods.
+
+        Two safety properties this implementation guarantees:
+
+        1. **Never evaluate descriptor properties.** Naive ``getattr(obj,
+           name)`` on a ``@property`` name invokes the property body,
+           which may do I/O (e.g.,
+           :attr:`DesignProcessCapability.current_branch` opens a git
+           repo). When that I/O fails (missing clone, missing file),
+           the entire handler-discovery path collapses and the agent
+           loses ALL event dispatch — the exact bug head5.log surfaced
+           via ``[Bus] handlers_block_raised``. The walk inspects the
+           class chain first; any name backed by a ``property`` (or
+           similar non-method descriptor) at the type level is skipped
+           before reaching ``getattr`` on the instance.
+        2. **One bad attribute can't poison the rest.** ``getattr`` on
+           each remaining name is wrapped in try/except so a future
+           descriptor surprise (e.g., a custom ``__getattr__`` that
+           raises on certain names) logs at WARNING and the discovery
+           continues with the other handlers.
+
+        The ``@event_handler`` decorator stamps ``_is_event_handler =
+        True`` on the wrapper function (see
+        :func:`polymathera.colony.agents.patterns.events.event_handler`),
+        so detection only needs to inspect a function-shape attribute —
+        properties and other descriptors are never legitimate event
+        handlers and skipping them costs nothing.
+
         Args:
             obj: Object to inspect for @event_handler decorated methods
         
         Returns:
             List of event handler methods
         """
-        handlers = []
+        handlers: list[Callable] = []
+        cls = type(obj)
         for name in dir(obj):
-            method = getattr(obj, name, None)
-            if callable(method) and hasattr(method, '_is_event_handler'):
+            # Skip dunder / private mangled names cheaply.
+            if name.startswith("__"):
+                continue
+            # Walk the class chain to find the raw descriptor. We use
+            # ``vars(klass).get(name)`` rather than ``getattr(klass,
+            # name)`` because ``getattr`` on a property at the class
+            # level returns the property descriptor itself, BUT custom
+            # descriptors / metaclasses may still invoke side effects.
+            # ``vars()`` is the inert dict lookup.
+            raw = None
+            for klass in cls.__mro__:
+                if name in vars(klass):
+                    raw = vars(klass)[name]
+                    break
+            # Skip non-method descriptors: properties (I/O risk),
+            # classmethods bound at the class, staticmethods, and any
+            # other data descriptor. Event handlers are always plain
+            # methods or async methods.
+            if isinstance(raw, (property, staticmethod, classmethod)):
+                continue
+            # Now safe to bind. Still wrap in try/except so a single
+            # bad attribute doesn't kill the entire discovery — e.g.,
+            # a ``__getattr__`` that raises on specific names.
+            try:
+                method = getattr(obj, name, None)
+            except Exception as e:
+                logger.warning(
+                    "[Bus] handler_discovery_attr_failed: agent=%s "
+                    "source=%s name=%s err=%s",
+                    getattr(self.agent, "agent_id", "?"),
+                    type(obj).__name__, name, e,
+                )
+                continue
+            if callable(method) and getattr(method, "_is_event_handler", False):
                 handlers.append(method)
         return handlers
 
@@ -1184,12 +1323,9 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         self._last_observation_was_empty = (event is None)
 
         if event is not None:
-            logger.debug(
-                "plan_step received event: key=%s, value_type=%s, value_preview=%s, metadata=%s",
-                event.key,
-                type(event.value).__name__,
-                str(event.value)[:200] if event.value else "None",
-                event.metadata,
+            logger.info(
+                "[Bus] plan_step_event_pulled: agent=%s key=%s value_type=%s",
+                self.agent.agent_id, event.key, type(event.value).__name__,
             )
         else:
             logger.debug("plan_step: no event")
@@ -1209,97 +1345,132 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             # Also update agent metadata so child agents inherit the run_id
             self.agent.metadata.run_id = event_value["run_id"]
 
-        # 3. Broadcast to event handlers (within session_id context)
+        # 3. Broadcast to event handlers (within session_id context).
+        # The whole block is wrapped in try/except Exception (with full
+        # traceback via ``logger.exception``) so any silent failure
+        # between the substeps below is identified by class + line in
+        # the next forensic round. Without this, asyncio context-manager
+        # exits, swallowed exceptions inside ``_get_event_handlers``,
+        # and exceptions inside individual handlers can leave the agent
+        # stuck without a visible log line — the failure shape we
+        # bisected to this block in head4.log.
         immediate_actions = []
         accumulated_context: dict[str, dict[str, Any]] = {}
 
         if event is not None:
-            with session_id_context(event_session_id):
-                handlers = self._get_event_handlers()
-                logger.debug(
-                    "Broadcasting event key=%s to %d handlers: %s",
-                    event.key, len(handlers),
-                    [h.__name__ for h in handlers],
+            try:
+                logger.info(
+                    "[Bus] handlers_block_enter: agent=%s key=%s session_id=%s",
+                    self.agent.agent_id, event.key, event_session_id,
                 )
-                for handler in handlers:
-                    try:
-                        result = await handler(event, self._action_dispatcher.repl)
-
-                        if result is None:
-                            continue  # Event not relevant to this handler
-
-                        logger.debug(
-                            "Event handler %s returned: context_key=%s, has_context=%s, has_immediate=%s",
-                            handler.__name__, result.context_key,
-                            result.context is not None, result.immediate_action is not None,
-                        )
-
-                        # Accumulate context from all handlers
-                        # This context is available to action executors via scope
-                        context = result.context
-                        if context:
-                            if isinstance(result.context, BaseModel):
-                                context = result.context.model_dump()
-                            # TODO: Handle key conflicts (namespacing?)
-                            # Event handlers can also store context in agent's
-                            # working memory if needed
-                            accumulated_context[result.context_key] = context
-
-                        # Collect immediate actions (rule-based decision)
-                        # (Don't return yet - process all handlers)
-                        if result.immediate_action:
-                            immediate_actions.append(result.immediate_action)
-
-                        # Check for terminal state
-                        if result.done:
-                            state.custom["policy_complete"] = True
-                            return None
-
-                    except Exception as e:
-                        logger.warning(
-                            f"Event handler {handler.__name__} failed: {e}",
-                            exc_info=True
-                        )
-                        continue
-
-                # Store accumulated context in REPL for action executors
-                # Action executors can access via repl.get("event_context")
-                # Event handlers can also store context in agent's working memory
-                if accumulated_context and self._action_dispatcher and self._action_dispatcher.repl:
-                    self._action_dispatcher.repl.set("event_context", accumulated_context)
-                    await self._store_event_context(
-                        accumulated_context,
-                        state,
-                        namespace="event_context"
-                    )
-
-                    # Feed the accumulated context to every consciousness
-                    # stream. Each stream decides independently (via its
-                    # event_filter) whether to record this event.
-                    for stream in self._consciousness_streams:
-                        stream.consider_event(accumulated_context)
-
-                # If any handler provided immediate action, return the first one
-                # (others are ignored)
-                # TODO: Could be made configurable (e.g., priority-based selection or
-                #       let the LLM planner choose among them)
-                if len(immediate_actions) == 1:
-                    return immediate_actions[0]
-                elif len(immediate_actions) > 1:
+                with session_id_context(event_session_id):
                     logger.info(
-                        "Multiple immediate actions from event handlers; passing them to the LLM planner to decide among them."
+                        "[Bus] handlers_block_in_ctx: agent=%s key=%s",
+                        self.agent.agent_id, event.key,
                     )
-                    # TODO: Ensure that these actions are not identical.
-                    # Pass all to LLM planner via context
-                    await self._store_event_context(
-                        {
-                            "immediate_actions": [action.model_dump() for action in immediate_actions],
-                            "description": "Multiple immediate actions from event handlers"
-                        },
-                        state,
-                        namespace="conflicting_immediate_actions"
+                    handlers = self._get_event_handlers()
+                    logger.info(
+                        "[Bus] handlers_broadcast: agent=%s key=%s handlers=%s",
+                        self.agent.agent_id, event.key,
+                        [h.__name__ for h in handlers],
                     )
-                    # Let LLM planner decide among them
+                    for handler in handlers:
+                        try:
+                            result = await handler(event, self._action_dispatcher.repl)
+                            logger.info(
+                                "[Bus] handler_invoked: agent=%s key=%s "
+                                "handler=%s returned=%s",
+                                self.agent.agent_id, event.key,
+                                handler.__name__,
+                                "None" if result is None
+                                else f"context_key={result.context_key}",
+                            )
+
+                            if result is None:
+                                continue  # Event not relevant to this handler
+
+                            # Accumulate context from all handlers
+                            # This context is available to action executors via scope
+                            context = result.context
+                            if context:
+                                if isinstance(result.context, BaseModel):
+                                    context = result.context.model_dump()
+                                # TODO: Handle key conflicts (namespacing?)
+                                # Event handlers can also store context in agent's
+                                # working memory if needed
+                                accumulated_context[result.context_key] = context
+
+                            # Collect immediate actions (rule-based decision)
+                            # (Don't return yet - process all handlers)
+                            if result.immediate_action:
+                                immediate_actions.append(result.immediate_action)
+
+                            # Check for terminal state
+                            if result.done:
+                                state.custom["policy_complete"] = True
+                                return None
+
+                        except Exception as e:
+                            logger.exception(
+                                "[Bus] handler_raised: agent=%s key=%s "
+                                "handler=%s err=%s",
+                                self.agent.agent_id, event.key,
+                                handler.__name__, e,
+                            )
+                            continue
+
+                    # Store accumulated context in REPL for action executors
+                    # Action executors can access via repl.get("event_context")
+                    # Event handlers can also store context in agent's working memory
+                    if accumulated_context and self._action_dispatcher and self._action_dispatcher.repl:
+                        self._action_dispatcher.repl.set("event_context", accumulated_context)
+                        await self._store_event_context(
+                            accumulated_context,
+                            state,
+                            namespace="event_context"
+                        )
+
+                        # Feed the accumulated context to every consciousness
+                        # stream. Each stream decides independently (via its
+                        # event_filter) whether to record this event.
+                        for stream in self._consciousness_streams:
+                            stream.consider_event(accumulated_context)
+
+                    # If any handler provided immediate action, return the first one
+                    # (others are ignored)
+                    # TODO: Could be made configurable (e.g., priority-based selection or
+                    #       let the LLM planner choose among them)
+                    if len(immediate_actions) == 1:
+                        return immediate_actions[0]
+                    elif len(immediate_actions) > 1:
+                        logger.info(
+                            "Multiple immediate actions from event handlers; passing them to the LLM planner to decide among them."
+                        )
+                        # TODO: Ensure that these actions are not identical.
+                        # Pass all to LLM planner via context
+                        await self._store_event_context(
+                            {
+                                "immediate_actions": [action.model_dump() for action in immediate_actions],
+                                "description": "Multiple immediate actions from event handlers"
+                            },
+                            state,
+                            namespace="conflicting_immediate_actions"
+                        )
+                        # Let LLM planner decide among them
+            except Exception as e:
+                # The entire handler-broadcast block — including
+                # ``_get_event_handlers``, ``session_id_context``, the
+                # per-handler loop, and the post-loop REPL writes — is
+                # wrapped here. Any silent failure that previously
+                # caused ``handlers_broadcast`` not to fire after
+                # ``plan_step_event_pulled`` (the F-B bisection in
+                # head4.log) will now produce a full traceback under
+                # this WARNING line, with the event key + agent id
+                # for grepability.
+                logger.exception(
+                    "[Bus] handlers_block_raised: agent=%s key=%s err=%s",
+                    self.agent.agent_id, event.key, e,
+                )
 
         # 4. Invoke LLM planner with enriched context
         # Subclasses should override this or use CacheAwareActionPolicy

@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from polymathera.colony.agents.models import PlanningContext
-from polymathera.colony.agents.patterns.actions.code_constraints import (
+from polymathera.colony.agents.patterns.planning.models import (
     BlockedDispatch,
 )
 from polymathera.colony.agents.patterns.actions.code_generation import (

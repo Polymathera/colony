@@ -75,7 +75,7 @@ async def _make_capability(_exec_ctx) -> HumanApprovalCapability:
 
 async def test_first_pending_poll_increments_counter(_exec_ctx) -> None:
     cap = await _make_capability(_exec_ctx)
-    rid = (await cap.request_human_approval(question="Q?"))["request_id"]
+    rid = (await cap.request_human_approval(question="Approve action Q?"))["request_id"]
     assert cap._agent.idle_wait_counter == 0
 
     envelope = await cap.get_response(rid)
@@ -89,7 +89,7 @@ async def test_repeated_pending_polls_are_idempotent(_exec_ctx) -> None:
     counter must stay at 1, not climb."""
 
     cap = await _make_capability(_exec_ctx)
-    rid = (await cap.request_human_approval(question="Q?"))["request_id"]
+    rid = (await cap.request_human_approval(question="Approve action Q?"))["request_id"]
 
     for _ in range(5):
         envelope = await cap.get_response(rid)
@@ -102,7 +102,7 @@ async def test_resolved_via_get_response_decrements_counter(_exec_ctx) -> None:
     fallback path) lands the decrement."""
 
     cap = await _make_capability(_exec_ctx)
-    rid = (await cap.request_human_approval(question="Q?"))["request_id"]
+    rid = (await cap.request_human_approval(question="Approve action Q?"))["request_id"]
     await cap.get_response(rid)  # pending → counter 1
     assert cap._agent.idle_wait_counter == 1
 
@@ -132,7 +132,7 @@ async def test_resolved_via_event_handler_decrements_counter(_exec_ctx) -> None:
     ``get_response`` a second time."""
 
     cap = await _make_capability(_exec_ctx)
-    rid = (await cap.request_human_approval(question="Q?"))["request_id"]
+    rid = (await cap.request_human_approval(question="Approve action Q?"))["request_id"]
     await cap.get_response(rid)  # pending → counter 1
     assert cap._agent.idle_wait_counter == 1
 
@@ -153,7 +153,7 @@ async def test_repeated_resolutions_are_idempotent(_exec_ctx) -> None:
     decrement the counter further (would underflow)."""
 
     cap = await _make_capability(_exec_ctx)
-    rid = (await cap.request_human_approval(question="Q?"))["request_id"]
+    rid = (await cap.request_human_approval(question="Approve action Q?"))["request_id"]
     await cap.get_response(rid)  # pending → counter 1
 
     response = HumanApprovalResponse(
@@ -178,8 +178,8 @@ async def test_n_concurrent_pollers_compose_independently(_exec_ctx) -> None:
     across N concurrent pollers without naming concerns."""
 
     cap = await _make_capability(_exec_ctx)
-    rid_a = (await cap.request_human_approval(question="A?"))["request_id"]
-    rid_b = (await cap.request_human_approval(question="B?"))["request_id"]
+    rid_a = (await cap.request_human_approval(question="Approve action A?"))["request_id"]
+    rid_b = (await cap.request_human_approval(question="Approve action B?"))["request_id"]
 
     await cap.get_response(rid_a)
     await cap.get_response(rid_b)
@@ -228,7 +228,7 @@ async def test_detached_capability_no_op_on_counter(_exec_ctx) -> None:
     await bb.initialize()
     cap._blackboard = bb
 
-    rid = (await cap.request_human_approval(question="Q?"))["request_id"]
+    rid = (await cap.request_human_approval(question="Approve action Q?"))["request_id"]
     # Should NOT raise.
     envelope = await cap.get_response(rid)
     assert envelope["state"] == "pending"

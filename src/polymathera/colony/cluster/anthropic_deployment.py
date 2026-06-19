@@ -68,7 +68,13 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
 
         self._client = anthropic.AsyncAnthropic(
             api_key=api_key,
-            max_retries=2,
+            # SDK retries 429 / 529 with exponential backoff and honors
+            # ``Retry-After`` natively. Bumped from the default of 2 to
+            # absorb per-tier rate-limit spikes when many callers fan
+            # out through the same deployment (e.g.,
+            # ``materialize_design_context_sources``'s per-file
+            # ingestion).
+            max_retries=5,
             timeout=httpx.Timeout(
                 connect=10.0,
                 read=self.config.api_timeout_seconds,

@@ -722,6 +722,13 @@ class DistributedStateSubscriber:
                     continue
 
                 update = DistributedStateUpdate.model_validate_json(message['data'])
+                logger.info(
+                    "[Bus] subscriber_received: channel=%s topic=%s "
+                    "type=%s replace_all=%s data_keys=%s",
+                    self.channel_key, update.topic, update.type,
+                    update.replace_all,
+                    list((update.data or {}).keys()) if update.data else [],
+                )
                 if not self._callback(update, ex=None):
                     break
 
@@ -3068,6 +3075,11 @@ class RedisOM:
                     ).model_dump(),
                     default=_json_default,
                 ),
+            )
+            logger.info(
+                "[Bus] publish: channel=%s topic=%s replace_all=%s update_keys=%s",
+                channel_key, topic, replace_all,
+                list(updates.keys()) if updates else [],
             )
 
         if pipe is not None:

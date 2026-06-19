@@ -13,12 +13,12 @@ from polymathera.colony.agents.patterns.actions.code_constraints import (
     ApprovalRequiredGuardrail,
     ArgsAwareOrderingRule,
     ArgsAwareTemporalOrderGuardrail,
-    CallRecord,
     CapabilityBoundaryGuardrail,
     CompositeGuardrail,
     NoGuardrail,
     TemporalOrderGuardrail,
 )
+from polymathera.colony.agents.patterns.planning.models import CallRecord
 
 
 pytestmark = pytest.mark.asyncio

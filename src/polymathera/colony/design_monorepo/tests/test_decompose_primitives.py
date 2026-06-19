@@ -426,6 +426,90 @@ async def test_classify_uses_default_criteria_when_none_passed(
     assert DEFAULT_DECOMPOSITION_CRITERIA in sent_prompt
 
 
+async def test_classify_pre_filters_already_decomposed_parents(
+    tmp_path: Path,
+) -> None:
+    """Parents carrying the ``colony:decomposed-into`` marker (stamped
+    by a prior ``create_decomposition``) are structurally pre-filtered
+    — surfaced as ``kind="already_decomposed"`` without burning an
+    LLM call. This is idempotency, not depth-gating: a decision the
+    operator already approved should not be re-judged."""
+
+    github = _make_github_stub(
+        issues_by_number={
+            1: {
+                "title": "Already split",
+                "body": (
+                    "Parent body.\n\n"
+                    "<!-- colony:decomposed-into: 10,11 -->\n"
+                    "- [ ] #10\n- [ ] #11\n"
+                ),
+            },
+            2: {"title": "Untouched", "body": "Big work to evaluate"},
+        },
+    )
+    llm_response = (
+        '{"classifications": [{"number": 2, "decomposable": true, '
+        '"kind": "too_high_level", "reason": "y"}]}'
+    )
+    cap = _make_capability(
+        tmp_path, github=github, llm_response=llm_response,
+    )
+    result = await cap.classify_issues_decomposability(issue_numbers=[1, 2])
+    assert result["ok"] is True
+    pre_filtered_numbers = [pf["number"] for pf in result["pre_filtered"]]
+    classified_numbers = [c["number"] for c in result["classifications"]]
+    assert pre_filtered_numbers == [1]
+    assert result["pre_filtered"][0]["kind"] == "already_decomposed"
+    assert classified_numbers == [2]
+    # The LLM prompt must omit the pre-filtered issue (it never reached
+    # the LLM) and include the classified one.
+    sent_prompt = cap._agent.infer.call_args.kwargs["prompt"]
+    assert "Untouched" in sent_prompt
+    assert "Already split" not in sent_prompt
+
+
+async def test_classify_does_not_pre_filter_children_of_decomposition(
+    tmp_path: Path,
+) -> None:
+    """Children of a prior decomposition (carrying ``colony:parent-of``)
+    are NOT pre-filtered: depth-independence is the contract. The LLM
+    judge evaluates each issue on its own body + the design-context
+    summary, so a child that is itself too big to ship in one PR can
+    be refined further. The ``colony:parent-of`` marker stays in the
+    body for lineage / audit but does not gate the LLM call."""
+
+    github = _make_github_stub(
+        issues_by_number={
+            10: {
+                "title": "Child task — still big",
+                "body": (
+                    "Child task body — designs the entire downstream "
+                    "scoring engine including human-readable + machine "
+                    "outputs.\n\n"
+                    "<!-- colony:parent-of: 1 -->\n"
+                ),
+            },
+        },
+    )
+    llm_response = (
+        '{"classifications": [{"number": 10, "decomposable": true, '
+        '"kind": "too_high_level", '
+        '"reason": "child still wraps multiple deliverables"}]}'
+    )
+    cap = _make_capability(
+        tmp_path, github=github, llm_response=llm_response,
+    )
+    result = await cap.classify_issues_decomposability(issue_numbers=[10])
+    assert result["ok"] is True
+    # The child reached the LLM judge (not auto-pre-filtered).
+    assert result["pre_filtered"] == []
+    assert [c["number"] for c in result["classifications"]] == [10]
+    assert result["classifications"][0]["decomposable"] is True
+    sent_prompt = cap._agent.infer.call_args.kwargs["prompt"]
+    assert "Child task — still big" in sent_prompt
+
+
 # ---------------------------------------------------------------------------
 # Primitive: propose_decompositions
 # ---------------------------------------------------------------------------
@@ -530,7 +614,7 @@ async def test_propose_per_parent_failure_attributed_with_success(
     failed parents carry ``error`` + ``raw_excerpt``. The cohort-
     level ``ok`` is True because at least one succeeded — the LLM
     can retry just the failed parents without losing the successes.
-    Pairs with the ErrorRewriterAdvisor F2 rule (now matches
+    Pairs with the ErrorRewriterReflector F2 rule (now matches
     ``ok=True`` with per-parent errors)."""
 
     github = _make_github_stub(
