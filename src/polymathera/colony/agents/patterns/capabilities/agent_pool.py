@@ -332,14 +332,26 @@ class AgentPoolCapability(AgentCapability):
     ) -> dict[str, Any]:
         """Get status of agents in the pool.
 
+        State is read from
+        :meth:`AgentSystemDeployment.get_agent_info` — the SINGLE
+        source of truth for an agent's lifecycle state.
+
         Args:
             agent_ids: Specific agents to query (None = all tracked agents)
-            filter_state: Filter by state ("RUNNING", "STOPPED", "SUSPENDED", etc.)
+            filter_state: Filter by AgentState name (UPPERCASE, matches
+                :class:`AgentState` enum names: ``RUNNING``, ``STOPPED``,
+                ``SUSPENDED``, ``FAILED``, ``WAITING``, ``IDLE``, etc.).
+                ``UNREGISTERED`` matches agents the registry has no
+                record for (terminated + reaped). ``UNKNOWN`` matches
+                agents the registry lookup raised on (transient
+                read-side error).
 
         Returns:
             Dict with:
             - agents: List of agent status dicts with agent_id, state, current_work
         """
+        from ....system import fetch_agent_info
+
         if agent_ids is None:
             agent_ids = list(self._agent_handles.keys())
 
@@ -347,11 +359,29 @@ class AgentPoolCapability(AgentCapability):
         for agent_id in agent_ids:
             handle = self._agent_handles.get(agent_id)
 
-            # Get state from child_agents tracking
-            state = "UNKNOWN"
-            if agent_id in self.agent.child_agents.values():
-                # Agent is tracked as a child
-                state = "RUNNING"
+            # Authoritative state lookup via the canonical
+            # ``fetch_agent_info`` helper (single source of truth —
+            # see :func:`polymathera.colony._handles.fetch_agent_info`).
+            # ``None`` means the registry has no record (terminated +
+            # reaped or never existed); a transient read-side
+            # exception means the deployment / registry is briefly
+            # unreachable. Both surface as typed strings the LLM
+            # caller can branch on; the action stays robust to
+            # registry hiccups instead of erroring the whole status
+            # query for ALL agents because of one read miss.
+            try:
+                info = await fetch_agent_info(
+                    agent_id, app_name=self.agent._app_name,
+                )
+            except Exception:  # noqa: BLE001 — transient registry read error
+                logger.warning(
+                    "AgentPoolCapability.get_agent_status: "
+                    "fetch_agent_info(%s) raised; surfacing UNKNOWN.",
+                    agent_id, exc_info=True,
+                )
+                state = "UNKNOWN"
+            else:
+                state = info.state.name if info is not None else "UNREGISTERED"
 
             # Check if we have work assigned
             current_work = self._agent_work.get(agent_id)

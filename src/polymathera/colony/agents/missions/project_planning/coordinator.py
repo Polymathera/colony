@@ -40,6 +40,9 @@ from polymathera.colony.agents.patterns.capabilities.github import (
 from polymathera.colony.agents.patterns.capabilities.human_approval import (
     HumanApprovalCapability,
 )
+from polymathera.colony.agents.patterns.capabilities.human_help import (
+    HumanHelpCapability,
+)
 from polymathera.colony.agents.patterns.capabilities.mission_status import (
     MissionStatusCapability,
 )
@@ -184,6 +187,18 @@ class ProjectPlanningCoordinator(Agent):
             DesignProcessCapability.bind(),
             GitHubCapability.bind(scope=BlackboardScope.SESSION),
             HumanApprovalCapability.bind(scope=BlackboardScope.SESSION),
+            # HumanHelpCapability exposes ``request_help`` for mid-run
+            # clarification when the planner is stuck on a judgment
+            # call new info has surfaced (operator must adjudicate).
+            # Distinct from ``request_human_approval`` (authorize a
+            # specific dispatch) and ``emit_mission_status`` (fire-and-
+            # forget narrative). Session-scoped — the SessionAgent's
+            # ``handle_human_help_request`` translator routes the
+            # request into the chat UI as a typed question with
+            # ``kind='human_help'``; the operator's free-text or
+            # picked-option response surfaces on this capability's
+            # ``@event_handler`` as a planner-context binding.
+            HumanHelpCapability.bind(scope=BlackboardScope.SESSION),
             # MissionStatusCapability exposes ``emit_mission_status`` so
             # the coordinator's planner can publish a one-line narrative
             # ("loading design context...", "classifying issues...")

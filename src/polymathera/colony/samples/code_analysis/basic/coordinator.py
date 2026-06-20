@@ -32,6 +32,9 @@ from polymathera.colony.agents.models import (
 )
 from polymathera.colony.system import get_agent_system
 from polymathera.colony.vcm.sources import PageCluster
+from polymathera.colony.agents.patterns.capabilities.human_help import (
+    HumanHelpCapability,
+)
 from polymathera.colony.agents.patterns.capabilities.critique import (
     CriticCapability,
     CritiqueContext,
@@ -900,6 +903,12 @@ class BaseCodeAnalysisCoordinator(Agent):
         # CriticCapability initializes policies from agent metadata
         self.add_capability_blueprints([
             CriticCapability.bind(),
+            # Mid-run clarification — escalate ambiguous analysis
+            # judgments to the operator via ``request_help``. Mounted
+            # on the BASE so both ``CodeAnalysisCoordinator`` (V1) and
+            # ``CodeAnalysisCoordinatorV2`` inherit it without
+            # duplicating the bind line.
+            HumanHelpCapability.bind(scope=BlackboardScope.SESSION),
         ])
 
         await super().initialize()

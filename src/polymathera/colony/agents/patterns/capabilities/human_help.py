@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, ClassVar
 
 from overrides import override
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ...base import Agent, AgentCapability
 from ...blackboard.protocol import HumanHelpProtocol
@@ -111,6 +111,29 @@ class HumanHelpResponse(BaseModel):
     decided_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
     )
+
+    @model_validator(mode="after")
+    def _require_chosen_option_or_guidance(self) -> "HumanHelpResponse":
+        """At least one of ``chosen_option`` and ``guidance`` MUST be
+        non-empty. A response with neither carries no signal for the
+        agent — the planner-context binding would surface an empty
+        envelope and the next iteration would have nothing to react
+        to. Enforced at the data-shape boundary so the REST endpoint
+        surfaces a 422 and the chat-UI form rejects empty submits
+        before they reach the blackboard."""
+
+        picked = self.chosen_option is not None and self.chosen_option != ""
+        wrote = bool(self.guidance and self.guidance.strip())
+        if not (picked or wrote):
+            raise ValueError(
+                "HumanHelpResponse: at least one of ``chosen_option`` "
+                "(the operator picks a candidate from the request's "
+                "``options``) or ``guidance`` (free-form text the "
+                "operator writes when none of the options fit) must "
+                "be non-empty. An empty response gives the agent "
+                "nothing to react to."
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

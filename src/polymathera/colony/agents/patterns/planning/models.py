@@ -102,6 +102,44 @@ are enough to recover; long-tail payloads (entire decomposition
 proposals) get truncated."""
 
 
+class GuardrailBlockedError(Exception):
+    """Raised by the ``run()`` helper when a runtime guardrail refuses
+    a dispatch. Aborts the LLM-generated code block in full.
+
+    A code block emitted by the action policy is the LLM's *plan* —
+    a sequence the LLM intended to execute as a unit. Letting the
+    suffix run after the head was rejected produces undefined
+    behavior (e.g. a ``wait_for_next_event`` running with its
+    precondition ``respond_to_user`` skipped → the agent goes idle
+    without ever responding to the user). Atomicity restores the
+    contract: the block is rejected wholesale; the LLM regenerates
+    on the next iteration with full visibility of the rejection
+    (the matching :class:`BlockedDispatch` is recorded in
+    ``CodeGenerationActionPolicy._last_blocked_dispatches`` before
+    this raises, so the next prompt build carries the advisory).
+
+    Subclass of ``Exception`` (not ``BaseException``) — the REPL's
+    exception capture treats it as a normal code-execution failure;
+    the action-policy retry loop fires automatically without
+    bespoke handling.
+    """
+
+    def __init__(
+        self,
+        *,
+        action_key: str,
+        reason: str,
+        suggestion: str,
+    ) -> None:
+        self.action_key = action_key
+        self.reason = reason
+        self.suggestion = suggestion
+        msg = f"Blocked by guardrail: {action_key}: {reason}."
+        if suggestion:
+            msg = f"{msg} {suggestion}"
+        super().__init__(msg)
+
+
 _FROZEN = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
 

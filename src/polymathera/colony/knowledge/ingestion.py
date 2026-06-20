@@ -278,28 +278,36 @@ class Ingestor:
         # Multi-reader path: each registered reader contributes its
         # sections; failures on one reader log and skip rather than
         # fail the whole ingest, so a transient GROBID outage doesn't
-        # poison the body-extractor result. We fail the record only if
-        # NO reader produced sections.
+        # poison the body-extractor result. Readers run concurrently —
+        # for PDFs, several LLM-driven readers (Anthropic / Gemini /
+        # Mistral OCR) may all be registered as fall-throughs; their
+        # sections union into the chunker input. Per-reader failure
+        # is logged and skipped — same recovery semantics as the
+        # prior serial loop. We fail the record only if NO reader
+        # produced sections.
+        reader_results = await asyncio.gather(
+            *(r.read_async(document) for r in readers),
+            return_exceptions=True,
+        )
         sections: list[Any] = []
         last_error: str | None = None
-        for reader in readers:
-            try:
-                reader_sections = await reader.read_async(document)
-            except FormatReaderError as exc:
-                last_error = str(exc)
+        for reader, result in zip(readers, reader_results):
+            if isinstance(result, FormatReaderError):
+                last_error = str(result)
                 logger.warning(
                     "Ingestor: reader %s rejected %s (%s); continuing.",
-                    type(reader).__name__, document.source_uri, exc,
+                    type(reader).__name__, document.source_uri, result,
                 )
                 continue
-            except Exception as exc:  # noqa: BLE001
-                last_error = f"reader failed: {exc}"
-                logger.exception(
+            if isinstance(result, BaseException):
+                last_error = f"reader failed: {result}"
+                logger.error(
                     "Ingestor: reader %s failed on %s",
                     type(reader).__name__, document.source_uri,
+                    exc_info=result,
                 )
                 continue
-            sections.extend(reader_sections)
+            sections.extend(result)
         if not sections:
             return _finish_record(
                 record, status=IngestionStatus.FAILED,
@@ -391,15 +399,14 @@ class Ingestor:
                 error=f"vector store insert failed: {exc}",
             )
 
-        if self._graph_store is not None:
-            for claim in claims:
-                try:
-                    await self._graph_store.add_claim(claim)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Ingestor: graph_store.add_claim failed for %s: %s",
-                        document.source_uri, exc,
-                    )
+        if self._graph_store is not None and claims:
+            try:
+                await self._graph_store.add_claims(claims)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Ingestor: graph_store.add_claims failed for %s: %s",
+                    document.source_uri, exc,
+                )
 
         review_required = self._sample_for_review()
         if review_required and self._review is not None:
@@ -480,19 +487,31 @@ class Ingestor:
     ) -> Sequence[Claim]:
         if not self._extractors:
             return ()
-        results: list[Claim] = []
-        # Run extractors per chunk in series — parallelism is the
-        # caller's choice (an LLM-bound extractor sets its own
-        # concurrency by batching internally).
+        # Every (chunk × extractor) pair runs concurrently. The
+        # actual back-pressure gate is downstream: an LLM-bound
+        # extractor's per-call rate-limiting (e.g. the Anthropic
+        # deployment's ``max_concurrent_requests`` semaphore +
+        # token-bucket throttle) caps the in-flight LLM calls; the
+        # rule-based ``DeterministicClaimExtractor`` is CPU-only and
+        # cheap. Per-chunk failure is logged and skipped so one bad
+        # chunk does not poison the batch — same recovery semantics
+        # as the prior serial loop.
+        tasks: list[Awaitable[Sequence[Claim]]] = []
+        attribution: list[tuple[Chunk, ClaimExtractor]] = []
         for chunk in chunks:
             for extractor in self._extractors:
-                try:
-                    results.extend(await extractor.extract(chunk))
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Ingestor: extractor %s failed on chunk %s: %s",
-                        type(extractor).__name__, chunk.chunk_id, exc,
-                    )
+                tasks.append(extractor.extract(chunk))
+                attribution.append((chunk, extractor))
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        results: list[Claim] = []
+        for (chunk, extractor), outcome in zip(attribution, outcomes):
+            if isinstance(outcome, BaseException):
+                logger.warning(
+                    "Ingestor: extractor %s failed on chunk %s: %s",
+                    type(extractor).__name__, chunk.chunk_id, outcome,
+                )
+                continue
+            results.extend(outcome)
         return tuple(results)
 
     def _sample_for_review(self) -> bool:

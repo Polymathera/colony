@@ -42,7 +42,25 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     -- a typed dict (kind=code/table/diff/...) the chat UI renders
     -- alongside the markdown content. JSONB so future kinds plug in
     -- without a schema migration.
-    attachments     JSONB
+    attachments     JSONB,
+    -- Typed-question routing hint set by the agent's
+    -- ``handle_human_approval_request`` / ``handle_human_help_request``
+    -- translators. Values: ``"human_approval"`` (response routes to
+    -- the human_approval HTTP endpoint), ``"human_help"`` (routes to
+    -- the human_help endpoint), NULL (legacy / freeform WS reply
+    -- lane). Persisted so a page reload surfaces the card in the
+    -- right shape — without this column, refreshing during an
+    -- awaiting-reply question loses the routing hint and the
+    -- operator's click would land on the wrong endpoint.
+    kind            TEXT,
+    -- Free-form bag the requesting agent stamps on typed-question
+    -- payloads. For ``kind="human_approval"`` carries the proposal
+    -- diff / summary / affected-pages list; for ``kind="human_help"``
+    -- carries the agent's ``context`` (what it has tried + observed)
+    -- so the operator card can render the situation that triggered
+    -- the escalation. JSONB so new request shapes can stamp
+    -- additional keys without a schema migration.
+    extra           JSONB
 );
 """
 
@@ -56,6 +74,8 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id
 CHAT_MESSAGES_MIGRATIONS_SQL = (
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS attachments JSONB;",
     "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS action_type TEXT;",
+    "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS kind TEXT;",
+    "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS extra JSONB;",
 )
 
 

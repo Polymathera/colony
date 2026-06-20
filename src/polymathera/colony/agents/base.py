@@ -1121,10 +1121,11 @@ class AgentHandle:
 
     async def _load_agent_metadata(self) -> None:
         """Load agent registration info from AgentSystemDeployment."""
-        from ..system import get_agent_system
+        from ..system import fetch_agent_info
 
-        agent_system = await get_agent_system(app_name=self._app_name)
-        agent_info = await agent_system.get_agent_info(self.child_agent_id)
+        agent_info = await fetch_agent_info(
+            self.child_agent_id, app_name=self._app_name,
+        )
 
         if agent_info is None:
             raise ValueError(f"Agent {self.child_agent_id} not found")
@@ -2034,6 +2035,7 @@ class Agent(BaseModel):
     _resumption_condition: ResumptionCondition | None = PrivateAttr(default=None)
     _manager: AgentManagerBase | None = PrivateAttr(default=None)
     _tracing_facility: TracingFacility | None = PrivateAttr(default=None)
+    _app_name: str | None = PrivateAttr(default=None)
 
     # Tracing config (set externally, e.g., by AgentSystemConfig)
     _tracing_config: TracingConfig | None = PrivateAttr(default=None)
@@ -2316,6 +2318,9 @@ class Agent(BaseModel):
         Override in subclasses to perform initialization logic.
         """
         from ..system import get_vcm
+
+        if self._app_name is None:
+            self._app_name = serving.get_my_app_name()
 
         # Check if this is a resumed agent
         if self.metadata.resuming_from_suspension:
@@ -3298,10 +3303,11 @@ class Agent(BaseModel):
         terminated. Unregistered (info is None) and STOPPED both mean the
         binding is stale and may be replaced.
         """
-        from ..system import get_agent_system
+        from ..system import fetch_agent_info
 
-        agent_system = await get_agent_system(app_name=self._app_name)
-        info = await agent_system.get_agent_info(child_agent_id)
+        info = await fetch_agent_info(
+            child_agent_id, app_name=self._app_name,
+        )
         return info is not None and info.state != AgentState.STOPPED
 
     async def spawn_child_agents(

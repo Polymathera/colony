@@ -3819,45 +3819,24 @@ class DesignProcessCapability(DesignMonorepoCapabilityBase):
     def _sibling_github_capability(self) -> Any:
         """Look up the ``GitHubCapability`` mounted on the same agent.
 
-        Returns the capability instance, or ``None`` when (a) the
-        capability is detached (no agent), (b) no GitHubCapability is
-        mounted, or (c) the agent's capability registry doesn't
-        expose lookup-by-class. Callers must handle ``None`` —
+        Returns the capability instance, or ``None`` when the
+        capability is detached (no agent) or no ``GitHubCapability``
+        is mounted. Callers must handle ``None`` —
         ``summarise_progress`` and ``identify_bottlenecks`` degrade
         gracefully.
+
+        Uses :meth:`Agent.get_capability_by_type` directly — the
+        canonical typed lookup on the ``Agent`` base class.
         """
 
         if self._agent is None:
             return None
-        # Try the standard capability registry. Different Agent /
-        # AgentHandle implementations expose this differently; try
-        # the most common shapes.
-        for attr in ("get_capability", "capability_by_class"):
-            getter = getattr(self._agent, attr, None)
-            if getter is None:
-                continue
-            try:
-                # Lazy import to avoid cycles + to keep this method
-                # safe in test environments without the full agent
-                # infrastructure.
-                from ..agents.patterns.capabilities.github import (
-                    GitHubCapability,
-                )
-                cap = getter(GitHubCapability)
-                if cap is not None:
-                    return cap
-            except Exception:  # noqa: BLE001
-                continue
-        # Fall back to the ``_capabilities`` dict if exposed.
-        caps = getattr(self._agent, "_capabilities", None)
-        if isinstance(caps, dict):
-            from ..agents.patterns.capabilities.github import (
-                GitHubCapability,
-            )
-            for cap in caps.values():
-                if isinstance(cap, GitHubCapability):
-                    return cap
-        return None
+        # Lazy import to avoid the design_monorepo → agents.patterns
+        # cycle.
+        from ..agents.patterns.capabilities.github import (
+            GitHubCapability,
+        )
+        return self._agent.get_capability_by_type(GitHubCapability)
 
     async def _discover_bottleneck_rules(
         self, *, rule_set: set[str],

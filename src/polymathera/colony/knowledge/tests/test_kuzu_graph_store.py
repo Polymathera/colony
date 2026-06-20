@@ -114,6 +114,122 @@ async def test_add_claim_round_trip(store: KuzuGraphStore) -> None:
     assert (nodes, edges) == (2, 1)
 
 
+async def test_add_claims_batch_round_trip(store: KuzuGraphStore) -> None:
+    """Fix D contract: ``add_claims`` ingests N claims under a single
+    ``asyncio.to_thread`` hop + a single outer lock acquisition. The
+    result list is one entry per input claim, in order, and the same
+    nodes/edges land in the store as if the equivalent N
+    ``add_claim`` calls had been issued."""
+
+    citation = CitationSpan(source_uri="book:wesson", section_path="1")
+    claims = [
+        Claim(subject="JET", predicate="requires", object="DT fuel",
+              citation=citation),
+        Claim(subject="DT fuel", predicate="ignites_at",
+              object="100M Kelvin", citation=citation),
+        Claim(subject="JET", predicate="located_in",
+              object="Culham", citation=citation),
+    ]
+    rows = await store.add_claims(claims)
+    assert len(rows) == 3
+    # Order preserved.
+    assert rows[0][0].node_id == "jet"  # subject of first claim
+    assert rows[1][0].node_id == "dt_fuel"
+    assert rows[2][0].node_id == "jet"
+    # All nodes + edges land in the store.
+    nodes, edges = await store.count()
+    # 4 distinct subjects/objects: jet, dt_fuel, 100m_kelvin, culham.
+    assert nodes == 4
+    assert edges == 3
+
+
+async def test_add_claims_empty_input(store: KuzuGraphStore) -> None:
+    """Empty input is a no-op — no thread hop, no lock acquisition,
+    returns ``()``."""
+
+    rows = await store.add_claims([])
+    assert rows == ()
+    nodes, edges = await store.count()
+    assert (nodes, edges) == (0, 0)
+
+
+async def test_add_claims_uses_single_to_thread_hop(
+    store: KuzuGraphStore, monkeypatch,
+) -> None:
+    """Performance contract: a 50-claim batch dispatches ONE
+    ``asyncio.to_thread`` call, not N. The win the Fix D plan
+    promised on the ingest path is amortising thread-pool round
+    trips across the batch — pin it so a refactor that puts
+    ``to_thread`` back inside the per-claim path triggers a
+    regression here."""
+
+    import asyncio as _asyncio
+    from polymathera.colony.knowledge.stores import graph as _graph_mod
+
+    hops = {"n": 0}
+    real_to_thread = _asyncio.to_thread
+
+    async def _counting_to_thread(func, *args, **kwargs):
+        hops["n"] += 1
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(_graph_mod.asyncio, "to_thread", _counting_to_thread)
+
+    citation = CitationSpan(source_uri="x", section_path="1")
+    claims = [
+        Claim(subject=f"S{i}", predicate="links", object=f"O{i}",
+              citation=citation)
+        for i in range(50)
+    ]
+    rows = await store.add_claims(claims)
+    assert len(rows) == 50
+    # Exactly ONE to_thread hop for the whole batch (the
+    # ``add_claims`` -> ``_add_claims_sync`` dispatch). Anything
+    # higher means a refactor reintroduced per-claim hops.
+    assert hops["n"] == 1, (
+        f"Expected 1 asyncio.to_thread hop for the batch; got "
+        f"{hops['n']}. A refactor likely pushed the hop back into "
+        f"the per-claim path."
+    )
+
+
+async def test_add_claims_per_claim_failure_does_not_poison_batch(
+    store: KuzuGraphStore, monkeypatch,
+) -> None:
+    """Recovery contract: when one claim's insertion raises, the
+    failing slot is ``None`` in the returned tuple and the surviving
+    claims still land. Matches the ingestor's prior per-claim
+    try/except recovery semantics — now amortised under one lock."""
+
+    citation = CitationSpan(source_uri="x", section_path="1")
+    claims = [
+        Claim(subject="A", predicate="links", object="B", citation=citation),
+        Claim(subject="POISON", predicate="links", object="C",
+              citation=citation),
+        Claim(subject="D", predicate="links", object="E", citation=citation),
+    ]
+
+    real_add_claim_locked = store._add_claim_locked
+
+    def _fragile(claim):  # noqa: ANN001
+        if claim.subject == "POISON":
+            raise RuntimeError("synthetic insertion failure")
+        return real_add_claim_locked(claim)
+
+    monkeypatch.setattr(store, "_add_claim_locked", _fragile)
+    rows = await store.add_claims(claims)
+
+    assert len(rows) == 3
+    assert rows[0] is not None and rows[0][0].node_id == "a"
+    assert rows[1] is None  # failed slot
+    assert rows[2] is not None and rows[2][0].node_id == "d"
+    # The surviving claims landed in the store; the failing one did
+    # not.
+    nodes, edges = await store.count()
+    assert nodes == 4  # a, b, d, e
+    assert edges == 2  # a-links->b, d-links->e
+
+
 # ---- Queries --------------------------------------------------------------
 
 

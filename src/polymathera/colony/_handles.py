@@ -72,6 +72,39 @@ async def get_agent_system(app_name: str | None = None) -> serving.DeploymentHan
     )
 
 
+async def fetch_agent_info(
+    agent_id: str,
+    *,
+    app_name: str | None = None,
+) -> "AgentRegistrationInfo | None":  # noqa: F821 — fwd ref, lazy import below
+    """Canonical lookup: ``AgentRegistrationInfo`` for ``agent_id`` from the
+    :class:`AgentSystemDeployment` registry, or ``None`` when no record
+    exists (agent terminated and reaped, or never existed).
+
+    Single source of truth for "what is this agent's lifecycle state /
+    type / capabilities right now?" — used by every call site that
+    needs to read agent state from the registry.
+
+    The returned :class:`AgentRegistrationInfo` is a fully typed
+    Pydantic model. Callers MUST read its fields directly
+    (``info.agent_type``, ``info.state``, ``info.capability_names``).
+    NEVER use ``getattr(info, "...", default)`` — every field on the
+    model is guaranteed to exist by construction, and a missing
+    attribute would surface a real bug rather than be silently
+    masked by a default per [[no-getattr-defaults]].
+
+    Exceptions from the underlying registry call PROPAGATE. Callers
+    that need a typed degraded fallback (e.g. "show state=UNKNOWN
+    when the registry is unreachable") must catch + handle at their
+    call site; the helper does not silently swallow.
+    """
+
+    from .agents.system import AgentSystemDeployment  # noqa: F401 — fwd-resolve
+
+    agent_system = await get_agent_system(app_name=app_name)
+    return await agent_system.get_agent_info(agent_id)
+
+
 async def get_llm_cluster(app_name: str | None = None) -> serving.DeploymentHandle:
     """Handle to the ``LLMCluster`` deployment (routing front for LLMs)."""
 

@@ -23,6 +23,9 @@ import logging
 from pydantic import BaseModel, Field
 
 from polymathera.colony.agents.patterns import MergeCapability
+from polymathera.colony.agents.patterns.capabilities.human_help import (
+    HumanHelpCapability,
+)
 from polymathera.colony.agents.base import Agent
 from polymathera.colony.agents.scopes import BlackboardScope, get_scope_prefix
 from .types import ComplianceType
@@ -104,7 +107,12 @@ class ComplianceAnalysisCoordinator(Agent):
             MergeCapability.bind(
                 scope=BlackboardScope.COLONY,
                 namespace="compliance_analysis_merge",
-            )
+            ),
+            # Mid-run clarification surface — when the planner is
+            # stuck on a judgment call (ambiguous license combination,
+            # contradicting obligations, etc.) it can call
+            # ``request_help`` to escalate to the operator.
+            HumanHelpCapability.bind(scope=BlackboardScope.SESSION),
         ])
         await super().initialize()
 

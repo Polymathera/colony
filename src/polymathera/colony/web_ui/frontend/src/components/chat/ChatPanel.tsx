@@ -141,6 +141,8 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             response_options: msg.response_options,
             awaiting_reply: msg.awaiting_reply,
             kind: msg.kind,
+            action_type: msg.action_type,
+            extra: msg.extra,
             run_status: msg.run_status,
             attachments: msg.attachments,
           });
@@ -158,6 +160,8 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             response_options: msg.response_options,
             awaiting_reply: true,
             kind: msg.kind,
+            action_type: msg.action_type,
+            extra: msg.extra,
             attachments: msg.attachments,
           });
         } else if (data.type === "history") {
@@ -176,6 +180,8 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             response_options: m.response_options,
             awaiting_reply: m.awaiting_reply,
             kind: m.kind,
+            action_type: m.action_type,
+            extra: m.extra,
             run_status: m.run_status,
             attachments: m.attachments,
           }));
@@ -301,7 +307,7 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
   const sendReply = useCallback((
     message: ChatMessageData,
     content: string,
-    extra?: { explanation?: string },
+    extra?: { explanation?: string; guidance?: string },
   ) => {
     const requestId = message.request_id;
     const agentId = message.agent_id;
@@ -353,6 +359,41 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             run_id: null,
             role: "system",
             content: `Failed to submit approval: ${err instanceof Error ? err.message : String(err)}`,
+            timestamp: Date.now(),
+          });
+        },
+      );
+      return;
+    }
+
+    if (message.kind === "human_help" && sessionId) {
+      // Typed human-help (mid-flow clarification) gate. Sibling of
+      // the human_approval branch above. The requesting agent's
+      // ``HumanHelpCapability`` listens on the SESSION blackboard's
+      // ``human_help:response:*`` topic; the HTTP endpoint writes
+      // there. ``content`` carries the operator's picked option (or
+      // ``""`` when they submitted free-text only); ``extra.guidance``
+      // carries the free-form text. At least one must be non-empty —
+      // the ``HumanHelpResponse`` Pydantic validator surfaces 422
+      // otherwise.
+      const chosenOption = content === "" ? null : content;
+      apiFetch<unknown>(
+        `/sessions/${encodeURIComponent(sessionId)}/human_help/${encodeURIComponent(requestId)}/respond`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            chosen_option: chosenOption,
+            guidance: extra?.guidance ?? "",
+          }),
+        },
+      ).then(
+        () => recordEcho(),
+        (err) => {
+          addMessage({
+            id: nextMessageId(),
+            run_id: null,
+            role: "system",
+            content: `Failed to submit help response: ${err instanceof Error ? err.message : String(err)}`,
             timestamp: Date.now(),
           });
         },

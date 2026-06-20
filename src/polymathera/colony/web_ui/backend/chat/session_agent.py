@@ -34,6 +34,7 @@ from polymathera.colony.agents.blackboard.protocol import (
     DIAGNOSTIC_EMPTY_ITERATION_STREAK,
     DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK,
     HumanApprovalProtocol,
+    HumanHelpProtocol,
     SELF_RELEVANT_DIAGNOSTIC_KINDS,
 )
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult, PROCESSED
@@ -443,6 +444,65 @@ class SessionOrchestratorCapability(AgentCapability):
                 "kind": "human_approval",
                 "timestamp": time.time(),
                 "extra": payload.get("extra") or {},
+            },
+        )
+        return PROCESSED
+
+    @event_handler(
+        pattern=HumanHelpProtocol.request_pattern(),
+        priority="high",
+    )
+    async def handle_human_help_request(
+        self, event: BlackboardEvent, _repl: Any,
+    ) -> EventProcessingResult | None:
+        """Translate one ``HumanHelpRequest`` into a chat
+        ``agent_question`` carrying ``kind='human_help'``.
+
+        Sibling of :meth:`handle_human_approval_request`. The chat
+        scope's existing WebSocket relay forwards every
+        ``chat:agent:*`` write whose payload carries
+        ``awaiting_reply=True`` as a typed ``agent_question``
+        message; the ``kind`` field tells the frontend to route the
+        operator's response via the
+        ``/sessions/{id}/human_help/{request_id}/respond`` HTTP
+        endpoint rather than the WebSocket reply lane or the
+        ``human_approval`` endpoint. ``options`` is the agent's
+        candidate-action list (rendered as buttons); a free-text
+        ``guidance`` field is always available so the operator can
+        write open guidance when none of the options fit.
+        ``context`` accompanies the question so the operator sees
+        what the agent has tried + observed."""
+
+        try:
+            request_id = HumanHelpProtocol.parse_request_key(event.key)
+        except ValueError:
+            return PROCESSED
+        chat_bb = await self.get_blackboard()
+        payload = event.value if isinstance(event.value, dict) else {}
+        question = payload.get("question") or "(empty help request)"
+        options = payload.get("options") or []
+        context_text = payload.get("context") or ""
+        requester_agent_id = (
+            payload.get("requester_agent_id")
+            or self._agent.agent_id
+        )
+
+        message_id = f"help_msg_{uuid.uuid4().hex[:12]}"
+        await chat_bb.write(
+            SessionChatProtocol.agent_message_key(
+                requester_agent_id, message_id,
+            ),
+            {
+                "message_id": message_id,
+                "agent_id": requester_agent_id,
+                "agent_type": "human_help",
+                "content": question,
+                "request_id": request_id,
+                "response_options": list(options),
+                "awaiting_reply": True,
+                "kind": "human_help",
+                "timestamp": time.time(),
+                "extra": {"context": context_text},
             },
         )
         return PROCESSED
@@ -1309,10 +1369,12 @@ class SessionOrchestratorCapability(AgentCapability):
 
                 if not target_id:
                     # Try matching by agent_type suffix
+                    from polymathera.colony.system import fetch_agent_info
                     for aid in agent_ids:
-                        info = await agent_system.get_agent_info(agent_id=aid)
-                        agent_type = getattr(info, "agent_type", "") if info else ""
-                        if agent_type.split(".")[-1].lower() == name.lower():
+                        info = await fetch_agent_info(aid)
+                        if info is None:
+                            continue
+                        if info.agent_type.split(".")[-1].lower() == name.lower():
                             target_id = aid
                             break
 
@@ -1462,7 +1524,7 @@ class SessionOrchestratorCapability(AgentCapability):
         3. Surface the outcome to the user. ``False`` is not a failure
            — it just means the agent was idle when /abort landed.
         """
-        policy = getattr(self.agent, "action_policy", None)
+        policy = self.agent.action_policy
         if policy is None:
             await self._post_response(
                 "⚠️ No action policy attached to this agent — nothing to abort.",
@@ -1523,7 +1585,7 @@ class SessionOrchestratorCapability(AgentCapability):
             )
             return
 
-        policy = getattr(self.agent, "action_policy", None)
+        policy = self.agent.action_policy
         aborted = False
         if policy is not None:
             try:
@@ -1580,7 +1642,7 @@ class SessionOrchestratorCapability(AgentCapability):
         """Read the policy's status snapshot and post it as a chat
         message. No action dispatch, no LLM call — pure read."""
         try:
-            policy = getattr(self.agent, "action_policy", None)
+            policy = self.agent.action_policy
             snapshot = policy.get_status_snapshot() if policy else {
                 "error": "no action policy attached to agent",
             }
@@ -1692,6 +1754,7 @@ class SessionOrchestratorCapability(AgentCapability):
         # Query agent system for agents in this session
         try:
             from polymathera.colony.system import get_agent_system
+            from polymathera.colony.system import fetch_agent_info
             agent_system = await get_agent_system()
             agent_ids = await agent_system.list_all_agents()
 
@@ -1702,12 +1765,23 @@ class SessionOrchestratorCapability(AgentCapability):
             lines = [f"**Active agents:** ({len(agent_ids)})"]
             for aid in agent_ids[:20]:
                 try:
-                    info = await agent_system.get_agent_info(agent_id=aid)
-                    agent_type = getattr(info, "agent_type", "unknown") if info else "unknown"
-                    state = str(getattr(info, "state", "unknown")) if info else "unknown"
-                    lines.append(f"  `{aid[:16]}` — {agent_type.split('.')[-1]} ({state})")
+                    info = await fetch_agent_info(aid)
                 except Exception:
                     lines.append(f"  `{aid[:16]}` — unknown")
+                    continue
+                if info is None:
+                    lines.append(f"  `{aid[:16]}` — unregistered")
+                    continue
+                # ``AgentRegistrationInfo`` fields are typed + required
+                # (see models.py:2819); read directly per
+                # [[no-getattr-defaults]]. ``state.name`` returns the
+                # enum NAME (uppercase: RUNNING / STOPPED / ...);
+                # ``agent_type`` is a dotted FQN whose tail segment
+                # is the human-readable class name.
+                lines.append(
+                    f"  `{aid[:16]}` — "
+                    f"{info.agent_type.split('.')[-1]} ({info.state.name})"
+                )
 
             if len(agent_ids) > 20:
                 lines.append(f"  ... and {len(agent_ids) - 20} more")

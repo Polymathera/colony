@@ -80,23 +80,20 @@ def _make_capability(
     if github is not None:
         # Simulate the agent's capability registry returning our
         # fake GitHubCapability when DesignProcessCapability calls
-        # ``self._agent.get_capability(GitHubCapability)``.
-        agent._capabilities = {"github": github}
-        agent.get_capability = lambda cls: (
-            github
-            if any(isinstance(github, cls) for _ in [None])
-            else None
+        # ``self._agent.get_capability_by_type(GitHubCapability)``.
+        # That is the canonical typed lookup on the ``Agent`` base
+        # class; the helper delegates to it directly per
+        # [[no-getattr-defaults]].
+        agent.get_capability_by_type = lambda cls: (
+            github if isinstance(github, cls) else None
         )
     else:
-        # No github sibling — make every lookup the design-process
-        # action's _sibling_github_capability tries explicitly return
-        # None so the "no sibling" branch fires deterministically.
-        # MagicMock auto-creates attributes on access, so leaving
-        # ``capability_by_class`` unset would return another
+        # No github sibling — make ``get_capability_by_type`` return
+        # ``None`` so the "no sibling" branch fires
+        # deterministically. MagicMock auto-creates attributes on
+        # access, so leaving the method unset would return another
         # MagicMock and the lookup would treat it as a real sibling.
-        agent._capabilities = {}
-        agent.get_capability = lambda _cls: None
-        agent.capability_by_class = None
+        agent.get_capability_by_type = lambda _cls: None
     cap = DesignProcessCapability(
         agent=agent, scope_id="test", working_dir=tmp_path,
     )

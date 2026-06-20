@@ -84,16 +84,15 @@ def _make_capability(
         "design_monorepo_url": "https://github.com/acme/proj.git",
     }
     if github is not None:
-        agent._capabilities = {"github": github}
-        agent.get_capability = lambda cls: (
-            github
-            if any(isinstance(github, cls) for _ in [None])
-            else None
+        # Simulate ``Agent.get_capability_by_type(GitHubCapability)``
+        # returning our stub. That is the canonical typed lookup on
+        # the ``Agent`` base class; the sibling helper delegates to
+        # it directly per [[no-getattr-defaults]].
+        agent.get_capability_by_type = lambda cls: (
+            github if isinstance(github, cls) else None
         )
     else:
-        agent._capabilities = {}
-        agent.get_capability = lambda _cls: None
-        agent.capability_by_class = None
+        agent.get_capability_by_type = lambda _cls: None
     if llm_responses is not None:
         side_effects: list[Any] = []
         for entry in llm_responses:

@@ -19,8 +19,12 @@ from __future__ import annotations
 
 import logging
 
+from polymathera.colony.agents.patterns.capabilities.human_help import (
+    HumanHelpCapability,
+)
 from polymathera.colony.agents.patterns.capabilities.merge import MergeCapability
 from polymathera.colony.agents.base import Agent
+from polymathera.colony.agents.scopes import BlackboardScope
 from .capabilities import (
     SliceMergePolicy,
     ProgramSlicingCapability,
@@ -81,6 +85,9 @@ class ProgramSlicingCoordinator(Agent):
             MergeCapability.bind(
                 merge_policy=SliceMergePolicy(),
             ),
+            # Mid-run clarification — escalate ambiguous
+            # interprocedural slicing decisions to the operator.
+            HumanHelpCapability.bind(scope=BlackboardScope.SESSION),
         ])
         await super().initialize()
 

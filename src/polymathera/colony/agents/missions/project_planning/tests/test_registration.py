@@ -222,6 +222,12 @@ def test_coordinator_module_binds_each_required_capability() -> None:
         "SystemDesignCapability.bind(",
         "GitHubCapability.bind(",
         "HumanApprovalCapability.bind(",
+        # request_help — mid-run clarification when the planner
+        # is stuck on a judgment call new info has surfaced
+        # (operator must adjudicate). Distinct from
+        # request_human_approval (authorize a specific dispatch)
+        # and emit_mission_status (fire-and-forget).
+        "HumanHelpCapability.bind(",
         "design_monorepo_capability_blueprints(",
     ):
         assert needle in source, (

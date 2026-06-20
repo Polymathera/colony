@@ -321,6 +321,7 @@ class PolymatheraCluster:
 # to work unchanged.
 from ._handles import (  # noqa: E402, F401
     _get_deployment_by_name,
+    fetch_agent_info,
     get_agent_system,
     get_embedding_deployment,
     get_llm_cluster,

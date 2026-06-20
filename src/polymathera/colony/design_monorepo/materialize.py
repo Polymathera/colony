@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -563,6 +564,9 @@ async def materialize_design_context_sources(
     enabled_sources: set[str] | None = None,
     include_kuzu: bool = True,
     ingestor: Any = None,
+    progress_callback: Callable[
+        [str, dict[str, Any]], Awaitable[None],
+    ] | None = None,
 ) -> DesignContextMaterialisationReport:
     """Materialise every row in ``repo_map.design_context_sources``
     through the two non-raw ingestion paths of §5:
@@ -655,8 +659,71 @@ async def materialize_design_context_sources(
         s for s in repo_map.design_context_sources
         if enabled_sources is None or s.name in enabled_sources
     ]
+    total = len(selected_sources)
+
+    # Wrap each per-source coroutine with a progress emission that fires
+    # AS the source finishes — completion order, not insertion order —
+    # so a long-running ingest doesn't read as a 15-minute silence on
+    # the chat surface. The callback is optional: callers that don't
+    # want streamed progress (tests, batch CLIs) pass ``None`` and the
+    # behaviour reduces to the original ``asyncio.gather``. Keeping
+    # this primitive — callback parameter, not a baked-in
+    # ``MissionStatusCapability`` dependency — preserves the layering
+    # ([[primitives-not-pipelines]]): the materializer ships the
+    # progress SIGNAL; the caller wires it to whichever sink (chat,
+    # CLI bar, log) fits the context.
+    if progress_callback is not None and total > 0:
+        try:
+            await progress_callback(
+                f"Materialising {total} design-context source(s)…",
+                {"total": total, "completed": 0, "stage": "start"},
+            )
+        except Exception:  # noqa: BLE001 — progress is best-effort
+            logger.warning(
+                "materialize_design_context_sources: progress_callback "
+                "raised on 'start' emission; continuing.",
+                exc_info=True,
+            )
+
+    completion_counter = {"done": 0}
+
+    async def _materialize_one_with_progress(
+        src: DesignContextSource,
+    ) -> tuple[DesignContextRowOutcome, DesignContextRowOutcome]:
+        result = await _materialize_one(src)
+        if progress_callback is not None:
+            completion_counter["done"] += 1
+            vcm_outcome, kuzu_outcome = result
+            try:
+                await progress_callback(
+                    (
+                        f"Materialised {completion_counter['done']}/"
+                        f"{total}: {src.name} "
+                        f"({vcm_outcome.num_files} file(s), "
+                        f"vcm={vcm_outcome.status}, "
+                        f"kuzu={kuzu_outcome.status})"
+                    ),
+                    {
+                        "total": total,
+                        "completed": completion_counter["done"],
+                        "stage": "source_done",
+                        "source_name": src.name,
+                        "num_files": vcm_outcome.num_files,
+                        "vcm_status": vcm_outcome.status,
+                        "kuzu_status": kuzu_outcome.status,
+                    },
+                )
+            except Exception:  # noqa: BLE001 — progress is best-effort
+                logger.warning(
+                    "materialize_design_context_sources: progress_callback "
+                    "raised on source %r; continuing.",
+                    src.name,
+                    exc_info=True,
+                )
+        return result
+
     per_row = await asyncio.gather(
-        *(_materialize_one(s) for s in selected_sources),
+        *(_materialize_one_with_progress(s) for s in selected_sources),
     )
 
     outcomes: list[DesignContextRowOutcome] = []

@@ -77,11 +77,14 @@ async def list_agents(
                 if info is None:
                     summaries.append(AgentSummary(agent_id=agent_id))
                     continue
+                # ``AgentRegistrationInfo`` fields are typed + required
+                # (see models.py:2819). Read directly per
+                # [[no-getattr-defaults]].
                 summaries.append(AgentSummary(
                     agent_id=agent_id,
-                    agent_type=getattr(info, "agent_type", ""),
-                    state=str(getattr(info, "state", "")),
-                    capabilities=getattr(info, "capabilities", []),
+                    agent_type=info.agent_type,
+                    state=info.state.name,
+                    capabilities=info.capability_names,
                 ))
             return summaries
         except Exception as e:
@@ -128,17 +131,20 @@ async def get_agent_hierarchy(
                 if info is None:
                     nodes.append(AgentHierarchyNode(agent_id=agent_id))
                     continue
-                # ``AgentRegistrationInfo.metadata`` is non-Optional
-                # (default_factory=AgentMetadata) — always present.
+                # ``AgentRegistrationInfo`` fields are typed + required
+                # (see models.py:2819). Read directly per
+                # [[no-getattr-defaults]]. ``metadata``,
+                # ``capability_names`` and ``bound_pages`` all have
+                # default_factory so they are always present too.
                 metadata = info.metadata
                 nodes.append(AgentHierarchyNode(
                     agent_id=agent_id,
-                    agent_type=getattr(info, "agent_type", ""),
-                    state=str(getattr(info, "state", "")),
+                    agent_type=info.agent_type,
+                    state=info.state.name,
                     role=metadata.role,
                     parent_agent_id=metadata.parent_agent_id,
-                    capability_names=getattr(info, "capability_names", []),
-                    bound_pages=getattr(info, "bound_pages", []),
+                    capability_names=info.capability_names,
+                    bound_pages=info.bound_pages,
                     tenant_id=metadata.tenant_id,
                     colony_id=metadata.colony_id,
                 ))
@@ -219,9 +225,11 @@ async def get_agent_capabilities(
         info = await handle.get_agent_info(agent_id=agent_id)
         if info is None:
             return {"error": "agent not found", "agent_id": agent_id}
+        # Read ``info.capability_names`` directly per
+        # [[no-getattr-defaults]].
         return {
             "agent_id": agent_id,
-            "capabilities": getattr(info, "capabilities", []),
+            "capabilities": info.capability_names,
         }
 
     except Exception as e:

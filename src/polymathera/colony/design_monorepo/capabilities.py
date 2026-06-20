@@ -508,6 +508,7 @@ class DesignMonorepoCapabilityBase(AgentCapability):
             mmap_config=MmapConfig(),
             renewer=self._design_context_renewer,
             include_kuzu=include_kuzu,
+            progress_callback=self._mission_status_progress_callback(),
         )
 
         # Emit one DesignContextMappedProtocol event per outcome row
@@ -589,6 +590,59 @@ class DesignMonorepoCapabilityBase(AgentCapability):
             "count": len(report.rows),
             "rows": rows_payload,
         }
+
+    def _mission_status_progress_callback(
+        self,
+    ) -> Callable[[str, dict[str, Any]], Awaitable[None]] | None:
+        """Build the progress callback the materializer streams per-
+        source progress through. Returns ``None`` when no sibling
+        :class:`MissionStatusCapability` is mounted on this agent
+        (detached / non-mission contexts), and the materializer falls
+        back to silent execution.
+
+        The callback delegates to
+        :meth:`MissionStatusCapability.emit_mission_status` so the
+        same singleton blackboard key the chat WebSocket relay tails
+        is updated — same surface as the LLM's own emissions, no
+        parallel channel. Best-effort: a per-call failure is logged
+        and swallowed so a progress glitch does not abort the
+        long-running ingest.
+        """
+
+        if self._agent is None:
+            return None
+        cap = self._sibling_mission_status_capability()
+        if cap is None:
+            return None
+
+        async def _cb(message: str, details: dict[str, Any]) -> None:
+            try:
+                await cap.emit_mission_status(message, details=details)
+            except Exception:  # noqa: BLE001 — progress is best-effort
+                logger.warning(
+                    "_mission_status_progress_callback: emit_mission_status "
+                    "raised; continuing ingest.",
+                    exc_info=True,
+                )
+
+        return _cb
+
+    def _sibling_mission_status_capability(self) -> Any:
+        """Look up the :class:`MissionStatusCapability` mounted on the
+        same agent, or ``None`` when the capability is detached (no
+        agent) or no :class:`MissionStatusCapability` is mounted.
+
+        Uses :meth:`Agent.get_capability_by_type` directly — the
+        canonical typed lookup on the ``Agent`` base class.
+        """
+
+        agent = self._agent
+        if agent is None:
+            return None
+        from ..agents.patterns.capabilities.mission_status import (
+            MissionStatusCapability,
+        )
+        return agent.get_capability_by_type(MissionStatusCapability)
 
     @property
     def working_dir(self) -> Path:
@@ -787,7 +841,7 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         role = "agent"
         if agent.metadata.role:
             role = str(agent.metadata.role)
-        colony_id = getattr(agent, "colony_id", "default") or "default"
+        colony_id = agent.colony_id
         return AgentIdentity(
             agent_id=agent.agent_id,
             role=role,
@@ -849,8 +903,8 @@ class DesignMonorepoCapabilityBase(AgentCapability):
         role: str | None = None
         colony_id: str = "default"
         if self._agent is not None:
-            agent_id = getattr(self._agent, "agent_id", None)
-            colony_id = getattr(self._agent, "colony_id", "default") or "default"
+            agent_id = self._agent.agent_id
+            colony_id = self._agent.colony_id
             if self._agent.metadata.role:
                 role = str(self._agent.metadata.role)
 
@@ -3143,7 +3197,7 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
         role = "agent"
         if agent.metadata.role:
             role = str(agent.metadata.role)
-        colony_id = getattr(agent, "colony_id", "default") or "default"
+        colony_id = agent.colony_id
         return AgentIdentity(
             agent_id=agent.agent_id,
             role=role,

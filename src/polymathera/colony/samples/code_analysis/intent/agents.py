@@ -24,8 +24,12 @@ import logging
 from pydantic import BaseModel, Field
 
 from polymathera.colony.agents.patterns.capabilities.merge import MergeCapability
+from polymathera.colony.agents.patterns.capabilities.human_help import (
+    HumanHelpCapability,
+)
 from polymathera.colony.agents.base import Agent
 from polymathera.colony.agents.patterns.capabilities.synthesis import SynthesisCapability
+from polymathera.colony.agents.scopes import BlackboardScope
 from polymathera.colony.agents.patterns.games.dynamic import DynamicGameCapability
 
 from .capabilities import (
@@ -93,6 +97,9 @@ class IntentInferenceCoordinator(Agent):
                 merge_policy=IntentMergePolicy(),
             ),
             SynthesisCapability.bind(),
+            # Mid-run clarification — escalate ambiguous code-intent
+            # judgments to the operator via ``request_help``.
+            HumanHelpCapability.bind(scope=BlackboardScope.SESSION),
         ])
         await super().initialize()
 

@@ -24,8 +24,9 @@ class ChatMessageStore:
                     id, session_id, run_id, role, agent_id, agent_type,
                     user_id, username, content, timestamp,
                     request_id, response_options, awaiting_reply,
-                    run_status, controls, attachments, action_type
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                    run_status, controls, attachments, action_type,
+                    kind, extra
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                 ON CONFLICT (id) DO NOTHING
                 """,
                 message.get("id"),
@@ -45,6 +46,8 @@ class ChatMessageStore:
                 json.dumps(message["controls"]) if message.get("controls") else None,
                 json.dumps(message["attachments"]) if message.get("attachments") else None,
                 message.get("action_type"),
+                message.get("kind"),
+                json.dumps(message["extra"]) if message.get("extra") else None,
             )
 
     async def get_history(
@@ -96,6 +99,8 @@ class ChatMessageStore:
                 msg["controls"] = json.loads(msg["controls"])
             if msg.get("attachments"):
                 msg["attachments"] = json.loads(msg["attachments"])
+            if msg.get("extra"):
+                msg["extra"] = json.loads(msg["extra"])
             messages.append(msg)
 
         return messages

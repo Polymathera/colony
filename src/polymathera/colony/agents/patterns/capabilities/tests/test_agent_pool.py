@@ -489,3 +489,215 @@ async def test_create_agent_inherit_scoped_params_false_opts_out(
 
     forwarded = cap._resolve_class.return_value.bind.call_args.kwargs["metadata"]
     assert "design_monorepo_url" not in forwarded.parameters
+
+
+# ---------------------------------------------------------------------------
+# get_agent_status — authoritative state from AgentSystemDeployment.
+#
+# The prior implementation derived ``state="RUNNING"`` from
+# ``agent_id in self.agent.child_agents.values()`` and never queried the
+# registry. That left STOPPED / FAILED / SUSPENDED agents reported as
+# ``"RUNNING"`` forever (run9 regression: SessionAgent polled this and
+# told the user the coordinator was running for 17+ min AFTER it had
+# cleanly STOPPED). Authoritative reads from
+# :meth:`AgentSystemDeployment.get_agent_info` close the gap.
+# ---------------------------------------------------------------------------
+
+
+from unittest.mock import patch
+from polymathera.colony.agents.models import (
+    AgentRegistrationInfo,
+    AgentState,
+)
+from polymathera.colony.agents.system import AgentSystemDeployment
+
+
+def _make_pool_capability_with_handles(handles: dict[str, object]) -> AgentPoolCapability:
+    """Build a ``AgentPoolCapability`` with pre-seeded
+    ``_agent_handles``. The status path reads state from the
+    registry, not the handles — but the handles dict still drives
+    ``has_handle`` + the default ``agent_ids=None`` listing path, so
+    the test fixture must populate it to exercise both."""
+
+    agent = MagicMock()
+    agent.agent_id = "parent"
+    agent._app_name = "app-x"
+    cap = AgentPoolCapability(agent=agent)
+    cap._agent_handles = dict(handles)
+    return cap
+
+
+def _make_info(*, agent_id: str, state: AgentState) -> AgentRegistrationInfo:
+    return AgentRegistrationInfo(
+        agent_id=agent_id,
+        agent_type="polymathera.colony.agents.base.Agent",
+        state=state,
+        tenant_id="t",
+        colony_id="c",
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_agent_status_reports_stopped_from_registry() -> None:
+    """The state must come from the registry, not from in-memory
+    child-agent membership. The run9 bug: a stopped coordinator kept
+    showing as ``RUNNING`` because the legacy code only checked
+    ``agent_id in self.agent.child_agents.values()``. Pin the new
+    contract — a registry ``state=STOPPED`` surfaces verbatim."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        cap = _make_pool_capability_with_handles({"child-1": object()})
+
+        fake_system = AsyncMock(spec=AgentSystemDeployment)
+        fake_system.get_agent_info.return_value = _make_info(
+            agent_id="child-1", state=AgentState.STOPPED,
+        )
+
+        with patch(
+            "polymathera.colony._handles.get_agent_system",
+            new=AsyncMock(return_value=fake_system),
+        ):
+            result = await cap.get_agent_status(agent_ids=["child-1"])
+
+        assert len(result["agents"]) == 1
+        assert result["agents"][0]["state"] == "STOPPED"
+        assert result["agents"][0]["agent_id"] == "child-1"
+        assert result["agents"][0]["has_handle"] is True
+        fake_system.get_agent_info.assert_awaited_once_with("child-1")
+
+
+@pytest.mark.asyncio
+async def test_get_agent_status_reports_running_from_registry() -> None:
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        cap = _make_pool_capability_with_handles({"child-1": object()})
+
+        fake_system = AsyncMock(spec=AgentSystemDeployment)
+        fake_system.get_agent_info.return_value = _make_info(
+            agent_id="child-1", state=AgentState.RUNNING,
+        )
+
+        with patch(
+            "polymathera.colony._handles.get_agent_system",
+            new=AsyncMock(return_value=fake_system),
+        ):
+            result = await cap.get_agent_status(agent_ids=["child-1"])
+
+        assert result["agents"][0]["state"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_status_unregistered_for_missing_agent() -> None:
+    """When the registry has no record (agent terminated and reaped,
+    or never existed), surface ``UNREGISTERED`` so the LLM caller can
+    branch on it — distinct from ``UNKNOWN`` (read-side error) and
+    distinct from any real lifecycle state."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        cap = _make_pool_capability_with_handles({"ghost": object()})
+
+        fake_system = AsyncMock(spec=AgentSystemDeployment)
+        fake_system.get_agent_info.return_value = None
+
+        with patch(
+            "polymathera.colony._handles.get_agent_system",
+            new=AsyncMock(return_value=fake_system),
+        ):
+            result = await cap.get_agent_status(agent_ids=["ghost"])
+
+        assert result["agents"][0]["state"] == "UNREGISTERED"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_status_unknown_on_registry_read_error() -> None:
+    """Transient registry read-side errors must NOT crash the action
+    — surface ``UNKNOWN`` so the LLM gets a typed envelope and can
+    decide whether to retry, wait, or escalate."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        cap = _make_pool_capability_with_handles({"flaky": object()})
+
+        fake_system = AsyncMock(spec=AgentSystemDeployment)
+        fake_system.get_agent_info.side_effect = RuntimeError("transient")
+
+        with patch(
+            "polymathera.colony._handles.get_agent_system",
+            new=AsyncMock(return_value=fake_system),
+        ):
+            result = await cap.get_agent_status(agent_ids=["flaky"])
+
+        assert result["agents"][0]["state"] == "UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_status_filter_state_matches_registry_state() -> None:
+    """``filter_state`` must compare against the registry-derived
+    state. With the bogus old impl returning everything as ``RUNNING``,
+    a filter of ``"STOPPED"`` would never match any agent. Pin that
+    the filter now matches real states."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        cap = _make_pool_capability_with_handles(
+            {"alive": object(), "dead": object()},
+        )
+
+        async def _info(agent_id: str) -> AgentRegistrationInfo:
+            if agent_id == "alive":
+                return _make_info(agent_id=agent_id, state=AgentState.RUNNING)
+            return _make_info(agent_id=agent_id, state=AgentState.STOPPED)
+
+        fake_system = AsyncMock(spec=AgentSystemDeployment)
+        fake_system.get_agent_info.side_effect = _info
+
+        with patch(
+            "polymathera.colony._handles.get_agent_system",
+            new=AsyncMock(return_value=fake_system),
+        ):
+            stopped = await cap.get_agent_status(
+                agent_ids=["alive", "dead"], filter_state="STOPPED",
+            )
+            running = await cap.get_agent_status(
+                agent_ids=["alive", "dead"], filter_state="RUNNING",
+            )
+
+        assert [a["agent_id"] for a in stopped["agents"]] == ["dead"]
+        assert [a["agent_id"] for a in running["agents"]] == ["alive"]
+
+
+@pytest.mark.asyncio
+async def test_get_agent_status_defaults_to_all_handle_ids() -> None:
+    """``agent_ids=None`` enumerates every entry in
+    ``_agent_handles``. The set must come from the local handle
+    cache (not the registry) so the action stays cheap for the
+    common 'list my children' case."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        cap = _make_pool_capability_with_handles(
+            {"c1": object(), "c2": object(), "c3": object()},
+        )
+
+        async def _info(agent_id: str) -> AgentRegistrationInfo:
+            return _make_info(agent_id=agent_id, state=AgentState.RUNNING)
+
+        fake_system = AsyncMock(spec=AgentSystemDeployment)
+        fake_system.get_agent_info.side_effect = _info
+
+        with patch(
+            "polymathera.colony._handles.get_agent_system",
+            new=AsyncMock(return_value=fake_system),
+        ):
+            result = await cap.get_agent_status()
+
+        assert {a["agent_id"] for a in result["agents"]} == {"c1", "c2", "c3"}
+        assert result["total"] == 3

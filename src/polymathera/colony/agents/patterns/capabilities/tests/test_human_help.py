@@ -338,3 +338,88 @@ async def test_response_context_key_prefix_is_classvar(_exec_ctx) -> None:
     assert HumanHelpCapability.RESPONSE_CONTEXT_KEY_PREFIX == (
         "human_help_response:"
     )
+
+
+# ---------------------------------------------------------------------------
+# HumanHelpResponse validator — chosen_option / guidance exclusivity
+# ---------------------------------------------------------------------------
+
+
+def test_response_rejects_both_fields_empty() -> None:
+    """The validator catches the empty-empty case at the data-shape
+    boundary so the REST endpoint surfaces a 422 and the chat-UI
+    form can refuse to submit. The blackboard write never happens
+    for an empty response."""
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc_info:
+        HumanHelpResponse(
+            request_id="rid",
+            chosen_option=None,
+            guidance="",
+        )
+    assert "at least one" in str(exc_info.value).lower()
+
+
+def test_response_rejects_whitespace_guidance_when_no_option() -> None:
+    """Whitespace-only ``guidance`` is empty in spirit — the agent
+    can't translate ``"   "`` into typed state. The validator strips
+    before deciding."""
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        HumanHelpResponse(
+            request_id="rid",
+            chosen_option=None,
+            guidance="   \t\n  ",
+        )
+
+
+def test_response_accepts_chosen_option_only() -> None:
+    r = HumanHelpResponse(
+        request_id="rid",
+        chosen_option="A",
+        guidance="",
+    )
+    assert r.chosen_option == "A"
+    assert r.guidance == ""
+
+
+def test_response_accepts_guidance_only() -> None:
+    r = HumanHelpResponse(
+        request_id="rid",
+        chosen_option=None,
+        guidance="Pick option C from the docs.",
+    )
+    assert r.chosen_option is None
+    assert "option C" in r.guidance
+
+
+def test_response_accepts_both() -> None:
+    """The operator may pick an option AND add a guidance note — the
+    agent's translator step can read both."""
+
+    r = HumanHelpResponse(
+        request_id="rid",
+        chosen_option="A",
+        guidance="Also, downstream caveat: watch for the X edge case.",
+    )
+    assert r.chosen_option == "A"
+    assert "edge case" in r.guidance
+
+
+def test_response_rejects_empty_string_chosen_option_alone() -> None:
+    """``chosen_option=""`` is functionally equivalent to ``None`` —
+    a picked-but-empty option carries no signal. Combined with empty
+    guidance the validator must refuse."""
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        HumanHelpResponse(
+            request_id="rid",
+            chosen_option="",
+            guidance="",
+        )

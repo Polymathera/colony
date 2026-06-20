@@ -98,8 +98,15 @@ export interface ChatMessageData {
   awaiting_reply?: boolean;
   // Routing hint for the click on an option button:
   //  - "human_approval" → POST to /sessions/{id}/human_approval/{request_id}/respond
+  //  - "human_help"     → POST to /sessions/{id}/human_help/{request_id}/respond
   //  - undefined / other → existing WebSocket reply lane
-  kind?: "human_approval" | string;
+  kind?: "human_approval" | "human_help" | string;
+  // Extra payload travelling with the question. For ``human_help``
+  // the agent stamps the ``context`` here (what it has tried + what
+  // it observed) so the operator sees the situation that triggered
+  // the escalation; the host renders ``extra.context`` above the
+  // response surface.
+  extra?: Record<string, unknown>;
   // Short action name (e.g. "create_decomposition"). Present iff the
   // request was a typed approval — drives the 4-choice button labels
   // (Approve once / Approve all / Reject / Abort).
@@ -116,15 +123,20 @@ export interface ChatMessageData {
 interface ChatMessageProps {
   message: ChatMessageData;
   // Receives the source message so the host can route per ``kind``
-  // (human_approval vs freeform agent_question). ``explanation`` is
-  // the operator's required justification on ``reject`` / ``abort``
-  // (matches the Pydantic ``HumanApprovalResponse.explanation``
-  // contract on the backend; the response validator rejects empty
-  // explanation for those choices with 422).
+  // (human_approval / human_help / freeform agent_question).
+  // ``extra.explanation`` is the operator's required justification on
+  // ``reject`` / ``abort`` for human_approval (matches the Pydantic
+  // ``HumanApprovalResponse.explanation`` contract; the response
+  // validator rejects empty explanation for those choices with 422).
+  // ``extra.guidance`` is the operator's free-form direction for
+  // human_help (matches the Pydantic
+  // ``HumanHelpResponse.guidance`` contract; at least one of
+  // ``chosen_option`` (passed via ``content``) and ``guidance``
+  // must be non-empty — the validator surfaces 422 otherwise).
   onReply?: (
     message: ChatMessageData,
     content: string,
-    extra?: { explanation?: string },
+    extra?: { explanation?: string; guidance?: string },
   ) => void;
 }
 
@@ -164,7 +176,7 @@ function approvalButtonLabel(
 const CHOICES_REQUIRING_EXPLANATION = new Set(["reject", "abort"]);
 
 export function ChatMessage({ message, onReply }: ChatMessageProps) {
-  const { role, content, agent_id, agent_type, username, timestamp, request_id, response_options, awaiting_reply, run_status, attachments, action_type } = message;
+  const { role, content, agent_id, agent_type, username, timestamp, request_id, response_options, awaiting_reply, run_status, attachments, action_type, kind, extra } = message;
 
   // When the operator clicks ``reject`` or ``abort``, switch the card
   // into compose mode and require a non-empty explanation before
@@ -173,8 +185,33 @@ export function ChatMessage({ message, onReply }: ChatMessageProps) {
   const [composeChoice, setComposeChoice] = useState<string | null>(null);
   const [explanationDraft, setExplanationDraft] = useState("");
 
+  // ``human_help`` keeps a separate free-text draft. Distinct from the
+  // ``human_approval`` explanation textarea (which only appears in
+  // compose mode after reject/abort): for help requests the free-text
+  // field is ALWAYS available because the operator may either pick an
+  // ``options`` button OR write open guidance OR both. The Pydantic
+  // ``HumanHelpResponse`` validator enforces "at least one
+  // non-empty" — the UI submits empty guidance + an option, or
+  // non-empty guidance + no option, or both; the empty/empty
+  // submission is blocked by the disabled state below before it
+  // reaches the server.
+  const [guidanceDraft, setGuidanceDraft] = useState("");
+  const isHumanHelp = kind === "human_help";
+  const contextText = isHumanHelp && typeof extra?.context === "string"
+    ? (extra.context as string)
+    : "";
+
   const handleChoice = (option: string) => {
     if (!onReply) return;
+    if (isHumanHelp) {
+      // For human_help, picking an option ALSO sends whatever the
+      // operator typed in the guidance textarea so both signals
+      // travel together. The agent's translation step sees both.
+      const guidance = guidanceDraft.trim();
+      onReply(message, option, guidance ? { guidance } : undefined);
+      setGuidanceDraft("");
+      return;
+    }
     if (CHOICES_REQUIRING_EXPLANATION.has(option)) {
       setComposeChoice(option);
       setExplanationDraft("");
@@ -190,6 +227,19 @@ export function ChatMessage({ message, onReply }: ChatMessageProps) {
     onReply(message, composeChoice, { explanation: trimmed });
     setComposeChoice(null);
     setExplanationDraft("");
+  };
+
+  const submitGuidanceOnly = () => {
+    if (!onReply) return;
+    const trimmed = guidanceDraft.trim();
+    if (!trimmed) return;
+    // ``content=""`` signals "no option picked, free-text only";
+    // the host routes to the human_help endpoint which writes
+    // ``chosen_option=null, guidance=<trimmed>``. The
+    // ``HumanHelpResponse`` validator accepts since guidance is
+    // non-empty.
+    onReply(message, "", { guidance: trimmed });
+    setGuidanceDraft("");
   };
 
   const cancelCompose = () => {
@@ -252,6 +302,21 @@ export function ChatMessage({ message, onReply }: ChatMessageProps) {
         <AttachmentList attachments={attachments} />
       )}
 
+      {/* Human-help context — what the agent has tried / observed
+          before escalating. Renders above the response surface so
+          the operator sees the situation that triggered the
+          escalation before picking an option or writing guidance. */}
+      {isHumanHelp && contextText && (
+        <div className="mt-2 rounded border border-zinc-700/40 bg-zinc-900/30 px-2 py-1.5">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Agent context
+          </div>
+          <div className="whitespace-pre-wrap text-[11px] leading-5 text-zinc-300">
+            {contextText}
+          </div>
+        </div>
+      )}
+
       {/* Agent question response options */}
       {awaiting_reply && response_options && response_options.length > 0 && request_id && agent_id && onReply && composeChoice === null && (
         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -273,6 +338,44 @@ export function ChatMessage({ message, onReply }: ChatMessageProps) {
               {approvalButtonLabel(option, action_type ?? null)}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* Human-help guidance textarea — ALWAYS visible alongside
+          the option buttons (when awaiting_reply + kind=human_help).
+          The operator may write free-form ``guidance`` instead of
+          picking an option, OR write guidance AND pick an option
+          (both signals reach the agent). At least one must be
+          non-empty — the ``HumanHelpResponse`` Pydantic validator
+          surfaces 422 if both are blank, so the Submit-guidance
+          button is disabled until the textarea has trimmed content. */}
+      {isHumanHelp && awaiting_reply && request_id && agent_id && onReply && (
+        <div className="mt-2 flex flex-col gap-1.5">
+          <div className="text-[10px] text-muted-foreground">
+            {response_options && response_options.length > 0
+              ? "Pick an option above, or write free-form guidance below — or both. The agent translates the reply into the missing parameter on its next iteration."
+              : "Write free-form guidance for the agent. The agent translates the reply into the missing parameter on its next iteration."}
+          </div>
+          <textarea
+            value={guidanceDraft}
+            onChange={(e) => setGuidanceDraft(e.target.value)}
+            placeholder="Free-form guidance (optional if you pick an option above)"
+            rows={3}
+            className="w-full rounded border border-zinc-700/40 bg-zinc-900/50 px-2 py-1 text-[11px] leading-5 focus:outline-none focus:border-primary/50"
+          />
+          <div className="flex gap-1.5">
+            <button
+              onClick={submitGuidanceOnly}
+              disabled={!guidanceDraft.trim()}
+              className={cn(
+                "rounded border px-2.5 py-1 text-[10px] font-medium transition-colors",
+                "border-primary/30 bg-primary/10 text-primary hover:bg-primary/20",
+                "disabled:opacity-40 disabled:cursor-not-allowed",
+              )}
+            >
+              Submit guidance
+            </button>
+          </div>
         </div>
       )}
 

@@ -324,6 +324,7 @@ def create_app(config: DashboardConfig) -> FastAPI:
         colonies,
         colony_status,
         human_approval,
+        human_help,
         github_webhook,
         tenants,
     )
@@ -342,6 +343,7 @@ def create_app(config: DashboardConfig) -> FastAPI:
     app.include_router(jobs.router, prefix="/api/v1", tags=["jobs"])
     app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
     app.include_router(human_approval.router, prefix="/api/v1", tags=["human-approval"])
+    app.include_router(human_help.router, prefix="/api/v1", tags=["human-help"])
     app.include_router(config_router.router, prefix="/api/v1", tags=["config"])
     app.include_router(vcm.router, prefix="/api/v1", tags=["vcm"])
     app.include_router(metrics.router, prefix="/api/v1", tags=["metrics"])

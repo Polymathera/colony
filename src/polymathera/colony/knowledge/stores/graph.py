@@ -141,6 +141,34 @@ class GraphStore(ABC):
 
         Returns the (possibly newly created) records."""
 
+    async def add_claims(
+        self, claims: Sequence[Claim],
+    ) -> tuple[tuple[GraphNode, GraphNode, GraphEdge] | None, ...]:
+        """Batch counterpart of :meth:`add_claim`. Returns one entry
+        per input claim, in order; failed inserts surface as ``None``
+        at the failing index so the batch does not abort on the first
+        bad claim (matches the ingestion loop's prior per-claim
+        try/except recovery).
+
+        The default implementation simply loops :meth:`add_claim`,
+        preserving the ABC's single-claim contract. Subclasses with a
+        transactional / locked write layer (e.g.
+        :class:`KuzuGraphStore`) should override to amortise the
+        per-claim await + lock-acquire churn across the batch.
+        """
+
+        out: list[tuple[GraphNode, GraphNode, GraphEdge] | None] = []
+        for claim in claims:
+            try:
+                out.append(await self.add_claim(claim))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "GraphStore.add_claim failed for claim %r: %s",
+                    claim, exc,
+                )
+                out.append(None)
+        return tuple(out)
+
     @abstractmethod
     async def get_node(self, node_id: str) -> GraphNode | None:
         ...
@@ -595,6 +623,58 @@ class KuzuGraphStore(GraphStore):
     async def add_claim(
         self, claim: Claim,
     ) -> tuple[GraphNode, GraphNode, GraphEdge]:
+        return (
+            await asyncio.to_thread(self._add_claim_sync, claim)
+        )
+
+    async def add_claims(
+        self, claims: Sequence[Claim],
+    ) -> tuple[tuple[GraphNode, GraphNode, GraphEdge] | None, ...]:
+        """Batched write: one :func:`asyncio.to_thread` hop, one
+        outer ``self._lock`` acquisition for the whole batch.
+        ``threading.RLock`` is reentrant, so the per-claim helpers
+        called inside (``_add_node_sync``, ``_add_edge_sync``,
+        ``_fetch_node_sync``) re-acquire cheaply without contention.
+        Per-claim failure is caught, logged, and surfaced as
+        ``None`` at the failing index — same recovery semantics as
+        the base-class default impl, with the lock-acquire churn
+        amortised across the batch."""
+
+        if not claims:
+            return ()
+        rows = await asyncio.to_thread(
+            self._add_claims_sync, list(claims),
+        )
+        return tuple(rows)
+
+    def _add_claim_sync(
+        self, claim: Claim,
+    ) -> tuple[GraphNode, GraphNode, GraphEdge]:
+        with self._lock:
+            return self._add_claim_locked(claim)
+
+    def _add_claims_sync(
+        self, claims: list[Claim],
+    ) -> list[tuple[GraphNode, GraphNode, GraphEdge] | None]:
+        out: list[tuple[GraphNode, GraphNode, GraphEdge] | None] = []
+        with self._lock:
+            for claim in claims:
+                try:
+                    out.append(self._add_claim_locked(claim))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "KuzuGraphStore.add_claim failed for claim %r: %s",
+                        claim, exc,
+                    )
+                    out.append(None)
+        return out
+
+    def _add_claim_locked(
+        self, claim: Claim,
+    ) -> tuple[GraphNode, GraphNode, GraphEdge]:
+        """Build + insert one claim's nodes + edge inside the held
+        lock. Caller MUST already hold ``self._lock``."""
+
         s_id = _node_id_for(claim.subject)
         o_id = _node_id_for(claim.object_)
         s_node = GraphNode(
@@ -605,8 +685,8 @@ class KuzuGraphStore(GraphStore):
             node_id=o_id, label="Entity",
             properties={"surface": claim.object_},
         )
-        await self.add_node(s_node)
-        await self.add_node(o_node)
+        self._add_node_sync(s_node)
+        self._add_node_sync(o_node)
         edge_id = f"{s_id}--{claim.predicate}-->{o_id}"
         edge = GraphEdge(
             edge_id=edge_id,
@@ -621,10 +701,9 @@ class KuzuGraphStore(GraphStore):
                 "char_end": claim.citation.char_end,
             },
         )
-        await self.add_edge(edge)
-        # Re-fetch so the returned models carry the merged-property view.
-        actual_s = await asyncio.to_thread(self._fetch_node_sync, s_id) or s_node
-        actual_o = await asyncio.to_thread(self._fetch_node_sync, o_id) or o_node
+        self._add_edge_sync(edge)
+        actual_s = self._fetch_node_sync(s_id) or s_node
+        actual_o = self._fetch_node_sync(o_id) or o_node
         return actual_s, actual_o, edge
 
     # ---- Queries ------------------------------------------------------

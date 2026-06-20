@@ -22,6 +22,9 @@ from polymathera.colony.agents.patterns.capabilities.synthesis import SynthesisC
 from polymathera.colony.agents.patterns.capabilities.merge import MergeCapability, MergePolicy, MergeContext
 from polymathera.colony.agents.patterns.capabilities.validation import ValidationResult
 from polymathera.colony.agents.patterns.capabilities.critique import CriticCapability
+from polymathera.colony.agents.patterns.capabilities.human_help import (
+    HumanHelpCapability,
+)
 from polymathera.colony.agents.patterns.capabilities.page_graph import PageGraphCapability
 from polymathera.colony.agents.blackboard import EnhancedBlackboard, BlackboardEvent
 from polymathera.colony.agents.base import Agent, AgentCapability, AgentMetadata
@@ -1659,6 +1662,9 @@ class ChangeImpactAnalysisCoordinator(Agent):
                 scope=BlackboardScope.AGENT,
                 namespace="change_impact_analysis"
             ),
+            # Mid-run clarification — escalate ambiguous
+            # cross-page impact judgments to the operator.
+            HumanHelpCapability.bind(scope=BlackboardScope.SESSION),
         ])
 
         await super().initialize()

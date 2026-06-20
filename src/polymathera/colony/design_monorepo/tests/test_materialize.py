@@ -10,6 +10,7 @@ onto the base :class:`MmapConfig` before invoking the VCM handle.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -913,3 +914,140 @@ async def test_design_context_kuzu_path_handles_zero_matching_files(
     assert kuzu.status == "completed"
     assert kuzu.num_files == 0
     assert kuzu.num_claims == 0
+
+
+# ---------------------------------------------------------------------------
+# Fix B — progress_callback per-source emission
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_progress_callback_emits_start_and_per_source(
+    tmp_path: Path,
+) -> None:
+    """Fix B regression pin: when ``progress_callback`` is provided,
+    the materializer emits one ``stage='start'`` message before the
+    fan-out and one ``stage='source_done'`` message per source as it
+    completes — completion order, not insertion order. Closes the
+    chat-silence gap observed in run7 (16 min between 'loading
+    design context' and the next status update)."""
+
+    repo_root = _make_repo_root_with_docs(tmp_path)
+    repo_map = RepoMap(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        design_context_sources=[
+            DesignContextSource(name="docs", paths=["docs/**/*.md"]),
+            DesignContextSource(name="codedocs", paths=["src/**/*.md"]),
+        ],
+    )
+    vcm_handle = MagicMock()
+    vcm_handle.mmap_application_scope = AsyncMock(
+        return_value=MagicMock(status="mapped"),
+    )
+    emissions: list[tuple[str, dict[str, Any]]] = []
+
+    async def _callback(message: str, details: dict[str, Any]) -> None:
+        emissions.append((message, details))
+
+    await materialize_design_context_sources(
+        vcm_handle=vcm_handle,
+        repo_map=repo_map,
+        repo_root=repo_root,
+        base_scope_id="dm",
+        origin_url="u", branch="main", commit="c",
+        mmap_config=MmapConfig(),
+        include_kuzu=False,
+        progress_callback=_callback,
+    )
+
+    # 1 start + 1 per source.
+    assert len(emissions) == 3
+    start_msg, start_details = emissions[0]
+    assert start_details["stage"] == "start"
+    assert start_details["total"] == 2
+    assert start_details["completed"] == 0
+    # Per-source emissions advance the completed counter and name
+    # the source.
+    rest = emissions[1:]
+    completed_counters = [d["completed"] for _, d in rest]
+    assert completed_counters == [1, 2]
+    source_names = {d["source_name"] for _, d in rest}
+    assert source_names == {"docs", "codedocs"}
+    for msg, details in rest:
+        assert details["stage"] == "source_done"
+        assert details["vcm_status"] in ("mapped", "already_mapped")
+
+
+@pytest.mark.asyncio
+async def test_progress_callback_failure_does_not_abort_ingest(
+    tmp_path: Path,
+) -> None:
+    """Recovery contract: a misbehaving progress_callback raises in
+    the per-source path, but the materializer still completes the
+    ingest and returns a normal report. Progress is best-effort."""
+
+    repo_root = _make_repo_root_with_docs(tmp_path)
+    repo_map = RepoMap(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        design_context_sources=[
+            DesignContextSource(name="docs", paths=["docs/**/*.md"]),
+        ],
+    )
+    vcm_handle = MagicMock()
+    vcm_handle.mmap_application_scope = AsyncMock(
+        return_value=MagicMock(status="mapped"),
+    )
+
+    async def _exploding_cb(message: str, details: dict[str, Any]) -> None:
+        raise RuntimeError("synthetic UI relay failure")
+
+    report = await materialize_design_context_sources(
+        vcm_handle=vcm_handle,
+        repo_map=repo_map,
+        repo_root=repo_root,
+        base_scope_id="dm",
+        origin_url="u", branch="main", commit="c",
+        mmap_config=MmapConfig(),
+        include_kuzu=False,
+        progress_callback=_exploding_cb,
+    )
+
+    # Report still good — the ingest itself was not poisoned.
+    assert report.mapped_count == 1
+    assert report.failed_count == 0
+
+
+@pytest.mark.asyncio
+async def test_progress_callback_none_preserves_legacy_path(
+    tmp_path: Path,
+) -> None:
+    """When ``progress_callback`` is omitted (``None``), behaviour
+    matches the pre-Fix-B path: no emissions, no per-source wrapper
+    overhead beyond a single ``if is None`` check. Pins the
+    backwards-compat contract for callers (tests, CLIs) that don't
+    want streamed status."""
+
+    repo_root = _make_repo_root_with_docs(tmp_path)
+    repo_map = RepoMap(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        design_context_sources=[
+            DesignContextSource(name="docs", paths=["docs/**/*.md"]),
+        ],
+    )
+    vcm_handle = MagicMock()
+    vcm_handle.mmap_application_scope = AsyncMock(
+        return_value=MagicMock(status="mapped"),
+    )
+
+    # No progress_callback passed — should behave exactly as before.
+    report = await materialize_design_context_sources(
+        vcm_handle=vcm_handle,
+        repo_map=repo_map,
+        repo_root=repo_root,
+        base_scope_id="dm",
+        origin_url="u", branch="main", commit="c",
+        mmap_config=MmapConfig(),
+        include_kuzu=False,
+    )
+
+    assert report.mapped_count == 1

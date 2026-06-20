@@ -40,6 +40,7 @@ import inspect
 import json
 import logging
 import time
+import uuid
 from typing import Any
 
 from overrides import override
@@ -89,6 +90,7 @@ from ..planning.models import (
     CallRecord,
     AdvisoryEntry,
     Diagnostic,
+    GuardrailBlockedError,
     BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES,
     CALL_RECORD_RESULT_PREVIEW_BYTES,
 )
@@ -1298,6 +1300,148 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 e,
             )
 
+    async def _handle_guardrail_block(
+        self,
+        *,
+        action_key: str,
+        params: dict[str, Any],
+        decision: Any,
+        repl_ns: dict[str, Any],
+    ) -> None:
+        """Block-handling for a guardrail-rejected ``run()`` dispatch.
+
+        Records the block four ways and then raises so the LLM-
+        generated code block aborts atomically at the await site:
+
+        1. ``self._run_call_trace`` — per-cell trace exposed to the
+           cell via the REPL namespace and rendered into the next
+           prompt's run-call-trace section.
+        2. ``self._last_blocked_dispatches`` — typed ``BlockedDispatch``
+           entries surfaced in the next iteration's planner prompt
+           under "## Blocked Dispatches (last iteration)" so the LLM
+           regenerates with full visibility of the rejection.
+        3. ``self._block_streak_tracker`` — fires
+           :data:`DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK` on the agent's
+           diagnostic blackboard when the same action_key is blocked
+           repeatedly, so external observers can intervene.
+        4. ``policy:action_started`` + ``policy:action_completed``
+           lifecycle events with ``blocked=True`` in the payload, so
+           the trace UI shows the rejection as a real (failed) action
+           row instead of an invisible gap. Without these, a blocked
+           ``respond_to_user`` followed by a successful
+           ``wait_for_next_event`` in the same cell renders as
+           "agent only ran wait_for_next_event" — silent failure from
+           the user's perspective.
+
+        Atomicity contract: the LLM's code block is a sequenced plan
+        the framework MUST execute as a unit or reject as a unit.
+        Returning a failed ``ActionResult`` here would let suffix
+        ``run()`` calls fire with their preconditions skipped
+        (e.g. the cell waits for an event without first responding
+        to the user — the bug this method's raise prevents). The
+        REPL captures the raised :class:`GuardrailBlockedError` as
+        a code-execution failure; the policy's retry loop (see
+        :meth:`execute_iteration`) feeds the matching
+        ``BlockedDispatch`` advisory into the next prompt and the
+        LLM regenerates a corrected plan.
+
+        Never returns — always raises :class:`GuardrailBlockedError`.
+        """
+        logger.warning(
+            f"Guardrail blocked '{action_key}': {decision.reason}",
+        )
+        self._run_call_trace.append({
+            "call_index": len(self._run_call_trace),
+            "action_key": action_key,
+            "parameters": dict(params),
+            "success": False,
+            "error": f"Blocked: {decision.reason}"[:200],
+            "output_preview": "",
+            "blocked": True,
+        })
+        repl_ns["_run_call_trace"] = self._run_call_trace
+
+        # JSON-truncate the params snapshot so a huge payload
+        # (e.g. a full decomposition proposal that was about to be
+        # passed to a gated action) can't blow the in-memory history.
+        try:
+            params_preview = json.loads(
+                json.dumps(
+                    dict(params),
+                )[:BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES]
+            )
+        except (json.JSONDecodeError, TypeError):
+            params_preview = (
+                str(params)[:BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES]
+            )
+
+        self._last_blocked_dispatches.append(BlockedDispatch(
+            action_key=action_key,
+            params_preview=params_preview,
+            reason=decision.reason,
+            suggestion=decision.suggestion,
+        ))
+        await self._block_streak_tracker.track(
+            action_key=action_key,
+            reason=decision.reason,
+            suggestion=decision.suggestion,
+        )
+
+        # ``emits_lifecycle`` honors the executor's declaration the
+        # same way the dispatch path does — actions that opt out
+        # (e.g. ``wait_for_next_event``) don't suddenly appear in
+        # the trace UI just because they were blocked. Unknown
+        # action_keys default to emitting (conservative).
+        blocked_action_id = (
+            f"codegen_internal_blocked_{uuid.uuid4().hex[:8]}"
+        )
+        blocked_executor = self._action_dispatcher.find_executor(action_key)
+        blocked_emits_lifecycle = (
+            blocked_executor is None
+            or blocked_executor.emits_lifecycle
+        )
+        if blocked_emits_lifecycle:
+            ts = time.time()
+            await self._emit_lifecycle_event(
+                key=ActionPolicyLifecycleProtocol.action_started_key(
+                    blocked_action_id,
+                ),
+                payload={
+                    "agent_id": self.agent.agent_id,
+                    "action_id": blocked_action_id,
+                    "action_key": action_key,
+                    "parameters": dict(params),
+                    "started_at": ts,
+                    "blocked": True,
+                },
+            )
+            await self._emit_lifecycle_event(
+                key=ActionPolicyLifecycleProtocol.action_completed_key(
+                    blocked_action_id,
+                ),
+                payload={
+                    "agent_id": self.agent.agent_id,
+                    "action_id": blocked_action_id,
+                    "action_key": action_key,
+                    "success": False,
+                    "cancelled": False,
+                    "blocked": True,
+                    "started_at": ts,
+                    "ended_at": ts,
+                    "wall_time_ms": 0,
+                    "error": (
+                        f"Blocked by guardrail: {decision.reason}"
+                    ),
+                    "suggestion": decision.suggestion,
+                },
+            )
+
+        raise GuardrailBlockedError(
+            action_key=action_key,
+            reason=decision.reason,
+            suggestion=decision.suggestion,
+        )
+
     async def _emit_codegen_recovery_banner(
         self,
         *,
@@ -1358,50 +1502,21 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 call_history=self._call_history,
             )
             if not decision.allowed:
-                logger.warning(f"Guardrail blocked '{action_key}': {decision.reason}")
-                self._run_call_trace.append({
-                    "call_index": len(self._run_call_trace),
-                    "action_key": action_key,
-                    "parameters": dict(params),
-                    "success": False,
-                    "error": f"Blocked: {decision.reason}"[:200],
-                    "output_preview": "",
-                    "blocked": True,
-                })
-                ns["_run_call_trace"] = self._run_call_trace
-                # Capture for the next iteration's prompt. JSON-truncate
-                # the params snapshot so a huge payload (e.g. a full
-                # decomposition proposal that was about to be passed
-                # to a gated action) can't blow the in-memory history.
-                try:
-                    params_preview = json.loads(
-                        json.dumps(
-                            dict(params),
-                        )[:BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES]
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    params_preview = (
-                        str(params)[
-                            :BLOCKED_DISPATCH_PARAMS_PREVIEW_BYTES
-                        ]
-                    )
-                self._last_blocked_dispatches.append(BlockedDispatch(
+                # Atomic abort: records the block + emits lifecycle
+                # events + raises ``GuardrailBlockedError``, which
+                # unwinds the cell at this await site so suffix
+                # ``run()`` calls (e.g. ``wait_for_next_event``)
+                # never fire. The LLM's code block is a sequenced
+                # plan — partial execution is undefined behavior.
+                # See :meth:`_handle_guardrail_block` for the
+                # contract.
+                await self._handle_guardrail_block(
                     action_key=action_key,
-                    params_preview=params_preview,
-                    reason=decision.reason,
-                    suggestion=decision.suggestion,
-                ))
-                await self._block_streak_tracker.track(
-                    action_key=action_key,
-                    reason=decision.reason,
-                    suggestion=decision.suggestion,
-                )
-                return ActionResult(
-                    success=False,
-                    error=f"Blocked by guardrail: {decision.reason}. {decision.suggestion}",
+                    params=params,
+                    decision=decision,
+                    repl_ns=ns,
                 )
 
-            import uuid
             action = Action(
                 action_id=f"codegen_internal_{uuid.uuid4().hex[:8]}",
                 agent_id=self.agent.agent_id,

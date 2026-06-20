@@ -599,6 +599,15 @@ async def _listen_for_agent_messages(
                 # renderer (code block, table, diff). Absent for
                 # plain-text messages.
                 "attachments": payload.get("attachments"),
+                # Free-form bag the requesting agent stamps on
+                # typed-question payloads. For ``kind="human_approval"``
+                # callers pass the proposal diff / summary / affected-
+                # pages list here; for ``kind="human_help"`` the
+                # SessionAgent's ``handle_human_help_request`` translator
+                # stamps the agent's ``context`` (what it has tried +
+                # observed) so the operator card surfaces it above the
+                # response surface. Absent for legacy messages.
+                "extra": payload.get("extra"),
             }
 
             # Persist agent message
@@ -778,13 +787,22 @@ async def _handle_list_agents(websocket: WebSocket, colony: ColonyConnection) ->
             for agent_id in agent_ids[:50]:  # Limit to 50
                 try:
                     info = await handle.get_agent_info(agent_id=agent_id)
-                    agents.append({
-                        "agent_id": agent_id,
-                        "agent_type": getattr(info, "agent_type", "") if info else "",
-                        "state": str(getattr(info, "state", "")) if info else "unknown",
-                    })
                 except Exception:
                     agents.append({"agent_id": agent_id, "agent_type": "", "state": "unknown"})
+                    continue
+                if info is None:
+                    agents.append({"agent_id": agent_id, "agent_type": "", "state": "unregistered"})
+                    continue
+                # ``AgentRegistrationInfo`` fields are typed + required
+                # (see models.py:2819). Read directly per
+                # [[no-getattr-defaults]] — ``info.state.name`` is the
+                # uppercase enum name (e.g. ``"RUNNING"`` /
+                # ``"STOPPED"``), no ``str(...)`` coercion needed.
+                agents.append({
+                    "agent_id": agent_id,
+                    "agent_type": info.agent_type,
+                    "state": info.state.name,
+                })
 
             await websocket.send_json({"type": "agents_list", "agents": agents})
         except Exception as e:

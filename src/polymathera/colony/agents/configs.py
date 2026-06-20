@@ -359,6 +359,7 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "ResultCapability",
             "CriticCapability",
             "SynthesisCapability",
+            "HumanHelpCapability",
         ],
         "worker_capabilities": [
             "ChangeImpactAnalysisCapability",
@@ -421,6 +422,7 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "WorkingSetCapability",
             "AgentPoolCapability",
             "PageGraphCapability",
+            "HumanHelpCapability",
         ],
         "worker_capabilities": [
             "ProgramSlicingCapability",
@@ -470,6 +472,7 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "WorkingSetCapability",
             "AgentPoolCapability",
             "PageGraphCapability",
+            "HumanHelpCapability",
         ],
         "worker_capabilities": [
             "ComplianceAnalysisCapability",
@@ -522,6 +525,7 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "WorkingSetCapability",
             "AgentPoolCapability",
             "PageGraphCapability",
+            "HumanHelpCapability",
         ],
         "worker_capabilities": [
             "IntentInferenceCapability",
@@ -574,6 +578,7 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "WorkingSetCapability",
             "AgentPoolCapability",
             "PageGraphCapability",
+            "HumanHelpCapability",
         ],
         "worker_capabilities": [
             "ContractInferenceCapability",
@@ -621,6 +626,7 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
         "coordinator_capabilities": [
             "CodeAnalysisCoordinatorCapability",
             "CriticCapability",
+            "HumanHelpCapability",
         ],
         "worker_capabilities": [
             "ClusterAnalyzerCapability",
@@ -669,6 +675,7 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
             "SystemDesignCapability",
             "GitHubCapability",
             "HumanApprovalCapability",
+            "HumanHelpCapability",
             "RepoStateProvider",
             "DesignCheckpointer",
             "ToolBuilder",
@@ -924,6 +931,7 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                     "snapshot_open_roadmap_issues, list_issues, "
                     "classify_issues_decomposability, "
                     "propose_decompositions, request_human_approval, "
+                    "request_help, "
                     "wait_for_next_event, "
                     "create_decomposition, request_decompose_early_stop, "
                     "respond_to_user. Compose them as the data warrants "
@@ -931,6 +939,35 @@ _BUILTIN_MISSIONS: dict[str, dict[str, Any]] = {
                     "or scope-wide; request approval per-decision or "
                     "batched; apply singly or in bulk under an active "
                     "approve_all."
+                ),
+                (
+                    "MID-RUN CLARIFICATION — when newly discovered "
+                    "information forces a judgment call you cannot "
+                    "resolve from the user's original prompt (e.g. an "
+                    "issue body that's ambiguous about whether the "
+                    "operator wants splitting along dimension A or B; "
+                    "an unexpected classification that contradicts the "
+                    "decomposition_criteria the user passed; an "
+                    "operator-tunable threshold mid-run), call "
+                    "``request_help(question, context=..., "
+                    "options=(...))`` to escalate to the user. "
+                    "``options`` is your shortlist of candidate "
+                    "answers (rendered as buttons); the operator can "
+                    "pick one or write free-form ``guidance``. "
+                    "After posting, end your code block with "
+                    "``await run('wait_for_next_event')`` to pause. "
+                    "The response arrives on the next iteration as a "
+                    "``human_help_response:{request_id}`` planner-"
+                    "context binding carrying ``{chosen_option, "
+                    "guidance, decided_by, decided_at}``; translate "
+                    "the operator's free-text reply into the typed "
+                    "state your strategy needs and proceed. Distinct "
+                    "from ``request_human_approval`` (which gates a "
+                    "specific dispatch with a fixed enum of choices) "
+                    "and from ``respond_to_user`` (fire-and-forget — "
+                    "operator may not respond). Use ``request_help`` "
+                    "ONLY for judgment calls; routine progress is "
+                    "``emit_mission_status``."
                 ),
             ],
             "constraints": [
