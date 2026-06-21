@@ -255,7 +255,7 @@ def _bind_cap(g: ApprovalRequiredGuardrail, cap) -> None:
 
         def get_capability_by_type(self, _cls):
             return cap
-    g.bind_speaker(_A())
+    g.bind_agent(_A())
 
 
 async def test_approval_guardrail_dry_run_is_always_allowed() -> None:
@@ -332,12 +332,12 @@ async def test_approval_guardrail_allows_when_cap_reports_approval() -> None:
     assert d.allowed
 
 
-async def test_approval_guardrail_bind_speaker_none_clears_resolver() -> None:
+async def test_approval_guardrail_bind_owner_none_clears_resolver() -> None:
     g = ApprovalRequiredGuardrail(
         approval_required_action_prefixes=["X.gated"],
     )
     _bind_cap(g, _FakeCap(allow=True))
-    g.bind_speaker(None)
+    g.bind_agent(None)
     d = await g.check(
         action_key="X.gated.apply",
         params={"dry_run": False},

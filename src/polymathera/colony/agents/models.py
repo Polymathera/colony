@@ -2616,11 +2616,26 @@ class AgentMetadata(BaseModel):
     # Optional page binding
     bound_pages: list[str] = Field(default_factory=list)
 
-    max_iterations: int = Field(
+    max_iterations: int | None = Field(
         default=20,
         ge=1,
         le=100,
-        description="Maximum reasoning loop iterations"
+        description=(
+            "Stuck-detection cap on agent-loop iterations. ``None`` "
+            "means no cap (the loop runs until ``_stop_requested`` "
+            "or a state-machine shutdown path fires). Long-lived "
+            "service agents (``LifecycleMode.CONTINUOUS``) typically "
+            "set ``None`` because they process many user messages "
+            "across a session and have no natural iteration budget; "
+            ":func:`effective_loop_max_iterations` also bypasses the "
+            "cap automatically for ``CONTINUOUS`` agents, so setting "
+            "``None`` here is a redundant-but-explicit declaration "
+            "of intent at the construction site. The 20 default "
+            "preserves the stuck-detection behavior for ONE_SHOT "
+            "coordinators that don't override it; ``ge=1`` / ``le=100`` "
+            "apply only when the value is an integer (Pydantic skips "
+            "numeric validators on ``None``)."
+        ),
     )
 
     lifecycle_mode: LifecycleMode = LifecycleMode.ONE_SHOT

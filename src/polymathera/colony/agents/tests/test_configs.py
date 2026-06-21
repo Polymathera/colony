@@ -225,3 +225,86 @@ def test_decompose_mode_self_concept_names_four_choice_surface() -> None:
         "explanation field — the LLM won't know to read it on "
         "reject/abort responses."
     )
+
+
+# ---------------------------------------------------------------------------
+# AgentMetadata.max_iterations accepts None
+# ---------------------------------------------------------------------------
+#
+# Regression pin for R11-Fix4. The field was originally typed
+# ``int`` with ``default=20, ge=1, le=100``, which rejected the
+# explicit ``None`` that long-lived service agents (SessionAgent,
+# any future CONTINUOUS-mode agent) use to declare "no stuck-detection
+# cap; the loop runs until _stop_requested". A redeploy after R11
+# blew up with::
+#
+#   pydantic ValidationError: max_iterations Input should be a
+#   valid integer [type=int_type, input_value=None]
+#
+# Pinning ``None`` acceptance here prevents a future widening that
+# rolls back to ``int``-only validation.
+
+
+def _exec_ctx_manager():
+    """``AgentMetadata.__init__`` reads the ambient execution context
+    to stamp ``syscontext``; tests that construct it need an active
+    context. Used by the ``max_iterations`` validation tests below."""
+
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        user_execution_context,
+    )
+    return user_execution_context(
+        tenant_id="tenant_test",
+        colony_id="colony_test",
+        session_id="session_test",
+        origin="test",
+    )
+
+
+def test_agent_metadata_accepts_none_max_iterations() -> None:
+    """``max_iterations=None`` must validate so CONTINUOUS-lifecycle
+    agents can declare "no cap" explicitly at the construction site.
+    The numeric validators (``ge=1, le=100``) apply only when the
+    value is an integer; Pydantic skips them on ``None``."""
+
+    from polymathera.colony.agents.models import AgentMetadata, LifecycleMode
+
+    with _exec_ctx_manager():
+        m = AgentMetadata(
+            max_iterations=None,
+            lifecycle_mode=LifecycleMode.CONTINUOUS,
+        )
+    assert m.max_iterations is None
+    assert m.lifecycle_mode == LifecycleMode.CONTINUOUS
+
+
+def test_agent_metadata_default_max_iterations_is_20() -> None:
+    """The schema default stays 20 (backwards-compatible) so
+    ONE_SHOT coordinators that don't override the field keep their
+    stuck-detection budget. Only operators explicitly opting into
+    "no cap" pass ``None``."""
+
+    from polymathera.colony.agents.models import AgentMetadata
+
+    with _exec_ctx_manager():
+        m = AgentMetadata()
+    assert m.max_iterations == 20
+
+
+def test_agent_metadata_max_iterations_numeric_bounds_still_enforced() -> None:
+    """``ge=1`` and ``le=100`` still apply when the value IS an
+    integer — adding ``None`` support must not silently widen the
+    valid range."""
+
+    from pydantic import ValidationError
+    from polymathera.colony.agents.models import AgentMetadata
+
+    import pytest
+    with _exec_ctx_manager():
+        with pytest.raises(ValidationError):
+            AgentMetadata(max_iterations=0)
+        with pytest.raises(ValidationError):
+            AgentMetadata(max_iterations=101)
+        # Boundaries are inclusive.
+        AgentMetadata(max_iterations=1)
+        AgentMetadata(max_iterations=100)

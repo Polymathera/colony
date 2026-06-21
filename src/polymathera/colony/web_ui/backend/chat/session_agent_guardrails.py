@@ -5,10 +5,15 @@ drift" — fabricating status reports from spawn-return shapes,
 claiming an apply happened before approval landed. Two hard
 guardrails close those drifts deterministically:
 
-- :class:`ArgsAwareTemporalOrderGuardrail` — gates ``respond_to_user``
-  calls whose ``content`` mentions an ``agent-<hex>`` id on a
-  recent matching :meth:`AgentPoolCapability.get_agent_status` for
-  THAT specific agent. Bare "Hi there!" responses pass through.
+- :class:`SemanticConstraintGuardrail` with the
+  ``no_unverified_agent_state_claims`` rule — uses an LLM judge
+  to evaluate whether a proposed ``respond_to_user`` content makes
+  a state CLAIM about another agent that the agent didn't verify
+  via ``get_agent_status`` in the SAME cell. Replaces the prior
+  syntactic predicate (regex on ``agent-<hex>``) that produced
+  false positives on bare references and false negatives on state
+  claims that didn't include an id literal. See
+  ``colony/MEMORY.md::no-syntactic-proxies-for-semantic-properties``.
 
 - :class:`ApprovalRequiredGuardrail` — gates apply-path calls into
   mission coordinators' mutating actions on a prior
@@ -18,34 +23,94 @@ guardrails close those drifts deterministically:
 Why this lives in its own module: the guardrail instance ships
 inside ``SessionAgent.bind(...)``'s ``action_policy_blueprints``,
 which travels through cloudpickle to the Ray worker. Module-level
-named functions (rather than lambdas captured in closures) keep
+named factories (rather than lambdas captured in closures) keep
 the serialised graph small and easy to audit; tests import these
 shapes too.
 
 See ``colony/mission_and_action_guardrails_plan.md`` (Part 2) for
-the broader hybrid-enforcement design, and
+the broader hybrid-enforcement design,
 ``colony/docs/guides/action-policy-dimensions.md`` for the
-operator-facing how-to.
+operator-facing how-to, and ``semantic_constraints.py`` for the
+general SemanticConstraint primitives this rule was migrated to.
 """
 
 from __future__ import annotations
 
-import re
-from typing import Any
-
 from polymathera.colony.agents.patterns.actions.code_constraints import (
     ApprovalRequiredGuardrail,
-    ArgsAwareOrderingRule,
-    ArgsAwareTemporalOrderGuardrail,
     CompositeGuardrail,
     RuntimeGuardrail,
 )
+from polymathera.colony.agents.patterns.actions.semantic_constraints import (
+    ConstraintFailureMode,
+    ConstraintScope,
+    LLMJudgeVerifier,
+    SemanticConstraint,
+    SemanticConstraintGuardrail,
+)
 
 
-# Module-level so the regex compiles once and survives cloudpickle
-# round-trips by reference (the closures below capture the name, not
-# the compiled object — cloudpickle handles that cleanly).
-_AGENT_ID_RE = re.compile(r"agent-[0-9a-f]+")
+# ---------------------------------------------------------------------------
+# Constraint catalogue
+# ---------------------------------------------------------------------------
+
+
+_NO_UNVERIFIED_AGENT_STATE_CLAIMS_RULE_NL = (
+    "When the proposed action is respond_to_user, the content MUST "
+    "NOT make any claim or imply anything about the lifecycle state "
+    "of another agent (e.g. 'running', 'stopped', 'idle', 'failed', "
+    "'finished', 'busy', 'has completed', 'is currently …') UNLESS "
+    "the agent has called AgentPoolCapability.get_agent_status for "
+    "that exact agent_id WITHIN THIS CELL and observed the state. "
+    "The owner agent's own agent_id is exempt — claims about the owner agent's "
+    "own state don't need verification. BARE references to another "
+    "agent's id without a state claim (e.g. 'I asked agent-XYZ to "
+    "help', 'the coordinator agent-XYZ was created') are allowed. "
+    "Only STATE CLAIMS about OTHER agents require evidence in the "
+    "form of a successful get_agent_status call this cell."
+)
+
+
+def _build_no_unverified_state_claims_constraint() -> SemanticConstraint:
+    """The first migrated declarative constraint. Replaces the prior
+    syntactic ``status_claim_rule`` that fired on ANY ``agent-<hex>``
+    mention in respond_to_user content — including bare references
+    that weren't state claims, and missing real state claims that
+    happened to refer to agents indirectly (e.g. by capability name
+    or by role).
+
+    The LLM judge reads the proposed content + the cell's call
+    history (including any prior get_agent_status calls + their
+    results) and decides whether the rule is satisfied. Failure
+    mode is BLOCK — state-claim fabrication is irreversible from
+    the user's perspective once the message ships.
+    """
+
+    return SemanticConstraint(
+        id="no_unverified_agent_state_claims",
+        rule_nl=_NO_UNVERIFIED_AGENT_STATE_CLAIMS_RULE_NL,
+        applies_to=["respond_to_user"],
+        scope=ConstraintScope.CELL,
+        failure_mode=ConstraintFailureMode.BLOCK,
+        verifier=LLMJudgeVerifier(
+            max_tokens=300,
+            temperature=0.0,
+        ),
+    )
+
+
+def session_agent_semantic_constraints() -> list[SemanticConstraint]:
+    """The catalogue. Each entry is one declarative rule the
+    framework checks at runtime AND surfaces in the planner prompt's
+    "## Active semantic constraints" section.
+
+    Operators add new rules by appending to this list. No Python
+    class per rule, no test scaffolding per rule, no signature
+    changes — the constraint is data."""
+
+    return [
+        _build_no_unverified_state_claims_constraint(),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -69,24 +134,17 @@ def build_session_agent_runtime_guardrail(
             disable the approval gate entirely.
 
     Returns:
-        A :class:`CompositeGuardrail` running the status-claim and
-        approval gates in that order. The order matters: status-claim
-        is the cheaper check and the more frequent failure mode in
-        traces, so it fronts. Approval is the second line.
+        A :class:`CompositeGuardrail` running the semantic constraint
+        catalogue and the approval gate in that order. Order matters:
+        the semantic constraints are cheaper to evaluate for the
+        common (non-applicable) action_key and are the more frequent
+        check, so they front. Approval is the second line for the
+        narrower set of mutating apply actions.
 
-    The status-claim predicate is built as a closure over a
-    one-element ``_speaker_ref`` dict so the SessionAgent's own
-    ``agent-<hex>`` id can be excluded from the "you referenced this
-    agent without status-checking it" check. The agent_id is not
-    known at build time (the agent is spawned later, gets its id
-    allocated at spawn); the code-generation policy calls
-    :meth:`RuntimeGuardrail.bind_speaker` after init, which writes the
-    id into ``_speaker_ref``. Per ``decompose_and_session_recovery_fixes_plan.md``
-    item 4: the live 2026-06-07 run blocked a ``respond_to_user``
-    that mentioned the SessionAgent's OWN id because the prior
-    ``get_agent_status`` only queried the coordinator's id; this
-    closure fixes that without touching every guardrail's check
-    signature.
+    The semantic catalogue lives in :func:`session_agent_semantic_constraints`;
+    LLM-judge verifiers get their ``infer_fn`` bound lazily via
+    :meth:`SemanticConstraintGuardrail.bind_agent` (the agent doesn't
+    exist at factory time — the blueprint cloudpickles into the worker).
     """
 
     if approval_required_action_prefixes is None:
@@ -96,84 +154,10 @@ def build_session_agent_runtime_guardrail(
             "DesignProcessCapability.propose_task_assignments",
         ]
 
-    speaker_ref: dict[str, str | None] = {"agent_id": None}
-
-    def _referenced_non_self_agent_ids(content: Any) -> set[str]:
-        """Extract every ``agent-<hex>`` mention in ``content`` minus
-        the speaker's own id (when known). Used by both ``applies_when``
-        and ``prior_params_match`` so the rule's gate AND its match
-        logic share the same "what counts as a non-self reference"
-        definition."""
-
-        if not isinstance(content, str):
-            return set()
-        referenced = set(_AGENT_ID_RE.findall(content))
-        speaker = speaker_ref["agent_id"]
-        if speaker:
-            referenced.discard(speaker)
-        return referenced
-
-    def _content_mentions_non_self_agent_id(
-        params: dict[str, Any],
-    ) -> bool:
-        """The rule's ``applies_when`` gate: fires only when the
-        proposed ``respond_to_user`` content references at least one
-        agent_id that ISN'T the speaker's own. A response that only
-        mentions the speaker (or none at all) bypasses the
-        status-check requirement entirely. Per item 4: the 2026-06-07
-        live run blocked a response that mentioned only the
-        SessionAgent's own id because the predicate didn't know who
-        the speaker was."""
-
-        return bool(_referenced_non_self_agent_ids(params.get("content")))
-
-    def _prior_get_status_covers_target_agents(
-        prior_params: dict[str, Any],
-        target_params: dict[str, Any],
-    ) -> bool:
-        """Return True when the prior ``get_agent_status`` call's
-        ``agent_ids`` cover every NON-SELF ``agent-<hex>`` mention
-        in the target ``respond_to_user`` content. Reuses the same
-        non-self extraction as ``applies_when`` for symmetry."""
-
-        referenced = _referenced_non_self_agent_ids(
-            target_params.get("content"),
-        )
-        if not referenced:
-            # ``applies_when`` should already have short-circuited;
-            # belt-and-braces if this is reached anyway.
-            return True
-        queried = set(prior_params.get("agent_ids") or [])
-        return referenced.issubset(queried)
-
-    status_claim_rule = ArgsAwareOrderingRule(
-        target_action="respond_to_user",
-        applies_when=_content_mentions_non_self_agent_id,
-        required_prior="get_agent_status",
-        max_age_calls=20,
-        prior_params_match=_prior_get_status_covers_target_agents,
-        suggestion=(
-            "Call AgentPoolCapability.get_agent_status with the "
-            "agent_id(s) you're about to reference, then respond. "
-            "The spawn_mission return only tells you whether the "
-            "coordinator was created — NOT whether it is running. "
-            "References to your OWN agent_id don't need a status "
-            "check. See docs/guides/action-policy-dimensions.md."
+    return CompositeGuardrail(
+        SemanticConstraintGuardrail(
+            constraints=session_agent_semantic_constraints(),
         ),
-    )
-
-    class _SessionAgentSpeakerAwareGuardrail(CompositeGuardrail):
-        """Plain composite + a ``bind_speaker`` that writes into the
-        predicate's closure mailbox."""
-
-        def bind_speaker(self, agent):
-            super().bind_speaker(agent)
-            speaker_ref["agent_id"] = (
-                agent.agent_id if agent is not None else None
-            )
-
-    return _SessionAgentSpeakerAwareGuardrail(
-        ArgsAwareTemporalOrderGuardrail(rules=[status_claim_rule]),
         ApprovalRequiredGuardrail(
             approval_required_action_prefixes=(
                 approval_required_action_prefixes
@@ -184,4 +168,5 @@ def build_session_agent_runtime_guardrail(
 
 __all__ = (
     "build_session_agent_runtime_guardrail",
+    "session_agent_semantic_constraints",
 )

@@ -434,6 +434,7 @@ async def create_session(
         session_agent_id: str | None = None
         try:
             from polymathera.colony.agents import AgentMetadata, AgentHandle
+            from polymathera.colony.agents.models import LifecycleMode
             from polymathera.colony.agents.self_concept import AgentSelfConcept
             from ..chat import SessionAgent, SessionOrchestratorCapability
             from ..chat.session_agent_guardrails import (
@@ -532,6 +533,18 @@ async def create_session(
             agent_metadata = AgentMetadata(
                 role="session_orchestrator",
                 syscontext=session_syscontext,
+                # SessionAgent is a long-lived chat-service agent: it
+                # processes many user messages across a session that
+                # can last hours or days. The agent-loop's
+                # ``max_iterations`` is a stuck-detection cap for
+                # ONE_SHOT coordinators with a focused goal — applying
+                # it here turned the chat into a silent-death lottery
+                # the moment the user's questions burned enough iterations.
+                # The CONTINUOUS lifecycle declares "goal satisfied →
+                # IDLE, wait for new events" (the existing primitive,
+                # see :class:`LifecycleMode`).
+                lifecycle_mode=LifecycleMode.CONTINUOUS,
+                max_iterations=None,
                 goals=[
                     "Orchestrate user interactions within this session",
                     "Interpret user intent and decide whether to respond directly or spawn mission agents",

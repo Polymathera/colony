@@ -1,180 +1,363 @@
-"""Tests for the SessionAgent's runtime guardrail composition.
+"""Tests for the SessionAgent's runtime guardrail composition after
+the R10-3 migration to declarative :class:`SemanticConstraint` records.
 
-Covers the speaker-aware status-claim predicate (item 4 of
-``colony/decompose_and_session_recovery_fixes_plan.md``): a
-``respond_to_user`` content that mentions ONLY the SessionAgent's own
-``agent-<hex>`` id must pass without a prior ``get_agent_status`` call,
-while a content that mentions OTHER agent_ids must still gate on a
-status check that covers them.
+Pre-R10-3 the SessionAgent's status-claim rule lived as a syntactic
+predicate (regex on ``agent-<hex>`` in respond_to_user content) inside
+an :class:`ArgsAwareTemporalOrderGuardrail`. After R10-3 it's one
+record in :func:`session_agent_semantic_constraints` checked by an
+:class:`LLMJudgeVerifier` — the judge decides whether the proposed
+content actually makes a STATE CLAIM about another agent.
+
+What these tests pin:
+
+1. The factory produces a :class:`CompositeGuardrail` of
+   :class:`SemanticConstraintGuardrail` + :class:`ApprovalRequiredGuardrail`
+   in that order (status-claim cheap-first front, approval gate second).
+2. The catalogue ships the ``no_unverified_agent_state_claims`` rule
+   with the right scope (CELL), failure mode (BLOCK), applies_to
+   filter, and verifier shape.
+3. The composite's ``bind_agent`` propagates the agent's ``infer``
+   into the LLM-judge verifier.
+4. Verdict routing: stub-judge ``satisfied=true`` → ``allowed=True``;
+   ``satisfied=false`` → ``allowed=False`` with the verdict's
+   reason + suggestion + the rule id prefix.
+5. The constraint's ``applies_to=[respond_to_user]`` short-circuits
+   unrelated action keys without invoking the judge (cost matters).
+
+The LLM judge's actual semantic decisions (does *this* content make
+a state claim about *that* agent?) are NOT pinned here — that's the
+judge's responsibility under non-deterministic semantics. Stub judges
+let us verify FRAMEWORK PLUMBING; the prompt-engineering of the
+``rule_nl`` is evaluated against real LLMs at the staging layer.
 """
 
 from __future__ import annotations
 
-import time
+import json
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
-from polymathera.colony.agents.patterns.planning.models import (
-    CallRecord,
+from polymathera.colony.agents.patterns.actions.code_constraints import (
+    ApprovalRequiredGuardrail,
+    CompositeGuardrail,
+)
+from polymathera.colony.agents.patterns.actions.semantic_constraints import (
+    ConstraintFailureMode,
+    ConstraintScope,
+    LLMJudgeVerifier,
+    SemanticConstraintGuardrail,
 )
 from polymathera.colony.web_ui.backend.chat.session_agent_guardrails import (
     build_session_agent_runtime_guardrail,
+    session_agent_semantic_constraints,
 )
 
 
 pytestmark = pytest.mark.asyncio
 
 
+# ---------------------------------------------------------------------------
+# Test doubles
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StubResponse:
+    generated_text: str
+
+
+def _stub_infer(verdict: dict, *, capture: list | None = None):
+    """Build an async ``infer_fn`` that returns ``verdict`` for every
+    call. ``capture`` (when supplied) accumulates the prompts so
+    tests can assert the judge saw the right inputs."""
+
+    text = json.dumps(verdict)
+
+    async def _f(*, prompt, max_tokens=None, temperature=None):
+        if capture is not None:
+            capture.append(prompt)
+        return _StubResponse(generated_text=text)
+
+    return _f
+
+
 class _FakeAgent:
-    def __init__(self, agent_id: str) -> None:
+    def __init__(
+        self, *, agent_id: str, infer_fn,
+    ) -> None:
         self.agent_id = agent_id
+        self.infer = infer_fn
 
 
-def _status_call(
-    *, agent_ids: list[str], when: float | None = None,
-) -> CallRecord:
-    return CallRecord(
-        action_key="AgentPoolCapability.AgentPoolCapability.get_agent_status",
-        params={"agent_ids": agent_ids},
-        end_wall=when or time.time(),
-        status="ok",
-        result={"ok": True, "agents": []},
-    )
+RESPOND_TO_USER_KEY = (
+    "SessionOrchestratorCapability."
+    "SessionOrchestratorCapability.respond_to_user"
+)
 
 
-async def _check(
-    guardrail, *, content: str, history: list[CallRecord],
-) -> Any:
-    return await guardrail.check(
-        action_key=(
-            "SessionOrchestratorCapability."
-            "SessionOrchestratorCapability.respond_to_user"
-        ),
-        params={"content": content},
-        call_history=history,
-    )
+# ---------------------------------------------------------------------------
+# 1. Factory composition shape
+# ---------------------------------------------------------------------------
 
 
-async def test_respond_to_user_without_agent_mention_passes() -> None:
-    """Plain content with no ``agent-<hex>`` mention bypasses the
-    rule's ``applies_when`` — no status check required."""
+async def test_factory_builds_composite_of_semantic_and_approval() -> None:
+    """The composite has TWO inner guardrails in the canonical order:
+    semantic constraints first (cheaper check, more frequent path),
+    approval gate second (narrower mutating-action set)."""
 
-    guardrail = build_session_agent_runtime_guardrail(
+    g = build_session_agent_runtime_guardrail(
         approval_required_action_prefixes=[],
     )
-    decision = await _check(
-        guardrail, content="Hello!", history=[],
+    assert isinstance(g, CompositeGuardrail)
+    inner = g._inner
+    assert len(inner) == 2
+    assert isinstance(inner[0], SemanticConstraintGuardrail)
+    assert isinstance(inner[1], ApprovalRequiredGuardrail)
+
+
+# ---------------------------------------------------------------------------
+# 2. Catalogue contents pinned
+# ---------------------------------------------------------------------------
+
+
+def test_catalogue_includes_no_unverified_state_claims_rule() -> None:
+    """The rule id is the stable handle the LLM and operator refer
+    to in block messages, advisories, and code review — pin it so
+    a typo in the migration doesn't silently change the handle."""
+
+    catalogue = session_agent_semantic_constraints()
+    ids = {c.id for c in catalogue}
+    assert "no_unverified_agent_state_claims" in ids
+
+
+def test_no_unverified_state_claims_rule_has_correct_shape() -> None:
+    """The rule's scope, failure mode, applies_to filter, and verifier
+    type are pinned. Cell scope is required (fresh evidence only —
+    stale status checks from prior iterations don't satisfy the
+    rule). Block mode is required (state-claim fabrication is
+    irreversible from the user's perspective once shipped)."""
+
+    catalogue = session_agent_semantic_constraints()
+    rule = next(
+        c for c in catalogue
+        if c.id == "no_unverified_agent_state_claims"
+    )
+    assert rule.scope == ConstraintScope.CELL
+    assert rule.failure_mode == ConstraintFailureMode.BLOCK
+    assert rule.applies_to == ["respond_to_user"]
+    assert isinstance(rule.verifier, LLMJudgeVerifier)
+    # The natural-language rule must reference the THREE invariants
+    # the judge enforces — pin so a rewrite doesn't drop a key piece.
+    rule_text = rule.rule_nl.lower()
+    assert "lifecycle state" in rule_text or "state" in rule_text
+    assert "get_agent_status" in rule_text
+    assert "owner" in rule_text  # self-exclusion invariant
+
+
+# ---------------------------------------------------------------------------
+# 3. Agent propagation through the composite
+# ---------------------------------------------------------------------------
+
+
+async def test_composite_bind_agent_propagates_to_llm_judge() -> None:
+    """The composite walks every inner guardrail; the semantic
+    constraint guardrail then walks every LLM-judge verifier and
+    late-binds ``agent.infer``. Without this chain, the judge stays
+    unbound and falls open (allowing every action) — a real
+    regression that would defeat the whole rule."""
+
+    capture: list = []
+    agent = _FakeAgent(
+        agent_id="agent-aaaaaaaa",
+        infer_fn=_stub_infer(
+            {"satisfied": True, "reason": ""},
+            capture=capture,
+        ),
+    )
+    g = build_session_agent_runtime_guardrail(
+        approval_required_action_prefixes=[],
+    )
+    g.bind_agent(agent)
+
+    semantic = g._inner[0]
+    assert isinstance(semantic, SemanticConstraintGuardrail)
+    rule = next(
+        c for c in semantic._constraints
+        if c.id == "no_unverified_agent_state_claims"
+    )
+    assert isinstance(rule.verifier, LLMJudgeVerifier)
+    assert rule.verifier._infer_fn is agent.infer
+
+
+# ---------------------------------------------------------------------------
+# 4. Verdict routing
+# ---------------------------------------------------------------------------
+
+
+async def test_judge_satisfied_passes_respond_to_user() -> None:
+    """The framework's job is to call the judge with the right
+    inputs and route the verdict. When the judge says satisfied,
+    the action passes — regardless of content. (The judge's
+    semantic decision-making is its own concern.)"""
+
+    g = build_session_agent_runtime_guardrail(
+        approval_required_action_prefixes=[],
+    )
+    agent = _FakeAgent(
+        agent_id="agent-owner",
+        infer_fn=_stub_infer({"satisfied": True}),
+    )
+    g.bind_agent(agent)
+    decision = await g.check(
+        action_key=RESPOND_TO_USER_KEY,
+        params={"content": "The agent-coord is running."},
+        call_history=[],
     )
     assert decision.allowed
 
 
-async def test_respond_to_user_mentioning_other_agent_requires_status_check() -> None:
-    """Content referencing a NON-speaker agent_id without a prior
-    status check fires the gate — the canonical original failure
-    mode the rule was written to catch."""
+async def test_judge_unsatisfied_blocks_with_rule_id_prefix() -> None:
+    """Block message carries the rule id prefix so the LLM /
+    operator can attribute it. Reason + suggestion flow from the
+    judge into the GuardrailDecision unchanged."""
 
-    guardrail = build_session_agent_runtime_guardrail(
+    g = build_session_agent_runtime_guardrail(
         approval_required_action_prefixes=[],
     )
-    guardrail.bind_speaker(_FakeAgent("agent-aaaaaaaa"))
-    decision = await _check(
-        guardrail,
-        content="The coordinator agent-bbbbbbbb is now running.",
-        history=[],
+    agent = _FakeAgent(
+        agent_id="agent-owner",
+        infer_fn=_stub_infer({
+            "satisfied": False,
+            "reason": "claims agent-coord is running without a status check this cell",
+            "suggestion": "call get_agent_status before respond_to_user",
+        }),
+    )
+    g.bind_agent(agent)
+    decision = await g.check(
+        action_key=RESPOND_TO_USER_KEY,
+        params={"content": "The agent-coord is running."},
+        call_history=[],
     )
     assert not decision.allowed
+    assert "[no_unverified_agent_state_claims]" in decision.reason
+    assert "without a status check" in decision.reason
     assert "get_agent_status" in decision.suggestion
 
 
-async def test_respond_to_user_mentioning_only_speakers_own_id_passes() -> None:
-    """Item 4 fix — the SessionAgent talking about ITSELF doesn't
-    need a status check. Content that mentions only the speaker's
-    own ``agent-<hex>`` id passes without any prior
-    ``get_agent_status`` call.
+# ---------------------------------------------------------------------------
+# 5. applies_to filter short-circuits
+# ---------------------------------------------------------------------------
 
-    Pre-fix the 2026-06-07 live run blocked exactly this shape and
-    the SessionAgent never sent its closing summary."""
 
-    guardrail = build_session_agent_runtime_guardrail(
+async def test_unrelated_action_does_not_invoke_judge() -> None:
+    """The constraint applies only to ``respond_to_user``; an
+    unrelated action key (e.g. ``get_agent_status`` itself) must
+    NOT trigger the judge. Otherwise every action would pay the
+    LLM round-trip cost."""
+
+    capture: list = []
+    g = build_session_agent_runtime_guardrail(
         approval_required_action_prefixes=[],
     )
-    guardrail.bind_speaker(_FakeAgent("agent-52c36b64"))
-    decision = await _check(
-        guardrail,
-        content=(
-            "I (agent-52c36b64) finished spawning the coordinator."
+    agent = _FakeAgent(
+        agent_id="agent-owner",
+        infer_fn=_stub_infer(
+            {"satisfied": True}, capture=capture,
         ),
-        history=[],
+    )
+    g.bind_agent(agent)
+    decision = await g.check(
+        action_key="AgentPoolCapability.get_agent_status",
+        params={"agent_ids": ["agent-coord"]},
+        call_history=[],
     )
     assert decision.allowed
+    assert capture == []  # judge never called
 
 
-async def test_respond_to_user_mentioning_speaker_plus_other_still_gates_on_other() -> None:
-    """Content that mentions BOTH the speaker AND another agent must
-    still gate — the gate is for the non-speaker. A prior status
-    check that covers the non-speaker is enough."""
+# ---------------------------------------------------------------------------
+# 6. Judge prompt carries the cell-scoped slice
+# ---------------------------------------------------------------------------
 
-    guardrail = build_session_agent_runtime_guardrail(
+
+async def test_judge_sees_cell_history_via_cell_start_index() -> None:
+    """When the code-generation policy passes the iteration boundary,
+    the judge prompt should include the calls AT/AFTER that index
+    (cell scope) and exclude earlier ones. Pins the wiring of
+    ``cell_start_index`` from policy → composite → semantic guardrail
+    → judge prompt."""
+
+    from polymathera.colony.agents.patterns.planning.models import CallRecord
+    import time as _t
+
+    capture: list = []
+    g = build_session_agent_runtime_guardrail(
         approval_required_action_prefixes=[],
     )
-    guardrail.bind_speaker(_FakeAgent("agent-52c36b64"))
-
-    # Without a status check on the OTHER agent → blocked.
-    decision_blocked = await _check(
-        guardrail,
-        content=(
-            "I (agent-52c36b64) spawned coordinator agent-38220aa6."
+    agent = _FakeAgent(
+        agent_id="agent-owner",
+        infer_fn=_stub_infer(
+            {"satisfied": True}, capture=capture,
         ),
-        history=[],
     )
-    assert not decision_blocked.allowed
-
-    # With a status check that covers the OTHER agent → allowed.
-    decision_allowed = await _check(
-        guardrail,
-        content=(
-            "I (agent-52c36b64) spawned coordinator agent-38220aa6."
+    g.bind_agent(agent)
+    history = [
+        CallRecord(
+            action_key="PRIOR.iter_call_a",
+            params={},
+            end_wall=_t.time(),
+            status="ok",
         ),
-        history=[_status_call(agent_ids=["agent-38220aa6"])],
+        CallRecord(
+            action_key="PRIOR.iter_call_b",
+            params={},
+            end_wall=_t.time(),
+            status="ok",
+        ),
+        CallRecord(
+            action_key="CELL.get_agent_status",
+            params={"agent_ids": ["agent-coord"]},
+            end_wall=_t.time(),
+            status="ok",
+            result={"agents": [{"id": "agent-coord", "state": "RUNNING"}]},
+        ),
+    ]
+    await g.check(
+        action_key=RESPOND_TO_USER_KEY,
+        params={"content": "agent-coord status update"},
+        call_history=history,
+        cell_start_index=2,  # cell starts at the get_agent_status call
     )
-    assert decision_allowed.allowed
+    assert len(capture) == 1
+    prompt = capture[0]
+    assert "CELL.get_agent_status" in prompt
+    assert "PRIOR.iter_call_a" not in prompt
+    assert "PRIOR.iter_call_b" not in prompt
 
 
-async def test_bind_speaker_with_none_falls_back_to_pre_fix_behaviour() -> None:
-    """When the policy never binds a speaker (or binds None), the
-    predicate degrades safely: every ``agent-<hex>`` mention must be
-    covered, just like before item 4. Belt-and-braces for any code
-    path that constructs the guardrail without going through the
-    code-generation policy's init hook."""
+# ---------------------------------------------------------------------------
+# 7. Auto-generated advisory contains the rule (R10-4)
+# ---------------------------------------------------------------------------
 
-    guardrail = build_session_agent_runtime_guardrail(
+
+def test_advisory_auto_generates_no_unverified_state_claims_section() -> None:
+    """The advisory the SessionAgent's planner prompt picks up from
+    the composite must include the catalogue's rule — auto-generated,
+    NOT hand-written into self_concept. Adding a new rule to the
+    catalogue should automatically update the prompt."""
+
+    g = build_session_agent_runtime_guardrail(
         approval_required_action_prefixes=[],
     )
-    # Deliberately do NOT call bind_speaker.
-    decision = await _check(
-        guardrail,
-        content="My id is agent-aaaaaaaa.",
-        history=[],
-    )
-    assert not decision.allowed
-
-
-async def test_composite_propagates_bind_speaker_to_inner_guardrails() -> None:
-    """The ``CompositeGuardrail.bind_speaker`` override must call
-    each inner guardrail's ``bind_speaker`` — otherwise the SessionAgent
-    fix in ``ArgsAwareTemporalOrderGuardrail`` would never see the
-    speaker through the composite wrapper."""
-
-    guardrail = build_session_agent_runtime_guardrail(
-        approval_required_action_prefixes=[],
-    )
-    speaker_id = "agent-deadbeef"
-    guardrail.bind_speaker(_FakeAgent(speaker_id))
-
-    decision = await _check(
-        guardrail,
-        content=f"Self-reference only: {speaker_id} is running.",
-        history=[],
-    )
-    assert decision.allowed
+    advisory = g.planner_context_advisory(call_history=[])
+    assert advisory is not None
+    assert "no_unverified_agent_state_claims" in advisory
+    assert "respond_to_user" in advisory
+    assert "cell" in advisory.lower()
+    assert "block" in advisory.lower()
+    # The advisory must reference the natural-language rule body
+    # (not just the id), since the LLM reads the rule to know what
+    # to do — id alone is opaque.
+    assert "lifecycle state" in advisory or "state" in advisory

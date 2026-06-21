@@ -37,6 +37,7 @@ from .models import (
     AgentResourceRequirements,
     AgentSuspensionState,
     AgentMetadata,
+    LifecycleMode,
     ResumptionCondition,
     ResumptionConditionType,
 )
@@ -3638,6 +3639,45 @@ class Agent(BaseModel):
 
 
 
+def effective_loop_max_iterations(
+    *,
+    agent_id: str,
+    lifecycle_mode: LifecycleMode,
+    configured_max_iterations: int | None,
+) -> int | None:
+    """Decide whether the agent loop's iteration cap is honored or
+    bypassed, based on the agent's declared lifecycle.
+
+    ``max_iterations`` is the stuck-detection cap for ONE_SHOT agents
+    — focused coordinators that should finish their goal in a bounded
+    number of planner turns. CONTINUOUS-mode agents (e.g. SessionAgent
+    — a long-lived chat service that processes many user messages
+    across a session) have NO natural iteration budget; capping them
+    turns the chat into a silent-death lottery the moment the cap is
+    reached.
+
+    The rule:
+
+    - ``LifecycleMode.CONTINUOUS`` → returns ``None`` (no cap).
+      ``_stop_requested`` + the state-machine shutdown paths (suspend,
+      failure, completion) remain the unconditional termination
+      mechanisms.
+    - ``LifecycleMode.ONE_SHOT`` → returns the configured cap
+      unchanged. ONE_SHOT coordinators rely on it as a stuck-detection
+      signal.
+    """
+
+    if lifecycle_mode == LifecycleMode.CONTINUOUS:
+        if configured_max_iterations is not None:
+            logger.info(
+                "Agent %s is CONTINUOUS; bypassing max_iterations=%d cap "
+                "(loop runs until _stop_requested).",
+                agent_id, configured_max_iterations,
+            )
+        return None
+    return configured_max_iterations
+
+
 class AgentManagerBase:
     """Mixin for managing agents on a deployment.
 
@@ -4253,6 +4293,13 @@ class AgentManagerBase:
         iteration = 0
         idle_wait_iterations = 0
         error_msg: str | None = None
+
+        max_iterations = effective_loop_max_iterations(
+            agent_id=agent.agent_id,
+            lifecycle_mode=agent.metadata.lifecycle_mode,
+            configured_max_iterations=max_iterations,
+        )
+
         try:
             await agent.start()
 

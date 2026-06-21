@@ -781,6 +781,8 @@ class RuntimeGuardrail(ABC):
         action_key: str,
         params: dict[str, Any],
         call_history: list[CallRecord],
+        *,
+        cell_start_index: int = 0,
     ) -> GuardrailDecision:
         """Check whether an action is allowed.
 
@@ -791,33 +793,46 @@ class RuntimeGuardrail(ABC):
             action_key: The action being dispatched.
             params: The action parameters.
             call_history: Per-call records of every dispatched action
-                so far in this code-generation iteration, in order.
+                in the agent's session so far, in order.
                 Each item is a :class:`CallRecord` carrying the
                 action key, params, timing, and terminal status.
                 Guardrails that only need action keys read
                 ``c.action_key``; guardrails that need args-aware
                 matching read ``c.params``.
+            cell_start_index: Index into ``call_history`` marking
+                where the CURRENT generated code block began. Calls
+                at indices ``[cell_start_index:]`` were made within
+                the LLM's current cell; earlier calls are from prior
+                iterations. Scope-aware guardrails (notably
+                :class:`SemanticConstraintGuardrail` with
+                ``ConstraintScope.CELL``) use this to require evidence
+                from THIS cell rather than from stale prior state.
+                Defaults to ``0`` so guardrails that don't care about
+                cell-vs-session distinction (the legacy set: capability
+                boundary, temporal order, approval gate) keep their
+                "look at all of history" semantics — the whole
+                ``call_history`` IS the cell slice when the start is 0.
 
         Returns:
             GuardrailDecision with allowed/reason/suggestion.
         """
         ...
 
-    def bind_speaker(self, agent: "Any | None") -> None:
-        """Tell the guardrail which agent is the SPEAKER (the agent whose
-        action-policy is dispatching the calls this guardrail will check).
+    def bind_agent(self, agent: "Any | None") -> None:
+        """Tell the guardrail which agent is the agent whose
+        action-policy is dispatching the calls this guardrail will check.
 
         Called by the code-generation action policy during init. Default
-        no-op — guardrails that need speaker context (e.g. the
+        no-op — guardrails that need agent context (e.g. the
         SessionAgent's status-claim gate, which must exclude the
         SessionAgent's OWN agent_id from the "you referenced this id
         without status-checking it" check) override this and stash the
         identity for use in :meth:`check` / predicates.
         A guardrail that doesn't know who's speaking can't
         tell self-references from other-references.
-        The narrow ``bind_speaker`` hook keeps the
+        The narrow ``bind_agent`` hook keeps the
         :meth:`check` signature stable while letting guardrails opt
-        in to speaker-aware behaviour.
+        in to agent-aware behaviour.
 
         Composite guardrails should propagate the bind to their inner
         guardrails."""
@@ -857,7 +872,9 @@ class RuntimeGuardrail(ABC):
 class NoGuardrail(RuntimeGuardrail):
     """Allow everything — no runtime constraints."""
 
-    async def check(self, action_key, params, call_history):
+    async def check(
+        self, action_key, params, call_history, *, cell_start_index=0,
+    ):
         return GuardrailDecision(allowed=True)
 
 
@@ -884,7 +901,9 @@ class CapabilityBoundaryGuardrail(RuntimeGuardrail):
         self._allowed = allowed_prefixes
         self._blocked = blocked_prefixes or []
 
-    async def check(self, action_key, params, call_history):
+    async def check(
+        self, action_key, params, call_history, *, cell_start_index=0,
+    ):
         # Check blocked first
         for prefix in self._blocked:
             if prefix.lower() in action_key.lower():
@@ -922,7 +941,9 @@ class TemporalOrderGuardrail(RuntimeGuardrail):
     def __init__(self, ordering_rules: list[tuple[str, str]]):
         self._rules = ordering_rules
 
-    async def check(self, action_key, params, call_history):
+    async def check(
+        self, action_key, params, call_history, *, cell_start_index=0,
+    ):
         for before, after in self._rules:
             if after.lower() in action_key.lower():
                 # Check if "before" has been called. ``call_history``
@@ -1018,7 +1039,9 @@ class ArgsAwareTemporalOrderGuardrail(RuntimeGuardrail):
     def __init__(self, rules: Sequence[ArgsAwareOrderingRule]):
         self._rules = tuple(rules)
 
-    async def check(self, action_key, params, call_history):
+    async def check(
+        self, action_key, params, call_history, *, cell_start_index=0,
+    ):
         now = time.time()
         for rule in self._rules:
             if rule.target_action.lower() not in action_key.lower():
@@ -1110,7 +1133,7 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
     Reads ``approval_required_action_prefixes`` and asks
     :meth:`HumanApprovalCapability.has_active_approval_for` whether a
     non-revoked approval covers the action_key. The capability is
-    resolved via :meth:`bind_speaker` when the action policy
+    resolved via :meth:`bind_agent` when the action policy
     initialises.
 
     ``request_human_approval`` itself is not a substitute: issuing
@@ -1127,11 +1150,11 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
         approval_required_action_prefixes: Sequence[str],
     ):
         self._gated = tuple(approval_required_action_prefixes)
-        # Filled by ``bind_speaker``; the guardrail constructor runs
+        # Filled by ``bind_agent``; the guardrail constructor runs
         # at session-create time, before the agent exists.
         self._approval_cap_resolver: Callable[[], Any] | None = None
 
-    def bind_speaker(self, agent):
+    def bind_agent(self, agent):
         """Capture a thunk that resolves the agent's
         ``HumanApprovalCapability`` lazily — at construction time it
         may not be mounted yet."""
@@ -1154,7 +1177,9 @@ class ApprovalRequiredGuardrail(RuntimeGuardrail):
             None,
         )
 
-    async def check(self, action_key, params, call_history):
+    async def check(
+        self, action_key, params, call_history, *, cell_start_index=0,
+    ):
         gated = self._matching_prefix(action_key)
         if gated is None:
             return GuardrailDecision(allowed=True)
@@ -1282,21 +1307,26 @@ class CompositeGuardrail(RuntimeGuardrail):
             )
         self._inner: tuple[RuntimeGuardrail, ...] = tuple(guardrails)
 
-    async def check(self, action_key, params, call_history):
+    async def check(
+        self, action_key, params, call_history, *, cell_start_index=0,
+    ):
         for guardrail in self._inner:
             decision = await guardrail.check(
-                action_key, params, call_history,
+                action_key,
+                params,
+                call_history,
+                cell_start_index=cell_start_index,
             )
             if not decision.allowed:
                 return decision
         return GuardrailDecision(allowed=True)
 
-    def bind_speaker(self, agent):
+    def bind_agent(self, agent):
         """Propagate the bind to every inner guardrail so each one
-        can pick up speaker-aware behaviour independently."""
+        can pick up agent-aware behaviour independently."""
 
         for guardrail in self._inner:
-            guardrail.bind_speaker(agent)
+            guardrail.bind_agent(agent)
 
     def planner_context_advisory(self, call_history):
         """Join non-empty advisories from every inner guardrail.

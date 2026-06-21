@@ -206,7 +206,7 @@ def test_approval_block_suggestion_names_event_queue_as_wake_surface() -> None:
         ),
     )
     # No HumanApprovalCapability mounted → the suggestion fires.
-    g.bind_speaker(MagicMock(get_capability_by_type=lambda _: None))
+    g.bind_agent(MagicMock(get_capability_by_type=lambda _: None))
     decision = asyncio.run(
         g.check(
             "DesignProcessCapability.create_decomposition",

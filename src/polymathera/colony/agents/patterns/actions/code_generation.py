@@ -922,13 +922,13 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self._recovery_strategy = recovery_strategy or DeterministicRecovery()
         self._runtime_guardrail = runtime_guardrail or NoGuardrail()
         # Let the guardrail (or its inner guardrails, via the
-        # ``CompositeGuardrail.bind_speaker`` propagation) know which
+        # ``CompositeGuardrail.bind_agent`` propagation) know which
         # agent owns this policy — needed e.g. by the SessionAgent's
-        # status-claim gate to filter the speaker's own agent_id out
+        # status-claim gate to filter the agent's own agent_id out
         # of the "you referenced this id without status-checking it"
-        # check. Default ``bind_speaker`` is a no-op so guardrails
+        # check. Default ``bind_agent`` is a no-op so guardrails
         # that don't care pay nothing.
-        self._runtime_guardrail.bind_speaker(agent)
+        self._runtime_guardrail.bind_agent(agent)
         self._completion_validator = completion_validator or LLMCompletionValidator() # NoOpCompletionValidator()
 
         # Execution tracking — PlanExecutionContext is the structured state.
@@ -1495,11 +1495,19 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             Returns:
                 ActionResult with success, output, error fields
             """
-            # Runtime guardrail check
+            # Runtime guardrail check. ``cell_start_index`` marks the
+            # boundary in ``self._call_history`` where the LLM's
+            # CURRENT cell began — scope-aware constraints (notably
+            # :class:`SemanticConstraintGuardrail` with
+            # ``ConstraintScope.CELL``) slice on this so evidence
+            # from earlier iterations doesn't satisfy a freshness-
+            # requiring rule. The legacy guardrails ignore the kwarg
+            # and keep their session-wide semantics.
             decision = await self._runtime_guardrail.check(
                 action_key=action_key,
                 params=params,
                 call_history=self._call_history,
+                cell_start_index=self._iteration_history_boundary,
             )
             if not decision.allowed:
                 # Atomic abort: records the block + emits lifecycle

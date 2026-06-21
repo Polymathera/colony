@@ -32,6 +32,7 @@ import logging
 from typing import Any
 
 from polymathera.colony.agents import AgentHandle, AgentMetadata
+from polymathera.colony.agents.models import LifecycleMode
 from polymathera.colony.distributed.ray_utils.serving.context import (
     ExecutionContext,
     Ring,
@@ -85,6 +86,19 @@ def _build_system_session_agent_metadata(
             session_id=session_id,
             origin="colony_system_session",
         ),
+        # The system session is an always-on per-colony service host:
+        # GitHubInbound polls every tick, MentionRouting fires on
+        # every comment, InteractionLog writes for every event. It
+        # processes work for the colony's lifetime, not a bounded
+        # goal — declaring CONTINUOUS lifecycle prevents the same
+        # silent-death pattern caught on the user SessionAgent
+        # (default ``max_iterations=20`` killed the loop mid-work
+        # after 20 reasoning turns). ``max_iterations=None`` makes
+        # intent explicit at the construction site so a future
+        # operator doesn't have to chase the loop logic to learn
+        # that the cap is meant to be absent here.
+        lifecycle_mode=LifecycleMode.CONTINUOUS,
+        max_iterations=None,
         goals=[
             "Host always-on colony-singleton capabilities for this colony",
         ],
