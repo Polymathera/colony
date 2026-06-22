@@ -373,6 +373,58 @@ class SessionManagerDeployment:
         return result
 
     @serving.endpoint(ring=serving.Ring.KERNEL)
+    async def replace_session_agent_id(
+        self,
+        session_id: str,
+        new_agent_id: str,
+        *,
+        expected_old_agent_id: str | None,
+    ) -> str | None:
+        """Atomic compare-and-swap replacement of ``session_agent_id``.
+
+        PR1-B (R12-ROOT-CAUSE-C): when the user's SessionAgent dies,
+        the dashboard's chat router respawns it via
+        :func:`spawn_user_session_agent_for_session` and writes the
+        new ``agent_id`` onto the session via this endpoint.
+        :meth:`set_session_agent_id` refuses to overwrite a non-null
+        ``session_agent_id`` (intentional, for the initial-spawn
+        race), so respawn needs a separate path. The CAS guard
+        prevents two concurrent respawns from racing — the loser's
+        write is rejected, the winner's lands, only one new agent
+        is wired into the session.
+
+        Args:
+            session_id: Session identifier.
+            new_agent_id: The freshly-spawned replacement's agent_id.
+            expected_old_agent_id: The agent_id the caller observed
+                BEFORE deciding to respawn. The swap succeeds only
+                when the current ``session_agent_id`` matches. Pass
+                ``None`` to claim an explicitly-unset slot (rare —
+                the normal path here is "death detected → respawn").
+
+        Returns:
+            The ``agent_id`` now on the session AFTER the call —
+            ``new_agent_id`` on success, the existing value on a CAS
+            mismatch (caller should stop its new agent and use the
+            returned id), or ``None`` if the session row is missing.
+        """
+
+        result: str | None = None
+        async for state in self.state_manager.write_transaction():
+            session = state.sessions.get(session_id)
+            if not session:
+                result = None
+            elif session.session_agent_id == expected_old_agent_id:
+                session.session_agent_id = new_agent_id
+                result = new_agent_id
+            else:
+                # CAS mismatch — somebody else already replaced it.
+                # Return the current value so the caller can fall in
+                # behind that respawn instead of starting a third.
+                result = session.session_agent_id
+        return result
+
+    @serving.endpoint(ring=serving.Ring.KERNEL)
     async def get_session(self, session_id: str) -> Session | None:
         """Get session by ID.
 

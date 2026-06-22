@@ -422,17 +422,38 @@ class DecomposeCompletionValidator(CompletionValidator):
 
     async def _read_early_stop(self, agent: "Agent") -> bool:
         """True iff ``request_decompose_early_stop`` has been recorded
-        for this mission instance."""
+        for this mission instance.
+
+        BB errors used to silently return False — the
+        same shape as "no early-stop", which let zombie decompose
+        loops keep spawning work whenever Redis hiccupped. Distinguish
+        the cases: a true read-miss (key absent) → False; a real BB
+        error → log loudly so the operator sees the early-stop kill
+        switch may be silently defeated. Still returns False (we
+        can't crash the validator), but the operator-visible signal
+        is the durable fix per [[concise-diagnostics-no-speculation]].
+        """
 
         try:
             bb = await agent.get_blackboard()
-        except Exception:  # noqa: BLE001 — defensive: validator must not crash on bb hiccups
+        except Exception as e:  # noqa: BLE001 — defensive: validator must not crash on bb hiccups
+            logger.error(
+                "DecomposeCompletionValidator: bb resolution failed "
+                "(early-stop kill switch silently defeated): %s",
+                e,
+            )
             return False
         try:
             payload = await bb.read(
                 DecomposeEarlyStopProtocol.signal_key(agent.agent_id),
             )
-        except Exception:  # noqa: BLE001 — read miss is "no early-stop"
+        except KeyError:
+            return False  # genuine read-miss: no early-stop recorded
+        except Exception as e:  # noqa: BLE001 — read miss is "no early-stop"
+            logger.error(
+                "DecomposeCompletionValidator: bb.read failed for "
+                "early-stop signal (silently defeated): %s", e,
+            )
             return False
         return bool(payload)
 

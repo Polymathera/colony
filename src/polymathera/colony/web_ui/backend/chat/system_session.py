@@ -50,6 +50,7 @@ from polymathera.colony.agents.scopes import BlackboardScope
 from polymathera.colony.agents.self_concept import AgentSelfConcept
 
 from .session_agent import SessionAgent, SessionOrchestratorCapability
+from .session_agent_lifecycle import session_agent_stopped
 from ..services.colony_connection import ColonyConnection
 
 
@@ -212,6 +213,13 @@ def build_system_session_agent_blueprint(
             # conversation to maintain (chat-attach refuses to bind).
             "consciousness_streams": [],
         },
+        # PR1-A (R12-ROOT-CAUSE-C + B4): user-visible death message.
+        # Even though chat-attach refuses to bind to the system
+        # session, ``chat:agent:*`` writes still land on the session
+        # blackboard and are visible in the Traces tab + log
+        # adapters. The diagnostic-event emit is the primary
+        # operator-facing signal for system-session death.
+        stop_callbacks=[session_agent_stopped],
     )
 
 

@@ -467,3 +467,113 @@ async def test_alert_handlers_skipped_when_quiesced(monkeypatch) -> None:
         _make_event("design_inconsistency:s:k:1", {}), None,
     )
     assert insert_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Health dashboard: agent_diagnostic write-through
+# ---------------------------------------------------------------------------
+
+
+async def test_on_agent_diagnostic_inserts_row(monkeypatch) -> None:
+    """An ``agent:diagnostic:*`` write on colony scope → one row with
+    ``channel='internal'`` + ``event_kind='agent_diagnostic'`` + refs
+    surfacing the producer's agent_id and the diagnostic kind so the
+    dashboard can group / filter by either dimension."""
+
+    from polymathera.colony.agents.blackboard.protocol import (
+        AgentDiagnosticProtocol,
+    )
+
+    cap = _make_capability()
+    insert_calls: list[dict] = []
+
+    async def _fake_insert(*args, **kwargs):
+        insert_calls.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(
+        "polymathera.colony.agents.patterns.capabilities."
+        "interaction_log.capability.insert_event",
+        _fake_insert,
+    )
+
+    key = AgentDiagnosticProtocol.event_key(
+        agent_id="session_agent_abc",
+        kind="session_agent_stopped",
+        sequence=1700000000123,
+    )
+    value = {
+        "agent_id": "session_agent_abc",
+        "agent_type": "SessionAgent",
+        "kind": "session_agent_stopped",
+        "stop_reason": "max_iterations_exceeded",
+        "timestamp": 1700000000.123,
+    }
+    await cap._on_agent_diagnostic(_make_event(key, value), None)
+
+    assert len(insert_calls) == 1
+    kw = insert_calls[0]
+    assert kw["channel"] == "internal"
+    assert kw["event_kind"] == "agent_diagnostic"
+    assert {
+        "kind": "diagnostic_kind", "value": "session_agent_stopped",
+    } in kw["refs"]
+    assert {
+        "kind": "agent_id", "value": "session_agent_abc",
+    } in kw["refs"]
+    assert kw["payload"]["stop_reason"] == "max_iterations_exceeded"
+
+
+async def test_on_agent_diagnostic_skipped_when_quiesced(monkeypatch) -> None:
+    """Quiesce guard: no insert when Postgres unreachable."""
+
+    cap = _make_capability()
+    cap._quiesced_reason = "no_db_pool"
+    insert_called = False
+
+    async def _fake_insert(*args, **kwargs):
+        nonlocal insert_called
+        insert_called = True
+        return 1
+
+    monkeypatch.setattr(
+        "polymathera.colony.agents.patterns.capabilities."
+        "interaction_log.capability.insert_event",
+        _fake_insert,
+    )
+    await cap._on_agent_diagnostic(
+        _make_event(
+            "agent:diagnostic:a1:session_agent_stopped:1",
+            {"agent_id": "a1", "kind": "session_agent_stopped"},
+        ),
+        None,
+    )
+    assert insert_called is False
+
+
+async def test_on_agent_diagnostic_swallows_insert_failure(monkeypatch) -> None:
+    """A failing insert must NOT bubble — one bad row cannot stop the
+    handler from processing future diagnostic events."""
+
+    cap = _make_capability()
+
+    async def _failing_insert(*args, **kwargs):
+        raise RuntimeError("db unreachable")
+
+    monkeypatch.setattr(
+        "polymathera.colony.agents.patterns.capabilities."
+        "interaction_log.capability.insert_event",
+        _failing_insert,
+    )
+    # Must not raise.
+    await cap._on_agent_diagnostic(
+        _make_event(
+            "agent:diagnostic:a1:github_inbound_quiesced:1",
+            {
+                "agent_id": "a1",
+                "kind": "github_inbound_quiesced",
+                "reason": "no_db_pool",
+            },
+        ),
+        None,
+    )

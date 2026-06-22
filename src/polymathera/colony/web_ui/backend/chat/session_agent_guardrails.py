@@ -36,6 +36,9 @@ general SemanticConstraint primitives this rule was migrated to.
 
 from __future__ import annotations
 
+import re
+from typing import Any
+
 from polymathera.colony.agents.patterns.actions.code_constraints import (
     ApprovalRequiredGuardrail,
     CompositeGuardrail,
@@ -45,9 +48,32 @@ from polymathera.colony.agents.patterns.actions.semantic_constraints import (
     ConstraintFailureMode,
     ConstraintScope,
     LLMJudgeVerifier,
+    ScopedConstraintState,
     SemanticConstraint,
     SemanticConstraintGuardrail,
 )
+
+
+# Cheap precondition for ``no_unverified_agent_state_claims``: only
+# fire the (expensive) LLM judge when ``respond_to_user`` content
+# actually mentions a non-self ``agent-<hex>``. Plain "Hi!" or
+# acks that name no other agent skip the judge entirely.
+_AGENT_ID_RE = re.compile(r"agent-[0-9a-f]+")
+
+
+def _respond_to_user_mentions_non_self_agent(
+    action_key: str,
+    params: dict[str, Any],
+    scoped_state: ScopedConstraintState,
+) -> bool:
+    content = params.get("content")
+    if not isinstance(content, str):
+        return False
+    ids = set(_AGENT_ID_RE.findall(content))
+    owner = scoped_state.owner_agent_id
+    if owner:
+        ids.discard(owner)
+    return bool(ids)
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +122,11 @@ def _build_no_unverified_state_claims_constraint() -> SemanticConstraint:
             max_tokens=300,
             temperature=0.0,
         ),
+        # Cheap regex pre-filter. Only call the
+        # judge when the proposed content actually mentions a
+        # non-self ``agent-<hex>``. Eliminates the per-message
+        # judge call for "Hi!" / acks / bare prose.
+        precondition=_respond_to_user_mentions_non_self_agent,
     )
 
 

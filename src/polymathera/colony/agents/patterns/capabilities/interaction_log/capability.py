@@ -24,7 +24,13 @@ from typing import Any
 
 from ...events import event_handler
 from ....base import Agent
-from ....blackboard.protocol import GitHubEventProtocol
+from ....blackboard.protocol import (
+    AgentDiagnosticProtocol,
+    BottleneckDetectedProtocol,
+    DesignInconsistencyProtocol,
+    GitHubEventProtocol,
+    MentionEventProtocol,
+)
 from ....scopes import BlackboardScope
 from ....utils.postgres import get_agent_db_pool
 from ..colony_singleton_base import ColonySingletonCapabilityBase
@@ -190,7 +196,7 @@ class InteractionLogCapability(ColonySingletonCapabilityBase):
     # Write-through — GitHubEventProtocol.*
     # ------------------------------------------------------------------
 
-    @event_handler(pattern="github:*")
+    @event_handler(pattern=GitHubEventProtocol.all_pattern())
     async def _on_github_event(self, event, _scope) -> None:  # type: ignore[no-untyped-def]
         """Mirror a ``GitHubEventProtocol.*`` write into ``interaction_log``.
 
@@ -246,7 +252,7 @@ class InteractionLogCapability(ColonySingletonCapabilityBase):
     # Write-through — MentionEventProtocol.* (P10)
     # ------------------------------------------------------------------
 
-    @event_handler(pattern="mention:*")
+    @event_handler(pattern=MentionEventProtocol.event_pattern())
     async def _on_mention_event(self, event, _scope) -> None:  # type: ignore[no-untyped-def]
         """Mirror a :class:`MentionEventProtocol` write into
         ``interaction_log`` so mentions are queryable via
@@ -306,7 +312,7 @@ class InteractionLogCapability(ColonySingletonCapabilityBase):
     # Write-through — alert protocols (P11)
     # ------------------------------------------------------------------
 
-    @event_handler(pattern="bottleneck_detected:*")
+    @event_handler(pattern=BottleneckDetectedProtocol.event_pattern())
     async def _on_bottleneck_detected(self, event, _scope) -> None:  # type: ignore[no-untyped-def]
         """Mirror a :class:`BottleneckDetectedProtocol` write into
         ``interaction_log`` so the ColonyStatusPanel's "Alerts" tile
@@ -317,12 +323,62 @@ class InteractionLogCapability(ColonySingletonCapabilityBase):
         """
         await self._insert_alert(event, channel="internal", event_kind="bottleneck")
 
-    @event_handler(pattern="design_inconsistency:*")
+    @event_handler(pattern=DesignInconsistencyProtocol.event_pattern())
     async def _on_design_inconsistency(self, event, _scope) -> None:  # type: ignore[no-untyped-def]
         """Mirror a :class:`DesignInconsistencyProtocol` write into
         ``interaction_log``. Pair with ``_on_bottleneck_detected``
         so the alerts query returns both kinds in one tail."""
         await self._insert_alert(event, channel="internal", event_kind="inconsistency")
+
+    # ------------------------------------------------------------------
+    # Write-through — AgentDiagnosticProtocol
+    # ------------------------------------------------------------------
+
+    @event_handler(pattern=AgentDiagnosticProtocol.event_pattern())
+    async def _on_agent_diagnostic(self, event, _scope) -> None:  # type: ignore[no-untyped-def]
+        """Mirror an :class:`AgentDiagnosticProtocol` event into
+        ``interaction_log`` so the health dashboard can tail recent
+        agent diagnostics (session-agent crashes, GitHub inbound
+        quiesce, etc.) via the standard ``fetch_recent_activity``
+        query filtered by ``event_kind='agent_diagnostic'``.
+
+        Producers writing on the colony blackboard:
+        - ``session_agent_stopped`` from session_agent_lifecycle.py
+        - ``github_inbound_quiesced`` from github_inbound/capability.py
+
+        Both carry an ``agent_id`` + ``kind`` in the payload; the
+        ``kind`` is surfaced as a ref so dashboard panels can filter
+        by diagnostic type without parsing keys.
+        """
+
+        if self._quiesced_reason is not None:
+            return
+
+        value = event.value or {}
+        refs: list[dict[str, str]] = []
+        kind = value.get("kind")
+        if isinstance(kind, str) and kind:
+            refs.append({"kind": "diagnostic_kind", "value": kind})
+        agent_id = value.get("agent_id")
+        if isinstance(agent_id, str) and agent_id:
+            refs.append({"kind": "agent_id", "value": agent_id})
+
+        try:
+            await insert_event(
+                self._db_pool,
+                tenant_id=self._tenant_id,
+                colony_id=self._colony_id,
+                channel="internal",
+                event_kind="agent_diagnostic",
+                payload=dict(value),
+                refs=refs,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "InteractionLogCapability: insert_event failed for "
+                "agent_diagnostic key=%s — dropping event",
+                event.key,
+            )
 
     async def _insert_alert(
         self, event, *, channel: str, event_kind: str,

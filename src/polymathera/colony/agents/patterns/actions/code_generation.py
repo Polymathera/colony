@@ -45,7 +45,7 @@ from typing import Any
 
 from overrides import override
 
-from ...base import Agent
+from ...base import Agent, effective_loop_max_iterations
 from ...blackboard.protocol import (
     ActionPolicyLifecycleProtocol,
     AgentDiagnosticProtocol,
@@ -59,6 +59,7 @@ from ...models import (
     ActionPolicyExecutionState,
     ActionPolicyIterationResult,
     ActionPolicyIO,
+    LifecycleMode,
     PlanningContext,
     PlanExecutionContext,
 )
@@ -911,7 +912,18 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self.max_retries = max_retries
         self._allow_self_termination = allow_self_termination
         self.code_timeout = code_timeout
-        self.max_code_iterations = max_code_iterations
+        # The inner code-gen cap must respect ``agent.metadata.lifecycle_mode``
+        # the same way the outer agent-loop cap does.
+        # Resolving via the shared :func:`effective_loop_max_iterations`
+        # helper keeps the rule at one source — ONE_SHOT
+        # coordinators (project planning, etc.) still get the
+        # stuck-detection benefit; CONTINUOUS services (SessionAgent,
+        # system session) get ``None`` and never die at this cap.
+        self.max_code_iterations = effective_loop_max_iterations(
+            agent_id=agent.agent_id,
+            lifecycle_mode=agent.metadata.lifecycle_mode,
+            configured_max_iterations=max_code_iterations,
+        )
         self._planning_capability_blueprints = planning_capability_blueprints
         self._context_builder = context_builder or PlanningContextBuilder(agent)
 
@@ -1791,7 +1803,18 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         # Install into namespace
         ns["run"] = run
         ns["browse"] = browse
-        if self._allow_self_termination:
+        # Install signal_completion only when both
+        # ``_allow_self_termination`` AND the agent is ONE_SHOT.
+        # CONTINUOUS-mode agents (SessionAgent, system session,
+        # future webhook watchers) MUST NEVER be killable by their
+        # own LLM regardless of the per-policy
+        # allow_self_termination default (which is True at the
+        # defaults.py:68 level). Two-key gate so a future operator
+        # who flips one doesn't accidentally re-arm the kill switch.
+        _is_continuous = (
+            self.agent.metadata.lifecycle_mode == LifecycleMode.CONTINUOUS
+        )
+        if self._allow_self_termination and not _is_continuous:
             ns["signal_completion"] = signal_completion
         ns["switch_mode"] = switch_mode
         ns["log"] = log
@@ -1995,8 +2018,15 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
             return None
 
         # Check iteration limit (incremented after validation, not before,
-        # so validation failures don't consume iterations)
-        if self._code_iteration_count >= self.max_code_iterations:
+        # so validation failures don't consume iterations).
+        # ``self.max_code_iterations`` is ``None`` for CONTINUOUS-mode
+        # agents (resolved through ``effective_loop_max_iterations``
+        # in __init__); they never hit this cap. ONE_SHOT
+        # coordinators keep the stuck-detection behavior.
+        if (
+            self.max_code_iterations is not None
+            and self._code_iteration_count >= self.max_code_iterations
+        ):
             logger.warning(
                 f"CodeGenerationActionPolicy: max iterations ({self.max_code_iterations}) reached"
             )

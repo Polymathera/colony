@@ -1086,11 +1086,11 @@ def resolve_effective_max_iterations(
     *,
     caller_override: int | None,
     policy: MissionExecutionPolicy,
-    schema_default: int = 20,
-) -> int:
+    schema_default: int | None = 20,
+) -> int | None:
     """Compute the planner-loop iteration cap for a mission coordinator.
 
-    Precedence:
+    Precedence (first non-None wins):
 
     1. ``caller_override`` — when the spawn caller (LLM planner via
        ``spawn_mission`` or REST handler via ``/api/jobs/submit``)
@@ -1101,9 +1101,14 @@ def resolve_effective_max_iterations(
        Set this when the mission's natural loop shape (e.g.
        propose → request_approval → idle-poll → apply → report)
        doesn't fit the generic 20-iteration default.
-    3. ``schema_default`` — :class:`AgentMetadata`'s field default
-       (20). Matches the pre-policy behaviour for any mission that
-       declares no explicit budget.
+    3. ``schema_default`` — defaults to 20 to match
+       :class:`AgentMetadata`'s field default and preserve the
+       pre-policy behaviour. Callers that want "no cap" semantics
+       (e.g. a CONTINUOUS-lifecycle coordinator routed through this
+       helper) pass ``schema_default=None``; the function then
+       returns ``None`` when every layer above is also ``None``,
+       and the agent loop's :func:`effective_loop_max_iterations`
+       picks up the un-capped run.
 
     Single resolution point so both spawn paths
     (:meth:`SessionOrchestratorCapability.spawn_mission` and

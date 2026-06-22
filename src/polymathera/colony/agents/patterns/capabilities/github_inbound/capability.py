@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -364,12 +365,47 @@ class GitHubInboundCapability(ColonySingletonCapabilityBase):
                     await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "GitHubInboundCapability: poll loop crashed; "
                 "capability is now quiesced until restart",
             )
             self._quiesced_reason = "poll_loop_crashed"
+            # Operator-visible signal. Without this,
+            # the webhook pipeline silently dies — no new issues are
+            # ingested and no one notices until they look at the log.
+            # Emit on the COLONY-scoped diagnostic blackboard so the
+            # dashboard's diagnostic view (and future health-check
+            # consumers) can surface a banner.
+            try:
+                await self._emit_quiesced_diagnostic(exc)
+            except Exception:
+                logger.exception(
+                    "GitHubInboundCapability: diagnostic emit failed",
+                )
+
+    async def _emit_quiesced_diagnostic(self, exc: Exception) -> None:
+        """Write an :class:`AgentDiagnosticProtocol` event so
+        operator-facing tools see the inbound pipeline went dark."""
+
+        from polymathera.colony.agents.blackboard.protocol import (
+            AgentDiagnosticProtocol,
+        )
+        bb = await self._get_colony_blackboard()
+        seq = time.time_ns()
+        key = AgentDiagnosticProtocol.event_key(
+            agent_id=self._agent.agent_id,
+            kind="github_inbound_quiesced",
+            sequence=seq,
+        )
+        await bb.write(key, {
+            "agent_id": self._agent.agent_id,
+            "kind": "github_inbound_quiesced",
+            "reason": self._quiesced_reason,
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc)[:300],
+            "timestamp": time.time(),
+        })
 
     async def _tick_one_repo(self, repo: str) -> None:
         cursor = await get_cursor(

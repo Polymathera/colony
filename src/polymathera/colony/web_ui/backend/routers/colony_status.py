@@ -122,6 +122,49 @@ async def colony_status_recent_activity(
     return {"events": rows, "count": len(rows)}
 
 
+@router.get("/colony-status/agent-diagnostics")
+async def colony_status_agent_diagnostics(
+    limit: int = Query(50, ge=1, le=200),
+    user: dict[str, Any] = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> dict[str, Any]:
+    """Recent ``AgentDiagnosticProtocol`` events for this colony —
+    session-agent crashes (PR1-A) + github-inbound quiesce (PR4) +
+    future kinds. The frontend health panel uses this to surface
+    operator-visible failure patterns the chat UI alone would miss
+    (the SessionAgent is dead by the time it can't say so itself).
+
+    Same over-fetch + post-filter shape as
+    :func:`colony_status_alerts` — agent_diagnostic volume is low in
+    steady state, so a dedicated SQL filter would be premature."""
+
+    from polymathera.colony.agents.patterns.capabilities.interaction_log.service import (
+        fetch_recent_activity,
+    )
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        get_colony_id, get_tenant_id,
+    )
+
+    db = _get_db_pool(colony)
+    tenant_id = get_tenant_id() or user.get("tenant_id", "")
+    colony_id = get_colony_id() or ""
+    if not tenant_id or not colony_id:
+        raise HTTPException(
+            status_code=400,
+            detail="tenant_id + colony_id required (set X-Colony-Id).",
+        )
+
+    rows = await fetch_recent_activity(
+        db, tenant_id=tenant_id, colony_id=colony_id,
+        limit=max(limit * 3, limit),
+    )
+    diagnostics = [r for r in rows if r["event_kind"] == "agent_diagnostic"]
+    return {
+        "diagnostics": diagnostics[:limit],
+        "count": len(diagnostics[:limit]),
+    }
+
+
 @router.get("/colony-status/project-link")
 async def colony_status_project_link(
     user: dict[str, Any] = Depends(require_auth),

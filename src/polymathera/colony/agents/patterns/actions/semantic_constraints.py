@@ -25,11 +25,13 @@ principle.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import time
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Sequence
@@ -194,10 +196,17 @@ class LLMJudgeVerifier(ConstraintVerifier):
         infer_fn: Callable[..., Awaitable[InferenceResponse]] | None = None,
         max_tokens: int = 256,
         temperature: float = 0.0,
+        cache_size: int = 128,
     ) -> None:
         self._infer_fn = infer_fn
         self._max_tokens = max_tokens
         self._temperature = temperature
+        # Per-(rule, action, content, history) LRU.
+        # Many judge calls on near-identical drafts can happen; the
+        # cache collapses repeats to 1 LLM call. Per-verifier
+        # instance, so each rule gets its own cache.
+        self._cache: OrderedDict[str, ConstraintVerdict] = OrderedDict()
+        self._cache_size = cache_size
 
     def bind_infer(
         self, infer_fn: Callable[..., Awaitable[InferenceResponse]],
@@ -247,6 +256,29 @@ class LLMJudgeVerifier(ConstraintVerifier):
                 fallback="unbound",
             )
             return verdict
+
+        # Cache lookup before the LLM call. Same
+        # (rule, action, content, scoped-history fingerprint) →
+        # same verdict; skip the round-trip.
+        cache_key = _judge_cache_key(
+            constraint_id=constraint.id,
+            action_key=action_key,
+            action_params=action_params,
+            history=history,
+        )
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            self._cache.move_to_end(cache_key)
+            self._emit_observability(
+                constraint=constraint,
+                action_key=action_key,
+                history_len=len(history),
+                verdict=cached,
+                latency_ms=(time.time() - start_wall) * 1000.0,
+                tokens=None,
+                fallback="cache_hit",
+            )
+            return cached
 
         history_text = _render_history_for_judge(history)
         params_preview = _truncate_params_for_judge(action_params)
@@ -317,6 +349,16 @@ class LLMJudgeVerifier(ConstraintVerifier):
             fallback = "parse_unparseable"
         elif "JSON malformed" in verdict.reason:
             fallback = "parse_malformed"
+
+        # Cache only well-formed verdicts. Fail-open
+        # parse errors are transient (LLM noise); we want a fresh
+        # call next time so a temporarily-flaky LLM doesn't get
+        # its bad answer pinned.
+        if fallback is None:
+            self._cache[cache_key] = verdict
+            if len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+
         self._emit_observability(
             constraint=constraint,
             action_key=action_key,
@@ -522,6 +564,16 @@ class SemanticConstraint:
     verifier: ConstraintVerifier
     scope: ConstraintScope = ConstraintScope.CELL
     failure_mode: ConstraintFailureMode = ConstraintFailureMode.BLOCK
+    # Cheap pre-filter run BEFORE the verifier. When
+    # set, returns True iff the rule could possibly fire for this
+    # action — False short-circuits to ``satisfied=True`` without
+    # invoking the (expensive) verifier. The
+    # ``no_unverified_agent_state_claims`` rule uses a regex match
+    # for non-self ``agent-<hex>`` mentions; bare ``"Hi!"``
+    # responses skip the LLM-judge entirely.
+    precondition: Callable[
+        [str, dict[str, Any], "ScopedConstraintState"], bool,
+    ] | None = None
 
     def matches_action(self, action_key: str) -> bool:
         target = action_key.lower()
@@ -563,6 +615,8 @@ class SemanticConstraintGuardrail(RuntimeGuardrail):
 
     def __init__(
         self, constraints: Sequence[SemanticConstraint],
+        *,
+        escalation_threshold: int = 2,
     ) -> None:
         self._constraints: tuple[SemanticConstraint, ...] = tuple(
             constraints,
@@ -571,6 +625,31 @@ class SemanticConstraintGuardrail(RuntimeGuardrail):
         self._pending_advisories: list[
             tuple[SemanticConstraint, ConstraintVerdict]
         ] = []
+        # Per-(rule, action-content) streak counter.
+        # After ``escalation_threshold`` consecutive BLOCKs on the
+        # SAME (rule_id, content-hash), downgrade THIS rule to
+        # ADVISE for the rest of the agent's session so the LLM
+        # stops retrying the same blocked draft forever. The
+        # downgrade is per-rule, not global — other rules keep
+        # blocking; only the stuck one yields. Run12: 46 blocks on
+        # the same draft burned the iteration budget.
+        self._block_streak: dict[tuple[str, str], int] = {}
+        self._downgraded: set[str] = set()
+        self._escalation_threshold = escalation_threshold
+        # Operator runtime override. Disabled
+        # constraints are skipped entirely (no precondition / no
+        # verifier / no advisory). Manual counterpart to the
+        # auto-downgrade above — useful when a constraint is
+        # misbehaving in ways the streak detector can't catch
+        # (e.g. wrong rule, off-target false-positives across
+        # multiple drafts).
+        # Operator-disabled constraint ids are NOT mirrored locally.
+        # The session blackboard's
+        # ``operator_override:semantic_constraint:<id>`` keys are the
+        # single source of truth — the dashboard's POST writes there
+        # and ``check()`` reads from there each iteration. No local
+        # set means no rehydrate-on-respawn problem and no event
+        # subscription to keep in sync.
 
     def bind_agent(self, agent: Agent | None) -> None:
         """Capture the owner AND late-bind any LLM-judge verifiers
@@ -598,6 +677,8 @@ class SemanticConstraintGuardrail(RuntimeGuardrail):
         if not applicable:
             return GuardrailDecision(allowed=True)
 
+        disabled_ids = await self._read_disabled_ids()
+
         scoped = _build_scoped_state(
             call_history=call_history,
             cell_start_index=cell_start_index,
@@ -605,6 +686,28 @@ class SemanticConstraintGuardrail(RuntimeGuardrail):
         )
 
         for constraint in applicable:
+            # Operator override — disabled constraints
+            # are skipped entirely. Checked FIRST so a disabled
+            # constraint costs nothing (no precondition, no verifier,
+            # no advisory).
+            if constraint.id in disabled_ids:
+                continue
+            # Cheap precondition pre-filter. Returns
+            # False → rule does not apply; skip the verifier
+            # entirely (no LLM call). Defensive try/except so a
+            # buggy predicate degrades to "run the verifier" rather
+            # than crashing the check.
+            if constraint.precondition is not None:
+                try:
+                    if not constraint.precondition(action_key, params, scoped):
+                        continue
+                except Exception as e:
+                    logger.warning(
+                        "SemanticConstraintGuardrail: precondition raised "
+                        "for %r: %s. Falling through to verifier.",
+                        constraint.id, e,
+                    )
+
             verdict = await constraint.verifier.verify(
                 constraint=constraint,
                 action_key=action_key,
@@ -612,8 +715,42 @@ class SemanticConstraintGuardrail(RuntimeGuardrail):
                 scoped_state=scoped,
             )
             if verdict.satisfied:
+                # Reset the streak for this (rule, content) — a
+                # successful pass means the LLM course-corrected.
+                self._block_streak.pop(
+                    (constraint.id, _content_fingerprint(params)),
+                    None,
+                )
                 continue
-            if constraint.failure_mode == ConstraintFailureMode.BLOCK:
+
+            # Pick the effective failure mode FIRST
+            # (downgraded constraints get ADVISE for this call AND
+            # subsequent ones), then update the streak / mark for
+            # downgrade. This way the call that REACHES the
+            # threshold still blocks; the FOLLOWING call is the
+            # first allowed-through-advisory.
+            effective_mode = (
+                ConstraintFailureMode.ADVISE
+                if constraint.id in self._downgraded
+                else constraint.failure_mode
+            )
+            if (
+                effective_mode == ConstraintFailureMode.BLOCK
+                and constraint.id not in self._downgraded
+            ):
+                key = (constraint.id, _content_fingerprint(params))
+                self._block_streak[key] = self._block_streak.get(key, 0) + 1
+                if self._block_streak[key] >= self._escalation_threshold:
+                    self._downgraded.add(constraint.id)
+                    logger.warning(
+                        "SemanticConstraintGuardrail: constraint %r "
+                        "blocked %d consecutive times on the same "
+                        "content; downgrading to ADVISE for the rest "
+                        "of the session to break the death spiral.",
+                        constraint.id, self._block_streak[key],
+                    )
+
+            if effective_mode == ConstraintFailureMode.BLOCK:
                 return GuardrailDecision(
                     allowed=False,
                     reason=(
@@ -623,7 +760,7 @@ class SemanticConstraintGuardrail(RuntimeGuardrail):
                     ),
                     suggestion=verdict.suggestion,
                 )
-            # ADVISE: surface in next iteration; allow now.
+            # ADVISE (native or downgraded): surface in next iter; allow now.
             self._pending_advisories.append((constraint, verdict))
 
         return GuardrailDecision(allowed=True)
@@ -638,6 +775,70 @@ class SemanticConstraintGuardrail(RuntimeGuardrail):
         drained = list(self._pending_advisories)
         self._pending_advisories.clear()
         return drained
+
+    # ------------------------------------------------------------------
+    # Operator runtime override — read live from the session BB
+    # ------------------------------------------------------------------
+
+    async def _read_disabled_ids(self) -> set[str]:
+        """Snapshot the currently operator-disabled constraint ids
+        from the session blackboard.
+
+        The dashboard's POST writes ``operator_override:
+        semantic_constraint:<id> = {"disabled": bool, ...}`` on the
+        session-default scope; this method reads back the same keys.
+        Reading at check-time (instead of mirroring into a local set
+        and listening for change events) keeps a single source of
+        truth — overrides survive SessionAgent respawn for free, and
+        no in-memory state can drift from the BB.
+
+        Read failures degrade open (returns the empty set) — losing
+        operator overrides during a transient BB outage is strictly
+        less bad than blocking every guardrailed action."""
+
+        if self._owner is None:
+            return set()
+        # SESSION scope — same prefix the dashboard's POST writes at.
+        # ``Agent.get_blackboard()`` with no ``scope_id`` defaults to
+        # AGENT scope, which is a different prefix and would never see
+        # the dashboard's writes.
+        from ...scopes import BlackboardScope, get_scope_prefix
+        from ...blackboard.protocol import OperatorOverrideProtocol
+        try:
+            bb = await self._owner.get_blackboard(
+                scope_id=get_scope_prefix(BlackboardScope.SESSION),
+            )
+        except Exception as e:
+            logger.warning(
+                "SemanticConstraintGuardrail: get_blackboard failed "
+                "while reading operator overrides: %s — treating as "
+                "no overrides for this iteration.", e,
+            )
+            return set()
+        if bb is None:
+            return set()
+        try:
+            entries = await bb.query(
+                namespace=OperatorOverrideProtocol.semantic_constraint_pattern(),
+            )
+        except Exception as e:
+            logger.warning(
+                "SemanticConstraintGuardrail: BB query for operator "
+                "overrides failed: %s — treating as no overrides.", e,
+            )
+            return set()
+        out: set[str] = set()
+        for entry in entries:
+            try:
+                cid = OperatorOverrideProtocol.parse_semantic_constraint_key(
+                    entry.key,
+                )
+            except ValueError:
+                continue
+            payload = entry.value if isinstance(entry.value, dict) else {}
+            if bool(payload.get("disabled", False)):
+                out.add(cid)
+        return out
 
     def planner_context_advisory(
         self,
@@ -765,6 +966,49 @@ def _truncate_params_for_judge(params: dict[str, Any]) -> str:
     if len(text) > 200:
         text = text[:200] + "…"
     return text
+
+
+def _content_fingerprint(action_params: dict[str, Any]) -> str:
+    """Compact hash of the proposed action params. Used by the
+    streak counter to detect "same draft blocked twice in a row"
+    without storing the full content."""
+
+    try:
+        blob = json.dumps(action_params, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        blob = str(action_params)
+    return hashlib.blake2b(blob.encode("utf-8"), digest_size=12).hexdigest()
+
+
+def _judge_cache_key(
+    *,
+    constraint_id: str,
+    action_key: str,
+    action_params: dict[str, Any],
+    history: Sequence[CallRecord],
+) -> str:
+    """Stable cache key for :class:`LLMJudgeVerifier`. Hashes the
+    proposed action + the scoped-history fingerprint (action keys +
+    terminal status) so SAME draft + SAME history → cached verdict;
+    a get_agent_status appearing in the cell flips the fingerprint
+    and forces a fresh judge call."""
+
+    try:
+        params_blob = json.dumps(action_params, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        params_blob = str(action_params)
+    history_blob = "|".join(
+        f"{c.action_key}:{c.status}" for c in history
+    )
+    h = hashlib.blake2b(digest_size=16)
+    h.update(constraint_id.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(action_key.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(params_blob.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(history_blob.encode("utf-8"))
+    return h.hexdigest()
 
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)

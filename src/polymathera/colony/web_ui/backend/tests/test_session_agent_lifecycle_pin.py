@@ -25,15 +25,21 @@ from __future__ import annotations
 from pathlib import Path
 
 
-_SESSIONS_ROUTER = (
+# PR1-B extracted the user-session blueprint construction from
+# ``routers/sessions.py:create_session`` into
+# ``chat/user_session_factory.py:build_user_session_agent_blueprint``.
+# These pins follow the code to the factory; the router's call site
+# is pinned by ``test_pr1b_respawn.py`` (which asserts the router
+# calls the factory's spawn helper instead of inlining the blueprint).
+_USER_SESSION_FACTORY = (
     Path(__file__).resolve().parents[1]
-    / "routers"
-    / "sessions.py"
+    / "chat"
+    / "user_session_factory.py"
 )
 
 
-def _sessions_router_source() -> str:
-    return _SESSIONS_ROUTER.read_text(encoding="utf-8")
+def _user_session_factory_source() -> str:
+    return _USER_SESSION_FACTORY.read_text(encoding="utf-8")
 
 
 def test_session_agent_metadata_declares_continuous_lifecycle() -> None:
@@ -43,9 +49,9 @@ def test_session_agent_metadata_declares_continuous_lifecycle() -> None:
     inherits the default ONE_SHOT cap and the SessionAgent dies in
     the middle of long conversations."""
 
-    src = _sessions_router_source()
+    src = _user_session_factory_source()
     assert "lifecycle_mode=LifecycleMode.CONTINUOUS" in src, (
-        "routers/sessions.py must construct the SessionAgent's "
+        "chat/user_session_factory.py must construct the SessionAgent's "
         "AgentMetadata with lifecycle_mode=LifecycleMode.CONTINUOUS. "
         "See R11 forensic + test_lifecycle_aware_iteration_cap.py for "
         "why."
@@ -60,9 +66,9 @@ def test_session_agent_metadata_declares_max_iterations_none() -> None:
     intentional: a future reader doesn't have to chase the loop
     logic to learn that the cap is meant to be absent here."""
 
-    src = _sessions_router_source()
+    src = _user_session_factory_source()
     assert "max_iterations=None" in src, (
-        "routers/sessions.py must construct the SessionAgent's "
+        "chat/user_session_factory.py must construct the SessionAgent's "
         "AgentMetadata with max_iterations=None. See R11 forensic + "
         "test_lifecycle_aware_iteration_cap.py for why."
     )
@@ -72,12 +78,10 @@ def test_session_agent_metadata_imports_lifecycle_mode() -> None:
     """The lifecycle-mode import must travel with the construction;
     a missing import would surface here, not at deploy time."""
 
-    src = _sessions_router_source()
+    src = _user_session_factory_source()
     assert "LifecycleMode" in src
     assert (
         "from polymathera.colony.agents.models import LifecycleMode" in src
-        or "polymathera.colony.agents.models" in src
-        and "LifecycleMode" in src
     )
 
 

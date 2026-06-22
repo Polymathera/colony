@@ -36,7 +36,7 @@ from typing import Any
 
 from overrides import override
 
-from ...base import Agent
+from ...base import Agent, effective_loop_max_iterations
 from ...models import (
     Action,
     ActionType,
@@ -86,7 +86,11 @@ class MinimalActionPolicy(BaseActionPolicy):
             consciousness_streams=consciousness_streams,
             **kwargs,
         )
-        self._max_iterations = max_iterations
+        self._max_iterations = effective_loop_max_iterations(
+            agent_id=agent.agent_id,
+            lifecycle_mode=agent.metadata.lifecycle_mode,
+            configured_max_iterations=max_iterations,
+        )
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._iteration_count = 0
@@ -108,7 +112,10 @@ class MinimalActionPolicy(BaseActionPolicy):
         """
         self._iteration_count += 1
 
-        if self._iteration_count > self._max_iterations:
+        if (
+            self._max_iterations is not None
+            and self._iteration_count > self._max_iterations
+        ):
             logger.info(f"MinimalActionPolicy: max iterations ({self._max_iterations}) reached")
             state.custom["policy_complete"] = True
             return None

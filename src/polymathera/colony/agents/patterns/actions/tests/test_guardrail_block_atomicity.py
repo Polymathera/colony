@@ -146,10 +146,17 @@ def _build_policy(
     """Construct a policy + minimal deps for direct handler exercise."""
 
     agent = _FakeAgent()
-    # The constructor reads ``agent.metadata.action_policy_config``.
-    # The fake agent doesn't have ``metadata`` — wire a minimal one.
+    # The constructor reads ``agent.metadata.action_policy_config``
+    # AND (PR2) ``agent.metadata.lifecycle_mode`` for the
+    # effective_loop_max_iterations bypass. Wire both on the
+    # minimal fake. Default to ONE_SHOT here so the cap-check
+    # branch behaves like a production coordinator; tests that
+    # care about CONTINUOUS lifecycle override before constructing
+    # the policy.
+    from polymathera.colony.agents.models import LifecycleMode
     agent.metadata = type("M", (), {})()
     agent.metadata.action_policy_config = {}
+    agent.metadata.lifecycle_mode = LifecycleMode.ONE_SHOT
 
     policy = CodeGenerationActionPolicy(
         agent=agent,

@@ -131,10 +131,17 @@ async def test_policy_captures_block_and_renders_then_clears() -> None:
         CodeGenerationActionPolicy,
     )
 
+    from polymathera.colony.agents.models import LifecycleMode
+
     fake_agent = type("A", (), {})()
     fake_agent.agent_id = "agent-test"
     fake_agent.metadata = type("M", (), {})()
     fake_agent.metadata.action_policy_config = {}
+    # PR2: the policy constructor consults
+    # ``agent.metadata.lifecycle_mode`` through
+    # ``effective_loop_max_iterations``. ONE_SHOT preserves the
+    # pre-PR2 cap behavior these tests assume.
+    fake_agent.metadata.lifecycle_mode = LifecycleMode.ONE_SHOT
 
     # Build the policy directly with only the guardrail set. The
     # constructor takes many optional deps; passing them as None

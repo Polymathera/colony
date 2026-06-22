@@ -97,7 +97,7 @@ async def _build_cap(
             return human_bb
         if "agent_diagnostic" in scope_id:
             return diag_bb
-        raise AssertionError(f"unexpected scope_id requested: {scope_id!r}")
+        return chat_bb
 
     cap.get_blackboard = _get_bb  # type: ignore[method-assign]
     return cap

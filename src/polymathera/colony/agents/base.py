@@ -2968,7 +2968,29 @@ class Agent(BaseModel):
 
             # Policy-driven state transitions
             if iteration_result.policy_completed:
-                self.state = AgentState.STOPPED
+                # CONTINUOUS-mode agents: A long-lived service agent
+                # (SessionAgent, system session, future webhook
+                # watchers) MUST NOT terminate on a per-policy
+                # ``policy_completed`` signal — the policy completed
+                # ITS plan (or hit some stuck-detection branch), but
+                # the agent's lifetime is bounded by the SESSION,
+                # not by any one plan. Without this branch, every
+                # per-policy cap (max_code_iterations, MinimalActionPolicy's
+                # cap, an event-handler returning done=True, …) silently
+                # kills the chat.
+                if self.metadata.lifecycle_mode == LifecycleMode.CONTINUOUS:
+                    logger.info(
+                        "Agent %s is CONTINUOUS; downgrading "
+                        "policy_completed → IDLE (the policy "
+                        "completed its plan; the agent keeps "
+                        "running until _stop_requested).",
+                        self.agent_id,
+                    )
+                    if self.state != AgentState.IDLE:
+                        self._idle_since = time.time()
+                    self.state = AgentState.IDLE
+                else:
+                    self.state = AgentState.STOPPED
             elif iteration_result.idle:
                 if self.state != AgentState.IDLE:
                     self._idle_since = time.time()

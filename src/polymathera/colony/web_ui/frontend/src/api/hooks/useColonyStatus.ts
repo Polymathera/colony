@@ -75,6 +75,43 @@ export function useColonyRecentActivity(
   });
 }
 
+export interface AgentDiagnosticRow {
+  id: number;
+  ts: string;
+  event_kind: string; // always 'agent_diagnostic'
+  payload: {
+    agent_id?: string;
+    kind?: string;
+    stop_reason?: string;
+    reason?: string;
+    exception_type?: string;
+    exception_message?: string;
+    timestamp?: number;
+    [k: string]: unknown;
+  };
+  refs: Array<{ kind: string; value: string }>;
+}
+
+export interface AgentDiagnosticsResponse {
+  diagnostics: AgentDiagnosticRow[];
+  count: number;
+}
+
+export function useColonyAgentDiagnostics(
+  limit = 20,
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: ["colony-status", "agent-diagnostics", limit],
+    queryFn: () =>
+      apiFetch<AgentDiagnosticsResponse>(
+        `/colony-status/agent-diagnostics?limit=${limit}`,
+      ),
+    enabled: options?.enabled ?? true,
+    refetchInterval: 30_000,
+  });
+}
+
 export interface ColonyProjectLink {
   project_url: string | null;
 }

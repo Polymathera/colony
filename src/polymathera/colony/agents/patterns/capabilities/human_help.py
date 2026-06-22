@@ -336,7 +336,7 @@ class HumanHelpCapability(AgentCapability):
 
     # ---- Event handler ------------------------------------------------
 
-    @event_handler(pattern="human_help:response:*")
+    @event_handler(pattern=HumanHelpProtocol.response_pattern())
     async def _on_response(
         self,
         event: Any,

@@ -159,16 +159,54 @@ async def session_chat(
         event_listener_task: asyncio.Task | None = None
         action_status_task: asyncio.Task | None = None
         mission_status_task: asyncio.Task | None = None
+
+        def _listener_done(stream_name: str):
+            """Fire-and-forget task without
+            ``add_done_callback`` swallows exceptions silently — a
+            transient backend error in stream_events kills the
+            stream and the chat goes send-only until WebSocket
+            disconnect. The callback logs + notifies the browser so
+            the failure isn't invisible."""
+
+            def _cb(task: asyncio.Task) -> None:
+                if task.cancelled():
+                    return
+                exc = task.exception()
+                if exc is None:
+                    return
+                logger.error(
+                    "chat listener %s crashed for session %s: %s",
+                    stream_name, session_id, exc,
+                    exc_info=exc,
+                )
+                # Best-effort browser notification — if the WS is
+                # already closed this silently no-ops.
+                try:
+                    asyncio.create_task(websocket.send_json({
+                        "type": "error",
+                        "message": (
+                            f"chat stream '{stream_name}' crashed — "
+                            f"reload the page to recover. "
+                            f"({type(exc).__name__}: {exc})"
+                        ),
+                    }))
+                except Exception:
+                    pass
+            return _cb
+
         if session_agent_id:
             event_listener_task = asyncio.create_task(
                 _listen_for_agent_messages(websocket, colony, session_id, session_info, chat_store)
             )
+            event_listener_task.add_done_callback(_listener_done("agent_messages"))
             action_status_task = asyncio.create_task(
                 _listen_for_action_status(websocket, colony, session_id, session_info)
             )
+            action_status_task.add_done_callback(_listener_done("action_status"))
             mission_status_task = asyncio.create_task(
                 _listen_for_mission_status(websocket, colony, session_id, session_info)
             )
+            mission_status_task.add_done_callback(_listener_done("mission_status"))
 
         # Track active streaming tasks so we can cancel on disconnect
         active_tasks: dict[str, asyncio.Task] = {}
@@ -296,6 +334,14 @@ class _SessionInfo:
     # chat-attach is refused). Defaults to ``user`` so any pre-P8-0
     # serialized session that lacks the field passes the guard.
     session_kind: str = "user"
+    # The auth ``sub`` persisted on SessionMetadata.created_by at
+    # create-session time. Respawn passes this back into
+    # :func:`spawn_user_session_agent_for_session` so the new
+    # SessionAgent inherits the same per-user GitHub identity.
+    # Empty string when the session was created by an internal
+    # caller (e.g. system-session bootstrap, fork-from path that
+    # didn't propagate the sub).
+    created_by: str = ""
 
 
 async def _get_session_info(colony: ColonyConnection, session_id: str) -> _SessionInfo | None:
@@ -316,6 +362,7 @@ async def _get_session_info(colony: ColonyConnection, session_id: str) -> _Sessi
                 tenant_id=session.tenant_id,
                 colony_id=session.colony_id,
                 session_kind=session.session_kind,
+                created_by=session.metadata.created_by,
             )
     except Exception as e:
         logger.warning("Failed to look up session info for %s: %s", session_id, e)
@@ -349,6 +396,214 @@ async def _get_session_chat_blackboard(colony: ColonyConnection, session_info: _
         return None
 
 
+# Agent states that count as "the SessionAgent is alive and accepting
+# events". Anything outside this set triggers a respawn on the next
+# user-side activity (ensure_session_agent_alive below).
+# - INITIALIZED, LOADED, RUNNING, WAITING, IDLE: live (or settling).
+# - SUSPENDED: temporarily paused; do not respawn (operator can resume).
+# Everything else (STOPPED, FAILED, UNLOADED, or registry-missing
+# entirely) is dead-or-unrecoverable.
+_LIVE_AGENT_STATES: frozenset[str] = frozenset({
+    "INITIALIZED", "LOADED", "RUNNING", "WAITING", "IDLE",
+    "SUSPENDED",
+})
+
+
+async def ensure_session_agent_alive(
+    colony: ColonyConnection,
+    session_id: str,
+    session_info: _SessionInfo,
+) -> str | None:
+    """Detect-and-respawn for the user's SessionAgent.
+
+    PR1-B (R12-ROOT-CAUSE-C): the chat router is the only process
+    with both postgres access AND a ColonyConnection, so it owns
+    the respawn primitive. Ray-worker stop_callbacks (PR1-A) can't
+    reach those resources — they emit a user-visible chat message
+    and a typed diagnostic event, and this helper reacts to the
+    DEAD agent on the next user activity by spawning a replacement
+    via :func:`spawn_user_session_agent_for_session` and CAS-swapping
+    the pointer via
+    :meth:`SessionManagerDeployment.replace_session_agent_id`.
+
+    Called from the two routes a user message can take: the
+    WebSocket connect handler (so a reconnecting browser respawns
+    a dead agent before the first message ships) and
+    :func:`_post_user_message` (defense-in-depth — the connect-time
+    check might have missed a between-message death).
+
+    Returns the agent_id of a LIVE SessionAgent — either the
+    existing one (if it's alive) or the freshly-spawned replacement
+    — or ``None`` when respawn failed (logged; caller decides
+    whether to drop the user's message or write a chat error).
+
+    System sessions (``session_kind="system"``) are NOT respawned
+    by this helper — they have their own bootstrap path in
+    ``system_session.ensure_system_session_for_colony``; chat-attach
+    refuses to bind to them anyway.
+    """
+
+    if session_info.session_kind == "system":
+        return session_info.session_agent_id
+
+    from polymathera.colony.system import fetch_agent_info
+
+    current_id = session_info.session_agent_id
+    is_alive = False
+    if current_id:
+        try:
+            info = await fetch_agent_info(current_id, app_name=colony.app_name)
+            is_alive = (
+                info is not None
+                and info.state.name in _LIVE_AGENT_STATES
+            )
+        except Exception as e:
+            logger.warning(
+                "ensure_session_agent_alive: fetch_agent_info(%s) "
+                "raised: %s — treating as dead",
+                current_id, e,
+            )
+            is_alive = False
+
+    if is_alive:
+        return current_id
+
+    logger.warning(
+        "ensure_session_agent_alive: session=%s — current agent_id="
+        "%s is dead/missing; respawning",
+        session_id, current_id,
+    )
+
+    from ..chat.user_session_factory import (
+        spawn_user_session_agent_for_session,
+    )
+
+    new_agent_id = await spawn_user_session_agent_for_session(
+        colony,
+        session_id=session_id,
+        tenant_id=session_info.tenant_id,
+        colony_id=session_info.colony_id,
+        user_sub=session_info.created_by or None,
+    )
+    if new_agent_id is None:
+        logger.error(
+            "ensure_session_agent_alive: session=%s — respawn "
+            "failed (spawn_user_session_agent_for_session returned "
+            "None); see prior log for the underlying cause",
+            session_id,
+        )
+        return None
+
+    # CAS swap. Two concurrent respawns (e.g. two open browser tabs
+    # racing on the first message after a death) both succeed in
+    # spawning their own agent, but only one writes the pointer.
+    # The loser detects the mismatch via the returned value and
+    # should stop its agent — but we don't have a stop_agent path
+    # here without more plumbing, so log loudly and fall in behind
+    # the winner. The orphan will be cleaned up on idle_timeout or
+    # session close.
+    with colony.kernel_execution_context(origin="dashboard_chat_respawn"):
+        sm = await colony.get_session_manager()
+        settled = await sm.replace_session_agent_id(
+            session_id=session_id,
+            new_agent_id=new_agent_id,
+            expected_old_agent_id=current_id,
+        )
+    if settled != new_agent_id:
+        logger.warning(
+            "ensure_session_agent_alive: session=%s — CAS mismatch "
+            "(expected_old=%s, settled=%s, our_new=%s). Another "
+            "respawn won; using the settled id. Our spawn %s is "
+            "orphaned (no stop_agent plumbing yet).",
+            session_id, current_id, settled, new_agent_id, new_agent_id,
+        )
+        # Refresh the cached session_info so subsequent calls in
+        # this WebSocket session use the winner's id.
+        session_info.session_agent_id = settled
+        return settled
+
+    logger.info(
+        "ensure_session_agent_alive: session=%s — respawned "
+        "SessionAgent old=%s → new=%s",
+        session_id, current_id, new_agent_id,
+    )
+    session_info.session_agent_id = new_agent_id
+
+    # Replay orphaned user messages.
+    # Messages sent during the dead-agent gap exist on the chat
+    # blackboard but the dead agent's subscription died before
+    # processing them — and the new agent's subscription only sees
+    # FUTURE writes. Re-write each orphan with a fresh key so the
+    # new agent's @event_handler(chat:user:*) picks them up.
+    await _replay_orphaned_user_messages(
+        colony, session_id, session_info,
+    )
+    return new_agent_id
+
+
+async def _replay_orphaned_user_messages(
+    colony: ColonyConnection,
+    session_id: str,
+    session_info: _SessionInfo,
+) -> None:
+    """Re-enqueue chat:user:* messages that arrived after the latest
+    chat:agent:* response. Best-effort: replay failure logs but does
+    not propagate (the respawn itself already succeeded; the user
+    can always re-send manually).
+    """
+
+    from ..chat import SessionChatProtocol
+    try:
+        bb = await _get_session_chat_blackboard(colony, session_info)
+        if bb is None:
+            return
+        users = await bb.query(namespace=SessionChatProtocol.user_message_pattern())
+        agents = await bb.query(namespace=SessionChatProtocol.agent_message_pattern())
+        if not users:
+            return
+        latest_agent_ts = max(
+            (
+                (e.value or {}).get("timestamp", 0.0)
+                for e in agents
+                if isinstance(e.value, dict)
+            ),
+            default=0.0,
+        )
+        # Orphans = user messages strictly newer than the last
+        # agent response. Sort by ts so replay order matches arrival.
+        orphans = sorted(
+            (
+                e for e in users
+                if isinstance(e.value, dict)
+                and (e.value.get("timestamp") or 0.0) > latest_agent_ts
+            ),
+            key=lambda e: e.value.get("timestamp") or 0.0,
+        )
+        if not orphans:
+            return
+        logger.warning(
+            "ensure_session_agent_alive: session=%s — replaying %d "
+            "orphan user message(s) into the new agent's event queue",
+            session_id, len(orphans),
+        )
+        for entry in orphans:
+            new_id = f"msg_replay_{uuid.uuid4().hex[:12]}"
+            payload = dict(entry.value)
+            payload["message_id"] = new_id
+            payload["replayed_from"] = entry.key
+            payload["timestamp"] = time.time()
+            await bb.write(
+                SessionChatProtocol.user_message_key(new_id),
+                payload,
+            )
+    except Exception as e:
+        logger.error(
+            "ensure_session_agent_alive: replay failed for "
+            "session=%s: %s — user can re-send manually",
+            session_id, e,
+        )
+
+
 async def _post_user_message(
     colony: ColonyConnection,
     session_id: str,
@@ -367,6 +622,22 @@ async def _post_user_message(
     """
     try:
         from ..chat import SessionChatProtocol
+
+        # PR1-B (R12-ROOT-CAUSE-C): detect-and-respawn BEFORE writing.
+        # A dead SessionAgent's chat blackboard write succeeds (the
+        # blackboard backend is process-independent) but the user
+        # message rots — no subscriber is reading it. Respawning
+        # here keeps the session usable across SessionAgent death.
+        alive_agent_id = await ensure_session_agent_alive(
+            colony, session_id, session_info,
+        )
+        if alive_agent_id is None:
+            logger.error(
+                "Failed to ensure live SessionAgent for session %s — "
+                "dropping user message",
+                session_id,
+            )
+            return
 
         bb = await _get_session_chat_blackboard(colony, session_info)
         if bb is None:
@@ -497,12 +768,26 @@ async def _backfill_chat_history_from_blackboard(
     # connect matches what would have been streamed live had the
     # WebSocket been connected when the messages were written. The
     # ``query`` is a single backend round-trip per pattern.
+    # The 500-row cap is intentional (browser-side
+    # history slider lazy-loads older rows on demand) but used to
+    # be silent. Surface a WARNING when we hit the cap so the
+    # operator can spot sessions whose backlog is bigger than the
+    # initial page — without it, a reconnecting user sees only the
+    # most recent 500 entries with no way to know more existed.
     count = 0
+    _BACKFILL_CAP = 500
     for pattern, role in (
         (SessionChatProtocol.agent_message_pattern(), "agent"),
         (SessionChatProtocol.user_message_pattern(), "user"),
     ):
-        entries = await bb.query(namespace=pattern, limit=500)
+        entries = await bb.query(namespace=pattern, limit=_BACKFILL_CAP)
+        if len(entries) >= _BACKFILL_CAP:
+            logger.warning(
+                "_backfill_chat_history: hit limit=%d for "
+                "pattern=%s session=%s — older entries are NOT in "
+                "the initial page (lazy-load via /history endpoint).",
+                _BACKFILL_CAP, pattern, session_id,
+            )
         for entry in entries:
             payload = entry.value if isinstance(entry.value, dict) else {}
             chat_msg = {

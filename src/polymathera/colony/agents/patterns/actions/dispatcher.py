@@ -281,7 +281,23 @@ class MethodWrapperActionExecutor(ActionExecutor):
                         ret = ret.model_dump()
                     # else: leave ret as-is (primitive types)
                 except ValidationError as e:
-                    logger.warning(f"Output validation failed for {self.action_key}: {e}")
+                    # Output-validation failure used
+                    # to log+swallow and return success=True with
+                    # the unvalidated dict; the LLM then consumed
+                    # garbage as schema-valid. Surface as a real
+                    # failure so the caller's branch on r.success
+                    # actually runs.
+                    logger.error(
+                        f"Output validation failed for {self.action_key}: {e}"
+                    )
+                    return ActionResult(
+                        success=False,
+                        completed=True,
+                        error=(
+                            f"Output validation failed for "
+                            f"{self.action_key}: {e}"
+                        ),
+                    )
 
             result = ActionResult(
                 success=True,

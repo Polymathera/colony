@@ -21,12 +21,19 @@ import pytest
 
 
 def _load_router_source() -> str:
-    """Read the sessions router source. We import the module and use
-    ``inspect.getsource`` instead of opening the file by path so the
-    test follows the same import chain a regression would break."""
+    """Read the user-session blueprint factory source. PR1-B moved
+    the blueprint construction (including HumanHelpCapability mount
+    and the self_concept MISSION SPAWN PROTOCOL prose) out of
+    ``routers/sessions.py:create_session`` into
+    ``chat/user_session_factory.py`` so the same shape is used for
+    create-session AND for the dashboard's lazy respawn. The pins
+    follow the code to the factory; the router's call site is
+    pinned by ``tests/test_pr1b_respawn.py``."""
 
-    from polymathera.colony.web_ui.backend.routers import sessions
-    return inspect.getsource(sessions)
+    from polymathera.colony.web_ui.backend.chat import (
+        user_session_factory,
+    )
+    return inspect.getsource(user_session_factory)
 
 
 def test_session_agent_blueprint_mounts_human_help_capability() -> None:

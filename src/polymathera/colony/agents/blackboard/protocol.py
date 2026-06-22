@@ -1960,6 +1960,17 @@ class GitHubEventProtocol(BlackboardProtocol):
     # --- Pattern construction ---
 
     @staticmethod
+    def all_pattern() -> str:
+        """Catch-all pattern matching every GitHubEventProtocol key
+        shape (issue_opened, issue_commented, issue_closed, pr_*,
+        project_item_changed). For subscribers that want to react to
+        any GitHub event — e.g. ``InteractionLogCapability`` mirroring
+        the whole stream into ``interaction_log`` or
+        ``MentionRoutingCapability`` scanning every comment body."""
+
+        return "github:*"
+
+    @staticmethod
     def issue_opened_pattern() -> str:
         return f"{GitHubEventProtocol._ISSUE_OPENED}*"
 
@@ -2850,3 +2861,40 @@ DIAGNOSTIC_EMPTY_ITERATION_STREAK = "empty_iteration_streak"
 SELF_RELEVANT_DIAGNOSTIC_KINDS: frozenset[str] = frozenset({
     DIAGNOSTIC_EMPTY_ITERATION_STREAK,
 })
+
+
+class OperatorOverrideProtocol(BlackboardProtocol):
+    """Operator runtime overrides for in-session agent behavior.
+
+    PR5-B (R12-E): the dashboard writes typed override records on
+    the session blackboard; the SessionAgent's ``@event_handler``
+    consumes them and reconfigures the runtime guardrail without
+    restarting the agent. v1 ships ``semantic_constraint`` (operator
+    disable/enable for a constraint id); future shapes (cap
+    override, judge-temperature override, …) follow the same
+    ``operator_override:<kind>:<id>`` pattern.
+
+    Key shape: ``operator_override:semantic_constraint:<constraint_id>``
+    Payload:    ``{"disabled": bool, "set_at": float, "set_by": str}``
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.SESSION
+
+    _PREFIX_SC = "operator_override:semantic_constraint:"
+
+    @staticmethod
+    def semantic_constraint_key(constraint_id: str) -> str:
+        return f"{OperatorOverrideProtocol._PREFIX_SC}{constraint_id}"
+
+    @staticmethod
+    def semantic_constraint_pattern() -> str:
+        return f"{OperatorOverrideProtocol._PREFIX_SC}*"
+
+    @staticmethod
+    def parse_semantic_constraint_key(key: str) -> str:
+        if not key.startswith(OperatorOverrideProtocol._PREFIX_SC):
+            raise ValueError(
+                f"Not an OperatorOverrideProtocol semantic-constraint "
+                f"key: {key!r}",
+            )
+        return key[len(OperatorOverrideProtocol._PREFIX_SC):]

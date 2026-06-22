@@ -4,6 +4,7 @@ import { useAgents } from "@/api/hooks/useAgents";
 import { useVCMStats } from "@/api/hooks/useVCM";
 import { useSessionStats } from "@/api/hooks/useSessions";
 import { useTokenUsage } from "@/api/hooks/useMetrics";
+import { useColonyAgentDiagnostics } from "@/api/hooks/useColonyStatus";
 import { MetricCard } from "../shared/MetricCard";
 import { Badge } from "../shared/Badge";
 import { formatDuration, formatTokens } from "@/lib/utils";
@@ -16,10 +17,12 @@ export function OverviewTab() {
   const vcm = useVCMStats();
   const sessionStats = useSessionStats();
   const tokenUsage = useTokenUsage();
+  const diagnostics = useColonyAgentDiagnostics(20);
 
   const h = health.data;
   const r = redis.data;
   const totals = tokenUsage.data?.totals;
+  const diagRows = diagnostics.data?.diagnostics ?? [];
 
   return (
     <div className="space-y-6">
@@ -117,6 +120,56 @@ export function OverviewTab() {
           />
         </div>
       </section>
+
+      {/* Agent Diagnostics — session-agent crashes, github-inbound
+          quiesce, and other AgentDiagnosticProtocol events the chat
+          UI can't surface (the agent is dead by the time it would
+          have spoken). Hidden when steady-state empty. */}
+      {diagRows.length > 0 && (
+        <section>
+          <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Agent Diagnostics
+          </h2>
+          <div className="rounded-lg border bg-card divide-y">
+            {diagRows.map((row) => {
+              const kind = row.payload.kind ?? "unknown";
+              const agentId = row.payload.agent_id ?? "—";
+              const detail =
+                row.payload.stop_reason ??
+                row.payload.exception_message ??
+                row.payload.reason ??
+                "";
+              return (
+                <div
+                  key={row.id}
+                  className="flex items-start gap-3 p-3 text-sm"
+                >
+                  <Badge
+                    variant={
+                      kind === "session_agent_stopped" ? "error" : "warning"
+                    }
+                  >
+                    {kind}
+                  </Badge>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-mono text-xs text-muted-foreground truncate">
+                      {agentId}
+                    </div>
+                    {detail && (
+                      <div className="mt-0.5 text-xs text-foreground/80 line-clamp-2">
+                        {String(detail)}
+                      </div>
+                    )}
+                  </div>
+                  <span className="shrink-0 text-[10px] text-muted-foreground">
+                    {new Date(row.ts).toLocaleString()}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

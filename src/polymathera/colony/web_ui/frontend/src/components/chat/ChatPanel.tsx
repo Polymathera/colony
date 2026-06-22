@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { PanelRightClose, PanelRightOpen } from "lucide-react";
+import { PanelRightClose, PanelRightOpen, ShieldAlert } from "lucide-react";
 import { ChatMessageList } from "./ChatMessageList";
 import { ChatInput } from "./ChatInput";
 import { ChatControls, type ChatControlsState } from "./ChatControls";
+import { ConstraintsPanel } from "./ConstraintsPanel";
 import type { ChatMessageData } from "./ChatMessage";
 import { apiFetch } from "@/api/client";
 
@@ -69,6 +70,8 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
   // backend-emitted ``{cleared: true}`` (mission terminal state or
   // mission_id replay) removes the entry.
   const [missionStatuses, setMissionStatuses] = useState<Record<string, MissionStatus>>({});
+  // PR5-B operator constraint-override panel visibility.
+  const [showConstraints, setShowConstraints] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const isDragging = useRef(false);
 
@@ -494,10 +497,30 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             <span className={`inline-block h-2 w-2 rounded-full ${statusDot}`} />
             <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Chat</span>
           </div>
-          <button onClick={() => setCollapsed(true)} className="text-muted-foreground hover:text-foreground" title="Collapse chat">
-            <PanelRightClose size={18} />
-          </button>
+          <div className="flex items-center gap-2">
+            {/* PR5-B: operator runtime constraint override. Opens the
+                ConstraintsPanel modal which lists the SessionAgent's
+                semantic constraints with toggle buttons. */}
+            {sessionId && (
+              <button
+                onClick={() => setShowConstraints(true)}
+                className="text-muted-foreground hover:text-foreground"
+                title="Semantic constraints (operator override)"
+              >
+                <ShieldAlert size={16} />
+              </button>
+            )}
+            <button onClick={() => setCollapsed(true)} className="text-muted-foreground hover:text-foreground" title="Collapse chat">
+              <PanelRightClose size={18} />
+            </button>
+          </div>
         </div>
+        {showConstraints && sessionId && (
+          <ConstraintsPanel
+            sessionId={sessionId}
+            onClose={() => setShowConstraints(false)}
+          />
+        )}
 
         {/* Messages */}
         <div className="flex-1 min-h-0">

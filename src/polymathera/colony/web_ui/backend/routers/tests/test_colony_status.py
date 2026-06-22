@@ -206,6 +206,86 @@ async def test_recent_activity_returns_raw_tail() -> None:
 
 
 # ---------------------------------------------------------------------------
+# /agent-diagnostics (R12 follow-up — health dashboard surface)
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_diagnostics_returns_only_agent_diagnostic_kind() -> None:
+    """``/agent-diagnostics`` over-fetches via ``fetch_recent_activity``
+    then post-filters to ``event_kind == 'agent_diagnostic'``. GitHub
+    events / alert rows are excluded; this is the dashboard-side mirror
+    of the alerts route's post-filter pattern."""
+
+    app, capture = _build_app(fetch_recent_returns=[
+        {
+            "id": 1, "ts": "2026-06-21T10:00:00Z",
+            "event_kind": "agent_diagnostic", "channel": "internal",
+            "payload": {
+                "agent_id": "session_agent_abc",
+                "kind": "session_agent_stopped",
+                "stop_reason": "max_iterations_exceeded",
+            },
+            "refs": [
+                {"kind": "diagnostic_kind", "value": "session_agent_stopped"},
+                {"kind": "agent_id", "value": "session_agent_abc"},
+            ],
+            "channel_ref": None,
+        },
+        {
+            "id": 2, "ts": "2026-06-21T11:00:00Z",
+            "event_kind": "github_issue_event", "channel": "github",
+            "payload": {}, "refs": [], "channel_ref": None,
+        },
+        {
+            "id": 3, "ts": "2026-06-21T12:00:00Z",
+            "event_kind": "agent_diagnostic", "channel": "internal",
+            "payload": {
+                "agent_id": "github_inbound_a1",
+                "kind": "github_inbound_quiesced",
+                "reason": "no_db_pool",
+            },
+            "refs": [
+                {"kind": "diagnostic_kind", "value": "github_inbound_quiesced"},
+            ],
+            "channel_ref": None,
+        },
+    ])
+    try:
+        client = TestClient(app)
+        resp = client.get("/api/v1/colony-status/agent-diagnostics")
+        assert resp.status_code == 200
+        data = resp.json()
+        kinds = [d["payload"]["kind"] for d in data["diagnostics"]]
+        assert "session_agent_stopped" in kinds
+        assert "github_inbound_quiesced" in kinds
+        # GitHub events excluded.
+        assert data["count"] == 2
+        assert all(
+            d["event_kind"] == "agent_diagnostic"
+            for d in data["diagnostics"]
+        )
+    finally:
+        _restore(capture)
+
+
+async def test_agent_diagnostics_empty_when_no_matching_rows() -> None:
+    app, capture = _build_app(fetch_recent_returns=[
+        {
+            "id": 1, "ts": "x",
+            "event_kind": "github_issue_event", "channel": "github",
+            "payload": {}, "refs": [], "channel_ref": None,
+        },
+    ])
+    try:
+        client = TestClient(app)
+        resp = client.get("/api/v1/colony-status/agent-diagnostics")
+        assert resp.status_code == 200
+        assert resp.json() == {"diagnostics": [], "count": 0}
+    finally:
+        _restore(capture)
+
+
+# ---------------------------------------------------------------------------
 # /project-link
 # ---------------------------------------------------------------------------
 

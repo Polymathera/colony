@@ -1448,16 +1448,125 @@ class SessionOrchestratorCapability(AgentCapability):
 
     @event_handler(pattern=SessionChatProtocol.reply_pattern())
     async def handle_user_reply(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult:
-        """Handle a user reply to an agent question."""
+        """Route a user's plain-chat reply to the matching typed
+        request channel.
+
+        Detects which protocol owns ``request_id`` (human_help vs
+        human_approval) by reading the corresponding
+        ``{proto}:request:{request_id}`` key on the session-scoped
+        namespace. For human_help, freeform chat maps cleanly to
+        the ``guidance`` field of :class:`HumanHelpResponse` — the
+        operator's plain reply is forwarded as guidance and the
+        requesting agent's ``@event_handler`` for
+        ``human_help:response:*`` picks it up. For human_approval,
+        the response shape requires a discrete ``choice`` from a
+        fixed enum which freeform text can't reliably express — we
+        surface a chat error directing the user to the typed
+        buttons. Unknown ``request_id`` (no matching request key
+        on either namespace) → log + chat error so the reply isn't
+        silently dropped.
+        """
+
+        from polymathera.colony.agents.blackboard.protocol import (
+            HumanApprovalProtocol,
+            HumanHelpProtocol,
+        )
+        from polymathera.colony.agents.patterns.capabilities.human_approval import (
+            HumanApprovalCapability,
+        )
+        from polymathera.colony.agents.patterns.capabilities.human_help import (
+            HumanHelpCapability,
+            HumanHelpResponse,
+        )
+        from polymathera.colony.agents.scopes import (
+            BlackboardScope,
+            get_scope_prefix,
+        )
+
         request_id, _ = SessionChatProtocol.parse_reply_key(event.key)
         payload = event.value if isinstance(event.value, dict) else {}
         content = payload.get("content", "")
 
-        logger.info("SessionAgent received reply to request %s: %s", request_id, content[:100])
+        # Resolve both protocol namespaces; either may host the
+        # request for this request_id (or neither if the id is bogus).
+        help_bb = await self.get_blackboard(
+            scope_id=get_scope_prefix(
+                BlackboardScope.SESSION,
+                namespace=HumanHelpCapability.DEFAULT_NAMESPACE,
+            ),
+        )
+        appr_bb = await self.get_blackboard(
+            scope_id=get_scope_prefix(
+                BlackboardScope.SESSION,
+                namespace=HumanApprovalCapability.DEFAULT_NAMESPACE,
+            ),
+        )
 
-        # TODO: Route reply back to the requesting agent's blackboard.
-        await self._post_response(f"Reply to {request_id} acknowledged: {content}")
+        help_req = None
+        appr_req = None
+        try:
+            help_req = await help_bb.read(
+                HumanHelpProtocol.request_key(request_id),
+            )
+        except Exception:  # noqa: BLE001
+            help_req = None
+        try:
+            appr_req = await appr_bb.read(
+                HumanApprovalProtocol.request_key(request_id),
+            )
+        except Exception:  # noqa: BLE001
+            appr_req = None
 
+        if help_req is not None:
+            # Translate to HumanHelpResponse(guidance=...) and write
+            # to the help response key the requesting agent's
+            # @event_handler subscribes to.
+            response = HumanHelpResponse(guidance=content)
+            await help_bb.write(
+                HumanHelpProtocol.response_key(request_id),
+                response.model_dump(),
+            )
+            logger.info(
+                "SessionAgent routed chat:reply to human_help:response:%s",
+                request_id,
+            )
+            await self._post_response(
+                f"✅ Forwarded your reply to the requesting agent "
+                f"(`request_help` / `{request_id}`)."
+            )
+            return PROCESSED
+
+        if appr_req is not None:
+            # Approval needs a discrete choice; freeform reply
+            # can't produce one reliably. Tell the user to use
+            # the typed surface.
+            logger.warning(
+                "SessionAgent received chat:reply for "
+                "human_approval request=%s; cannot translate "
+                "freeform text to a discrete choice. content=%s",
+                request_id, content[:200],
+            )
+            await self._post_response(
+                f"⚠️ Your reply to `{request_id}` is for a "
+                f"**human-approval** request, which needs a discrete "
+                f"choice (approve / reject / abort). Use the buttons "
+                f"in the chat UI (or `POST /api/v1/sessions/.../"
+                f"human_approval/{request_id}/respond`) instead of a "
+                f"plain-chat reply."
+            )
+            return PROCESSED
+
+        logger.warning(
+            "SessionAgent received chat:reply for unknown request=%s "
+            "(no matching request key on human_help or "
+            "human_approval). content=%s",
+            request_id, content[:200],
+        )
+        await self._post_response(
+            f"⚠️ No live request found for `{request_id}` — your "
+            f"reply could not be routed. The request may have "
+            f"already been answered or expired."
+        )
         return PROCESSED
 
     @event_handler(
@@ -1691,12 +1800,20 @@ class SessionOrchestratorCapability(AgentCapability):
         command = parts[0].lstrip("/").lower()
         args_str = parts[1] if len(parts) > 1 else ""
 
+        # ``/abort`` (and ``/cancel`` / ``/status`` /
+        # ``/whatdoing`` / ``/replace``) are ROUTED on the high-
+        # priority lane by ``chat.py:_HIGH_PRIORITY_COMMANDS``;
+        # ``handle_control_command`` is the authoritative handler.
+        # They never reach this dispatch table for the normal-
+        # priority lane — listing them here would create a dead
+        # second handler and confusing user feedback (the audit
+        # flagged the prior ``"abort": self._cmd_abort`` entry).
+        # Help text below also reflects the lane split.
         handler = {
             "help": self._cmd_help,
             "status": self._cmd_status,
             "agents": self._cmd_agents,
             "roles": self._cmd_roles,
-            "abort": self._cmd_abort,
             "analyze": self._cmd_analyze,
             "map": self._cmd_map,
             "set": self._cmd_set,
@@ -1710,11 +1827,19 @@ class SessionOrchestratorCapability(AgentCapability):
 
     async def _cmd_help(self, args: str, controls: dict | None) -> None:
         """Show available commands."""
+        # High-priority commands (run on a dedicated lane
+        # so an in-flight long action can't block them) are marked
+        # explicitly so the operator knows they always take effect.
+        # Normal-lane commands are blocked by in-flight actions
+        # until the planner returns.
         commands = {
             "/analyze <type>": "Start a mission run (impact, compliance, intent, contracts, slicing, basic)",
             "/map <url>": "Map a repository or content to VCM",
-            "/abort [run_id]": "Abort the current or specified run",
-            "/status": "Show current session and run status",
+            "/abort": "(high-priority) Cancel the in-flight action",
+            "/cancel": "(high-priority) Alias for /abort",
+            "/status": "(high-priority) Show current session and run status",
+            "/whatdoing": "(high-priority) Show what the agent is doing right now",
+            "/replace <request>": "(high-priority) Abort + queue a new request",
             "/agents": "List active agents in this session",
             "/roles": "List the colony-generic agent roles available to spawn",
             "/set <param>=<value>": "Set session parameters (max-agents, effort, etc.)",
@@ -1826,10 +1951,24 @@ class SessionOrchestratorCapability(AgentCapability):
             lines.append(f"    `{agent_type}`")
         await self._post_response("\n".join(lines))
 
+    # NOTE: ``_cmd_abort`` is intentionally NOT in the dispatch
+    # table (see ``_handle_command``); ``/abort`` routes through
+    # the high-priority lane to ``handle_control_command``. The
+    # method is kept here ONLY as a fallback for callers that
+    # bypass the chat router (tests, programmatic invocation). It
+    # is unreachable via normal user input.
     async def _cmd_abort(self, args: str, controls: dict | None) -> None:
-        """Abort a run."""
-        # TODO: Implement run cancellation via InterruptionProtocol
-        await self._post_response("Abort not yet implemented. Coming in a future update.")
+        """Fallback for /abort if it ever reaches the normal-lane
+        dispatch (it should not — the chat router routes /abort to
+        the high-priority lane handled by ``handle_control_command``).
+        If you see this message, the router's routing was bypassed."""
+
+        await self._post_response(
+            "⚠️ `/abort` reached the normal-priority lane (it should "
+            "have been routed to the high-priority lane). The cancel "
+            "did NOT fire. Reload the page and retry; if it recurs, "
+            "the chat router's high-priority routing is broken."
+        )
 
     async def _cmd_analyze(self, args: str, controls: dict | None) -> None:
         """Start a mission run by spawning coordinator agents."""

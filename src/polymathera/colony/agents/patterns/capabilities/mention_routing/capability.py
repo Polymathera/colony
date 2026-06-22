@@ -44,7 +44,7 @@ class MentionRoutingCapability(ColonySingletonCapabilityBase):
     # Parser — subscribed to every GitHub event with a body field
     # ------------------------------------------------------------------
 
-    @event_handler(pattern="github:*")
+    @event_handler(pattern=GitHubEventProtocol.all_pattern())
     async def _on_github_event(self, event, _scope) -> None:  # type: ignore[no-untyped-def]
         """Walk the value's ``body`` for ``@colony`` / ``@polymath``
         mentions; emit one :class:`MentionEventProtocol` per match.
