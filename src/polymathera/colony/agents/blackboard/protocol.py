@@ -375,6 +375,78 @@ class HumanApprovalProtocol(BlackboardProtocol):
         return key[len(prefix):]
 
 
+class GuardrailWaiverProtocol(BlackboardProtocol):
+    """Typed agent-initiated request for a human waiver on a semantic
+    constraint the agent cannot pass.
+
+    When a runtime guardrail blocks an action the agent judges the
+    rule shouldn't apply to (e.g. the LLM made a real verifying call
+    but the judge keeps misreading the cell history), the agent calls
+    :meth:`GuardrailWaiverCapability.request_guardrail_waiver`, which
+    writes a ``request`` key the SessionAgent surfaces to the UI as
+    an Approve/Reject card. The user's decision lands as a
+    ``response`` key the agent's ``@event_handler`` reads to wake
+    its planner. Approving ALSO writes the existing PR5-B
+    ``operator_override:semantic_constraint:<id>`` key so the
+    guardrail's own ``_read_disabled_ids`` skips the constraint on
+    the next ``.check()`` — no separate enforcement plumbing.
+
+    Per-session scope so waivers granted in one chat don't leak to
+    another and the SessionAgent's existing session-scope BB handle
+    sees both keys without an extra subscription scope.
+
+    Key formats:
+
+    - ``guardrail_waiver:request:{waiver_id}`` — agent posts a typed
+      payload (constraint_id, justification, requesting_agent_id).
+    - ``guardrail_waiver:response:{waiver_id}`` — backend writes the
+      user's typed response (``approved: bool``, ``decided_by``,
+      optional ``reason``).
+    """
+
+    scope: ClassVar[BlackboardScope] = BlackboardScope.SESSION
+
+    # --- Key construction ---
+
+    @staticmethod
+    def request_key(waiver_id: str) -> str:
+        return f"guardrail_waiver:request:{waiver_id}"
+
+    @staticmethod
+    def response_key(waiver_id: str) -> str:
+        return f"guardrail_waiver:response:{waiver_id}"
+
+    # --- Pattern construction ---
+
+    @staticmethod
+    def request_pattern() -> str:
+        return "guardrail_waiver:request:*"
+
+    @staticmethod
+    def response_pattern() -> str:
+        return "guardrail_waiver:response:*"
+
+    # --- Key parsing ---
+
+    @staticmethod
+    def parse_request_key(key: str) -> str:
+        prefix = "guardrail_waiver:request:"
+        if not key.startswith(prefix):
+            raise ValueError(
+                f"Not a GuardrailWaiverProtocol request key: {key!r}",
+            )
+        return key[len(prefix):]
+
+    @staticmethod
+    def parse_response_key(key: str) -> str:
+        prefix = "guardrail_waiver:response:"
+        if not key.startswith(prefix):
+            raise ValueError(
+                f"Not a GuardrailWaiverProtocol response key: {key!r}",
+            )
+        return key[len(prefix):]
+
+
 class HumanHelpProtocol(BlackboardProtocol):
     """Protocol for typed human-help requests / responses on the
     session blackboard.

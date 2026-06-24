@@ -1,7 +1,37 @@
 
+from typing import Any
+
 from ...base import Agent, ActionPolicy
 
 _DEFAULT_POLICY = "CODE_GEN" # Options: "CODE_GEN", "CACHE_AWARE", "MINIMAL"
+
+
+def _runtime_guardrail_has_semantic_constraints(guardrail: Any) -> bool:
+    """Return True when ``guardrail`` is (or wraps) a
+    :class:`SemanticConstraintGuardrail` instance.
+
+    Used by :func:`create_default_action_policy` to auto-mount
+    :class:`GuardrailWaiverCapability` on agents that have a semantic
+    guardrail to potentially waive. The caller passes the
+    already-resolved instance (``Agent._create_action_policy``'s
+    ``_resolve`` step has turned any Blueprint into its local
+    instance before splatting ``**resolved_config`` into this
+    factory), so this function checks instance types directly and
+    walks ``CompositeGuardrail._inner`` for nested layouts.
+    """
+
+    from .semantic_constraints import SemanticConstraintGuardrail
+    from .code_constraints import CompositeGuardrail
+
+    if isinstance(guardrail, SemanticConstraintGuardrail):
+        return True
+    if isinstance(guardrail, CompositeGuardrail):
+        return any(
+            _runtime_guardrail_has_semantic_constraints(inner)
+            for inner in guardrail._inner
+        )
+    return False
+
 
 async def create_default_action_policy(agent: Agent, **kwargs) -> ActionPolicy:
     if _DEFAULT_POLICY == "CODE_GEN":
@@ -50,6 +80,30 @@ async def create_default_action_policy(agent: Agent, **kwargs) -> ActionPolicy:
         runtime_guardrail = kwargs.get(
             "runtime_guardrail", NoGuardrail(),
         )
+
+        # Auto-mount GuardrailWaiverCapability when the resolved
+        # runtime_guardrail contains a SemanticConstraintGuardrail
+        # (directly or wrapped in CompositeGuardrail). Mounted here —
+        # NOT in Agent._create_action_policy — because by the time
+        # this factory runs the caller has resolved any Blueprint via
+        # ``_resolve`` and splatted the resolved instance through
+        # ``**resolved_config``, so the isinstance check actually
+        # sees the right type. Mounting earlier in
+        # ``_create_action_policy`` would see the unresolved Blueprint
+        # and silently skip the auto-mount. Skipped when an operator
+        # has pre-mounted the capability (idempotency check).
+        if _runtime_guardrail_has_semantic_constraints(runtime_guardrail):
+            from ..capabilities.guardrail_waiver import (
+                GuardrailWaiverCapability,
+            )
+            if agent.get_capability_by_type(GuardrailWaiverCapability) is None:
+                waiver_cap = GuardrailWaiverCapability(
+                    agent=agent,
+                    capability_key="guardrail_waiver",
+                )
+                await waiver_cap.initialize()
+                agent.add_capability(waiver_cap, events_only=False)
+
         return await create_code_generation_action_policy(
             agent=agent,
             action_map=kwargs.get("action_map", None),

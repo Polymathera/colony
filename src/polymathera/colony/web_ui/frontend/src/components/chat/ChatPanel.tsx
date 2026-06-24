@@ -369,6 +369,50 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
       return;
     }
 
+    if (message.kind === "guardrail_waiver" && sessionId) {
+      // Agent-initiated waiver request on a semantic guardrail rule.
+      // The asking agent's ``GuardrailWaiverCapability`` listens on
+      // ``guardrail_waiver:response:*``; the HTTP endpoint writes
+      // there AND on approve ALSO writes the
+      // ``operator_override:semantic_constraint:<cid>`` key the
+      // existing ``SemanticConstraintGuardrail._read_disabled_ids``
+      // reads — same plumbing as the dashboard's disable button. The
+      // ``constraint_id`` round-trips via ``extra`` from the original
+      // request. ``reason`` is the operator's optional rationale
+      // (mapped from the same compose-mode field the human_approval
+      // card surfaces on reject/abort).
+      const verb = content === "approve" ? "approve" : "reject";
+      // ``constraint_id`` round-trips via the ORIGINAL waiver request's
+      // ``message.extra`` (the SessionOrchestrator's request-mirror
+      // stamps it there). The reply ``extra`` carries the operator's
+      // free-form rationale only.
+      const constraintId = typeof message.extra?.constraint_id === "string"
+        ? (message.extra.constraint_id as string)
+        : "";
+      apiFetch<unknown>(
+        `/sessions/${encodeURIComponent(sessionId)}/waivers/${encodeURIComponent(requestId)}/${verb}`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            constraint_id: constraintId,
+            reason: extra?.explanation ?? "",
+          }),
+        },
+      ).then(
+        () => recordEcho(),
+        (err) => {
+          addMessage({
+            id: nextMessageId(),
+            run_id: null,
+            role: "system",
+            content: `Failed to submit waiver decision: ${err instanceof Error ? err.message : String(err)}`,
+            timestamp: Date.now(),
+          });
+        },
+      );
+      return;
+    }
+
     if (message.kind === "human_help" && sessionId) {
       // Typed human-help (mid-flow clarification) gate. Sibling of
       // the human_approval branch above. The requesting agent's

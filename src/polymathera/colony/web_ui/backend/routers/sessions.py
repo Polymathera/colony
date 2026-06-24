@@ -833,3 +833,192 @@ async def enable_semantic_constraint(
         disabled=False,
         user=user,
     )
+
+
+async def _write_guardrail_waiver_response(
+    *,
+    colony: ColonyConnection,
+    session_id: str,
+    waiver_id: str,
+    constraint_id: str,
+    approved: bool,
+    reason: str,
+    user: dict,
+) -> SessionActionResponse:
+    """Write a typed :class:`GuardrailWaiverProtocol` response onto
+    the session blackboard. When ``approved=True`` ALSO write the
+    PR5-B operator-override key so
+    :meth:`SemanticConstraintGuardrail._read_disabled_ids` sees the
+    constraint as disabled on the next ``.check()`` — same source-of-
+    truth contract the dashboard's disable/enable endpoints use.
+    Atomic-enough: writes are serialised on the same BB instance.
+    """
+
+    import time as _time
+    from polymathera.colony.agents.blackboard import EnhancedBlackboard
+    from polymathera.colony.agents.blackboard.protocol import (
+        GuardrailWaiverProtocol,
+        OperatorOverrideProtocol,
+    )
+    from polymathera.colony.agents.scopes import (
+        BlackboardScope,
+        get_scope_prefix,
+    )
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        Ring,
+        execution_context,
+    )
+
+    if not colony.is_connected:
+        return SessionActionResponse(
+            session_id=session_id, success=False, message="Not connected",
+        )
+
+    try:
+        sm = await colony.get_session_manager()
+        session = await sm.get_session(session_id=session_id)
+        if session is None:
+            return SessionActionResponse(
+                session_id=session_id, success=False,
+                message=f"Session {session_id} not found",
+            )
+        from polymathera.colony.agents.sessions.models import Session as SM
+        if isinstance(session, dict):
+            session = SM(**session)
+        decided_by = user.get("sub", "unknown")
+        with execution_context(
+            ring=Ring.USER,
+            tenant_id=session.tenant_id,
+            colony_id=session.colony_id,
+            session_id=session_id,
+            origin="dashboard_guardrail_waiver",
+        ):
+            bb = EnhancedBlackboard(
+                app_name=colony.app_name,
+                scope_id=get_scope_prefix(BlackboardScope.SESSION),
+                backend_type=None,
+                enable_events=True,
+            )
+            await bb.initialize()
+            # On approve, set the constraint as operator-disabled so
+            # the asking agent's NEXT action attempt sees the override
+            # via SemanticConstraintGuardrail._read_disabled_ids.
+            # Write the override FIRST so by the time the response key
+            # wakes the asking agent's planner, the override is
+            # already on BB.
+            if approved and constraint_id:
+                await bb.write(
+                    OperatorOverrideProtocol.semantic_constraint_key(
+                        constraint_id,
+                    ),
+                    {
+                        "disabled": True,
+                        "set_at": _time.time(),
+                        "set_by": decided_by,
+                        "waiver_id": waiver_id,
+                    },
+                )
+            # Always write the typed response so the agent wakes
+            # whether the waiver was approved or rejected.
+            await bb.write(
+                GuardrailWaiverProtocol.response_key(waiver_id),
+                {
+                    "waiver_id": waiver_id,
+                    "constraint_id": constraint_id,
+                    "approved": approved,
+                    "decided_by": decided_by,
+                    "reason": reason,
+                    "decided_at": _time.time(),
+                },
+            )
+        verb = "approved" if approved else "rejected"
+        return SessionActionResponse(
+            session_id=session_id,
+            success=True,
+            message=(
+                f"Operator {verb} guardrail waiver {waiver_id!r} "
+                f"(constraint {constraint_id!r}) for session {session_id}"
+            ),
+        )
+    except Exception as e:
+        logger.error(
+            "guardrail waiver (%s) failed: session=%s waiver=%s "
+            "constraint=%s err=%s",
+            "approve" if approved else "reject",
+            session_id, waiver_id, constraint_id, e,
+        )
+        return SessionActionResponse(
+            session_id=session_id, success=False, message=str(e),
+        )
+
+
+class GuardrailWaiverDecision(BaseModel):
+    """Operator's decision payload for ``/waivers/{wid}/{approve|reject}``.
+
+    ``constraint_id`` is the rule the original
+    :class:`GuardrailWaiverProtocol` request named — surfaced to the
+    UI in the agent_question payload and round-tripped here so the
+    approve path writes the right
+    :class:`OperatorOverrideProtocol` key. ``reason`` is the
+    operator's optional explanation, surfaced to the asking agent's
+    planner context."""
+
+    constraint_id: str
+    reason: str = ""
+
+
+@router.post(
+    "/sessions/{session_id}/waivers/{waiver_id}/approve",
+    response_model=SessionActionResponse,
+)
+async def approve_guardrail_waiver(
+    session_id: str,
+    waiver_id: str,
+    decision: GuardrailWaiverDecision,
+    user: dict = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> SessionActionResponse:
+    """Operator approves a guardrail waiver. Disables the named
+    constraint for this session (same effect as
+    ``/constraints/{id}/disable``) AND wakes the asking agent via a
+    typed :class:`GuardrailWaiverProtocol` response. The agent's
+    next planner iteration sees ``approved=True`` in the context
+    binding and retries the originally-blocked action — the
+    constraint now lets it through."""
+
+    return await _write_guardrail_waiver_response(
+        colony=colony,
+        session_id=session_id,
+        waiver_id=waiver_id,
+        constraint_id=decision.constraint_id,
+        approved=True,
+        reason=decision.reason,
+        user=user,
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/waivers/{waiver_id}/reject",
+    response_model=SessionActionResponse,
+)
+async def reject_guardrail_waiver(
+    session_id: str,
+    waiver_id: str,
+    decision: GuardrailWaiverDecision,
+    user: dict = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> SessionActionResponse:
+    """Operator rejects a guardrail waiver. NO override is written;
+    the constraint stays active. The asking agent's planner sees
+    ``approved=False`` in its context binding and must find another
+    path (different action, give up, etc.)."""
+
+    return await _write_guardrail_waiver_response(
+        colony=colony,
+        session_id=session_id,
+        waiver_id=waiver_id,
+        constraint_id=decision.constraint_id,
+        approved=False,
+        reason=decision.reason,
+        user=user,
+    )

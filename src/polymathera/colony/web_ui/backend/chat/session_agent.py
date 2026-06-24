@@ -33,6 +33,7 @@ from polymathera.colony.agents.blackboard.protocol import (
     CHAT_BLACKBOARD_NAMESPACE,
     DIAGNOSTIC_EMPTY_ITERATION_STREAK,
     DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK,
+    GuardrailWaiverProtocol,
     HumanApprovalProtocol,
     HumanHelpProtocol,
     LifecycleSignalProtocol,
@@ -450,6 +451,69 @@ class SessionOrchestratorCapability(AgentCapability):
         return PROCESSED
 
     @event_handler(
+        pattern=GuardrailWaiverProtocol.request_pattern(),
+        priority="high",
+    )
+    async def handle_guardrail_waiver_request(
+        self, event: BlackboardEvent, _repl: Any,
+    ) -> EventProcessingResult | None:
+        """Translate one :class:`GuardrailWaiverProtocol` request into
+        a chat ``agent_question`` carrying ``kind='guardrail_waiver'``.
+
+        Sibling of :meth:`handle_human_approval_request` and
+        :meth:`handle_human_help_request`. The agent asks for a
+        waiver via :meth:`GuardrailWaiverCapability.request_guardrail_waiver`;
+        the asking agent (typically a coordinator the SessionAgent
+        spawned) writes a typed BB request key; this handler mirrors
+        it to chat so the UI renders Approve/Reject. The frontend
+        routes the operator's decision via the
+        ``/sessions/{id}/waivers/{waiver_id}/{approve|reject}`` HTTP
+        endpoints — on approve, the existing PR5-B operator-override
+        key is ALSO written so
+        ``SemanticConstraintGuardrail._read_disabled_ids`` sees the
+        constraint as disabled on the next ``.check()``."""
+
+        try:
+            waiver_id = GuardrailWaiverProtocol.parse_request_key(event.key)
+        except ValueError:
+            return PROCESSED
+        chat_bb = await self.get_blackboard()
+        payload = event.value if isinstance(event.value, dict) else {}
+        constraint_id = payload.get("constraint_id") or ""
+        justification = payload.get("justification") or ""
+        requester_agent_id = (
+            payload.get("requester_agent_id")
+            or self._agent.agent_id
+        )
+        content = (
+            f"⚠️ Agent `{requester_agent_id}` is requesting a waiver "
+            f"on guardrail **{constraint_id}**.\n\n{justification}"
+        )
+
+        message_id = f"waiver_msg_{uuid.uuid4().hex[:12]}"
+        await chat_bb.write(
+            SessionChatProtocol.agent_message_key(
+                requester_agent_id, message_id,
+            ),
+            {
+                "message_id": message_id,
+                "agent_id": requester_agent_id,
+                "agent_type": "guardrail_waiver",
+                "content": content,
+                "request_id": waiver_id,
+                "response_options": ["approve", "reject"],
+                "awaiting_reply": True,
+                "kind": "guardrail_waiver",
+                "timestamp": time.time(),
+                "extra": {
+                    "constraint_id": constraint_id,
+                    "justification": justification,
+                },
+            },
+        )
+        return PROCESSED
+
+    @event_handler(
         pattern=HumanHelpProtocol.request_pattern(),
         priority="high",
     )
@@ -718,6 +782,28 @@ class SessionOrchestratorCapability(AgentCapability):
         human_bb.stream_events_to_queue(
             target_for_high,
             pattern=HumanApprovalProtocol.request_pattern(),
+            event_types={"write"},
+        )
+
+        # Guardrail-waiver requests written by any agent in this
+        # session via ``GuardrailWaiverCapability.request_guardrail_waiver``.
+        # Mirrored to chat by ``handle_guardrail_waiver_request`` so the
+        # UI renders the Approve/Reject card. Same shape as the
+        # approval / help subscriptions; routed HIGH because it's a
+        # pure chat mirror with no planner-context binding.
+        from polymathera.colony.agents.patterns.capabilities.guardrail_waiver import (
+            GuardrailWaiverCapability,
+        )
+        waiver_bb = await self.get_blackboard(
+            scope_id=get_scope_prefix(
+                BlackboardScope.SESSION,
+                namespace=GuardrailWaiverCapability.DEFAULT_NAMESPACE,
+            ),
+            enable_events=True,
+        )
+        waiver_bb.stream_events_to_queue(
+            target_for_high,
+            pattern=GuardrailWaiverProtocol.request_pattern(),
             event_types={"write"},
         )
 

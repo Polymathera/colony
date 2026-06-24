@@ -354,6 +354,66 @@ async def test_emit_termination_event_reads_reason_from_hook_kwargs(
 
 
 @pytest.mark.asyncio
+async def test_guardrail_waiver_request_mirrored_to_chat_card() -> None:
+    """The SessionOrchestrator's ``handle_guardrail_waiver_request``
+    must translate a typed :class:`GuardrailWaiverProtocol` request
+    into a ``chat:agent:*`` write carrying ``kind='guardrail_waiver'``
+    + ``awaiting_reply=True`` + the constraint_id/justification in
+    ``extra`` — same shape as approval/help cards so the frontend
+    can render the same Approve/Reject control set."""
+
+    from polymathera.colony.agents.blackboard import BlackboardEvent
+    from polymathera.colony.agents.blackboard.protocol import (
+        GuardrailWaiverProtocol,
+    )
+    from polymathera.colony.agents.scopes import BlackboardScope
+    from polymathera.colony.web_ui.backend.chat.session_agent import (
+        SessionOrchestratorCapability,
+    )
+
+    cap = SessionOrchestratorCapability(
+        agent=None, scope=BlackboardScope.SESSION,
+        capability_key="orch_test",
+        app_name="test_app",
+    )
+    cap._agent = SimpleNamespace(agent_id="session_agent_xyz")
+
+    captured: dict = {}
+
+    async def _write(key, value, **_kw):
+        captured["key"] = key
+        captured["value"] = value
+
+    fake_chat_bb = SimpleNamespace(write=_write)
+    cap.get_blackboard = AsyncMock(return_value=fake_chat_bb)
+
+    waiver_id = "waiver_abc"
+    event = BlackboardEvent(
+        event_type="write",
+        key=GuardrailWaiverProtocol.request_key(waiver_id),
+        value={
+            "waiver_id": waiver_id,
+            "constraint_id": "no_unverified_agent_state_claims",
+            "justification": "judge keeps misreading the verified call",
+            "requester_agent_id": "agent-coordinator-X",
+        },
+    )
+
+    await cap.handle_guardrail_waiver_request(event, None)
+
+    val = captured["value"]
+    assert val["kind"] == "guardrail_waiver"
+    assert val["awaiting_reply"] is True
+    assert val["request_id"] == waiver_id
+    assert val["response_options"] == ["approve", "reject"]
+    assert val["agent_id"] == "agent-coordinator-X"
+    assert val["extra"]["constraint_id"] == (
+        "no_unverified_agent_state_claims"
+    )
+    assert "judge keeps misreading" in val["extra"]["justification"]
+
+
+@pytest.mark.asyncio
 async def test_emit_termination_event_reads_reason_from_positional_args(
 ) -> None:
     """D2 fallback: if Agent.stop is called positionally (e.g.

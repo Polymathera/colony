@@ -97,10 +97,11 @@ export interface ChatMessageData {
   response_options?: string[];
   awaiting_reply?: boolean;
   // Routing hint for the click on an option button:
-  //  - "human_approval" → POST to /sessions/{id}/human_approval/{request_id}/respond
-  //  - "human_help"     → POST to /sessions/{id}/human_help/{request_id}/respond
-  //  - undefined / other → existing WebSocket reply lane
-  kind?: "human_approval" | "human_help" | string;
+  //  - "human_approval"   → POST to /sessions/{id}/human_approval/{request_id}/respond
+  //  - "human_help"       → POST to /sessions/{id}/human_help/{request_id}/respond
+  //  - "guardrail_waiver" → POST to /sessions/{id}/waivers/{request_id}/{approve|reject}
+  //  - undefined / other  → existing WebSocket reply lane
+  kind?: "human_approval" | "human_help" | "guardrail_waiver" | string;
   // Extra payload travelling with the question. For ``human_help``
   // the agent stamps the ``context`` here (what it has tried + what
   // it observed) so the operator sees the situation that triggered
