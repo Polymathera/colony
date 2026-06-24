@@ -28,6 +28,63 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+def _classify_anthropic_exception(exc: BaseException) -> "LLMErrorCategory":
+    """Classify an exception raised by the Anthropic SDK into the
+    cluster's typed :class:`LLMErrorCategory`.
+
+    Branches on (a) the SDK exception class for transient / timeout /
+    rate-limit signals, then (b) the response body's
+    ``error.type`` + message text for the cases the SDK delivers as
+    a generic ``BadRequestError`` (credit-low, invalid-api-key,
+    invalid-request). Body parsing is best-effort: an unparseable
+    body falls through to UNKNOWN, not a crash.
+
+    Reference for the response shapes:
+    https://docs.anthropic.com/en/api/errors
+    """
+
+    from .errors import LLMErrorCategory
+
+    try:
+        import anthropic
+        import httpx as _httpx
+    except ImportError:
+        return LLMErrorCategory.UNKNOWN
+
+    if isinstance(
+        exc,
+        (anthropic.APITimeoutError, _httpx.TimeoutException),
+    ):
+        return LLMErrorCategory.TRANSIENT
+    if isinstance(exc, anthropic.RateLimitError):
+        return LLMErrorCategory.TRANSIENT
+    if isinstance(exc, anthropic.AuthenticationError):
+        return LLMErrorCategory.AUTH
+    if isinstance(exc, anthropic.PermissionDeniedError):
+        return LLMErrorCategory.AUTH
+    if isinstance(exc, anthropic.APIConnectionError):
+        return LLMErrorCategory.TRANSIENT
+    if isinstance(exc, anthropic.InternalServerError):
+        return LLMErrorCategory.TRANSIENT
+
+    # ``BadRequestError`` (HTTP 400) is the Anthropic SDK's generic
+    # bucket for credit-low, invalid-request, prompt-too-long, model-
+    # deprecated. The body's ``error.type`` + message disambiguate.
+    # Credit-low specifically comes back as
+    # ``invalid_request_error`` with the canonical message
+    # "Your credit balance is too low..." — the only signal the
+    # provider gives, so we string-match on the substring rather
+    # than the type alone (other invalid_request_error subtypes
+    # are genuinely fail-fast INVALID_REQUEST).
+    if isinstance(exc, anthropic.BadRequestError):
+        message = str(exc).lower()
+        if "credit balance" in message or "payment required" in message:
+            return LLMErrorCategory.BILLING
+        return LLMErrorCategory.INVALID_REQUEST
+
+    return LLMErrorCategory.UNKNOWN
+
+
 @register_remote_llm_provider("anthropic")
 class AnthropicLLMDeployment(RemoteLLMDeployment):
     """Anthropic LLM deployment with prefix caching.
@@ -212,7 +269,11 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         except Exception as exc:
             import anthropic  # local import — anthropic SDK loaded lazily
             import httpx as _httpx
-            from .errors import LLMCallDeadlineExceeded
+            from .errors import (
+                LLMCallDeadlineExceeded,
+                LLMErrorCategory,
+                LLMInferenceError,
+            )
 
             is_timeout = isinstance(
                 exc,
@@ -223,7 +284,17 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
                     request_id=request_id or "<unknown>",
                     deadline_s=deadline_s,
                 ) from exc
-            raise
+            # Classify Anthropic SDK exceptions into the cluster's
+            # typed category enum so consumers can branch on
+            # retryable vs permanent vs malformed without
+            # string-matching error bodies. The deployment-level
+            # circuit breaker opens on the permanent categories.
+            category = _classify_anthropic_exception(exc)
+            raise LLMInferenceError(
+                str(exc),
+                category=category,
+                request_id=request_id or "<unknown>",
+            ) from exc
         logger.debug(
             f"[TRACE] AnthropicLLMDeployment._call_api: AFTER messages.create() "
             f"request_id={request_id} model={self.config.model_name}"

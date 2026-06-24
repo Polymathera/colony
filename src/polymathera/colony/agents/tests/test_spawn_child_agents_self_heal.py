@@ -336,3 +336,76 @@ async def test_agent_initialize_preserves_explicitly_set_app_name() -> None:
                 agent._app_name = _serving.get_my_app_name()
 
         assert agent._app_name == "pre-set-app-name"
+
+
+# ---------------------------------------------------------------------------
+# D8b — spawn_child_agents injects parent_agent_id into blueprint metadata
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_child_agents_injects_parent_agent_id_when_missing(
+) -> None:
+    """D8b: ``Agent.spawn_child_agents`` MUST populate
+    ``blueprint.metadata.parent_agent_id`` with ``self.agent_id`` when
+    the caller didn't set one. The downstream
+    :func:`AgentSystem.spawn_from_blueprint` has no caller context;
+    the invariant has to be enforced at this layer so the parent's
+    ``handle_child_agent_terminated`` filter (which keys on
+    ``payload.parent_agent_id``) recognises the child.
+
+    This is the peer of D1's fix at
+    ``AgentPoolCapability.create_agent`` — both major spawn paths
+    now guarantee the same invariant. Without this, agents spawned
+    via ``spawn_child_agents`` (goal_alignment, consistency,
+    meta_agents, …) would silently have ``parent_agent_id=None`` and
+    their termination events would slip past every parent's filter
+    or trigger D8a's loud-log dev-error path."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        parent = _make_agent(agent_id="parent-XYZ")
+        blueprints = [_make_blueprint(role=None)]  # no parent set
+
+        assert blueprints[0].metadata.parent_agent_id is None
+
+        with patch(
+            "polymathera.colony._handles.get_agent_system",
+            new=AsyncMock(return_value=AsyncMock(spec=AgentSystemDeployment)),
+        ), patch(
+            "polymathera.colony.system.spawn_agents",
+            new=AsyncMock(return_value=["child-1"]),
+        ):
+            await parent.spawn_child_agents(blueprints=blueprints)
+
+        assert blueprints[0].metadata.parent_agent_id == "parent-XYZ", (
+            "spawn_child_agents must inject self.agent_id as "
+            "parent_agent_id into blueprints that don't already have one."
+        )
+
+
+@pytest.mark.asyncio
+async def test_spawn_child_agents_preserves_explicit_parent_agent_id(
+) -> None:
+    """D8b: explicit ``parent_agent_id`` in the blueprint MUST be
+    preserved (e.g. for re-parenting flows where the spawner isn't
+    the logical owner). The injection only fills absent values."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        parent = _make_agent(agent_id="spawning-agent")
+        metadata = AgentMetadata(parent_agent_id="other-logical-owner")
+        blueprint = AgentBlueprint(Agent, {"metadata": metadata})
+
+        with patch(
+            "polymathera.colony._handles.get_agent_system",
+            new=AsyncMock(return_value=AsyncMock(spec=AgentSystemDeployment)),
+        ), patch(
+            "polymathera.colony.system.spawn_agents",
+            new=AsyncMock(return_value=["child-1"]),
+        ):
+            await parent.spawn_child_agents(blueprints=[blueprint])
+
+        assert blueprint.metadata.parent_agent_id == "other-logical-owner"

@@ -42,6 +42,7 @@ from .models import (
     KVCacheMetrics,
     VLLMDeploymentState,
 )
+from .circuit_breakers import llm_provider_down_circuit
 from .remote_config import RemoteLLMDeploymentConfig
 from .routing import TargetClientRouter
 from ..agents.base import AgentManagerBase
@@ -628,12 +629,22 @@ class RemoteLLMDeployment(AgentManagerBase):
 
     @serving.endpoint
     @hookable
+    @llm_provider_down_circuit
     async def infer(self, request: InferenceRequest) -> InferenceResponse:
         """Perform inference with automatic context page loading.
 
         This endpoint mirrors VLLMDeployment.infer(). It checks which required
         pages are loaded, builds the prompt from their cached text, and calls
         the remote API.
+
+        Wrapped by :func:`llm_provider_down_circuit` so a permanent
+        provider failure (BILLING / AUTH; see
+        :data:`PERMANENT_ERROR_CATEGORIES`) trips the breaker on the
+        first occurrence and every subsequent call fails-fast with a
+        typed ``LLMInferenceError(category=BILLING|AUTH)`` instead of
+        compounding the wasted spend. Transient failures pass through
+        the breaker — the consumer's per-call ``LLMFailureBackoff``
+        handles those.
 
         Args:
             request: Inference request with prompt and required page IDs
@@ -763,10 +774,21 @@ class RemoteLLMDeployment(AgentManagerBase):
             # Wrap provider-specific errors in a typed marker so callers
             # (action policies) can pattern-match LLM-cluster failures
             # without depending on the underlying provider's exception
-            # tree. The original is chained via ``__cause__``.
-            from .errors import LLMInferenceError
+            # tree. The original is chained via ``__cause__``. The
+            # provider-specific ``_call_api`` may already have
+            # classified the failure (anthropic_deployment raises
+            # LLMInferenceError with category); preserve that so the
+            # ``llm_provider_down_circuit`` decorator's predicate sees
+            # the right category.
+            from .errors import LLMErrorCategory, LLMInferenceError
+            if isinstance(e, LLMInferenceError):
+                category = e.category
+            else:
+                category = LLMErrorCategory.UNKNOWN
             raise LLMInferenceError(
-                request_id=request.request_id, message=str(e),
+                str(e),
+                category=category,
+                request_id=request.request_id,
             ) from e
 
         finally:

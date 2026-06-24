@@ -2827,7 +2827,20 @@ class Agent(BaseModel):
         self.state = AgentState.STOPPED
         self._running = False
         self.action_policy_state = None
-        # TODO: Should notify parent agent if any?
+        # Parent-agent notification + cross-replica registry sync are
+        # handled OUTSIDE Agent.stop() so this method stays Agent-pure
+        # (no manager / event-bus reach-throughs):
+        # - The manager's ``AgentManagerBase._run_loop`` finally block
+        #   propagates this terminal state to the AgentSystem registry
+        #   via ``update_agent_state`` so cluster-wide readers
+        #   (``fetch_agent_info``, ``get_agent_status``, the dashboard)
+        #   see the truth.
+        # - ``MemoryLifecycleHooks.flush_before_shutdown`` (a BEFORE
+        #   hook on this method) emits
+        #   ``LifecycleSignalProtocol.terminated_key`` on the colony
+        #   control-plane lifecycle scope; the payload carries
+        #   ``parent_agent_id`` + ``stop_reason`` so the spawning
+        #   parent's subscription can react without polling.
 
         # Fire stop_callbacks AFTER state has flipped to STOPPED so
         # callbacks observe the terminal state, not the in-progress
@@ -3379,6 +3392,22 @@ class Agent(BaseModel):
             ```
         """
         from ..system import spawn_agents
+
+        # ``self`` is the spawning parent — inject ``parent_agent_id``
+        # into every blueprint whose metadata doesn't already have one.
+        # The downstream :func:`spawn_from_blueprint` has no caller
+        # context (it just receives a blueprint), so the invariant has
+        # to be enforced at the call site that knows who the parent
+        # is. Pairs with the same injection at
+        # :meth:`AgentPoolCapability.create_agent`: both major spawn
+        # paths now guarantee terminated children carry
+        # ``parent_agent_id`` for their parent's
+        # ``handle_child_agent_terminated`` filter to recognize them.
+        # Caller wins on collision (an explicit re-parenting in the
+        # blueprint's metadata is preserved).
+        for bp in blueprints:
+            if not bp.metadata.parent_agent_id:
+                bp.metadata.parent_agent_id = self.agent_id
 
         child_ids: list[str] = await spawn_agents(
             blueprints=blueprints,
@@ -4008,21 +4037,11 @@ class AgentManagerBase:
                         pass
                     del self._agent_tasks[agent_id]
 
-            # RELEASE RESOURCES
-            self._used_cpu_cores -= agent.resource_requirements.cpu_cores
-            self._used_memory_mb -= agent.resource_requirements.memory_mb
-            self._used_gpu_cores -= agent.resource_requirements.gpu_cores
-            self._used_gpu_memory_mb -= agent.resource_requirements.gpu_memory_mb
-
-            # Unregister from agent system
-            if self._agent_system_handle:
-                try:
-                    await self._agent_system_handle.unregister_agent(agent_id)
-                except Exception as e:
-                    logger.error(f"Failed to unregister agent {agent_id}: {e}")
-
-            # Remove agent
-            del self._agents[agent_id]
+            # Cleanup tail is shared with the self-termination path
+            # (``_run_agent_loop``'s finally also calls this) so the
+            # ``policy_completed`` exit isn't a resource leak — see
+            # :meth:`_finalize_agent_cleanup` for the rationale.
+            await self._finalize_agent_cleanup(agent_id)
 
             logger.info(
                 f"Stopped agent {agent_id} (released cpu={agent.resource_requirements.cpu_cores}, "
@@ -4031,6 +4050,55 @@ class AgentManagerBase:
 
             # Try to resume suspended agents now that resources are available
             await self._try_resume_suspended_agents()
+
+    async def _finalize_agent_cleanup(self, agent_id: str) -> None:
+        """Release the manager's accounting for a stopped agent: free
+        resource counters, drop tracking dicts, and unregister from the
+        cluster-wide ``AgentSystemDeployment`` registry.
+
+        Called from two paths that MUST share the same cleanup
+        contract:
+
+        - :meth:`stop_agent` (external caller) — after it has awaited
+          the loop task to exit.
+        - :meth:`_run_agent_loop`'s ``finally`` (self-termination
+          via ``policy_completed`` / ``max_iterations`` / exception) —
+          there is no external ``stop_agent`` caller in that path, so
+          without this method the resource counters leaked and the
+          agent stayed in the registry as INITIALIZED forever (see
+          forensic trace on the 2026-06-22 ``/decompose`` run).
+
+        Idempotent: ``self._agents.pop(agent_id, None)`` returns None
+        on the second call so ``stop_agent``'s post-await call is a
+        no-op when the finally beat it. Single-threaded asyncio
+        guarantees the two calls are serialised, so no lock is
+        required here (the caller in :meth:`stop_agent` already holds
+        ``_agent_lock`` and a non-reentrant re-acquire would
+        deadlock; the ``_run_agent_loop`` finally path holds nothing
+        and is only mutating its own agent's accounting).
+        """
+
+        agent = self._agents.pop(agent_id, None)
+        if agent is None:
+            return  # already finalized
+
+        self._agent_tasks.pop(agent_id, None)
+        self._used_cpu_cores -= agent.resource_requirements.cpu_cores
+        self._used_memory_mb -= agent.resource_requirements.memory_mb
+        self._used_gpu_cores -= agent.resource_requirements.gpu_cores
+        self._used_gpu_memory_mb -= agent.resource_requirements.gpu_memory_mb
+
+        # Unregister from agent system
+        if self._agent_system_handle:
+            try:
+                await self._agent_system_handle.unregister_agent(agent_id)
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "Failed to unregister agent %s from AgentSystem: %s — "
+                    "the registry entry will stay until the system "
+                    "reaper picks it up.",
+                    agent_id, e,
+                )
 
     @serving.endpoint(router_class=AgentAffinityRouter)
     async def suspend_agent(self, agent_id: str, reason: str = "") -> bool:
@@ -4325,6 +4393,30 @@ class AgentManagerBase:
         try:
             await agent.start()
 
+            # Propagate the RUNNING transition to the AgentSystem
+            # registry so cross-replica readers (``fetch_agent_info``,
+            # ``AgentPoolCapability.get_agent_status``, the dashboard,
+            # the ``no_unverified_agent_state_claims`` semantic
+            # guardrail's verifier) observe the live state instead of
+            # the spawn-time INITIALIZED snapshot. Without this,
+            # ``register_agent`` writes INITIALIZED at spawn and
+            # nothing pushes RUNNING — the SessionAgent's LLM reads
+            # "INITIALIZED" for a coordinator that's actively running
+            # and reports it confusingly to the user. Best-effort
+            # try/except: a registry hiccup must not block the loop.
+            if self._agent_system_handle is not None:
+                try:
+                    await self._agent_system_handle.update_agent_state(
+                        agent.agent_id, agent.state,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.error(
+                        "Failed to propagate RUNNING state for agent "
+                        "%s to AgentSystem registry: %s — readers "
+                        "will see INITIALIZED until the next push.",
+                        agent.agent_id, e,
+                    )
+
             while not agent._stop_requested and (max_iterations is None or iteration < max_iterations):
                 # Check if agent requested suspension
                 if agent._suspend_requested:
@@ -4400,6 +4492,15 @@ class AgentManagerBase:
             # Ensure stop() is called if the agent hasn't already stopped
             if agent.state not in (AgentState.STOPPED, AgentState.SUSPENDED):
                 await agent.stop(reason=stop_reason)
+
+            # Release the manager's accounting (resource counters,
+            # tracking dicts, AgentSystem registration). Self-termination
+            # (``policy_completed`` / ``max_iterations`` / exception →
+            # FAILED) does NOT go through :meth:`stop_agent`, so without
+            # this call the manager leaked the agent's CPU/mem/GPU
+            # quota AND ``fetch_agent_info`` kept returning the
+            # spawn-time INITIALIZED state forever.
+            await self._finalize_agent_cleanup(agent.agent_id)
 
             logger.warning(
                 f"\n"

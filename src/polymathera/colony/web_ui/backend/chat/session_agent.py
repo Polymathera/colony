@@ -35,6 +35,7 @@ from polymathera.colony.agents.blackboard.protocol import (
     DIAGNOSTIC_GUARDRAIL_BLOCK_STREAK,
     HumanApprovalProtocol,
     HumanHelpProtocol,
+    LifecycleSignalProtocol,
     SELF_RELEVANT_DIAGNOSTIC_KINDS,
 )
 from polymathera.colony.agents.patterns.events import event_handler, EventProcessingResult, PROCESSED
@@ -730,6 +731,28 @@ class SessionOrchestratorCapability(AgentCapability):
         diag_bb.stream_events_to_queue(
             event_queue,
             pattern=AgentDiagnosticProtocol.event_pattern(),
+            event_types={"write"},
+        )
+
+        # Colony-scope agent-lifecycle stream. Subscribes to EVERY
+        # agent termination across the colony; the @event_handler
+        # filters by ``parent_agent_id`` so this SessionAgent only
+        # reacts to its own children (mission coordinators it spawned).
+        # Replaces the prior pattern where the SessionAgent had to
+        # poll ``get_agent_status`` to learn that a coordinator stopped
+        # — that polling path stayed stale until FIX-A made the
+        # AgentSystem registry update on terminal transitions.
+        from polymathera.colony.agents.blackboard.protocol import (
+            LifecycleSignalProtocol,
+        )
+        from polymathera.colony.agents.scopes import MemoryScope
+        lifecycle_bb = await self.get_blackboard(
+            scope_id=MemoryScope.colony_control_plane("lifecycle"),
+            enable_events=True,
+        )
+        lifecycle_bb.stream_events_to_queue(
+            event_queue,
+            pattern=LifecycleSignalProtocol.terminated_pattern(),
             event_types={"write"},
         )
 
@@ -1445,6 +1468,67 @@ class SessionOrchestratorCapability(AgentCapability):
                 },
             )
         return PROCESSED
+
+    @event_handler(pattern=LifecycleSignalProtocol.terminated_pattern())
+    async def handle_child_agent_terminated(
+        self, event: BlackboardEvent, _repl: Any,
+    ) -> EventProcessingResult | None:
+        """Surface a child mission coordinator's termination to the
+        planner without round-tripping ``get_agent_status``.
+
+        Subscribes to the colony-wide
+        :meth:`LifecycleSignalProtocol.terminated_pattern`; filters
+        down to events whose payload's ``parent_agent_id`` matches
+        this SessionAgent's ``agent_id`` (i.e. children this session
+        spawned). FIX-A keeps the AgentSystem registry consistent so
+        the polling path also tells the truth; this handler is the
+        event-driven shortcut that removes the polling latency."""
+
+        if self._agent is None:
+            return PROCESSED
+        payload = event.value if isinstance(event.value, dict) else {}
+        parent_id = payload.get("parent_agent_id")
+        if parent_id is None:
+            # ``None`` carries two distinct meanings the prior silent-
+            # skip conflated: (a) a legitimate root agent (SessionAgent,
+            # system session) whose own termination has no parent —
+            # correctly not ours; (b) a CHILD whose spawn path skipped
+            # the parent_agent_id injection, which is a
+            # spawn-site bug that needs to surface so the dev fixes
+            # the spawn path. Silent skip masks (b). Log loudly so the
+            # next operator-visible report names the offending key.
+            terminated_agent_id = payload.get("agent_id", "<unknown>")
+            logger.warning(
+                "handle_child_agent_terminated: termination event for "
+                "%s carries parent_agent_id=None. If %s is a child agent, "
+                "its spawn path skipped parent injection (see "
+                "AgentPoolCapability.create_agent / Agent.spawn_child_agents "
+                "for the invariant). If %s is a root agent, this is "
+                "expected and harmless.",
+                terminated_agent_id, terminated_agent_id,
+                terminated_agent_id,
+            )
+            return PROCESSED
+        if parent_id != self._agent.agent_id:
+            # Not ours — colony stream carries every termination from
+            # peer sessions and from system agents. Silent skip.
+            return PROCESSED
+        try:
+            parsed = LifecycleSignalProtocol.parse_key(event.key)
+        except Exception:  # noqa: BLE001 — defensive: unknown shapes ignored
+            return PROCESSED
+        terminated_agent_id = parsed.get("agent_id") or payload.get("agent_id")
+        return EventProcessingResult(
+            context_key=(
+                f"child_agent_terminated:{terminated_agent_id}"
+            ),
+            context={
+                "terminated_agent_id": terminated_agent_id,
+                "agent_type": payload.get("agent_type"),
+                "stop_reason": payload.get("stop_reason"),
+                "timestamp": payload.get("timestamp"),
+            },
+        )
 
     @event_handler(pattern=SessionChatProtocol.reply_pattern())
     async def handle_user_reply(self, event: BlackboardEvent, repl: PolicyREPL) -> EventProcessingResult:

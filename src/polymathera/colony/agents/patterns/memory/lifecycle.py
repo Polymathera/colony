@@ -308,9 +308,24 @@ class MemoryLifecycleHooks(AgentCapability):
             MemoryScope.agent_ltm_procedural(agent),
         ]
 
+        # Read the reason from the hook context's call args, NOT
+        # from ``agent._stop_reason``. This is a BEFORE hook, so it
+        # runs before ``Agent.stop``'s body sets ``self._stop_reason``
+        # — reading the instance field at this point gets the stale
+        # initial value (empty string), which silently broke every
+        # downstream consumer (the Overview-tab termination panel,
+        # SessionOrchestrator's child_agent_terminated planner-context
+        # binding) that relied on the reason to distinguish clean
+        # completion from crash. ``HookContext.kwargs`` carries the
+        # method's call args verbatim.
+        call_reason = ctx.kwargs.get("reason")
+        if call_reason is None and ctx.args:
+            call_reason = ctx.args[0]
         termination_data = AgentTerminationEvent(
             agent_id=agent_id,
             agent_type=agent.agent_type,
+            parent_agent_id=agent.metadata.parent_agent_id,
+            stop_reason=call_reason or "",
             timestamp=time.time(),
             memory_scopes=memory_scopes,
         )
@@ -340,12 +355,33 @@ class MemoryLifecycleHooks(AgentCapability):
 class AgentTerminationEvent(BaseModel):
     """Event emitted when an agent terminates.
 
-    MemoryManagementAgent listens for these events to recycle
-    the terminated agent's memories into collective memory.
+    Consumers include MemoryManagementAgent (recycle the agent's
+    memories) and any parent capability that wants to react to its
+    children's termination without polling — e.g. SessionOrchestrator
+    surfaces a chat update when a mission coordinator it spawned
+    completes, without round-tripping ``get_agent_status``.
     """
 
     agent_id: str = Field(description="ID of the terminated agent")
     agent_type: str = Field(description="Type of the agent for collective memory routing")
+    parent_agent_id: str | None = Field(
+        default=None,
+        description=(
+            "ID of the spawning parent agent, if any. Lets parent-side "
+            "subscribers filter the colony-wide termination stream down "
+            "to their own children without an extra ``fetch_agent_info`` "
+            "round-trip."
+        ),
+    )
+    stop_reason: str | None = Field(
+        default=None,
+        description=(
+            "Reason recorded on ``Agent._stop_reason`` (e.g. "
+            "``policy_completed``, ``max_iterations``, ``error``, "
+            "``stop_requested``). Lets subscribers distinguish clean "
+            "completion from crash without inspecting state."
+        ),
+    )
     syscontext: serving.ExecutionContext = Field(
         default_factory=serving.require_execution_context,
         description="System context the agent belongs to",

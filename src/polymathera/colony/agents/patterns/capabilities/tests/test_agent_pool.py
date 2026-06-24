@@ -89,6 +89,104 @@ async def test_create_agent_passes_through_typed_metadata_unchanged(
     assert forwarded is original
 
 
+@pytest.mark.asyncio
+async def test_create_agent_injects_parent_agent_id_into_pre_built_metadata(
+) -> None:
+    """D1 (2026-06-23): when the caller passes an already-built
+    :class:`AgentMetadata` WITHOUT setting ``parent_agent_id``
+    (the documented shape of ``SessionOrchestratorCapability.spawn_mission``
+    before the 2026-06-22 forensic), the pool MUST inject the parent
+    so downstream subscribers
+    (``SessionOrchestrator.handle_child_agent_terminated``) can filter
+    termination events to their own children. The previous code path
+    only injected when ``metadata is None``; pre-built AgentMetadata
+    fell through with ``parent_agent_id=None``, silently rejecting
+    every termination event in the parent's filter."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        agent = MagicMock()
+        agent.agent_id = "session_agent_X"
+        agent.syscontext = MagicMock()
+        agent.spawn_child_agents = AsyncMock(return_value=[])
+
+        cap = AgentPoolCapability(agent=agent)
+        cap._resolve_class = MagicMock(return_value=MagicMock(
+            bind=MagicMock(return_value=MagicMock())
+        ))
+
+        original = AgentMetadata()  # NO parent_agent_id set
+        assert original.parent_agent_id is None
+        await cap.create_agent(
+            agent_type="polymathera.colony.agents.base.Agent",
+            metadata=original,
+        )
+
+    forwarded = cap._resolve_class.return_value.bind.call_args.kwargs["metadata"]
+    assert forwarded.parent_agent_id == "session_agent_X"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_injects_parent_agent_id_into_dict_metadata(
+) -> None:
+    """D1: dict-form metadata without ``parent_agent_id`` (the
+    LLM-driven path) also gets the parent injected after coercion to
+    AgentMetadata. Pinned separately because the dict and
+    pre-built-AgentMetadata branches both needed the fix."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        agent = MagicMock()
+        agent.agent_id = "session_agent_Y"
+        agent.syscontext = MagicMock()
+        agent.spawn_child_agents = AsyncMock(return_value=[])
+
+        cap = AgentPoolCapability(agent=agent)
+        cap._resolve_class = MagicMock(return_value=MagicMock(
+            bind=MagicMock(return_value=MagicMock())
+        ))
+
+        await cap.create_agent(
+            agent_type="polymathera.colony.agents.base.Agent",
+            metadata={"tenant_id": "t"},  # no parent_agent_id
+        )
+
+    forwarded = cap._resolve_class.return_value.bind.call_args.kwargs["metadata"]
+    assert forwarded.parent_agent_id == "session_agent_Y"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_does_not_overwrite_explicit_parent_agent_id(
+) -> None:
+    """D1: explicit ``parent_agent_id`` in the caller's metadata
+    wins. The injection only fills in absent fields — explicit
+    re-parenting (e.g. for re-spawn flows) is preserved."""
+
+    with execution_context(
+        ring=Ring.USER, tenant_id="t", colony_id="c", session_id="s",
+    ):
+        agent = MagicMock()
+        agent.agent_id = "owning_agent"
+        agent.syscontext = MagicMock()
+        agent.spawn_child_agents = AsyncMock(return_value=[])
+
+        cap = AgentPoolCapability(agent=agent)
+        cap._resolve_class = MagicMock(return_value=MagicMock(
+            bind=MagicMock(return_value=MagicMock())
+        ))
+
+        original = AgentMetadata(parent_agent_id="some_other_parent")
+        await cap.create_agent(
+            agent_type="polymathera.colony.agents.base.Agent",
+            metadata=original,
+        )
+
+    forwarded = cap._resolve_class.return_value.bind.call_args.kwargs["metadata"]
+    assert forwarded.parent_agent_id == "some_other_parent"
+
+
 # ---------------------------------------------------------------------------
 # _resolve_class fallback to L1-A discovered agent registry
 #

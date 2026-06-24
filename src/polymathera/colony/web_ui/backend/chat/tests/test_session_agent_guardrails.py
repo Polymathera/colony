@@ -154,6 +154,18 @@ def test_no_unverified_state_claims_rule_has_correct_shape() -> None:
     assert "lifecycle state" in rule_text or "state" in rule_text
     assert "get_agent_status" in rule_text
     assert "owner" in rule_text  # self-exclusion invariant
+    # D4 (2026-06-23): the rule MUST teach the judge that
+    # ``agent_ids=[...]`` (the action's actual parameter name) is
+    # the form of evidence to look for. Without this, the judge
+    # rejects valid calls because the action's signature uses the
+    # plural form while the rule's prose used to say "for that
+    # exact agent_id" — causing the 2026-06-23 retry storm where
+    # the SessionAgent's LLM made the right call but the judge
+    # didn't recognise it.
+    assert "agent_ids" in rule_text, (
+        "D4: rule must mention the plural ``agent_ids`` form so the "
+        "LLM judge recognises the action's actual parameter shape."
+    )
 
 
 # ---------------------------------------------------------------------------

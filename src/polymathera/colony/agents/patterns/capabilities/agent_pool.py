@@ -236,6 +236,20 @@ class AgentPoolCapability(AgentCapability):
                     **metadata,
                 )
 
+            # parent_agent_id MUST be populated regardless of which
+            # branch built the metadata above. Callers that pre-build
+            # an ``AgentMetadata`` instance (e.g. ``spawn_mission``)
+            # historically omitted this field, leaving every spawned
+            # coordinator with ``parent_agent_id=None`` — which broke
+            # parent-side termination subscribers that filter by
+            # parent (``SessionOrchestrator.handle_child_agent_terminated``
+            # got every termination event but rejected them all on the
+            # ``payload["parent_agent_id"] != self.agent.agent_id``
+            # check). Single central injection here so every spawn
+            # path inherits the same invariant.
+            if not metadata.parent_agent_id:
+                metadata.parent_agent_id = self.agent.agent_id
+
             # Inherit COLONY + SESSION scoped ``metadata.parameters``
             # keys from this agent (the parent) into the child's
             # ``metadata.parameters``. The single central inheritance
