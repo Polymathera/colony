@@ -891,6 +891,18 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         await policy.initialize()
     """
 
+    #: Cap on the cumulative ``_call_history`` length. The history is
+    #: cumulative across iterations (so :class:`ConstraintScope.SESSION`
+    #: rules see evidence from prior iterations) — this cap keeps the
+    #: in-memory growth bounded across long-running agents. Eviction
+    #: is FIFO at the append site and shifts
+    #: ``_iteration_history_boundary`` so the per-cell slice math
+    #: remains correct after older calls drop. 10 000 ≈ a 6 KiB/record
+    #: × 10k ≈ ~60 MiB worst case per agent — comfortably below the
+    #: per-worker memory budget and large enough to retain weeks of
+    #: realistic chat-driven activity.
+    _CALL_HISTORY_MAX_LEN: int = 10_000
+
     def __init__(
         self,
         agent: Agent,
@@ -955,12 +967,23 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         # paths that only want the action keys read ``c.action_key``
         # — see ``_build_codegen_step_summary`` for the canonical
         # example.
+        # Cumulative across iterations so
+        # :class:`ConstraintScope.SESSION` rules see evidence from
+        # prior cells (e.g. an operator approval granted three cells
+        # ago still satisfies the rule). The boundary at
+        # :attr:`_iteration_history_boundary` marks where the CURRENT
+        # cell's calls start in this cumulative list — consumers that
+        # want only this cell's calls slice at the boundary; consumers
+        # that want full session history read the whole list. Bounded
+        # at :attr:`_CALL_HISTORY_MAX_LEN` via FIFO eviction at the
+        # append site to keep memory bounded across long-running
+        # sessions.
         self._call_history: list[CallRecord] = []
         # Runtime-guardrail blocks captured during the LAST iteration's
         # ``run()`` calls. Cleared at the start of every iteration
-        # (same lifecycle as ``_call_history``); rendered into the
-        # next iteration's planner prompt so the LLM sees the block +
-        # the guardrail's suggestion BEFORE proposing its next cell.
+        # (line 2080 in ``plan_step``); rendered into the next
+        # iteration's planner prompt so the LLM sees the block + the
+        # guardrail's suggestion BEFORE proposing its next cell.
         self._last_blocked_dispatches: list[BlockedDispatch] = []
         self._block_streak_tracker = BlockStreakTracker(agent)
         self._run_call_trace: list[dict[str, Any]] = []
@@ -1657,6 +1680,23 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     if not result.success else None,
                     result=preview,
                 ))
+                # FIFO eviction once cumulative history exceeds the
+                # cap. Shift ``_iteration_history_boundary`` by the
+                # drop count so the per-cell slice (used by the
+                # guardrail check and the step-summary build) still
+                # points at the current cell's start. If the boundary
+                # would go negative the entire prior-cell window has
+                # been evicted; clamp to 0 — losing oldest evidence
+                # is the SESSION-scope tradeoff this cap encodes.
+                overflow = (
+                    len(self._call_history) - self._CALL_HISTORY_MAX_LEN
+                )
+                if overflow > 0:
+                    del self._call_history[:overflow]
+                    self._iteration_history_boundary = max(
+                        0,
+                        self._iteration_history_boundary - overflow,
+                    )
                 if result.success:
                     self._block_streak_tracker.reset_streak()
 
@@ -2302,8 +2342,18 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self._consecutive_failures = 0
         self._error_history.clear()
 
-        # Reset call history for this code execution (Dimension 5 tracking)
-        self._call_history.clear()
+        # Reset per-cell trace + failure state for the new code
+        # execution (Dimension 5 tracking). ``_call_history`` is
+        # intentionally NOT cleared here — it accumulates across
+        # iterations so :class:`ConstraintScope.SESSION` rules can see
+        # evidence from prior cells; ``_iteration_history_boundary``
+        # (advanced earlier in this ``plan_step`` body, conditional on
+        # ``_build_prior_iteration_observation`` having recorded the
+        # boundary) marks where the NEW cell's calls will start in
+        # that cumulative list. The per-cell step-summary build in
+        # ``execute_iteration`` slices ``_call_history`` at this
+        # boundary; the guardrail's ``cell_start_index`` reads it for
+        # cell-vs-session-scope distinction.
         self._run_call_trace = []
         # Also reset in REPL namespace so _execute_repl_code sees empty trace
         # if the code block has no run() calls
@@ -2389,8 +2439,22 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
 
             self._execution_context.codegen_step_summaries[step_id] = (
                 _build_codegen_step_summary(
-                    actions_called=[c.action_key for c in self._call_history],
-                    action_ids=[c.action_id for c in self._call_history],
+                    # Slice by ``_iteration_history_boundary`` so the
+                    # per-iter step summary sees only THIS cell's
+                    # calls — ``_call_history`` is cumulative across
+                    # iterations (see SESSION-scope rules).
+                    actions_called=[
+                        c.action_key
+                        for c in self._call_history[
+                            self._iteration_history_boundary:
+                        ]
+                    ],
+                    action_ids=[
+                        c.action_id
+                        for c in self._call_history[
+                            self._iteration_history_boundary:
+                        ]
+                    ],
                     planning_action_keys=planning_action_keys,
                     had_failures=self._had_internal_failures,
                     repl_success=result.result.success if result.result else False,

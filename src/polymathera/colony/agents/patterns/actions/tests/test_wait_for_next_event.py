@@ -32,6 +32,17 @@ def _exec_ctx():
         yield ctx
 
 
+class _AlwaysLiveCapability:
+    """Test double for an :class:`AgentCapability` whose
+    :meth:`is_awaiting_event` always returns ``True``. Used so the
+    wait-primitive tests below exercise the queue/timeout mechanics
+    without tripping the live-wake-source pre-check
+    (:class:`NoLiveWakeSource`) on every call."""
+
+    def is_awaiting_event(self) -> bool:
+        return True
+
+
 class _FakeAgent:
     """Minimal agent stub for direct policy-method testing."""
 
@@ -44,6 +55,10 @@ class _FakeAgent:
         self.metadata.parameters = {}
         self.metadata.run_id = None
         self.writes: list[tuple[str, dict[str, Any]]] = []
+        #: Mount a single always-live capability so the wait-primitive
+        #: tests pass the DL2 pre-check. Tests that exercise the
+        #: pre-check itself override this directly.
+        self.capabilities: list[Any] = [_AlwaysLiveCapability()]
 
     async def get_blackboard(self, *, scope_id: str | None = None):
         agent = self
@@ -62,7 +77,7 @@ class _FakeAgent:
         return _BB()
 
     def get_capabilities(self):
-        return []
+        return self.capabilities
 
 
 def _make_policy() -> EventDrivenActionPolicy:
@@ -201,3 +216,114 @@ def test_action_is_discoverable_via_action_executor_decorator() -> None:
     # dispatcher uses to discover action executors.
     assert hasattr(method, "_action_input_schema")
     assert hasattr(method, "_action_output_schema")
+
+
+# ---------------------------------------------------------------------------
+# DL2: live-wake-source pre-check
+#
+# Closes the run5 deadlock — a cell that called ``request_human_approval``
+# whose input validator raised (no request published on BB), then
+# unconditionally called ``wait_for_next_event``. Without the pre-check
+# the agent waited forever because no response key would ever be
+# written. With the pre-check the wait fails-fast with
+# :class:`NoLiveWakeSource`, an :class:`ActionInputViolation` subclass
+# the dispatcher re-raises unwrapped to abort the cell.
+# ---------------------------------------------------------------------------
+
+
+class _NeverLiveCapability:
+    """Test double whose :meth:`is_awaiting_event` always returns
+    ``False`` — represents a request-response capability with no
+    outstanding requests AND no continuous subscription."""
+
+    def is_awaiting_event(self) -> bool:
+        return False
+
+
+async def test_pre_check_raises_when_no_capability_is_live() -> None:
+    from polymathera.colony.agents.patterns.actions.policies import (
+        NoLiveWakeSource,
+    )
+
+    policy = _make_policy()
+    # Override the default _AlwaysLiveCapability with a single
+    # never-live one so the pre-check fires.
+    policy.agent.capabilities = [_NeverLiveCapability()]
+    with pytest.raises(NoLiveWakeSource):
+        await policy.wait_for_next_event()
+
+
+async def test_pre_check_raises_when_no_capabilities_mounted() -> None:
+    """An agent with zero capabilities cannot possibly be awaiting
+    an event. The empty ``any(...)`` evaluates to False so the
+    pre-check fires."""
+
+    from polymathera.colony.agents.patterns.actions.policies import (
+        NoLiveWakeSource,
+    )
+
+    policy = _make_policy()
+    policy.agent.capabilities = []
+    with pytest.raises(NoLiveWakeSource):
+        await policy.wait_for_next_event()
+
+
+async def test_pre_check_passes_with_any_one_live_capability() -> None:
+    """Mixed mount with one live + several inert capabilities ⇒
+    the wait proceeds (and the queue-already-nonempty path returns
+    the normal envelope). Confirms the ``any()`` shape."""
+
+    policy = _make_policy()
+    policy.agent.capabilities = [
+        _NeverLiveCapability(),
+        _NeverLiveCapability(),
+        _AlwaysLiveCapability(),
+    ]
+    policy._queues.normal.put_nowait("ev")
+    result = await asyncio.wait_for(
+        policy.wait_for_next_event(), timeout=0.05,
+    )
+    assert result == {"ok": True, "timed_out": False}
+
+
+async def test_pre_check_exception_is_action_input_violation_subclass(
+) -> None:
+    """The dispatcher's two ``except Exception`` blocks were updated
+    to re-raise :class:`ActionInputViolation` subclasses unwrapped
+    (DL1 surface). :class:`NoLiveWakeSource` inherits from
+    ``ActionInputViolation`` so this exception path threads
+    through the same cell-abort mechanism, not a wrapped
+    ``ActionResult(success=False)``."""
+
+    from polymathera.colony.agents.patterns.actions.dispatcher import (
+        ActionInputViolation,
+    )
+    from polymathera.colony.agents.patterns.actions.policies import (
+        NoLiveWakeSource,
+    )
+
+    assert issubclass(NoLiveWakeSource, ActionInputViolation)
+
+    policy = _make_policy()
+    policy.agent.capabilities = []
+    with pytest.raises(ActionInputViolation):
+        await policy.wait_for_next_event()
+
+
+async def test_pre_check_runs_before_idle_wait_counter_increment(
+) -> None:
+    """The pre-check happens BEFORE the ``idle_wait_counter += 1``
+    statement, so a deadlock-detected wait does NOT leak counter
+    state. Otherwise the agent's idle accounting would drift on
+    every aborted cell."""
+
+    from polymathera.colony.agents.patterns.actions.policies import (
+        NoLiveWakeSource,
+    )
+
+    policy = _make_policy()
+    policy.agent.capabilities = []
+    assert policy.agent.idle_wait_counter == 0
+    with pytest.raises(NoLiveWakeSource):
+        await policy.wait_for_next_event()
+    assert policy.agent.idle_wait_counter == 0

@@ -488,6 +488,41 @@ class AgentCapability(ABC):
         """
         return frozenset()
 
+    def is_awaiting_event(self) -> bool:
+        """Whether this capability currently has a live wake source —
+        i.e. an event that, if it arrives, would wake the agent's
+        ``wait_for_next_event``.
+
+        Two shapes:
+
+        - **Continuous listeners** (e.g. the SessionAgent's
+          ``SessionOrchestratorCapability`` subscriptions to
+          ``chat:user:*``, ``LifecycleSignalProtocol.terminated_pattern``,
+          etc.): always live while the agent is alive. Override and
+          return ``True`` unconditionally.
+        - **Request-response capabilities** (e.g.
+          :class:`HumanApprovalCapability`,
+          :class:`HumanHelpCapability`,
+          :class:`GuardrailWaiverCapability`): live iff there is at
+          least one outstanding request whose typed response would
+          match the capability's subscription. Override and return
+          ``bool(self._outstanding_…)``.
+
+        Default is ``False`` — capabilities that do NOT contribute
+        wake events (memory, mission-control actions, design-process
+        actions, etc.) MUST NOT contribute a false positive. The
+        opt-in is explicit and lives on each capability that owns a
+        wake subscription.
+
+        Aggregated by :meth:`BaseActionPolicy.wait_for_next_event`'s
+        pre-check: if NO capability returns ``True``, the wait is a
+        guaranteed deadlock and the action fails-fast with
+        :class:`NoLiveWakeSource` (an :class:`ActionInputViolation`
+        subclass that aborts the cell at the await site).
+        """
+
+        return False
+
     @property
     def capability_key(self) -> str:
         """Unique key for this instance within an agent's _capabilities dict.

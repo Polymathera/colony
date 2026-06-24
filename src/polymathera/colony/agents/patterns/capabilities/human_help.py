@@ -334,6 +334,15 @@ class HumanHelpCapability(AgentCapability):
         self._idle_waiting_request_ids.discard(request_id)
         self._agent.idle_wait_counter -= 1
 
+    def is_awaiting_event(self) -> bool:
+        """``HumanHelpCapability`` is awaiting an event iff it
+        currently holds at least one help request whose response has
+        not landed (typed event handler clears the id via
+        :meth:`_on_resolved`). Used by
+        ``wait_for_next_event``'s live-wake-source pre-check."""
+
+        return bool(self._idle_waiting_request_ids)
+
     # ---- Event handler ------------------------------------------------
 
     @event_handler(pattern=HumanHelpProtocol.response_pattern())

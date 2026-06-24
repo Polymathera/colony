@@ -398,6 +398,20 @@ class SessionOrchestratorCapability(AgentCapability):
                 "the previous snapshot",
             )
 
+    def is_awaiting_event(self) -> bool:
+        """The session agent is a CONTINUOUS listener: it subscribes
+        to ``SessionChatProtocol.user_message_pattern``,
+        ``SessionChatProtocol.reply_pattern``,
+        ``LifecycleSignalProtocol.terminated_pattern``,
+        ``AgentDiagnosticProtocol.event_pattern`` (etc.) — every
+        ``@event_handler`` on this class is a live wake source for
+        the duration of the session. So return ``True``
+        unconditionally; ``wait_for_next_event`` should never be
+        considered a deadlock when the session orchestrator is
+        mounted, even between user turns."""
+
+        return True
+
     @event_handler(
         pattern=HumanApprovalProtocol.request_pattern(),
         priority="high",

@@ -59,6 +59,7 @@ from ...blackboard.protocol import HumanApprovalProtocol
 from ...models import AgentSuspensionState
 from ...scopes import BlackboardScope, get_scope_prefix
 from ..actions import action_executor
+from ..actions.dispatcher import ActionInputViolation
 from ..events import EventProcessingResult, event_handler
 
 
@@ -204,7 +205,7 @@ def _claims_enumeration(text: str) -> bool:
     return bool(_ENUMERATION_CLAIM_RE.search(text))
 
 
-class RequestHumanApprovalEmpty(ValueError):
+class RequestHumanApprovalEmpty(ActionInputViolation):
     """``request_human_approval`` was called with no substantive
     content for the operator to evaluate.
 
@@ -215,12 +216,27 @@ class RequestHumanApprovalEmpty(ValueError):
     the body has zero items (e.g., ``successful_proposals`` was empty
     or the code was truncated by an iteration-shape limit).
 
+    Subclass of :class:`ActionInputViolation` so the dispatcher
+    re-raises it unwrapped at the cell's ``await run(...)`` site.
     Raised at the action-executor boundary so the framework converts
     the exception into ``ActionResult(success=False, error=...)``;
     the ``ErrorRewriterReflector`` rule then surfaces a typed
     recovery recipe in the next iteration's prompt — either build
     the body from existing proposals or stop the run cleanly via
-    the mission's terminal-stop primitive."""
+    the mission's terminal-stop primitive.
+    Suffix ``run()`` calls in the same cell (notably a paired
+    ``wait_for_next_event``) MUST NOT execute, otherwise the cell
+    deadlocks waiting on a response key that was never written.
+    A forensic analysis captured the exact deadlock: the
+    LLM emitted ``request_human_approval(...)`` then
+    ``wait_for_next_event()`` in the same cell; the request raised
+    HERE before publishing, the wait then hung forever on a
+    response that could never arrive. The previous design (subclass
+    of ``ValueError``) deferred recovery to the next iteration via
+    ``ErrorRewriterReflector`` — but the next iteration never
+    starts when the cell deadlocks inside the first one. Re-parent
+    to ``ActionInputViolation`` so prevention is enforced at the
+    dispatcher boundary."""
 
 
 class HumanApprovalResponse(BaseModel):
@@ -603,6 +619,15 @@ class HumanApprovalCapability(AgentCapability):
             f"on resolve of {request_id!r}"
         )
         self._agent.idle_wait_counter -= 1
+
+    def is_awaiting_event(self) -> bool:
+        """``HumanApprovalCapability`` is awaiting an event iff it
+        currently holds at least one approval request whose response
+        has not landed (typed event handler clears the id via
+        :meth:`_on_resolved`). Used by
+        ``wait_for_next_event``'s live-wake-source pre-check."""
+
+        return bool(self._idle_waiting_request_ids)
 
     @action_executor(
         planning_summary=(

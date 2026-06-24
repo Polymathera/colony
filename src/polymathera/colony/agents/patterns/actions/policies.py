@@ -43,7 +43,7 @@ from ...blackboard import BlackboardEvent
 from ...blackboard.protocol import ActionPolicyProtocol
 from ...scopes import BlackboardScope
 from ....distributed.hooks import hookable
-from .dispatcher import ActionDispatcher, ActionGroup, SchemaDetail, action_executor, pydantic_model_to_str
+from .dispatcher import ActionDispatcher, ActionGroup, ActionInputViolation, SchemaDetail, action_executor, pydantic_model_to_str
 from ..planning import (
     ActionPlanner,
     PlanBlackboard,
@@ -68,6 +68,17 @@ if TYPE_CHECKING:
 
 logger = setup_logger(__name__)
 
+
+
+class NoLiveWakeSource(ActionInputViolation):
+    """``wait_for_next_event`` was called when no mounted capability
+    on the agent has a live wake source (no continuous listener AND
+    no transient capability with outstanding requests). The wait
+    would deadlock — fail-fast at the await site so the cell aborts
+    instead of idle-waiting forever.
+
+    See :meth:`AgentCapability.is_awaiting_event` for the per-capability
+    contract this aggregates over."""
 
 
 class BaseActionPolicy(ActionPolicy):
@@ -1104,6 +1115,23 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         long-running child mission, or when a ``SessionAgent`` has
         nothing else to do.
 
+        Raises:
+            NoLiveWakeSource: when no capability on this agent has a
+                live source that would wake the wait (no continuous
+                listener AND no transient capability with outstanding
+                requests). Pre-check shape: any ``AgentCapability``
+                whose ``is_awaiting_event()`` returns True keeps the
+                wait legitimate; otherwise this would deadlock and we
+                fail-fast. Subclass of :class:`ActionInputViolation`
+                so the dispatcher re-raises it unwrapped, aborting
+                the cell at this await site (same as a guardrail
+                block). An example deadlock fired in
+                exactly this shape — a coordinator called
+                ``request_human_approval`` which raised at the input
+                validator, then unconditionally called this action;
+                no request had been published so no response key
+                could ever wake it.
+
         Args:
             timeout_seconds: Optional deadline in seconds. When
                 ``None`` (default), block indefinitely. When set and
@@ -1119,6 +1147,25 @@ class EventDrivenActionPolicy(BaseActionPolicy):
             ``plan_step``'s observation + handler-dispatch pipeline,
             not as the return value of this action.
         """
+        # Live-wake-source pre-check (DL2). Walk the agent's mounted
+        # capabilities; if NONE reports that it's currently awaiting
+        # an event (continuous listeners always do; request-response
+        # capabilities only when they hold outstanding requests),
+        # this wait would deadlock — fail-fast.
+        if not any(
+            cap.is_awaiting_event()
+            for cap in self.agent.get_capabilities()
+        ):
+            raise NoLiveWakeSource(
+                f"wait_for_next_event on agent {self.agent.agent_id} "
+                f"has no live wake source: no mounted capability "
+                f"reports an outstanding request or a continuous "
+                f"listener. The wait would deadlock. Common cause: "
+                f"the request-issuing action raised at its input "
+                f"validator BEFORE publishing — the response key it "
+                f"would have produced will never arrive."
+            )
+
         self.agent.idle_wait_counter += 1
         try:
             awoke = await self._queues.wait_nonempty(timeout=timeout_seconds)

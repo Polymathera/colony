@@ -79,6 +79,7 @@ def _make_capability(
 ) -> tuple[GuardrailWaiverCapability, MagicMock]:
     cap = GuardrailWaiverCapability.__new__(GuardrailWaiverCapability)
     cap._agent = SimpleNamespace(agent_id=agent_id)
+    cap._outstanding_waiver_ids = set()
     bb = MagicMock()
     bb.write = AsyncMock()
     cap.get_blackboard = AsyncMock(return_value=bb)

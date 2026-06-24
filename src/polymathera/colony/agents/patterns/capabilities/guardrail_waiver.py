@@ -31,7 +31,12 @@ Design parallels :class:`HumanApprovalCapability`:
 The capability holds NO local state about granted waivers — the
 override is read live from BB by ``SemanticConstraintGuardrail`` (PR5
 single-source-of-truth contract). This avoids the duplicate-state
-class of bug the operator-disable path already closed.
+class of bug the operator-disable path already closed. The capability
+DOES track in-flight ``waiver_id``s in :attr:`_outstanding_waiver_ids`
+purely so :meth:`is_awaiting_event` can answer ``wait_for_next_event``'s
+live-wake-source pre-check (DL2) — entries are added when the request
+publishes and discarded as soon as the typed response handler observes
+the matching key.
 """
 
 from __future__ import annotations
@@ -95,6 +100,12 @@ class GuardrailWaiverCapability(AgentCapability):
             capability_key=capability_key,
             app_name=app_name,
         )
+        #: Live-pending tracker: waiver_ids that have been published
+        #: on BB but whose typed response key has not been observed
+        #: yet. Drives :meth:`is_awaiting_event` so
+        #: ``wait_for_next_event``'s pre-check counts this capability
+        #: as a live wake source while a decision is outstanding.
+        self._outstanding_waiver_ids: set[str] = set()
 
     def get_capability_tags(self) -> frozenset[str]:
         return frozenset({"guardrail_waiver", "gate", "session"})
@@ -188,12 +199,22 @@ class GuardrailWaiverCapability(AgentCapability):
                 "requester_agent_id": self._agent.agent_id,
             },
         )
+        self._outstanding_waiver_ids.add(waiver_id)
         logger.warning(
             "[GuardrailWaiver] request_published: waiver_id=%s "
             "constraint_id=%s requester=%s",
             waiver_id, cid, self._agent.agent_id,
         )
         return {"ok": True, "waiver_id": waiver_id}
+
+    def is_awaiting_event(self) -> bool:
+        """``GuardrailWaiverCapability`` is awaiting an event iff at
+        least one ``request_guardrail_waiver`` request has been
+        published whose typed response has not landed (the typed
+        event handler clears the id on first observation). Used by
+        ``wait_for_next_event``'s live-wake-source pre-check."""
+
+        return bool(self._outstanding_waiver_ids)
 
     # ---- Receive side ------------------------------------------------
 
@@ -225,6 +246,7 @@ class GuardrailWaiverCapability(AgentCapability):
         decided_by = event.value.get("decided_by", "")
         constraint_id = event.value.get("constraint_id", "")
         reason = event.value.get("reason") or ""
+        self._outstanding_waiver_ids.discard(waiver_id)
         logger.warning(
             "[GuardrailWaiver] response_received: waiver_id=%s "
             "constraint_id=%s approved=%s decided_by=%s",

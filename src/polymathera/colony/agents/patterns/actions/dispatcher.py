@@ -41,6 +41,38 @@ logger = setup_logger(__name__)
 # action within the dependency transactor contexts.
 
 
+class ActionInputViolation(ValueError):
+    """Marker exception that an action's body raises when its INPUT
+    contract is violated in a way that makes the LLM-generated cell's
+    plan undefined behavior to continue.
+
+    The dispatcher's catch re-raises subclasses of this exception
+    UNWRAPPED so the cell aborts at the ``await run(...)`` site —
+    same semantics as :class:`GuardrailBlockedError`. Suffix
+    ``run()`` calls in the same cell (notably ``wait_for_next_event``
+    paired with a request that just failed validation) never fire.
+
+    Other exceptions stay wrapped in ``ActionResult(success=False,
+    error=...)`` so the LLM can branch on ``r.success`` for recoverable
+    failures (transient HTTP errors, missing keys in upstream data,
+    etc.).
+
+    Action authors who want their input validators to abort the cell
+    raise an :class:`ActionInputViolation` subclass. Action authors
+    who want the LLM to handle the failure on the next iteration
+    raise a plain ``ValueError`` / return a typed error envelope
+    / let it propagate as a generic ``Exception``. Pairs with
+    [[primitives-not-pipelines]] — the dispatcher gives both shapes;
+    the action author picks the right one per input field.
+
+    See :class:`RequestHumanApprovalEmpty` for the canonical example:
+    the question body has no items for the operator to evaluate, so
+    issuing the request would silently deadlock the cell on the
+    paired ``wait_for_next_event`` if the dispatcher swallowed the
+    raise.
+    """
+
+
 class SchemaDetail(str, Enum):
     """Controls how action parameter schemas are rendered in planning prompts.
 
@@ -305,6 +337,13 @@ class MethodWrapperActionExecutor(ActionExecutor):
                 output=ret
             )
             return result
+        except ActionInputViolation:
+            # Typed input-contract violation — re-raise unwrapped so
+            # the cell aborts at the ``await run(...)`` site, same as
+            # GuardrailBlockedError. Subsequent statements in the
+            # LLM's cell (e.g. ``wait_for_next_event`` paired with
+            # this failed request) MUST NOT execute.
+            raise
         except Exception as e:
             logger.exception(f"Failed to execute action {self.action_key}")
             result = ActionResult(success=False, completed=True, error=str(e))
@@ -460,6 +499,11 @@ class FunctionWrapperActionExecutor(ActionExecutor):
                 output=ret
             )
 
+        except ActionInputViolation:
+            # Same contract as ``MethodWrapperActionExecutor``: typed
+            # input-contract violations propagate unwrapped to abort
+            # the cell at the await site.
+            raise
         except Exception as e:
             logger.exception(f"Error executing function {self.action_key}")
             return ActionResult(
