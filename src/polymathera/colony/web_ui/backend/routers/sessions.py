@@ -75,39 +75,6 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
-def _resolve_github_identity(
-    tenant_row: dict | None,
-    user_row: dict | None,
-) -> dict:
-    """Compose the ``github_identity`` metadata block agents read.
-
-    Inputs are the raw rows returned by
-    :func:`auth_service.get_tenant_github_installation` and
-    :func:`auth_service.get_user_github_identity` — either may be
-    ``None`` (tenant missing the row; user hasn't OAuth'd). The
-    returned dict always has the five keys downstream readers
-    expect; absent values are ``None``.
-    """
-
-    return {
-        "tenant_installation_id": (
-            (tenant_row or {}).get("installation_id")
-        ),
-        "user_github_login": (
-            (user_row or {}).get("github_login")
-        ),
-        "user_github_id": (
-            (user_row or {}).get("github_user_id")
-        ),
-        "git_user_email": (
-            (user_row or {}).get("github_email")
-        ),
-        "git_user_name": (
-            (user_row or {}).get("git_user_name")
-        ),
-    }
-
-
 # ---------------------------------------------------------------------------
 # Read endpoints
 # ---------------------------------------------------------------------------

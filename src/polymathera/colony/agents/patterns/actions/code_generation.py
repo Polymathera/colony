@@ -1006,6 +1006,14 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 max_iterations=self.max_code_iterations,
             ),
         ):
+            # Factories may return ``None`` to indicate "this reflector is
+            # N/A for this agent shape" — e.g. ``cliff_guard_stream`` skips
+            # when ``max_iterations is None`` (CONTINUOUS agents have no cap
+            # for it to count down toward). Filter at the mount site so the
+            # None-handling lives ONCE here, not in every consumer of
+            # ``self._consciousness_streams``.
+            if reflector_stream is None:
+                continue
             self._consciousness_streams.append(reflector_stream)
         # Index into ``_call_history`` marking the boundary between the
         # prior iteration's calls and earlier iterations' calls. Updated
@@ -1692,10 +1700,26 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     len(self._call_history) - self._CALL_HISTORY_MAX_LEN
                 )
                 if overflow > 0:
+                    prev_boundary = self._iteration_history_boundary
                     del self._call_history[:overflow]
                     self._iteration_history_boundary = max(
                         0,
                         self._iteration_history_boundary - overflow,
+                    )
+                    # Loud INFO log — eviction shifts the boundary index
+                    # silently, and any later guardrail "judge saw 0
+                    # cell calls" failure would otherwise require log
+                    # cross-correlation to trace back to a cap hit.
+                    logger.info(
+                        "[CodeGen:%s] _call_history_evicted: drop=%d "
+                        "boundary_prev=%d boundary_new=%d new_len=%d "
+                        "(cap=%d)",
+                        self.agent.agent_id,
+                        overflow,
+                        prev_boundary,
+                        self._iteration_history_boundary,
+                        len(self._call_history),
+                        self._CALL_HISTORY_MAX_LEN,
                     )
                 if result.success:
                     self._block_streak_tracker.reset_streak()
@@ -2188,7 +2212,24 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 asyncio.create_task(
                     self._emit_reflection_diagnostic(diagnostic),
                 )
+            # Advance the boundary for the cell about to be generated.
+            # Per Option B (run5 followup) the boundary marks where THIS
+            # iteration's cell calls will start in the cumulative
+            # ``_call_history`` — every CELL-scope guardrail check + the
+            # per-iter step-summary read slice on it. Logged at INFO so
+            # a future boundary-stale regression surfaces in the log
+            # without forensic reconstruction.
+            prev_boundary = self._iteration_history_boundary
             self._iteration_history_boundary = len(self._call_history)
+            logger.info(
+                "[CodeGen:%s] iter=%d boundary_advanced: prev=%d new=%d "
+                "call_history_len=%d",
+                self.agent.agent_id,
+                self._code_iteration_count,
+                prev_boundary,
+                self._iteration_history_boundary,
+                len(self._call_history),
+            )
 
         # Clear completion rejection after it's been rendered into the prompt
         self._execution_context.custom_data.pop("last_completion_rejection", None)

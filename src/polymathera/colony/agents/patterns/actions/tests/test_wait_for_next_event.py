@@ -37,7 +37,15 @@ class _AlwaysLiveCapability:
     :meth:`is_awaiting_event` always returns ``True``. Used so the
     wait-primitive tests below exercise the queue/timeout mechanics
     without tripping the live-wake-source pre-check
-    (:class:`NoLiveWakeSource`) on every call."""
+    (:class:`NoLiveWakeSource`) on every call.
+
+    ``capability_key`` is the unique-per-instance identifier the
+    live-wake-source log site reads — set on every stub so the
+    list-of-tuples log shape (not dict-keyed-by-class-name, which
+    would collide on duplicates) has a non-empty key per entry."""
+
+    def __init__(self, capability_key: str = "always_live") -> None:
+        self.capability_key = capability_key
 
     def is_awaiting_event(self) -> bool:
         return True
@@ -236,6 +244,9 @@ class _NeverLiveCapability:
     ``False`` — represents a request-response capability with no
     outstanding requests AND no continuous subscription."""
 
+    def __init__(self, capability_key: str = "never_live") -> None:
+        self.capability_key = capability_key
+
     def is_awaiting_event(self) -> bool:
         return False
 
@@ -275,15 +286,66 @@ async def test_pre_check_passes_with_any_one_live_capability() -> None:
 
     policy = _make_policy()
     policy.agent.capabilities = [
-        _NeverLiveCapability(),
-        _NeverLiveCapability(),
-        _AlwaysLiveCapability(),
+        _NeverLiveCapability(capability_key="never_1"),
+        _NeverLiveCapability(capability_key="never_2"),
+        _AlwaysLiveCapability(capability_key="always_1"),
     ]
     policy._queues.normal.put_nowait("ev")
     result = await asyncio.wait_for(
         policy.wait_for_next_event(), timeout=0.05,
     )
     assert result == {"ok": True, "timed_out": False}
+
+
+async def test_pre_check_does_not_collapse_same_class_capabilities(
+    caplog,
+) -> None:
+    """``Agent._capabilities`` is keyed by ``capability_key``, not
+    by class — multiple instances of the SAME capability class are
+    legitimate (the canonical real-world case is the five
+    ``MemoryCapability`` instances mounted on every agent under keys
+    ``working`` / ``stm`` / ``ltm:episodic`` / ``ltm:semantic`` /
+    ``ltm:procedural``). The live-wake-source log line MUST surface
+    each instance independently — a dict-keyed-by-class-name would
+    collapse them, hiding which instance was/wasn't live and making
+    forensic recovery indirect.
+
+    Pin via two same-class capabilities with different liveness:
+    log emits BOTH ``capability_key``s, ``any_live`` is True, the
+    wait proceeds."""
+
+    import logging
+
+    policy = _make_policy()
+    # Two _NeverLiveCapability instances + one _AlwaysLiveCapability
+    # — three same-class duplications-of-shape: two never-live with
+    # different keys, one always-live. The log must show all three
+    # entries.
+    policy.agent.capabilities = [
+        _NeverLiveCapability(capability_key="duplicate_class_a"),
+        _NeverLiveCapability(capability_key="duplicate_class_b"),
+        _AlwaysLiveCapability(capability_key="always_keep_alive"),
+    ]
+    policy._queues.normal.put_nowait("ev")
+    with caplog.at_level(logging.INFO, logger="polymathera.colony"):
+        await asyncio.wait_for(
+            policy.wait_for_next_event(), timeout=0.05,
+        )
+    # Find the live_wake_check line.
+    live_check_lines = [
+        r for r in caplog.records
+        if "live_wake_check" in r.getMessage()
+    ]
+    assert live_check_lines, (
+        "live_wake_check log line missing — instrumentation regressed"
+    )
+    msg = live_check_lines[-1].getMessage()
+    # All THREE capability_keys must appear — dict-keyed-by-class
+    # would collapse the two _NeverLiveCapability instances into one
+    # entry and the log would only show two distinct items, not three.
+    assert "duplicate_class_a" in msg
+    assert "duplicate_class_b" in msg
+    assert "always_keep_alive" in msg
 
 
 async def test_pre_check_exception_is_action_input_violation_subclass(

@@ -1152,10 +1152,19 @@ class EventDrivenActionPolicy(BaseActionPolicy):
         # an event (continuous listeners always do; request-response
         # capabilities only when they hold outstanding requests),
         # this wait would deadlock — fail-fast.
-        if not any(
-            cap.is_awaiting_event()
+        live_per_cap = [
+            (cap.capability_key, type(cap).__name__, cap.is_awaiting_event())
             for cap in self.agent.get_capabilities()
-        ):
+        ]
+        any_live = any(entry[2] for entry in live_per_cap)
+        logger.info(
+            "[Policy:%s] wait_for_next_event live_wake_check: "
+            "any_live=%s live_per_cap=%s",
+            self.agent.agent_id,
+            any_live,
+            live_per_cap,
+        )
+        if not any_live:
             raise NoLiveWakeSource(
                 f"wait_for_next_event on agent {self.agent.agent_id} "
                 f"has no live wake source: no mounted capability "

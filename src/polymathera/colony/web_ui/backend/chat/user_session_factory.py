@@ -135,14 +135,38 @@ def _resolve_github_identity(
     dict always has the five keys downstream readers expect;
     absent values are ``None`` so the agent's GitHub action surface
     surfaces a clean error rather than crashing.
+
+    ``git_user_name`` falls back to ``github_login`` when GitHub's
+    profile ``name`` field is unset for the user (it's optional on
+    GitHub). ``users.git_user_name`` is populated from GitHub's
+    ``/user`` ``name`` response via
+    :func:`auth_service.upsert_user_from_vcs`, which honors ``COALESCE``
+    on a NULL value — so a brand-new user who OAuth'd successfully but
+    hasn't set a display name on their GitHub profile has
+    ``users.git_user_name IS NULL``. Without the fallback, the
+    commit-attribution resolver
+    (:meth:`DesignMonorepoCapabilityBase._resolve_attribution`) would
+    silently drop the ``Co-Authored-By:`` trailer for these users even
+    when the Colony UI is configured as ``commit_co_author=user``. Git
+    accepts any string as author name; the GitHub login is the
+    canonical identifier the user authenticated with and is always
+    populated on a successful OAuth (per
+    :func:`auth_service.get_user_github_identity`'s
+    ``row['vcs_login'] is None → return None`` gate).
     """
 
+    user = user_row or {}
     return {
         "tenant_installation_id": (tenant_row or {}).get("installation_id"),
-        "user_github_login": (user_row or {}).get("github_login"),
-        "user_github_id": (user_row or {}).get("github_user_id"),
-        "git_user_email": (user_row or {}).get("github_email"),
-        "git_user_name": (user_row or {}).get("git_user_name"),
+        "user_github_login": user.get("github_login"),
+        "user_github_id": user.get("github_user_id"),
+        "git_user_email": user.get("github_email"),
+        # Fall back to ``github_login`` when ``git_user_name`` is
+        # unset/empty so users with no GitHub display name still get
+        # commits attributed via their login. See docstring.
+        "git_user_name": (
+            user.get("git_user_name") or user.get("github_login")
+        ),
     }
 
 

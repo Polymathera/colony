@@ -337,12 +337,17 @@ class MethodWrapperActionExecutor(ActionExecutor):
                 output=ret
             )
             return result
-        except ActionInputViolation:
+        except ActionInputViolation as e:
             # Typed input-contract violation — re-raise unwrapped so
             # the cell aborts at the ``await run(...)`` site, same as
             # GuardrailBlockedError. Subsequent statements in the
             # LLM's cell (e.g. ``wait_for_next_event`` paired with
             # this failed request) MUST NOT execute.
+            logger.info(
+                "[Dispatch] ActionInputViolation re-raised unwrapped: "
+                "action=%s type=%s reason=%s",
+                self.action_key, type(e).__name__, str(e)[:200],
+            )
             raise
         except Exception as e:
             logger.exception(f"Failed to execute action {self.action_key}")
@@ -499,10 +504,15 @@ class FunctionWrapperActionExecutor(ActionExecutor):
                 output=ret
             )
 
-        except ActionInputViolation:
+        except ActionInputViolation as e:
             # Same contract as ``MethodWrapperActionExecutor``: typed
             # input-contract violations propagate unwrapped to abort
             # the cell at the await site.
+            logger.info(
+                "[Dispatch] ActionInputViolation re-raised unwrapped: "
+                "action=%s type=%s reason=%s",
+                self.action_key, type(e).__name__, str(e)[:200],
+            )
             raise
         except Exception as e:
             logger.exception(f"Error executing function {self.action_key}")

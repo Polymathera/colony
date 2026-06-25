@@ -27,7 +27,10 @@ from typing import Any
 import pytest
 
 from polymathera.colony.cluster.anthropic_deployment import AnthropicLLMDeployment
-from polymathera.colony.cluster.errors import LLMCallDeadlineExceeded
+from polymathera.colony.cluster.errors import (
+    LLMCallDeadlineExceeded,
+    LLMInferenceError,
+)
 from polymathera.colony.cluster.remote_config import RemoteLLMDeploymentConfig
 
 
@@ -261,10 +264,18 @@ async def test_anthropic_timeout_error_maps_to_llm_call_deadline_exceeded() -> N
     assert excinfo.value.request_id == "req-5"
 
 
-async def test_non_timeout_error_propagates_unchanged() -> None:
+async def test_non_timeout_error_wraps_as_llm_inference_error() -> None:
     """A non-timeout SDK exception is not swallowed by the deadline
-    branch — generic transport errors continue to surface as the
-    cluster's existing :class:`LLMInferenceError` upstream."""
+    branch — and is NOT re-raised raw either. The deployment wraps
+    every transport-layer exception into
+    :class:`LLMInferenceError` carrying an
+    :class:`LLMErrorCategory` (TRANSIENT / AUTH / PERMANENT / etc).
+    The wrap is the seam the deployment-level circuit breaker reads
+    to count failures + decide when to open. Re-raising the raw
+    provider/transport exception would defeat the breaker. The
+    original exception is preserved as ``__cause__`` for forensics.
+    Pins commit 3b0d04d1 (typed-error classification + circuit
+    breaker integration)."""
 
     boom = RuntimeError("network blew up")
     messages = _StubMessages(
@@ -273,22 +284,30 @@ async def test_non_timeout_error_propagates_unchanged() -> None:
     )
     deployment = _build_deployment(client=_StubClient(messages))
 
-    with pytest.raises(RuntimeError, match="network blew up"):
+    with pytest.raises(LLMInferenceError, match="network blew up") as excinfo:
         await deployment._call_api(
             messages={"messages": [{"role": "user", "content": "."}]},
             deadline_s=10.0,
             request_id="req-6",
         )
+    assert excinfo.value.__cause__ is boom
 
 
-async def test_timeout_without_deadline_propagates_unchanged() -> None:
-    """If no per-call deadline was supplied, a timeout from the
-    client-level configuration is NOT re-mapped — there's no
-    framework-side deadline to attribute it to. The cluster-level
-    timeout still bounds the call (via the client config), but the
-    exception type stays the provider's so callers can tell apart
-    "I asked for X seconds and got cut off" from "the client's
-    background timeout fired"."""
+async def test_timeout_without_deadline_wraps_as_llm_inference_error(
+) -> None:
+    """When no per-call ``deadline_s`` was supplied, a timeout from
+    the client-level configuration is NOT promoted to
+    :class:`LLMCallDeadlineExceeded` (that subclass is reserved for
+    "I asked for X seconds and it fired"). But it IS still wrapped
+    into :class:`LLMInferenceError` (category=TRANSIENT) so the
+    deployment-level circuit breaker observes repeated background
+    timeouts and can open on a downstream outage. Callers that need
+    to distinguish "deadline I set" from "background timeout" branch
+    on the SUBCLASS (``LLMCallDeadlineExceeded`` vs plain
+    ``LLMInferenceError``), not on the raw provider exception type.
+
+    The original ``anthropic.APITimeoutError`` is preserved as
+    ``__cause__``."""
 
     import anthropic
 
@@ -299,8 +318,13 @@ async def test_timeout_without_deadline_propagates_unchanged() -> None:
     )
     deployment = _build_deployment(client=_StubClient(messages))
 
-    with pytest.raises(anthropic.APITimeoutError):
+    with pytest.raises(LLMInferenceError) as excinfo:
         await deployment._call_api(
             messages={"messages": [{"role": "user", "content": "."}]},
             request_id="req-7",
         )
+    # NOT the deadline subclass — there was no deadline to exceed.
+    assert not isinstance(excinfo.value, LLMCallDeadlineExceeded)
+    # Original provider exception preserved on the cause chain so
+    # forensics + post-hoc classification still work.
+    assert excinfo.value.__cause__ is timeout_exc

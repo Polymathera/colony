@@ -242,6 +242,25 @@ def test_cliff_guard_silent_after_cap():
     assert result.is_empty
 
 
+def test_cliff_guard_stream_returns_none_when_max_iterations_is_none() -> None:
+    """Run6 fix: CONTINUOUS-mode agents (SessionAgent, etc.) have no
+    iteration cap; the cliff_guard reflector would silently raise
+    ``TypeError: NoneType - int`` every iteration (swallowed by the
+    stream wrapper, 97 occurrences in the run6 logs). Skip
+    construction at the factory and let the mount site filter ``None``."""
+
+    assert cliff_guard_stream(max_iterations=None) is None
+
+
+def test_cliff_guard_stream_returns_stream_when_max_iterations_is_int(
+) -> None:
+    """ONE_SHOT agents pass an int cap; the reflector mounts normally."""
+
+    stream = cliff_guard_stream(max_iterations=50)
+    assert stream is not None
+    assert stream.name == "cliff_guard"
+
+
 # ---------------------------------------------------------------------------
 # ApprovalAdvanceReflector
 # ---------------------------------------------------------------------------

@@ -72,9 +72,25 @@ def inconsistency_stream() -> ConsciousnessStream:
 
 def cliff_guard_stream(
     *,
-    max_iterations: int,
+    max_iterations: int | None,
     lead_iterations: int = 2,
-) -> ConsciousnessStream:
+) -> ConsciousnessStream | None:
+    """Build the cliff-guard reflector stream — or ``None`` when the
+    agent has no iteration cap.
+
+    ``max_iterations is None`` for CONTINUOUS-mode agents (resolved via
+    ``effective_loop_max_iterations`` — e.g. the SessionAgent). The
+    "N iterations remaining before max_iterations forces a hard stop"
+    advisory has no meaning without a cap, and the reflector's
+    ``self._max - about_to_plan`` arithmetic would raise ``TypeError``
+    every iteration (silently swallowed by the stream wrapper). Skip
+    construction entirely; callers receive ``None`` and the consumer
+    site filters it out — single source of truth for "this reflector
+    is N/A for this agent shape" lives here, not at every mount site
+    and not behind a try/except in the reflect loop."""
+
+    if max_iterations is None:
+        return None
     return _reflector_stream(
         name="cliff_guard",
         reflector=CliffGuardReflector(

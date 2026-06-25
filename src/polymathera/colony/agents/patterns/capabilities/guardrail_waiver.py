@@ -200,6 +200,13 @@ class GuardrailWaiverCapability(AgentCapability):
             },
         )
         self._outstanding_waiver_ids.add(waiver_id)
+        logger.info(
+            "[GuardrailWaiver:%s] outstanding_waiver_ids added=%s "
+            "current_size=%d",
+            self._agent.agent_id,
+            waiver_id,
+            len(self._outstanding_waiver_ids),
+        )
         logger.warning(
             "[GuardrailWaiver] request_published: waiver_id=%s "
             "constraint_id=%s requester=%s",
@@ -246,7 +253,16 @@ class GuardrailWaiverCapability(AgentCapability):
         decided_by = event.value.get("decided_by", "")
         constraint_id = event.value.get("constraint_id", "")
         reason = event.value.get("reason") or ""
+        was_tracked = waiver_id in self._outstanding_waiver_ids
         self._outstanding_waiver_ids.discard(waiver_id)
+        logger.info(
+            "[GuardrailWaiver:%s] outstanding_waiver_ids removed=%s "
+            "was_tracked=%s current_size=%d",
+            self._agent.agent_id if self._agent is not None else "<no-agent>",
+            waiver_id,
+            was_tracked,
+            len(self._outstanding_waiver_ids),
+        )
         logger.warning(
             "[GuardrailWaiver] response_received: waiver_id=%s "
             "constraint_id=%s approved=%s decided_by=%s",

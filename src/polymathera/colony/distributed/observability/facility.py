@@ -107,13 +107,31 @@ class TracingFacility(ABC):
         kind: SpanKind,
         span_id: str,
         parent_span_id: str | None,
-        input_summary: dict[str, Any] = {},
+        input_summary: dict[str, Any] | None = None,
+        output_summary: dict[str, Any] | None = None,
         status: SpanStatus = SpanStatus.RUNNING,
         start_time: float = None,
         start_wall: float = None,
         end_time: float = None,
         finish: bool = False,
     ) -> Span:
+        """Build + append a :class:`Span`. ``output_summary`` is accepted
+        here (in addition to ``input_summary``) so callers that already
+        know the terminal-state payload at creation time — e.g.
+        :meth:`AgentTracingFacility.emit_lifecycle_event` passing
+        ``details`` as the stop/cancel/idle-timeout summary — can write
+        in ONE call instead of `add_span(...)` + mutate-then-flush. The
+        prior signature accepted only ``input_summary``; callers that
+        passed ``output_summary=`` raised ``TypeError`` at the boundary
+        even though :class:`Span` carries the field and the DB schema
+        persists it (see ``observability/models.py``,
+        ``observability/migrations.py``, ``observability/consumer.py``).
+
+        Mutable default ``{}`` was also replaced with ``None`` →
+        local ``{}`` so two callers can't share the same dict instance
+        through this signature (a Python anti-pattern that has bitten
+        this codebase before)."""
+
         now_mono = time.monotonic()
         now_wall = time.time()
         span = Span(
@@ -128,7 +146,8 @@ class TracingFacility(ABC):
             start_wall=start_wall or now_wall,
             end_time=end_time,
             status=status,
-            input_summary=input_summary,
+            input_summary=input_summary if input_summary is not None else {},
+            output_summary=output_summary if output_summary is not None else {},
         )
         if finish:
             span.finish()
