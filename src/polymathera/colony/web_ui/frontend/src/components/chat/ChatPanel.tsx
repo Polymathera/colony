@@ -4,6 +4,7 @@ import { ChatMessageList } from "./ChatMessageList";
 import { ChatInput } from "./ChatInput";
 import { ChatControls, type ChatControlsState } from "./ChatControls";
 import { ConstraintsPanel } from "./ConstraintsPanel";
+import { ActiveRequestsOverlay } from "./ActiveRequestsOverlay";
 import type { ChatMessageData } from "./ChatMessage";
 import { apiFetch } from "@/api/client";
 
@@ -34,42 +35,12 @@ function nextMessageId(): string {
   return `msg_${Date.now()}_${++messageIdCounter}`;
 }
 
-type RunningAction = {
-  action_id: string;
-  action_key: string;
-  agent_id?: string | null;
-  started_at?: number | null;
-};
-
-// Mission narrative published by ``MissionStatusCapability.emit_mission_status``
-// on the coordinator side. The protocol is singleton-per-mission: a new
-// message for the same ``mission_id`` REPLACES the prior status; the UI
-// shows the latest, not a history. Lifetime is framework-managed (the
-// backend relay clears on mission terminal state or new mission with the
-// same ``mission_id``), NOT LLM-managed.
-type MissionStatus = {
-  mission_id: string;
-  agent_id?: string | null;
-  message: string;
-  details?: Record<string, unknown>;
-  timestamp?: number | null;
-};
-
 export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
   const [width, setWidth] = useState(getStoredWidth);
   const [collapsed, setCollapsed] = useState(getStoredCollapsed);
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [messages, setMessages] = useState<ChatMessageData[]>([]);
   const [chatControls, setChatControls] = useState<ChatControlsState>({});
-  // action_id → running record. Cleared on a "complete" / "failed"
-  // record from the same action_id.
-  const [runningActions, setRunningActions] = useState<Record<string, RunningAction>>({});
-  // mission_id → latest narrative status. Backend relay reads the
-  // session blackboard's ``chat:mission_status:*`` singletons and
-  // forwards every change; we keep the latest per mission_id. A
-  // backend-emitted ``{cleared: true}`` (mission terminal state or
-  // mission_id replay) removes the entry.
-  const [missionStatuses, setMissionStatuses] = useState<Record<string, MissionStatus>>({});
   // PR5-B operator constraint-override panel visibility.
   const [showConstraints, setShowConstraints] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -192,57 +163,101 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             setMessages((prev) => [...historyMsgs, ...prev]);
           }
         } else if (data.type === "action_status") {
-          // Action lifecycle: "running" adds a banner entry; the
-          // matching "complete"/"failed" record removes it. Brief
-          // out-of-order arrivals (very fast actions) self-resolve
-          // because the start record only adds, the end only removes.
+          // Action lifecycle becomes a single timeline entry per
+          // ``action_id``. ``running`` appends a new entry with
+          // ``status_phase=running`` (spinner dot); ``complete`` /
+          // ``failed`` UPDATE that entry in place to the terminal
+          // phase. Stable id ``status_action_<action_id>`` is the
+          // join key — any record arriving with the same id mutates
+          // the same row. Brief out-of-order arrivals self-resolve
+          // because the update path is idempotent on the id.
           const id = data.action_id as string | undefined;
           if (!id) return;
+          const statusId = `status_action_${id}`;
           if (data.status === "running") {
-            setRunningActions((prev) => ({
-              ...prev,
-              [id]: {
-                action_id: id,
-                action_key: data.action_key || "",
-                agent_id: data.agent_id,
-                started_at: data.started_at,
-              },
-            }));
+            // First-seen running record — append. If a duplicate
+            // arrived (e.g. WebSocket replay), short-circuit so we
+            // don't show two entries.
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === statusId)) return prev;
+              return [
+                ...prev,
+                {
+                  id: statusId,
+                  run_id: null,
+                  role: "system",
+                  kind: "status",
+                  status_phase: "running",
+                  content: _shortActionName(data.action_key || ""),
+                  agent_id: data.agent_id ?? undefined,
+                  timestamp: (data.started_at ? data.started_at * 1000 : Date.now()),
+                },
+              ];
+            });
           } else {
-            setRunningActions((prev) => {
-              if (!(id in prev)) return prev;
-              const next = { ...prev };
-              delete next[id];
-              return next;
+            // Terminal phase — flip the existing entry's phase + dot
+            // color. If the running record never arrived (very fast
+            // action whose start was missed), synthesise a terminal
+            // entry rather than silently dropping the signal.
+            const phase = data.status === "complete" ? "completed" : "failed";
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === statusId)) {
+                return prev.map((m) =>
+                  m.id === statusId ? { ...m, status_phase: phase } : m,
+                );
+              }
+              return [
+                ...prev,
+                {
+                  id: statusId,
+                  run_id: null,
+                  role: "system",
+                  kind: "status",
+                  status_phase: phase,
+                  content: _shortActionName(data.action_key || ""),
+                  agent_id: data.agent_id ?? undefined,
+                  timestamp: Date.now(),
+                },
+              ];
             });
           }
         } else if (data.type === "mission_status") {
-          // Mission narrative: replace the per-mission singleton with
-          // the latest message. The backend relay handles lifetime
-          // (mission terminal state, replay) — we never time-out or
-          // age out client-side. A ``cleared`` payload from the
-          // backend removes the entry.
+          // Mission narrative becomes one timeline entry per emitted
+          // message. The prior banner shape collapsed history to
+          // "latest only per mission_id"; the unified-timeline shape
+          // is append-per-event so the operator sees the arc of the
+          // coordinator's work. ``cleared`` payloads are no-ops at
+          // the timeline layer (entries are historical; the backend
+          // relay's clearing semantics applied to a singleton banner
+          // that no longer exists). Each entry's id is unique per
+          // (mission_id, timestamp) so duplicate replays don't
+          // double-render.
           const missionId = data.mission_id as string | undefined;
           if (!missionId) return;
-          if (data.cleared) {
-            setMissionStatuses((prev) => {
-              if (!(missionId in prev)) return prev;
-              const next = { ...prev };
-              delete next[missionId];
-              return next;
-            });
-          } else {
-            setMissionStatuses((prev) => ({
+          if (data.cleared) return;
+          const ts = typeof data.timestamp === "number"
+            ? data.timestamp
+            : Date.now() / 1000;
+          const statusId = `status_mission_${missionId}_${ts}`;
+          const text = typeof data.message === "string" ? data.message : "";
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === statusId)) return prev;
+            return [
               ...prev,
-              [missionId]: {
-                mission_id: missionId,
-                agent_id: data.agent_id ?? null,
-                message: typeof data.message === "string" ? data.message : "",
-                details: (data.details && typeof data.details === "object") ? data.details : {},
-                timestamp: typeof data.timestamp === "number" ? data.timestamp : null,
+              {
+                id: statusId,
+                run_id: null,
+                role: "system",
+                kind: "status",
+                // Mission narratives are informational; no
+                // start/end lifecycle to drive ``status_phase``.
+                // The renderer falls back to a neutral dot.
+                content: text,
+                agent_id: data.agent_id ?? undefined,
+                timestamp: ts * 1000,
               },
-            }));
-          }
+            ];
+          });
         } else if (data.type === "tab_activity" && onTabActivity) {
           onTabActivity(data.tab_id, data.count);
         } else if (data.type === "error") {
@@ -281,10 +296,13 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
     };
   }, [sessionId, addMessage, onTabActivity]);
 
-  // Clear messages when session changes
+  // Clear messages when session changes. Status entries live IN the
+  // ``messages`` array now (unified-timeline redesign), so a single
+  // ``setMessages([])`` wipes both chat history AND inline status
+  // history — no separate ``runningActions`` / ``missionStatuses``
+  // state to clear.
   useEffect(() => {
     setMessages([]);
-    setRunningActions({});
   }, [sessionId]);
 
   const sendMessage = useCallback((content: string) => {
@@ -566,7 +584,7 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
           />
         )}
 
-        {/* Messages */}
+        {/* Messages — unified timeline (status entries inline). */}
         <div className="flex-1 min-h-0">
           <ChatMessageList
             messages={messages}
@@ -575,18 +593,14 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
           />
         </div>
 
-        {/* Currently-running actions banner */}
-        <ActionStatusBanner
-          running={runningActions}
-          onAbort={() => sendMessage("/abort")}
-          canAbort={status === "connected"}
-        />
-
-        {/* Per-mission narrative status — placed directly above the
-            chat input where the user looks while waiting. Singleton
-            per mission_id; the backend relay manages lifetime (clears
-            on mission terminal state or mission_id replay). */}
-        <MissionStatusBanner statuses={missionStatuses} />
+        {/* Active operator requests (approval / help / waiver) pinned
+            above the input. Source-of-truth is ``messages`` — the
+            overlay filters to entries with ``awaiting_reply=true``
+            and renders them with ``interactive=true`` so the operator
+            can answer without scrolling. Auto-scroll cannot bury
+            them; the timeline shows the same entries as historical
+            context with ``interactive=false``. */}
+        <ActiveRequestsOverlay messages={messages} onReply={sendReply} />
 
         {/* Controls + Input */}
         <ChatControls controls={chatControls} onChange={setChatControls} />
@@ -611,82 +625,3 @@ function _shortActionName(actionKey: string): string {
 }
 
 
-function ActionStatusBanner({
-  running,
-  onAbort,
-  canAbort,
-}: {
-  running: Record<string, RunningAction>;
-  onAbort: () => void;
-  canAbort: boolean;
-}) {
-  const entries = Object.values(running);
-  if (entries.length === 0) return null;
-  // Most recent first so the user sees the latest action at the top.
-  entries.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
-  return (
-    <div className="flex items-start gap-2 border-t border-border bg-accent/30 px-3 py-2 text-xs">
-      <div className="flex-1 min-w-0">
-        {entries.map((a) => {
-          const elapsed = a.started_at
-            ? Math.max(0, Math.floor(Date.now() / 1000 - a.started_at))
-            : null;
-          return (
-            <div key={a.action_id} className="flex items-center gap-2">
-              <div
-                className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent"
-                aria-hidden
-              />
-              <span className="font-mono text-foreground">
-                {_shortActionName(a.action_key)}
-              </span>
-              <span className="text-muted-foreground">
-                running{elapsed !== null ? ` for ${elapsed}s` : ""}
-                {a.agent_id ? ` · ${a.agent_id.slice(0, 12)}` : ""}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-      {/* One Abort button per banner — abort cancels the *current* in-flight
-          action on the agent. Banner shows multiple entries only when actions
-          interleave (e.g., child policies); a single /abort propagates through
-          policy.abort_current() which cancels whatever is at the top of the
-          dispatcher's task stack, so a single button is the correct UX. */}
-      <button
-        type="button"
-        onClick={onAbort}
-        disabled={!canAbort}
-        title="Abort the running action (sends /abort on the high-priority lane)"
-        className="shrink-0 rounded border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        Abort
-      </button>
-    </div>
-  );
-}
-
-
-function MissionStatusBanner({
-  statuses,
-}: {
-  statuses: Record<string, MissionStatus>;
-}) {
-  const entries = Object.values(statuses);
-  if (entries.length === 0) return null;
-  // Most recent first so the user sees the freshest mission narrative
-  // at the top — matches the ActionStatusBanner ordering convention.
-  entries.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-  return (
-    <div className="flex items-start gap-2 border-t border-border bg-muted/40 px-3 py-2 text-xs">
-      <div className="flex-1 min-w-0 space-y-1">
-        {entries.map((m) => (
-          <div key={m.mission_id} className="flex items-center gap-2">
-            <span className="inline-block h-2 w-2 rounded-full bg-primary/60" />
-            <span className="truncate text-muted-foreground">{m.message}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}

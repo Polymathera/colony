@@ -102,10 +102,16 @@ export function ChunkMarkdown({ text }: { text: string }) {
   return (
     <div
       className={cn(
-        "prose prose-invert prose-xs max-w-none leading-5",
-        "[&_table]:text-[10px] [&_th]:px-2 [&_td]:px-2",
-        "[&_code]:text-[10px] [&_pre]:text-[10px]",
-        "[&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs",
+        // ``prose-sm`` is the smallest REAL variant from
+        // @tailwindcss/typography (sm / base / lg / xl / 2xl).
+        // ``prose-xs`` does NOT exist — using it silently falls back
+        // to default ``prose`` (16px), which is why the prior
+        // body-vs-headers sizing was backwards (body 16px, headers
+        // pinned to 12-14px by the explicit overrides below).
+        "prose prose-invert prose-sm max-w-none leading-5",
+        "[&_table]:text-[12px] [&_th]:px-2 [&_td]:px-2",
+        "[&_code]:text-[12px] [&_pre]:text-[12px]",
+        "[&_h1]:text-base [&_h2]:text-sm [&_h3]:text-sm",
       )}
     >
       <Markdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>

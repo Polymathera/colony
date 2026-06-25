@@ -15,7 +15,14 @@ interface TabBarProps {
 
 export function TabBar({ tabs, activeTab, onTabChange, notifications }: TabBarProps) {
   return (
-    <nav className="flex gap-1 border-b bg-background px-3">
+    // ``overflow-x-auto`` keeps the bar inside its parent column when
+    // the chat panel grows (the column itself shrinks via ``min-w-0``
+    // at the AppShell level; flex children's default ``min-width:
+    // auto`` would otherwise let the buttons overflow and visually
+    // spill into the chat column). ``shrink-0`` on each button makes
+    // the "don't shrink the label" intent explicit so a future
+    // refactor doesn't accidentally truncate or hide tab text.
+    <nav className="flex gap-1 overflow-x-auto border-b bg-background px-3">
       {tabs.map((tab) => {
         const count = notifications?.[tab.id] || 0;
         return (
@@ -23,7 +30,7 @@ export function TabBar({ tabs, activeTab, onTabChange, notifications }: TabBarPr
             key={tab.id}
             onClick={() => onTabChange(tab.id)}
             className={cn(
-              "relative flex items-center gap-1.5 px-3 py-2.5 text-sm font-medium transition-colors",
+              "relative flex shrink-0 items-center gap-1.5 px-3 py-2.5 text-sm font-medium transition-colors",
               "hover:text-foreground",
               activeTab === tab.id
                 ? "text-foreground"
