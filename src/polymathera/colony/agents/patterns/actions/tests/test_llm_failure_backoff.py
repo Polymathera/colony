@@ -135,3 +135,53 @@ async def test_snapshot_shape() -> None:
     assert snap["next_delay_s"] > 0
     assert snap["last_failure_at"] is not None
     assert "credit balance" in snap["last_error_message"]
+
+
+async def test_permanent_category_uses_recovery_floor(
+) -> None:
+    """R7-FIX-B: a permanent-category failure (BILLING / AUTH) raises
+    the next_delay to the breaker's recovery floor (300s) instead of
+    the exponential 1s start. Run7 had ~5,364 spin-loop retries at
+    sub-second cadence into a permanently-open breaker; this floor
+    is the consumer-side answer that aligns the retry cadence with
+    the breaker's RECOVERY_TIMEOUT."""
+
+    from polymathera.colony.cluster.errors import LLMErrorCategory
+
+    agent = _make_agent()
+    backoff = LLMFailureBackoff(agent, initial_delay_s=0.01, cap_delay_s=0.02)
+    sleeps: list[float] = []
+    with patch("asyncio.sleep", side_effect=lambda s: sleeps.append(s)):
+        await backoff.handle_failure(
+            LLMInferenceError(
+                request_id="r1",
+                message="credit balance too low",
+                category=LLMErrorCategory.BILLING,
+            ),
+        )
+    # The category floor is 300s — far above the configured
+    # initial_delay_s=0.01 and cap_delay_s=0.02.
+    assert sleeps == [LLMFailureBackoff.PERMANENT_FAILURE_FLOOR_S]
+    assert backoff._next_delay_s == LLMFailureBackoff.PERMANENT_FAILURE_FLOOR_S
+
+
+async def test_transient_category_uses_exponential_not_floor(
+) -> None:
+    """Counterpart: a transient failure keeps the existing
+    exponential backoff. The floor is reserved for permanent
+    categories so transient blips don't pause the agent for 5 min."""
+
+    from polymathera.colony.cluster.errors import LLMErrorCategory
+
+    agent = _make_agent()
+    backoff = LLMFailureBackoff(agent, initial_delay_s=0.01, cap_delay_s=0.02)
+    sleeps: list[float] = []
+    with patch("asyncio.sleep", side_effect=lambda s: sleeps.append(s)):
+        await backoff.handle_failure(
+            LLMInferenceError(
+                request_id="r1",
+                message="rate limited",
+                category=LLMErrorCategory.TRANSIENT,
+            ),
+        )
+    assert sleeps == [0.01]  # initial_delay_s, NOT 300s

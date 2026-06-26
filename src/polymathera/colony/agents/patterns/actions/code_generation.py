@@ -2310,9 +2310,15 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     return None
                 # Outer cancellation (e.g., agent shutdown) — propagate.
                 raise
-            except Exception as e:
-                logger.error(f"CodeGenerationActionPolicy: code generation failed: {e}")
-                return None
+            # NOTE: do NOT add a broad ``except Exception`` here.
+            # ``EventDrivenActionPolicy.execute_iteration`` already
+            # catches :class:`LLMInferenceError` and routes through
+            # :class:`LLMFailureBackoff` (sleep + idle-wait token).
+            # Any other Exception must propagate so the outer logger
+            # surfaces the offending exception class + traceback.
+            # Swallowing here previously produced a tight retry loop
+            # against a permanently-open breaker because the swallow
+            # bypassed the backoff.
             finally:
                 self._current_codegen_task = None
 

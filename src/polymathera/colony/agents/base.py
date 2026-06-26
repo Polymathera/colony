@@ -4872,7 +4872,7 @@ class AgentManagerBase:
             **kwargs
         )
 
-        logger.warning(
+        logger.info(
             f"              📡 agent_infer({agent_id}): submitting to LLM cluster — "
             f"request_id={request.request_id}, pages={len(context_page_ids or [])}"
         )
@@ -4880,7 +4880,7 @@ class AgentManagerBase:
         # Delegate to LLM cluster
         response = await self._llm_cluster_handle.infer(request)
 
-        logger.warning(
+        logger.info(
             f"              📡 agent_infer({agent_id}): LLM cluster responded — "
             f"len={len(response.generated_text) if hasattr(response, 'generated_text') else '?'}"
         )

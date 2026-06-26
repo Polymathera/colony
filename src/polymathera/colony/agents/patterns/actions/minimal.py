@@ -132,15 +132,20 @@ class MinimalActionPolicy(BaseActionPolicy):
         prompt = self._build_prompt(state, action_descriptions)
 
         # 3. Call LLM
-        try:
-            response = await self.agent.infer(
-                prompt=prompt,
-                max_tokens=self._max_tokens,
-                temperature=self._temperature,
-            )
-        except Exception as e:
-            logger.error(f"MinimalActionPolicy: LLM inference failed: {e}")
-            return None
+        # NOTE: do NOT add a broad ``except Exception`` here.
+        # ``EventDrivenActionPolicy.execute_iteration`` already
+        # catches :class:`LLMInferenceError` and routes through
+        # :class:`LLMFailureBackoff`. Any other Exception must
+        # propagate so the outer logger surfaces the offending
+        # exception class + traceback. Swallowing here previously
+        # bypassed the backoff and produced tight retry loops against
+        # permanently-open breakers (sibling bug to the
+        # ``CodeGenerationActionPolicy`` swallow at code_generation.py).
+        response = await self.agent.infer(
+            prompt=prompt,
+            max_tokens=self._max_tokens,
+            temperature=self._temperature,
+        )
 
         # 4. Parse response
         action = self._parse_response(response, action_descriptions)

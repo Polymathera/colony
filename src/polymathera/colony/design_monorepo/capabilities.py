@@ -138,6 +138,93 @@ def _commit_paths(
     )
 
 
+def _commit_paths_and_push(
+    client: "DesignMonorepoClient",
+    identity: "AgentIdentity | CommitIdentity",
+    message: str,
+    paths: list[Path] | None,
+    all_changes: bool,
+) -> tuple[str, str]:
+    """Paths-variant of :func:`_commit_all_and_push`. Same contract,
+    same return shape; the caller chose paths-vs-all_changes
+    explicitly via the action's parameters."""
+
+    try:
+        prior_head = client._repo.head.commit.hexsha
+    except Exception:  # noqa: BLE001
+        prior_head = ""
+    commit_sha = client.commit_with_identity(
+        identity, message, paths=paths, all_changes=all_changes,
+    )
+    if commit_sha == prior_head:
+        return commit_sha, "no_commit"
+    try:
+        client.push()
+    except Exception as exc:  # noqa: BLE001
+        return commit_sha, f"push_failed:{type(exc).__name__}: {exc!s}"[:200]
+    return commit_sha, "pushed"
+
+
+def _commit_all_and_push(
+    client: "DesignMonorepoClient",
+    identity: "AgentIdentity | CommitIdentity",
+    message: str,
+) -> tuple[str, str]:
+    """Commit-then-push worker for ``asyncio.to_thread``.
+
+    Commits everything (``git add -A`` + commit) AND pushes the
+    current branch to ``origin``. Returns ``(commit_sha,
+    push_status)`` where ``push_status`` is one of:
+
+    - ``"pushed"`` — the commit landed on ``origin``.
+    - ``"push_failed:<reason>"`` — commit succeeded locally but the
+      push raised. Commit is NOT rolled back (already in the local
+      history); the caller surfaces ``push_status`` so the operator
+      can retry the push out-of-band.
+    - ``"no_commit"`` — no working-tree changes; nothing to commit
+      AND nothing to push. Returned ``commit_sha`` is the current
+      HEAD (unchanged).
+
+    Why commit+push as one helper (vs leaving push to the LLM): every
+    commit-producing CAPABILITY ACTION whose purpose is to SHARE
+    state across sessions / agents (ingestion, knowledge
+    materialisation, design checkpoint) needs to push, otherwise the
+    commit lives on the agent's per-session clone and is gone when
+    the agent terminates. Forcing the LLM to compose a separate
+    ``push_remote`` after every commit-producing action is fragile
+    (the LLM forgets; the user pays for re-ingest because the cache
+    didn't reach github). Pushing inline at the commit site is the
+    durable shape for SHARE-purpose commits. Approval-gating for
+    protected branches is the caller's concern — see
+    :meth:`DesignMonorepoCapabilityBase._commit_all_and_push_when_safe`
+    which routes through the existing ``_run_or_gate`` predicate.
+    """
+
+    # Snapshot HEAD BEFORE the commit. When ``commit_with_identity``
+    # finds nothing to stage, it returns the current HEAD's sha
+    # (see ``client.commit_with_identity``); detect that via prior
+    # vs returned and skip the push (no new content to share).
+    try:
+        prior_head = client._repo.head.commit.hexsha
+    except Exception:  # noqa: BLE001 — empty repo / no commits yet
+        prior_head = ""
+    commit_sha = client.commit_with_identity(
+        identity, message, all_changes=True,
+    )
+    if commit_sha == prior_head:
+        return commit_sha, "no_commit"
+    try:
+        client.push()
+    except Exception as exc:  # noqa: BLE001 — covers GitCommandError + DesignMonorepoError
+        # Commit is NOT rolled back — it's in the local history and
+        # the operator can retry the push out-of-band via
+        # ``push_remote``. Push-status is returned so the caller can
+        # surface the failure in its action envelope (the LLM /
+        # operator sees ``push_failed:...`` and can react).
+        return commit_sha, f"push_failed:{type(exc).__name__}: {exc!s}"[:200]
+    return commit_sha, "pushed"
+
+
 def _build_ingest_commit_message(report: "KnowledgeMaterialisationReport") -> str:
     """Compose the one-line commit summary + per-section detail for a
     ``materialize_knowledge_sources`` batch.
@@ -1548,19 +1635,28 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
                     {"source_uri": str(rec.source_uri), "error": rec.error or ""},
                 )
 
-        # One batch commit per invocation — sidecars + any acquired
-        # files land in the design monorepo together so re-ingest is
-        # cheap and the operator can inspect / edit the extracted
-        # markdown via normal git workflow.
+        # One batch commit-AND-PUSH per invocation — sidecars + any
+        # acquired files land in the design monorepo's remote so
+        # subsequent sessions inherit the ingestion cache and the
+        # operator doesn't re-pay for PDF OCR / claim-extraction LLM
+        # tokens. Local-only commits live on the agent's per-session
+        # clone and vanish with it.
         commit_sha = ""
+        push_status = "no_changes"
         if records or report.acquisitions:
             client = await self._client_async()
             principal, decorated = self._commit_attribution(
                 _build_ingest_commit_message(report),
             )
-            commit_sha = await asyncio.to_thread(
-                _commit_all, client, principal, decorated,
+            commit_sha, push_status = await asyncio.to_thread(
+                _commit_all_and_push, client, principal, decorated,
             )
+            if push_status.startswith("push_failed"):
+                logger.warning(
+                    "ingest_repo_map_literature: commit %s landed "
+                    "locally but push failed: %s",
+                    commit_sha, push_status,
+                )
 
         acquisitions_payload = [
             {
@@ -1587,6 +1683,7 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
             "by_status": by_status,
             "acquisitions": acquisitions_payload,
             "commit_sha": commit_sha,
+            "push_status": push_status,
             "backend": {
                 "vector_store": type(deps.vector_store).__name__,
                 "qdrant_url": qdrant_cfg.url or None,
@@ -2276,9 +2373,18 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
             f"checkpoint: {label}",
         )
         if all_changes:
-            await asyncio.to_thread(
-                _commit_all, client, principal, decorated,
+            # Commit-AND-push so the checkpoint lands on the remote
+            # immediately. The checkpoint's purpose is share-across-
+            # sessions — a local-only checkpoint defeats the design
+            # (lost when the agent's clone is GC'd).
+            _, push_status = await asyncio.to_thread(
+                _commit_all_and_push, client, principal, decorated,
             )
+            if push_status.startswith("push_failed"):
+                logger.warning(
+                    "checkpoint_state: commit landed locally but "
+                    "push failed: %s", push_status,
+                )
         # No co-author trailer on the tag annotation —
         # :meth:`DesignMonorepoClient.list_checkpoints` parses the
         # ``label\n\nrationale`` annotation structure on read, and a
@@ -2453,14 +2559,25 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
             path_objs = [Path(p) for p in paths]
 
         async def _execute() -> str:
-            return await asyncio.to_thread(
-                _commit_paths,
+            # Commit AND push: ``commit_state`` is a share-purpose
+            # action; a local-only commit on the agent's per-session
+            # clone defeats the point. Push status is logged on
+            # failure but the action's wire shape (``sha``-only)
+            # remains stable for existing consumers.
+            sha, push_status = await asyncio.to_thread(
+                _commit_paths_and_push,
                 client,
                 principal,
                 decorated,
                 path_objs,
                 all_changes,
             )
+            if push_status.startswith("push_failed"):
+                logger.warning(
+                    "commit_state: commit %s landed locally but "
+                    "push failed: %s", sha, push_status,
+                )
+            return sha
 
         current_branch = await asyncio.to_thread(self._current_branch_name)
         return await self._run_or_gate(
@@ -3252,9 +3369,18 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
             f"checkpoint: {label}",
         )
         try:
-            await asyncio.to_thread(
-                _commit_all, client, principal, decorated,
+            # Commit-AND-push: an auto-checkpoint that doesn't reach
+            # the remote is invisible to subsequent sessions, which
+            # defeats the durability purpose of the checkpoint.
+            _, push_status = await asyncio.to_thread(
+                _commit_all_and_push, client, principal, decorated,
             )
+            if push_status.startswith("push_failed"):
+                logger.warning(
+                    "DesignCheckpointer: auto-checkpoint commit "
+                    "landed locally for episode %s but push failed: %s",
+                    episode_id, push_status,
+                )
             checkpoint = await asyncio.to_thread(
                 client.tag_checkpoint, principal, label, rationale,
             )
@@ -3594,14 +3720,25 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
             _, decorated = self._commit_attribution(
                 str(args.get("message", "")),
             )
-            return await asyncio.to_thread(
-                _commit_paths,
+            # Commit AND push: the operator approved a protected-
+            # branch commit; their intent is to share that commit
+            # immediately. Failing to push here would leave the
+            # approved commit local-only — defeats the approval.
+            sha, push_status = await asyncio.to_thread(
+                _commit_paths_and_push,
                 client,
                 identity,
                 decorated,
                 path_objs,
                 bool(args.get("all_changes", False)),
             )
+            if push_status.startswith("push_failed"):
+                logger.warning(
+                    "_dispatch_protected_op[commit_state]: commit %s "
+                    "landed locally but push failed: %s",
+                    sha, push_status,
+                )
+            return sha
         if op_kind == "push_remote":
             await asyncio.to_thread(
                 client.push,

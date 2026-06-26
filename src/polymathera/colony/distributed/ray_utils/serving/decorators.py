@@ -697,7 +697,16 @@ def deployment(
                         )
 
                     except Exception as e:
-                        logger.error(
+                        # Log at WARNING (not ERROR): the exception
+                        # is captured in the response payload + the
+                        # caller's handle.py will re-raise it on the
+                        # client side. The caller decides the
+                        # appropriate severity for its domain
+                        # context (a billing 400 from Anthropic is
+                        # expected after a credit-out; an actor-died
+                        # is an ERROR). Logging at ERROR here causes
+                        # a log-spam cascade.
+                        logger.warning(
                             f"Error handling request {request.request_id} "
                             f"to method {request.method_name}: {e}",
                             exc_info=True,

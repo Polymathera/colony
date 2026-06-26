@@ -62,6 +62,18 @@ from ._internal import DESIGN_CONTEXT_URI_SCHEME
 logger = logging.getLogger(__name__)
 
 
+#: Bounded-concurrency cap for file-level ``ingest_file`` fan-out
+#: across both :func:`materialize_knowledge_sources` and
+#: :func:`materialize_design_context_sources`. Module-level so both
+#: functions share one source of truth (per the rule about not
+#: maintaining parallel constants). The Anthropic deployment's
+#: ``max_concurrent_requests=10`` is the actual back-pressure for
+#: the LLM-bound stages (per-chunk claim extraction) — the
+#: semaphore here just keeps the file-level gather from queuing
+#: thousands of pending coroutines on large repos.
+_INGEST_CONCURRENCY: int = 10
+
+
 # ---------------------------------------------------------------------------
 # Knowledge materialisation — typed return
 # ---------------------------------------------------------------------------
@@ -274,19 +286,53 @@ async def materialize_knowledge_sources(
     records: list[IngestionRecord] = []
     acquisitions: list[AcquisitionOutcome] = []
 
-    for source in repo_map.knowledge_sources:
-        if enabled_sources is not None and source.name not in enabled_sources:
-            continue
+    # Build the flat list of per-file ingest coroutines. The prior
+    # serial ``for source: for file:`` shape was the dominant cost (~90s/file)
+    # Fan-out is bounded by ``_INGEST_CONCURRENCY`` (module-level constant; the
+    # sibling :func:`materialize_design_context_sources` uses the same
+    # cap). The Anthropic deployment's ``max_concurrent_requests=10``
+    # is the actual rate gate on per-chunk LLM extraction; the
+    # semaphore here just bounds the outer queue.
+    #
+    # Acquirer rows still serialize "acquire then ingest" within a
+    # single row (the acquirer fetches one file, the ingest consumes
+    # it) — but rows themselves run concurrently with each other and
+    # with local-path file ingests.
+    sem = asyncio.Semaphore(_INGEST_CONCURRENCY)
 
-        if source.acquirer is not None:
-            acquired = await _run_acquirer(
-                registry=registry,
-                source=source,
-                repo_root=repo_root,
-                acquisitions=acquisitions,
-            )
-            if acquired is None:
-                continue
+    async def _ingest_one_local(
+        source: KnowledgeSource, abs_path: Path,
+    ) -> None:
+        async with sem:
+            try:
+                rec = await mpi.ingest_file(
+                    abs_path,
+                    tier=source.tier,
+                    data_type_override=source.profile,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "materialize_knowledge_sources: ingest failed for "
+                    "%s (row %r)", abs_path, source.name,
+                )
+                return
+            records.append(rec)
+
+    async def _acquire_then_ingest(source: KnowledgeSource) -> None:
+        # Acquirer runs OUTSIDE the semaphore — acquirers are
+        # network-bound on remote fetches, distinct rate concern from
+        # the LLM-bound ingest stage. Semaphore wraps only the
+        # ``ingest_file`` call so the concurrent-acquirers ×
+        # concurrent-ingests don't compound into a runaway queue.
+        acquired = await _run_acquirer(
+            registry=registry,
+            source=source,
+            repo_root=repo_root,
+            acquisitions=acquisitions,
+        )
+        if acquired is None:
+            return
+        async with sem:
             try:
                 rec = await mpi.ingest_file(
                     acquired.local_path,
@@ -294,29 +340,27 @@ async def materialize_knowledge_sources(
                     data_type_override=source.profile,
                     source_uri=_acquired_source_uri(source, acquired),
                 )
-                records.append(rec)
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "materialize_knowledge_sources: ingest failed for "
                     "acquired source %s (row %r)",
                     acquired.local_path, source.name,
                 )
-            continue
+                return
+            records.append(rec)
 
-        # Local-paths row.
+    coros: list[Awaitable[None]] = []
+    for source in repo_map.knowledge_sources:
+        if enabled_sources is not None and source.name not in enabled_sources:
+            continue
+        if source.acquirer is not None:
+            coros.append(_acquire_then_ingest(source))
+            continue
+        # Local-paths row: one coroutine per matching file.
         for abs_path in _iter_matching_files(repo_root, source):
-            try:
-                rec = await mpi.ingest_file(
-                    abs_path,
-                    tier=source.tier,
-                    data_type_override=source.profile,
-                )
-                records.append(rec)
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "materialize_knowledge_sources: ingest failed for %s "
-                    "(row %r)", abs_path, source.name,
-                )
+            coros.append(_ingest_one_local(source, abs_path))
+
+    await asyncio.gather(*coros)
 
     return KnowledgeMaterialisationReport(
         records=tuple(records),
@@ -908,9 +952,9 @@ async def _materialize_kuzu_path(
     # rate via its token bucket; KuzuGraphStore serializes writes via
     # ``threading.RLock`` (stores/graph.py:501). So gathering the file-
     # level coroutines is safe: the deployment + the store are the
-    # actual throttles. The semaphore here just keeps the file-level
-    # gather from queuing thousands of pending coroutines on huge repos.
-    _INGEST_CONCURRENCY = 10
+    # actual throttles. Reads the module-level ``_INGEST_CONCURRENCY``
+    # so this function and :func:`materialize_knowledge_sources` share
+    # one source of truth.
     sem = asyncio.Semaphore(_INGEST_CONCURRENCY)
 
     async def _ingest_one(file_path: Path) -> tuple[str, Any | None, str | None]:

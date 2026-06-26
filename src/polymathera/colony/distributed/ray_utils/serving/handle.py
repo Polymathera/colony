@@ -324,7 +324,12 @@ class DeploymentHandle:
                 if response.traceback:
                     error_msg += f"\nRemote traceback:\n{response.traceback}"
 
-                logger.error(error_msg)
+                # Log at WARNING (not ERROR): the error WILL be raised
+                # to the caller via the re-raise below; the caller is
+                # responsible for logging at the right severity for
+                # its domain context. Logging at ERROR here is
+                # a primary contributor to a log-spam cascade.
+                logger.warning(error_msg)
 
                 # Try to re-raise with the original exception type
                 if response.error_type and response.error_module:

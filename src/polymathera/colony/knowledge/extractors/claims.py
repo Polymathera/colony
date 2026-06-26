@@ -261,6 +261,29 @@ class LLMClaimExtractor(ClaimExtractor):
             )
             return ()
         except Exception as exc:  # noqa: BLE001 — typed failure paths above; broad guard covers deployment-level surprises
+            # Short-circuit on permanent provider-down conditions
+            # (BILLING / AUTH). Surface the permanent failure to the
+            # caller so the ingest pipeline can abort the batch
+            # cleanly (vs. burning every remaining claim's call).
+            # Transient / unknown failures keep the warn-and-empty
+            # behaviour: a single bad chunk shouldn't poison the
+            # whole pipeline.
+            from polymathera.colony.cluster.errors import (
+                LLMInferenceError,
+                PERMANENT_ERROR_CATEGORIES,
+            )
+            if (
+                isinstance(exc, LLMInferenceError)
+                and exc.category in PERMANENT_ERROR_CATEGORIES
+            ):
+                logger.error(
+                    "LLMClaimExtractor: PERMANENT LLM failure (%s) "
+                    "for %s — raising to abort the batch (provider "
+                    "down, retrying further claims is wasted spend / "
+                    "log spam)",
+                    exc.category, chunk.citation.source_uri,
+                )
+                raise
             logger.warning(
                 "LLMClaimExtractor: LLM call failed for %s: %s (%s)",
                 chunk.citation.source_uri,

@@ -16,6 +16,8 @@ import logging
 import time
 from typing import Any
 
+from ....cluster.errors import LLMInferenceError, PERMANENT_ERROR_CATEGORIES
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,14 @@ class LLMFailureBackoff:
       ``agent.metadata.idle_wait_counter`` (so the outer agent loop
       doesn't count this iteration toward ``max_iterations``).
       Subsequent failures double the delay up to ``cap_delay_s``.
+    - When the failure's ``LLMInferenceError.category`` is in
+      :data:`PERMANENT_ERROR_CATEGORIES` (BILLING, AUTH), the next
+      delay is FLOORED at :attr:`PERMANENT_FAILURE_FLOOR_S` — the
+      breaker's own recovery_timeout (300s default). Retrying a
+      permanently-down provider every 1s wastes the operator's
+      attention with log spam and wastes the breaker's recovery
+      window. The floor aligns the consumer's retry cadence with
+      the breaker's intended cooldown.
     - :meth:`record_success` is called after any successful
       ``plan_step`` return; it decrements the idle-wait token if a
       streak was open and resets the backoff state.
@@ -44,6 +54,12 @@ class LLMFailureBackoff:
 
     DEFAULT_INITIAL_DELAY_S: float = 1.0
     DEFAULT_CAP_DELAY_S: float = 60.0
+    #: Lower bound on the sleep interval when the failure category is
+    #: a permanent provider-down condition (BILLING / AUTH). Mirrors
+    #: the breaker's :attr:`_LLMProviderDownBreaker.RECOVERY_TIMEOUT`
+    #: (300s) so the consumer's retry cadence never undershoots the
+    #: breaker's half-open probe interval.
+    PERMANENT_FAILURE_FLOOR_S: float = 300.0
 
     def __init__(
         self,
@@ -68,6 +84,12 @@ class LLMFailureBackoff:
         a streak increments ``idle_wait_counter``; subsequent failures
         only double the delay. The matching decrement happens in
         :meth:`record_success`.
+
+        When ``exc`` is a permanent-category
+        :class:`LLMInferenceError` (BILLING / AUTH), the sleep is
+        floored at :attr:`PERMANENT_FAILURE_FLOOR_S` so the consumer
+        doesn't burn the breaker's recovery_timeout window with
+        millisecond-cadence retries.
         """
 
         if not self._is_in_streak:
@@ -78,6 +100,19 @@ class LLMFailureBackoff:
         else:
             self._next_delay_s = min(
                 self._cap_delay_s, self._next_delay_s * 2,
+            )
+        # Permanent-category floor: when the underlying failure is
+        # BILLING / AUTH (provider unreachable until the operator
+        # acts), retrying inside the breaker's RECOVERY_TIMEOUT is
+        # pure log spam. Override the exponential next_delay with the
+        # floor for THIS failure only — record_success or a non-
+        # permanent failure resets the state cleanly.
+        if (
+            isinstance(exc, LLMInferenceError)
+            and exc.category in PERMANENT_ERROR_CATEGORIES
+        ):
+            self._next_delay_s = max(
+                self._next_delay_s, self.PERMANENT_FAILURE_FLOOR_S,
             )
         self._failure_count += 1
         self._last_failure_at = time.time()

@@ -332,12 +332,24 @@ class MonorepoPersistedIngestor:
         manifest: SidecarManifest,
     ) -> None:
         sidecar_dir.mkdir(parents=True, exist_ok=True)
-        (sidecar_dir / EXTRACTED_MD_NAME).write_text(
-            extracted_md, encoding="utf-8",
-        )
-        (sidecar_dir / INGESTION_JSON_NAME).write_text(
+        md_path = sidecar_dir / EXTRACTED_MD_NAME
+        json_path = sidecar_dir / INGESTION_JSON_NAME
+        md_path.write_text(extracted_md, encoding="utf-8")
+        json_path.write_text(
             manifest.model_dump_json(indent=2) + "\n",
             encoding="utf-8",
+        )
+        # Observability: the sidecar persistence is the operator-
+        # visible artifact of a successful ingest, but until this
+        # log was added the substance was unobservable from logs.
+        logger.info(
+            "MonorepoPersistedIngestor: sidecar persisted "
+            "source_uri=%s extractor=%s sections=%d pages=%d md_bytes=%d",
+            manifest.source_uri,
+            manifest.extractor or "<unknown>",
+            manifest.section_count,
+            manifest.page_count,
+            len(extracted_md),
         )
 
 

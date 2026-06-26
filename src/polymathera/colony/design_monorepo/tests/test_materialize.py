@@ -90,6 +90,103 @@ async def test_knowledge_sources_ingest_matching_files(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_knowledge_sources_ingest_runs_files_concurrently(
+    tmp_path: Path,
+) -> None:
+    """R7-PLAN-PERF regression: ``materialize_knowledge_sources``
+    must fan out file-level ingest concurrently (bounded by
+    ``_INGEST_CONCURRENCY``), not serially. Run7 had ~30 PDFs
+    ingested serially at ~90s/file = 45 min wall time; this test
+    pins the concurrent shape so a future refactor that reverts to
+    a serial ``for: await`` surfaces here.
+
+    The check is wall-time based: we stub ``MonorepoPersistedIngestor.
+    ingest_file`` with a coroutine that sleeps ``per_file_seconds``,
+    seed N files where N <= ``_INGEST_CONCURRENCY``, and assert the
+    total wall time is closer to ``per_file_seconds`` (concurrent)
+    than to ``N * per_file_seconds`` (serial). The midpoint
+    threshold catches even partially-serial regressions."""
+
+    import asyncio
+    import time
+    from polymathera.colony.design_monorepo.materialize import (
+        _INGEST_CONCURRENCY,
+    )
+
+    repo_root = tmp_path / "r"
+    (repo_root / "literature" / "curated").mkdir(parents=True)
+    # Seed exactly ``_INGEST_CONCURRENCY`` files so the entire batch
+    # fits in one concurrency slot — concurrent wall time is
+    # ~per_file_seconds; serial wall time is N × per_file_seconds.
+    n_files = _INGEST_CONCURRENCY
+    for i in range(n_files):
+        (repo_root / "literature" / "curated" / f"f{i:02d}.txt").write_text(
+            f"paper {i}\n", encoding="utf-8",
+        )
+
+    per_file_seconds = 0.20
+    # Stub the wrapper's ingest_file to sleep + return a synthetic
+    # ``IngestionRecord``. We patch at the class level because
+    # ``materialize_knowledge_sources`` instantiates a fresh wrapper
+    # internally.
+    from polymathera.colony.knowledge.models import (
+        IngestionRecord,
+        IngestionStatus,
+    )
+
+    async def _slow_stub_ingest(self, abs_path, *, tier=None, data_type_override=None, source_uri=None):  # noqa: ARG001
+        await asyncio.sleep(per_file_seconds)
+        return IngestionRecord(
+            source_uri=source_uri or f"file://{abs_path}",
+            tier=tier,
+            status=IngestionStatus.COMPLETED,
+            chunks_added=0,
+            claims_extracted=0,
+        )
+
+    repo_map = RepoMap(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        knowledge_sources=[
+            KnowledgeSource(
+                name="curated",
+                paths=["literature/curated/**/*.txt"],
+                profile="scientific_paper",
+            ),
+        ],
+    )
+
+    from polymathera.colony.knowledge.monorepo_persisted_ingestor import (
+        MonorepoPersistedIngestor,
+    )
+
+    with patch.object(
+        MonorepoPersistedIngestor, "ingest_file", _slow_stub_ingest,
+    ):
+        t0 = time.monotonic()
+        report = await materialize_knowledge_sources(
+            repo_map=repo_map, repo_root=repo_root,
+        )
+        wall = time.monotonic() - t0
+
+    # All files completed.
+    assert len(report.records) == n_files
+    # Concurrent expectation: wall time ~= per_file_seconds (+ overhead).
+    # Serial expectation would be n_files * per_file_seconds.
+    # Threshold = midpoint; below the midpoint means "more concurrent
+    # than serial". With n_files=10, per_file=0.20s → serial≈2.0s,
+    # concurrent≈0.2s, midpoint≈1.0s.
+    serial_estimate = n_files * per_file_seconds
+    midpoint = serial_estimate / 2
+    assert wall < midpoint, (
+        f"materialize_knowledge_sources ran in {wall:.2f}s for "
+        f"{n_files} files at {per_file_seconds:.2f}s each. Serial "
+        f"would be {serial_estimate:.2f}s; concurrent should be "
+        f"~{per_file_seconds:.2f}s. Got more than midpoint "
+        f"({midpoint:.2f}s) — fan-out reverted to serial?"
+    )
+
+
+@pytest.mark.asyncio
 async def test_enabled_sources_filters_knowledge_rows(tmp_path: Path) -> None:
     """``enabled_sources={"a"}`` skips row ``b`` even though both rows
     match files on disk."""

@@ -188,6 +188,57 @@ async def test_llm_extractor_transport_error_returns_empty() -> None:
     assert claims == ()
 
 
+async def test_llm_extractor_permanent_failure_raises_to_caller() -> None:
+    """R7-FIX-D: a permanent-category :class:`LLMInferenceError`
+    (BILLING / AUTH) MUST raise to the caller — not warn-and-empty
+    per-claim. Run7 had 25,254 per-claim warnings against an open
+    breaker because this extractor swallowed the typed failure and
+    the ingest pipeline kept calling it for every remaining claim of
+    every remaining paper. Raising short-circuits the batch so the
+    caller can abort cleanly."""
+
+    from polymathera.colony.cluster.errors import (
+        LLMErrorCategory,
+        LLMInferenceError,
+    )
+
+    async def fake_llm(prompt: str, schema: type[BaseModel]) -> BaseModel:
+        raise LLMInferenceError(
+            request_id="claim_extract_test",
+            message="credit balance too low",
+            category=LLMErrorCategory.BILLING,
+        )
+
+    extractor = LLMClaimExtractor(llm=fake_llm)
+    with pytest.raises(LLMInferenceError) as exc_info:
+        await extractor.extract(_chunk("..."))
+    assert exc_info.value.category == LLMErrorCategory.BILLING
+
+
+async def test_llm_extractor_transient_llm_error_still_returns_empty(
+) -> None:
+    """Counterpart: transient/unknown LLMInferenceError stays at
+    warn-and-empty. A single chunk failing on a transient blip
+    shouldn't poison the whole pipeline; only PERMANENT categories
+    short-circuit."""
+
+    from polymathera.colony.cluster.errors import (
+        LLMErrorCategory,
+        LLMInferenceError,
+    )
+
+    async def fake_llm(prompt: str, schema: type[BaseModel]) -> BaseModel:
+        raise LLMInferenceError(
+            request_id="r",
+            message="rate limit",
+            category=LLMErrorCategory.TRANSIENT,
+        )
+
+    extractor = LLMClaimExtractor(llm=fake_llm)
+    claims = await extractor.extract(_chunk("..."))
+    assert claims == ()
+
+
 async def test_llm_extractor_empty_response_is_zero_claims() -> None:
     """A schema-valid empty list is the legitimate "nothing
     high-confidence here" signal — distinct from
