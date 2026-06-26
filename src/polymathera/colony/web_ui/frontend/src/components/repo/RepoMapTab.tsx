@@ -37,7 +37,7 @@ import {
   type VcmSourceRow,
 } from "@/api/hooks/useRepoMap";
 import { useMapRepo } from "@/api/hooks/useVCM";
-import { useKBIngestRepoMap } from "@/api/hooks/useKB";
+import { useKBIngestRepoMap, useKBRehydrate } from "@/api/hooks/useKB";
 
 const DEFAULT_BRANCH = "main";
 
@@ -76,6 +76,7 @@ export function RepoMapTab() {
   const preview = useRepoMapPreview();
   const mapRepo = useMapRepo();
   const ingestKb = useKBIngestRepoMap();
+  const rehydrateKg = useKBRehydrate();
 
   // Two independent persisted selections — one per panel. The
   // dashboard hydrates the local state from the colony's persisted
@@ -160,6 +161,14 @@ export function RepoMapTab() {
       branch: submitted.branch,
     });
     setConfirmIngestOpen(false);
+  };
+
+  const onRehydrate = () => {
+    if (!submitted) return;
+    rehydrateKg.mutate({
+      origin_url: submitted.originUrl,
+      branch: submitted.branch,
+    });
   };
 
   // Persist on every checkbox toggle so the chat-driven
@@ -253,6 +262,14 @@ export function RepoMapTab() {
             >
               {ingestKb.isPending ? "Ingesting…" : "Ingest Knowledge"}
             </PrimaryButton>
+            <SecondaryButton
+              type="button"
+              onClick={onRehydrate}
+              disabled={!submitted || rehydrateKg.isPending}
+              title="Load the KG snapshot from origin/<branch> into the shared Kùzu store."
+            >
+              {rehydrateKg.isPending ? "Rehydrating…" : "Rehydrate KG"}
+            </SecondaryButton>
           </div>
         </form>
 

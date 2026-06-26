@@ -136,6 +136,99 @@ def test_kg_deletion_propagates(tmp_path: Path) -> None:
     assert ("a", "p", "x") not in triples
 
 
+def _claim(s: str, p: str, o: str, *, conf: float = 0.9,
+           run_id: str = "") -> dict:
+    return {
+        "subject": s, "predicate": p, "object": o,
+        "confidence": conf,
+        "citation": {"source_uri": "lit:1"},
+        "provenance": {"extractor_run_id": run_id} if run_id else {},
+    }
+
+
+def test_kg_claims_schema_set_merge_dedups_on_triple(tmp_path: Path) -> None:
+    base = tmp_path / "b.kg.json"
+    ours = tmp_path / "o.kg.json"
+    theirs = tmp_path / "t.kg.json"
+    _write(base, json.dumps({"version": "1.0", "claims": []}))
+    _write(ours, json.dumps({
+        "version": "1.0",
+        "claims": [_claim("a", "p", "b"), _claim("c", "p", "d")],
+    }))
+    _write(theirs, json.dumps({
+        "version": "1.0",
+        "claims": [_claim("a", "p", "b"), _claim("e", "p", "f")],
+    }))
+    rc = _drive(kg_merge, ours, base, theirs, "x.kg.json")
+    assert rc == 0
+    merged = json.loads(ours.read_text("utf-8"))
+    triples = {
+        (c["subject"], c["predicate"], c["object"])
+        for c in merged["claims"]
+    }
+    assert triples == {("a", "p", "b"), ("c", "p", "d"), ("e", "p", "f")}
+
+
+def test_kg_claims_schema_higher_confidence_wins_on_duplicate(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "b.kg.json"
+    ours = tmp_path / "o.kg.json"
+    theirs = tmp_path / "t.kg.json"
+    _write(base, json.dumps({"version": "1.0", "claims": []}))
+    _write(ours, json.dumps({
+        "version": "1.0",
+        "claims": [_claim("a", "p", "b", conf=0.5)],
+    }))
+    _write(theirs, json.dumps({
+        "version": "1.0",
+        "claims": [_claim("a", "p", "b", conf=0.95)],
+    }))
+    rc = _drive(kg_merge, ours, base, theirs, "x.kg.json")
+    assert rc == 0
+    merged = json.loads(ours.read_text("utf-8"))
+    assert len(merged["claims"]) == 1
+    assert merged["claims"][0]["confidence"] == 0.95
+
+
+def test_kg_claims_schema_run_id_tiebreak_on_equal_confidence(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "b.kg.json"
+    ours = tmp_path / "o.kg.json"
+    theirs = tmp_path / "t.kg.json"
+    _write(base, json.dumps({"version": "1.0", "claims": []}))
+    _write(ours, json.dumps({
+        "version": "1.0",
+        "claims": [_claim("a", "p", "b", conf=0.9, run_id="alpha")],
+    }))
+    _write(theirs, json.dumps({
+        "version": "1.0",
+        "claims": [_claim("a", "p", "b", conf=0.9, run_id="zulu")],
+    }))
+    rc = _drive(kg_merge, ours, base, theirs, "x.kg.json")
+    assert rc == 0
+    merged = json.loads(ours.read_text("utf-8"))
+    assert merged["claims"][0]["provenance"]["extractor_run_id"] == "zulu"
+
+
+def test_kg_refuses_cross_version_merge(tmp_path: Path) -> None:
+    base = tmp_path / "b.kg.json"
+    ours = tmp_path / "o.kg.json"
+    theirs = tmp_path / "t.kg.json"
+    _write(base, json.dumps({"version": "1.0", "claims": []}))
+    _write(ours, json.dumps({
+        "version": "1.0", "claims": [_claim("a", "p", "b")],
+    }))
+    _write(theirs, json.dumps({
+        "version": "2.0", "claims": [_claim("c", "p", "d")],
+    }))
+    rc = _drive(kg_merge, ours, base, theirs, "x.kg.json")
+    assert rc != 0
+    text = ours.read_text("utf-8")
+    assert "<<<<<<<" in text
+
+
 # ---------- budget-merge ----------------------------------------------------
 
 

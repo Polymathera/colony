@@ -211,10 +211,10 @@ async def test_add_claims_per_claim_failure_does_not_poison_batch(
 
     real_add_claim_locked = store._add_claim_locked
 
-    def _fragile(claim):  # noqa: ANN001
+    def _fragile(claim, tag):  # noqa: ANN001
         if claim.subject == "POISON":
             raise RuntimeError("synthetic insertion failure")
-        return real_add_claim_locked(claim)
+        return real_add_claim_locked(claim, tag)
 
     monkeypatch.setattr(store, "_add_claim_locked", _fragile)
     rows = await store.add_claims(claims)

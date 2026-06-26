@@ -39,6 +39,8 @@ def test_router_registers_expected_paths() -> None:
         "/kb/ingest",
         "/kb/ingest-repo-map",
         "/kb/ingest-repo-map/operations",
+        "/kb/rehydrate",
+        "/kb/rehydrate/operations",
         "/kb/images/{sha}",
     }
 

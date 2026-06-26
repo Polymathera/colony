@@ -200,3 +200,59 @@ export function useKBIngestRepoMapOperations() {
     },
   });
 }
+
+
+// ----------------------------------------------------------------------
+// /kb/rehydrate — pull a branch's KG snapshot from the design monorepo
+// into the shared Kùzu store. ``branch="__all__"`` iterates every
+// remote branch.
+// ----------------------------------------------------------------------
+
+export interface RehydrateRequest {
+  origin_url: string;
+  branch?: string;
+}
+
+export interface RehydrateOpStatus {
+  op_id: string;
+  status: "pending" | "running" | "completed" | "error";
+  origin_url: string;
+  branch: string;
+  started_at: number;
+  completed_at: number | null;
+  message: string;
+  branches_rehydrated: number;
+  claims_in_file: number;
+  claims_newly_added: number;
+  claims_newly_tagged: number;
+  claims_already_present: number;
+}
+
+export function useKBRehydrate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: RehydrateRequest) =>
+      apiFetch<RehydrateOpStatus>("/kb/rehydrate", {
+        method: "POST",
+        body: JSON.stringify({ branch: "main", ...req }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["kb"] });
+    },
+  });
+}
+
+export function useKBRehydrateOperations() {
+  return useQuery({
+    queryKey: ["kb", "rehydrate", "operations"],
+    queryFn: () =>
+      apiFetch<RehydrateOpStatus[]>("/kb/rehydrate/operations"),
+    refetchInterval: (query) => {
+      const ops = query.state.data;
+      if (ops && ops.some((op) => op.status === "pending" || op.status === "running")) {
+        return 2000;
+      }
+      return false;
+    },
+  });
+}

@@ -30,6 +30,22 @@ import inspect
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolated_pre_commit_registry():
+    """Reset the process-wide pre-commit registry between tests so a
+    callback registered by another test (e.g. the KG snapshot hook)
+    does not run against this file's stub clients (which omit fields
+    real callbacks read)."""
+
+    from polymathera.colony.design_monorepo.commit_hooks import (
+        reset_pre_commit_registry,
+    )
+
+    reset_pre_commit_registry()
+    yield
+    reset_pre_commit_registry()
+
+
 def test_commit_all_and_push_helper_exists() -> None:
     from polymathera.colony.design_monorepo.capabilities import (
         _commit_all_and_push,
@@ -39,7 +55,8 @@ def test_commit_all_and_push_helper_exists() -> None:
     assert callable(_commit_paths_and_push)
 
 
-def test_commit_all_and_push_commits_then_pushes() -> None:
+@pytest.mark.asyncio
+async def test_commit_all_and_push_commits_then_pushes() -> None:
     """Stub client records call order; verify commit happens before
     push, push fires when the commit produced new content, and
     push_status reflects success."""
@@ -59,6 +76,8 @@ def test_commit_all_and_push_commits_then_pushes() -> None:
 
     class _StubClient:
         _repo = _Repo()
+        active_branch = "main"
+        working_dir = None
 
         def commit_with_identity(self, identity, message, all_changes=False):  # noqa: ARG002
             calls.append("commit")
@@ -67,13 +86,14 @@ def test_commit_all_and_push_commits_then_pushes() -> None:
         def push(self, *, branch=None, remote="origin", with_tags=False):  # noqa: ARG002
             calls.append("push")
 
-    sha, status = _commit_all_and_push(_StubClient(), object(), "msg")
+    sha, status = await _commit_all_and_push(_StubClient(), object(), "msg")
     assert sha == "NEW_SHA"
     assert status == "pushed"
     assert calls == ["commit", "push"]
 
 
-def test_commit_all_and_push_skips_push_when_no_changes() -> None:
+@pytest.mark.asyncio
+async def test_commit_all_and_push_skips_push_when_no_changes() -> None:
     """When ``commit_with_identity`` returns the current HEAD (no-op
     commit), the helper MUST NOT push — there's nothing new to share."""
 
@@ -92,23 +112,24 @@ def test_commit_all_and_push_skips_push_when_no_changes() -> None:
 
     class _StubClient:
         _repo = _Repo()
+        active_branch = "main"
+        working_dir = None
 
         def commit_with_identity(self, identity, message, all_changes=False):  # noqa: ARG002
-            # No-op commit returns the current HEAD per
-            # ``client.commit_with_identity``.
             return "HEAD_SHA"
 
         def push(self, *, branch=None, remote="origin", with_tags=False):  # noqa: ARG002
             nonlocal push_calls
             push_calls += 1
 
-    sha, status = _commit_all_and_push(_StubClient(), object(), "msg")
+    sha, status = await _commit_all_and_push(_StubClient(), object(), "msg")
     assert sha == "HEAD_SHA"
     assert status == "no_commit"
     assert push_calls == 0
 
 
-def test_commit_all_and_push_surfaces_push_failure_in_status() -> None:
+@pytest.mark.asyncio
+async def test_commit_all_and_push_surfaces_push_failure_in_status() -> None:
     """The commit is NOT rolled back on push failure (it's already
     in the local history). The helper returns the local sha + a
     ``push_failed:...`` status so the caller can log a warning + the
@@ -127,6 +148,8 @@ def test_commit_all_and_push_surfaces_push_failure_in_status() -> None:
 
     class _StubClient:
         _repo = _Repo()
+        active_branch = "main"
+        working_dir = None
 
         def commit_with_identity(self, identity, message, all_changes=False):  # noqa: ARG002
             return "NEW_SHA"
@@ -134,7 +157,7 @@ def test_commit_all_and_push_surfaces_push_failure_in_status() -> None:
         def push(self, *, branch=None, remote="origin", with_tags=False):  # noqa: ARG002
             raise RuntimeError("network unreachable")
 
-    sha, status = _commit_all_and_push(_StubClient(), object(), "msg")
+    sha, status = await _commit_all_and_push(_StubClient(), object(), "msg")
     assert sha == "NEW_SHA"
     assert status.startswith("push_failed:")
     assert "RuntimeError" in status

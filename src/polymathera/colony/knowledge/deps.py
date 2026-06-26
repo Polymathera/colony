@@ -362,6 +362,12 @@ def set_knowledge_deps(
             graph_store=_deps.graph_store,
             image_store=_deps.image_store,
         )
+    # Register the KG snapshot pre-commit callback on every Ray
+    # process so any commit-and-push the design-monorepo capabilities
+    # issue captures the current KG state in the same commit.
+    # Idempotent; safe to re-register after a deps rebind.
+    from .persistence import register_kg_snapshot_callback
+    register_kg_snapshot_callback()
     return _deps
 
 

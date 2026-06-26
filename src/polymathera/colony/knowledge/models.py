@@ -344,6 +344,12 @@ class Claim(BaseModel):
 
     chunk_id: str | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    """Free-form per-claim provenance preserved across the persistence
+    round-trip (extractor identity + version, extraction timestamp,
+    extractor run id, etc.). Distinct from :attr:`extra` which is for
+    transient framework-internal payloads not meant to survive
+    serialisation."""
 
 
 class EmbeddedChunk(BaseModel):

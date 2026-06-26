@@ -84,3 +84,21 @@ def pytest_configure(config):
         return _original_new_func(cls, *args, **kw)
 
     Table._new = classmethod(_tolerant_new)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _kg_test_branch_context():
+    """Bind a default branch into the GraphStore write context for the
+    duration of every test. Production code wraps the same context
+    manager around any code path that mutates the knowledge graph;
+    here we cover the suite-wide need without requiring every test
+    to set it explicitly. Tests that want a specific branch override
+    by nesting their own :func:`set_current_branch` block."""
+
+    from polymathera.colony.knowledge.stores.graph import set_current_branch
+
+    with set_current_branch("main"):
+        yield

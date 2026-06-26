@@ -547,6 +547,132 @@ async def kb_ingest_repo_map_operations(
     return [IngestRepoMapOpStatus(**op) for op in _ingest_ops.values()]
 
 
+class RehydrateRequest(BaseModel):
+    """Rehydrate one branch's (or every active branch's) KG snapshot
+    from the design monorepo into the shared Kùzu store."""
+
+    origin_url: str = Field(description="Git repo URL (https:// or file://)")
+    branch: str = Field(
+        default="main",
+        description=(
+            "Branch to rehydrate from origin. Pass the literal "
+            '"__all__" to iterate every remote branch.'
+        ),
+    )
+
+
+class RehydrateOpStatus(BaseModel):
+    op_id: str
+    status: str = Field(description="pending | running | completed | error")
+    origin_url: str
+    branch: str
+    started_at: float
+    completed_at: float | None = None
+    message: str = ""
+    branches_rehydrated: int = 0
+    claims_in_file: int = 0
+    claims_newly_added: int = 0
+    claims_newly_tagged: int = 0
+    claims_already_present: int = 0
+
+
+_rehydrate_ops: dict[str, dict[str, Any]] = {}
+
+
+@router.post("/kb/rehydrate", response_model=RehydrateOpStatus)
+async def kb_rehydrate(
+    request: RehydrateRequest,
+    background_tasks: BackgroundTasks,
+    _user: dict = Depends(require_auth),
+) -> RehydrateOpStatus:
+    """Rehydrate the shared KG from a design-monorepo snapshot.
+    Returns immediately; poll ``GET /kb/rehydrate/operations`` for
+    progress."""
+
+    op_id = f"rehydrate_{uuid.uuid4().hex[:12]}"
+    op: dict[str, Any] = {
+        "op_id": op_id,
+        "status": "pending",
+        "origin_url": request.origin_url,
+        "branch": request.branch,
+        "started_at": time.time(),
+        "completed_at": None,
+        "message": "",
+        "branches_rehydrated": 0,
+        "claims_in_file": 0,
+        "claims_newly_added": 0,
+        "claims_newly_tagged": 0,
+        "claims_already_present": 0,
+    }
+    _rehydrate_ops[op_id] = op
+    background_tasks.add_task(_run_rehydrate, op_id, request)
+    return RehydrateOpStatus(**op)
+
+
+@router.get(
+    "/kb/rehydrate/operations",
+    response_model=list[RehydrateOpStatus],
+)
+async def kb_rehydrate_operations(
+    _user: dict = Depends(require_auth),
+) -> list[RehydrateOpStatus]:
+    return [RehydrateOpStatus(**op) for op in _rehydrate_ops.values()]
+
+
+async def _run_rehydrate(op_id: str, request: RehydrateRequest) -> None:
+    op = _rehydrate_ops.get(op_id)
+    if not op:
+        return
+    op["status"] = "running"
+    try:
+        from git import Repo
+
+        from polymathera.colony.distributed import get_polymathera
+        from polymathera.colony.knowledge.persistence import (
+            list_remote_branches, rehydrate_branch_from_repo,
+        )
+
+        polymathera = get_polymathera()
+        storage = await polymathera.get_storage()
+        repo_path = await storage.git_storage.clone_or_retrieve_repository(
+            origin_url=request.origin_url,
+            branch="main" if request.branch == "__all__" else request.branch,
+            commit="HEAD",
+        )
+        repo = Repo(str(repo_path))
+
+        branch_names = []
+
+        if request.branch == "__all__":
+            op["message"] = "Discovering branches..."
+            branch_names = await list_remote_branches(repo)
+        else:
+            op["message"] = f"Rehydrating {request.branch}..."
+            branch_names = [request.branch]
+
+        for branch_name in branch_names:
+            op["message"] = f"Rehydrating {branch_name}..."
+            result = await rehydrate_branch_from_repo(repo, branch_name)
+            op["branches_rehydrated"] += 1
+            for k in (
+                "claims_in_file", "claims_newly_added",
+                "claims_newly_tagged", "claims_already_present",
+            ):
+                op[k] += int(result.get(k, 0))
+
+        op["message"] = (
+            f"Rehydrated {op['branches_rehydrated']} branch(es); "
+            f"{op['claims_newly_added']} new + "
+            f"{op['claims_newly_tagged']} retagged"
+        )
+        op["status"] = "completed"
+    except Exception as e:  # noqa: BLE001
+        logger.exception("kb_rehydrate op %s failed", op_id)
+        op["status"] = "error"
+        op["message"] = str(e)
+    op["completed_at"] = time.time()
+
+
 async def _run_ingest_repo_map(
     op_id: str, request: IngestRepoMapRequest,
 ) -> None:

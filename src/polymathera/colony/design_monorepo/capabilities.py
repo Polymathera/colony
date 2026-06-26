@@ -138,7 +138,7 @@ def _commit_paths(
     )
 
 
-def _commit_paths_and_push(
+async def _commit_paths_and_push(
     client: "DesignMonorepoClient",
     identity: "AgentIdentity | CommitIdentity",
     message: str,
@@ -147,8 +147,22 @@ def _commit_paths_and_push(
 ) -> tuple[str, str]:
     """Paths-variant of :func:`_commit_all_and_push`. Same contract,
     same return shape; the caller chose paths-vs-all_changes
-    explicitly via the action's parameters."""
+    explicitly via the action's parameters. Fires every registered
+    pre-commit callback before staging."""
 
+    await _fire_pre_commit(client, identity, message, paths)
+    return await asyncio.to_thread(
+        _commit_paths_and_push_sync, client, identity, message, paths, all_changes,
+    )
+
+
+def _commit_paths_and_push_sync(
+    client: "DesignMonorepoClient",
+    identity: "AgentIdentity | CommitIdentity",
+    message: str,
+    paths: list[Path] | None,
+    all_changes: bool,
+) -> tuple[str, str]:
     try:
         prior_head = client._repo.head.commit.hexsha
     except Exception:  # noqa: BLE001
@@ -165,12 +179,12 @@ def _commit_paths_and_push(
     return commit_sha, "pushed"
 
 
-def _commit_all_and_push(
+async def _commit_all_and_push(
     client: "DesignMonorepoClient",
     identity: "AgentIdentity | CommitIdentity",
     message: str,
 ) -> tuple[str, str]:
-    """Commit-then-push worker for ``asyncio.to_thread``.
+    """Commit-then-push for SHARE-purpose actions.
 
     Commits everything (``git add -A`` + commit) AND pushes the
     current branch to ``origin``. Returns ``(commit_sha,
@@ -184,6 +198,12 @@ def _commit_all_and_push(
     - ``"no_commit"`` — no working-tree changes; nothing to commit
       AND nothing to push. Returned ``commit_sha`` is the current
       HEAD (unchanged).
+
+    Pre-commit callbacks registered with
+    :func:`commit_hooks.get_pre_commit_registry` fire BEFORE
+    ``commit_with_identity`` stages files, so they may write
+    additional files into the working tree and have them picked up
+    by ``git add -A``. A raising callback aborts the commit.
 
     Why commit+push as one helper (vs leaving push to the LLM): every
     commit-producing CAPABILITY ACTION whose purpose is to SHARE
@@ -200,6 +220,17 @@ def _commit_all_and_push(
     which routes through the existing ``_run_or_gate`` predicate.
     """
 
+    await _fire_pre_commit(client, identity, message, None)
+    return await asyncio.to_thread(
+        _commit_all_and_push_sync, client, identity, message,
+    )
+
+
+def _commit_all_and_push_sync(
+    client: "DesignMonorepoClient",
+    identity: "AgentIdentity | CommitIdentity",
+    message: str,
+) -> tuple[str, str]:
     # Snapshot HEAD BEFORE the commit. When ``commit_with_identity``
     # finds nothing to stage, it returns the current HEAD's sha
     # (see ``client.commit_with_identity``); detect that via prior
@@ -223,6 +254,38 @@ def _commit_all_and_push(
         # operator sees ``push_failed:...`` and can react).
         return commit_sha, f"push_failed:{type(exc).__name__}: {exc!s}"[:200]
     return commit_sha, "pushed"
+
+
+async def _fire_pre_commit(
+    client: "DesignMonorepoClient",
+    identity: "AgentIdentity | CommitIdentity",
+    message: str,
+    paths: list[Path] | None,
+) -> None:
+    """Build :class:`PreCommitContext` and invoke every registered
+    callback. Branch is resolved from the client's current HEAD; a
+    detached HEAD or any other read failure falls back to an empty
+    string so callbacks that depend on a branch can decide for
+    themselves whether to skip."""
+
+    from .commit_hooks import PreCommitContext, get_pre_commit_registry
+
+    registry = get_pre_commit_registry()
+    if not registry.names():
+        return
+    try:
+        branch = client.active_branch
+    except Exception:  # noqa: BLE001
+        branch = ""
+    ctx = PreCommitContext(
+        client=client,
+        identity=identity,
+        message=message,
+        branch=branch,
+        paths=list(paths) if paths else None,
+        working_dir=client.working_dir,
+    )
+    await registry.fire_all(ctx)
 
 
 def _build_ingest_commit_message(report: "KnowledgeMaterialisationReport") -> str:
@@ -584,19 +647,21 @@ class DesignMonorepoCapabilityBase(AgentCapability):
             f":design_monorepo:{origin_url or 'local'}:{branch}"
         )
 
-        report = await materialize_design_context_sources(
-            vcm_handle=vcm_handle,
-            repo_map=repo_map,
-            repo_root=repo_root,
-            base_scope_id=base_scope_id,
-            origin_url=origin_url,
-            branch=branch,
-            commit=commit,
-            mmap_config=MmapConfig(),
-            renewer=self._design_context_renewer,
-            include_kuzu=include_kuzu,
-            progress_callback=self._mission_status_progress_callback(),
-        )
+        from ..knowledge.stores.graph import set_current_branch
+        with set_current_branch(branch):
+            report = await materialize_design_context_sources(
+                vcm_handle=vcm_handle,
+                repo_map=repo_map,
+                repo_root=repo_root,
+                base_scope_id=base_scope_id,
+                origin_url=origin_url,
+                branch=branch,
+                commit=commit,
+                mmap_config=MmapConfig(),
+                renewer=self._design_context_renewer,
+                include_kuzu=include_kuzu,
+                progress_callback=self._mission_status_progress_callback(),
+            )
 
         # Emit one DesignContextMappedProtocol event per outcome row
         # (so two events per source when include_kuzu: one with
@@ -1609,11 +1674,13 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
         repo_map = await asyncio.to_thread(RepoMap.load, repo_root)
         colony_id = serving.get_colony_id() or ""
         enabled_list = await list_enabled_knowledge_sources(colony_id)
-        report = await materialize_knowledge_sources(
-            repo_map=repo_map,
-            repo_root=repo_root,
-            enabled_sources=set(enabled_list) if enabled_list is not None else None,
-        )
+        from ..knowledge.stores.graph import set_current_branch
+        with set_current_branch(self.current_branch):
+            report = await materialize_knowledge_sources(
+                repo_map=repo_map,
+                repo_root=repo_root,
+                enabled_sources=set(enabled_list) if enabled_list is not None else None,
+            )
         records = report.records
 
         ingested: list[str] = []
@@ -1648,8 +1715,8 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
             principal, decorated = self._commit_attribution(
                 _build_ingest_commit_message(report),
             )
-            commit_sha, push_status = await asyncio.to_thread(
-                _commit_all_and_push, client, principal, decorated,
+            commit_sha, push_status = await _commit_all_and_push(
+                client, principal, decorated,
             )
             if push_status.startswith("push_failed"):
                 logger.warning(
@@ -1689,6 +1756,38 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
                 "qdrant_url": qdrant_cfg.url or None,
             },
         }
+
+    @action_executor(
+        planning_summary=(
+            "Rehydrate the colony's shared knowledge graph from a "
+            "branch's snapshot in the design monorepo. Reads "
+            "``.colony/colony.kg.json`` from ``origin/<branch>`` "
+            "(post fetch) without disturbing the working tree and "
+            "imports every claim tagged with the normalised branch "
+            "name. Idempotent — re-running on an unchanged branch is "
+            "a fast no-op. If ``branch`` is omitted, uses the clone's "
+            "current branch."
+        ),
+    )
+    async def rehydrate_kg(
+        self, *, branch: str | None = None,
+    ) -> dict[str, Any]:
+        from ..knowledge.persistence import rehydrate_branch_from_repo
+
+        from git import Repo
+
+        repo_root = self._working_dir
+        if not (repo_root / ".git").is_dir():
+            self._lazy_clone_from_agent_metadata()
+        if not (repo_root / ".git").is_dir():
+            raise DesignMonorepoError(
+                f"{repo_root} is not a git repository — set the colony's "
+                "design-monorepo URL on the landing page and start a "
+                "fresh session.",
+            )
+        repo = await asyncio.to_thread(Repo, str(repo_root))
+        target = branch or self.current_branch
+        return await rehydrate_branch_from_repo(repo, target)
 
     @action_executor(
         planning_summary=(
@@ -2377,8 +2476,8 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
             # immediately. The checkpoint's purpose is share-across-
             # sessions — a local-only checkpoint defeats the design
             # (lost when the agent's clone is GC'd).
-            _, push_status = await asyncio.to_thread(
-                _commit_all_and_push, client, principal, decorated,
+            _, push_status = await _commit_all_and_push(
+                client, principal, decorated,
             )
             if push_status.startswith("push_failed"):
                 logger.warning(
@@ -2564,8 +2663,7 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
             # clone defeats the point. Push status is logged on
             # failure but the action's wire shape (``sha``-only)
             # remains stable for existing consumers.
-            sha, push_status = await asyncio.to_thread(
-                _commit_paths_and_push,
+            sha, push_status = await _commit_paths_and_push(
                 client,
                 principal,
                 decorated,
@@ -3372,8 +3470,8 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
             # Commit-AND-push: an auto-checkpoint that doesn't reach
             # the remote is invisible to subsequent sessions, which
             # defeats the durability purpose of the checkpoint.
-            _, push_status = await asyncio.to_thread(
-                _commit_all_and_push, client, principal, decorated,
+            _, push_status = await _commit_all_and_push(
+                client, principal, decorated,
             )
             if push_status.startswith("push_failed"):
                 logger.warning(
@@ -3724,8 +3822,7 @@ class DesignCheckpointer(DesignMonorepoCapabilityBase):
             # branch commit; their intent is to share that commit
             # immediately. Failing to push here would leave the
             # approved commit local-only — defeats the approval.
-            sha, push_status = await asyncio.to_thread(
-                _commit_paths_and_push,
+            sha, push_status = await _commit_paths_and_push(
                 client,
                 identity,
                 decorated,
