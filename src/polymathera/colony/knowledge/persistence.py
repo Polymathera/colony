@@ -26,8 +26,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -35,6 +33,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from git import Repo
 
+from ..utils.files import atomic_write_text
 from .deps import get_knowledge_deps
 from .models import Claim, CitationSpan
 
@@ -142,25 +141,6 @@ def _sorted_claims(claims: Iterable[Claim]) -> list[PersistedClaim]:
     return persisted
 
 
-def _atomic_write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=path.name + ".",
-        suffix=".tmp",
-        dir=str(path.parent),
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp_name, str(path))
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-
-
 async def snapshot_branch_to_file(
     working_dir: Path, branch: str,
 ) -> tuple[Path, int]:
@@ -184,7 +164,7 @@ async def snapshot_branch_to_file(
     if not claims:
         return path, 0
     payload = KgFile(claims=_sorted_claims(claims))
-    _atomic_write(path, payload.to_json())
+    atomic_write_text(path, payload.to_json())
     return path, len(claims)
 
 

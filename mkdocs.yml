@@ -129,6 +129,7 @@ nav:
     - Git Commit Attribution: guides/git-attribution.md
     - Protected Branches & Approval: guides/protected-branches.md
     - Publishing & CI/CD: guides/publishing.md
+    - Training data & fine-tuned serving: guides/training-data.md
   - API Reference:
     - reference/index.md
     - Agent: reference/agent.md

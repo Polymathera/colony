@@ -103,6 +103,7 @@ class ColonyConnection:
         self._db_pool: Any | None = None
         self._span_consumer: Any | None = None
         self._span_query_store: Any | None = None
+        self._span_feedback_store: Any | None = None
         self._log_consumer: Any | None = None
         self._log_query_store: Any | None = None
 
@@ -229,6 +230,10 @@ class ColonyConnection:
             from polymathera.colony.distributed.observability.store import SpanQueryStore
             self._span_query_store = SpanQueryStore(self._db_pool)
 
+            # Per-span human feedback store (same pool)
+            from polymathera.colony.distributed.observability.feedback import SpanFeedbackStore
+            self._span_feedback_store = SpanFeedbackStore(self._db_pool)
+
             # Start Kafka→PG consumer
             from polymathera.colony.distributed.observability.consumer import SpanConsumer
             self._span_consumer = SpanConsumer(
@@ -254,6 +259,10 @@ class ColonyConnection:
     def get_span_query_store(self) -> Any:
         """Get the SpanQueryStore for trace queries."""
         return self._span_query_store
+
+    def get_span_feedback_store(self) -> Any:
+        """Get the SpanFeedbackStore for per-span human feedback."""
+        return self._span_feedback_store
 
     def get_log_query_store(self) -> Any:
         """Get the LogQueryStore for persistent log queries."""
