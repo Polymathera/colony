@@ -155,8 +155,10 @@ class AgentTracingFacility(TracingFacility):
 
     @override
     def summarize_input(self, ctx: HookContext, kind: SpanKind) -> dict[str, Any]:
-        """Extract a truncated input summary from hook context."""
-        max_chars = self._config.max_input_chars
+        """Extract an input summary from hook context (truncated unless
+        ``recording_grade``)."""
+        recording = self._config.recording_grade
+        max_chars = None if recording else self._config.max_input_chars
         summary: dict[str, Any] = {}
 
         if kind == SpanKind.ACTION and ctx.args:
@@ -167,16 +169,17 @@ class AgentTracingFacility(TracingFacility):
             if hasattr(action, "parameters"):
                 params = action.parameters
                 if isinstance(params, dict):
-                    # Truncate large param values
+                    # Truncate large param values; cap key count unless
+                    # recording-grade capture is on.
                     summary["parameters"] = {
                         k: self._get_str_field(v, max_chars)
-                        for k, v in list(params.items())[:10]
+                        for k, v in list(params.items())[: None if recording else 10]
                     }
             if hasattr(action, "reasoning") and action.reasoning:
                 summary["reasoning"] = self._get_str_field(action.reasoning, max_chars)
         elif kind == SpanKind.INFER and self._config.capture_infer_inputs:
             # Capture prompt text for UI inspection
-            max_infer = self._config.max_infer_chars
+            max_infer = None if recording else self._config.max_infer_chars
             prompt = ctx.kwargs.get("prompt")
             if prompt and isinstance(prompt, str):
                 summary["prompt"] = prompt[:max_infer]
@@ -188,8 +191,10 @@ class AgentTracingFacility(TracingFacility):
 
     @override
     def summarize_output(self, join_point: str, kind: SpanKind, result: Any) -> dict[str, Any]:
-        """Extract a truncated output summary from the result."""
-        max_chars = self._config.max_output_chars
+        """Extract an output summary from the result (truncated unless
+        ``recording_grade``)."""
+        recording = self._config.recording_grade
+        max_chars = None if recording else self._config.max_output_chars
         summary: dict[str, Any] = {}
 
         if kind == SpanKind.ACTION and self._config.capture_action_results:
@@ -210,7 +215,7 @@ class AgentTracingFacility(TracingFacility):
                 summary["result"] = self._get_str_field(result, max_chars)
         elif kind == SpanKind.INFER and self._config.capture_infer_inputs:
             # Capture LLM response text for UI inspection
-            max_infer = self._config.max_infer_chars
+            max_infer = None if recording else self._config.max_infer_chars
             generated = getattr(result, "generated_text", None)
             if generated and isinstance(generated, str):
                 summary["response"] = generated[:max_infer]

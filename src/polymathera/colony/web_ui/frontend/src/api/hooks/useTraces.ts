@@ -1,7 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch } from "../client";
-import type { TraceSummary, TraceSpan } from "../types";
+import type { SpanRating, TraceSummary, TraceSpan } from "../types";
 
 export function useTraces(limit = 100) {
   return useQuery({
@@ -33,6 +33,24 @@ export function useTraceSpans(
     queryFn: () =>
       apiFetch<TraceSpan[]>(`/traces/${traceId}/spans${qs}`),
     enabled: !!traceId,
+  });
+}
+
+/** Record (or update) the caller's rating of a single span. */
+export function useRecordSpanFeedback(traceId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { spanId: string; rating: SpanRating; note?: string }) =>
+      apiFetch<{ ok: boolean }>(
+        `/traces/${traceId}/spans/${vars.spanId}/feedback`,
+        {
+          method: "POST",
+          body: JSON.stringify({ rating: vars.rating, note: vars.note ?? null }),
+        },
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["traces", traceId, "spans"] });
+    },
   });
 }
 

@@ -105,6 +105,20 @@ class ChatMessageStore:
 
         return messages
 
+    async def get_message(self, message_id: str) -> dict[str, Any] | None:
+        """Fetch a single message by id, or None if it does not exist."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM chat_messages WHERE id = $1", message_id,
+            )
+        if row is None:
+            return None
+        msg = dict(row)
+        for field in ("response_options", "controls", "attachments", "extra"):
+            if msg.get(field):
+                msg[field] = json.loads(msg[field])
+        return msg
+
     async def mark_reply_received(self, request_id: str) -> None:
         """Mark an agent question as answered (awaiting_reply = False)."""
         async with self._pool.acquire() as conn:

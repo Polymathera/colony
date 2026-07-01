@@ -260,10 +260,13 @@ class TracingFacility(ABC):
 
         return handler
 
-    def _get_str_field(self, value: Any, max_chars: int) -> str:
-        """Convert a value to string and truncate if it exceeds max_chars."""
+    def _get_str_field(self, value: Any, max_chars: int | None) -> str:
+        """Convert a value to string and truncate if it exceeds max_chars.
+
+        ``max_chars=None`` disables truncation (recording-grade capture).
+        """
         s = str(value)
-        if len(s) > max_chars:
+        if max_chars is not None and len(s) > max_chars:
             return s[:max_chars] + "..."
         return s
 

@@ -20,3 +20,8 @@ def get_config(request: Request) -> DashboardConfig:
 def get_colony(request: Request) -> ColonyConnection:
     """Get the Colony connection from app state."""
     return request.app.state.colony
+
+
+def get_chat_store(request: Request):
+    """Get the ChatMessageStore from app state (None if unavailable)."""
+    return getattr(request.app.state, "chat_store", None)

@@ -5,9 +5,10 @@ interface ChatMessageListProps {
   messages: ChatMessageData[];
   onReply?: (message: ChatMessageData, content: string) => void;
   emptyText?: string;
+  sessionId?: string | null;
 }
 
-export function ChatMessageList({ messages, onReply, emptyText }: ChatMessageListProps) {
+export function ChatMessageList({ messages, onReply, emptyText, sessionId }: ChatMessageListProps) {
   const endRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   // Track whether the user is currently near the bottom. Updated by
@@ -84,6 +85,7 @@ export function ChatMessageList({ messages, onReply, emptyText }: ChatMessageLis
           // historically; the overlay carries the widget.
           interactive={false}
           onReply={onReply}
+          sessionId={sessionId}
         />
       ))}
       {/* Bottom-of-timeline working indicator. Sits AS A RAIL NODE so

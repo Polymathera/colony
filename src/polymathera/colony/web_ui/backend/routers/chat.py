@@ -19,16 +19,70 @@ import time
 from typing import Any
 from dataclasses import dataclass
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
-from ..dependencies import get_colony
+from polymathera.colony.distributed.observability.feedback import (
+    SpanFeedbackRatingError,
+)
+
+from ..auth.middleware import require_auth
+from ..dependencies import get_chat_store, get_colony
 from ..services.colony_connection import ColonyConnection
+from .traces import SpanFeedbackRequest
 
 from polymathera.colony.agents.blackboard import EnhancedBlackboard
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+@router.post("/chat/sessions/{session_id}/messages/{message_id}/feedback")
+async def record_message_feedback(
+    session_id: str,
+    message_id: str,
+    body: SpanFeedbackRequest,
+    _user: dict = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+    chat_store=Depends(get_chat_store),
+) -> dict[str, Any]:
+    """Rate an agent chat message.
+
+    The thumb is recorded against the INFER span that produced the
+    message, so chat feedback and Traces-tab span feedback land in the
+    same store and feed the same training signal.
+    """
+    if chat_store is None:
+        raise HTTPException(status_code=503, detail="Chat store unavailable")
+    message = await chat_store.get_message(message_id)
+    if message is None or message.get("session_id") != session_id:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if message.get("role") != "agent":
+        raise HTTPException(status_code=422, detail="Only agent messages can be rated")
+    agent_id = message.get("agent_id")
+    if not agent_id:
+        raise HTTPException(status_code=422, detail="Message has no agent attribution")
+
+    span_store = colony.get_span_query_store()
+    feedback_store = colony.get_span_feedback_store()
+    if span_store is None or feedback_store is None:
+        raise HTTPException(status_code=503, detail="Feedback store unavailable")
+    span_id = await span_store.get_latest_infer_span_id(
+        trace_id=session_id, agent_id=agent_id,
+        before_wall=message.get("timestamp", 0.0),
+    )
+    if span_id is None:
+        raise HTTPException(
+            status_code=422, detail="No traced inference found for this message",
+        )
+    try:
+        await feedback_store.record(
+            trace_id=session_id, span_id=span_id, author=_user["sub"],
+            rating=body.rating, note=body.note,
+        )
+    except SpanFeedbackRatingError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return {"ok": True, "span_id": span_id}
 
 
 @router.websocket("/ws/chat/{session_id}")

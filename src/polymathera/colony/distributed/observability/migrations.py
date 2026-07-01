@@ -38,6 +38,19 @@ CREATE TABLE IF NOT EXISTS spans (
 );
 """
 
+SPAN_FEEDBACK_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS span_feedback (
+    span_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    author TEXT NOT NULL,
+    rating TEXT NOT NULL,
+    note TEXT,
+    created_wall TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_wall TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (span_id, author)
+);
+"""
+
 LOGS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS logs (
     log_id TEXT PRIMARY KEY,
@@ -68,6 +81,10 @@ SPAN_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_spans_kind ON spans (kind);",
 ]
 
+SPAN_FEEDBACK_INDEXES_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_span_feedback_trace ON span_feedback (trace_id);",
+]
+
 LOG_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_logs_session_time ON logs (session_id, timestamp DESC);",
     "CREATE INDEX IF NOT EXISTS idx_logs_run_time ON logs (run_id, timestamp DESC);",
@@ -85,10 +102,13 @@ async def ensure_schema(db_pool: Any) -> None:
             await conn.execute(SPANS_TABLE_SQL)
             for idx_sql in SPAN_INDEXES_SQL:
                 await conn.execute(idx_sql)
+            await conn.execute(SPAN_FEEDBACK_TABLE_SQL)
+            for idx_sql in SPAN_FEEDBACK_INDEXES_SQL:
+                await conn.execute(idx_sql)
             await conn.execute(LOGS_TABLE_SQL)
             for idx_sql in LOG_INDEXES_SQL:
                 await conn.execute(idx_sql)
-        logger.info("Observability schema ensured (spans + logs)")
+        logger.info("Observability schema ensured (spans + span_feedback + logs)")
     except Exception:
         logger.error("Failed to create observability schema", exc_info=True)
         raise

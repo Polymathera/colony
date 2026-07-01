@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { Highlight, themes } from "prism-react-renderer";
 import { Check, X as XIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { apiFetch } from "@/api/client";
 import { AttachmentList, type Attachment } from "./Attachments";
 
 // When a fenced code block exceeds either threshold, the chat message
@@ -158,6 +159,48 @@ const MARKDOWN_COMPONENTS: Components = {
   pre: CollapsiblePre,
 };
 
+// Thumbs on an agent message. The rating is recorded against the INFER
+// span that produced the message (resolved server-side), so it lands in
+// the same feedback store the Traces tab uses.
+function MessageFeedback({ sessionId, messageId }: { sessionId: string; messageId: string }) {
+  const [state, setState] = useState<"idle" | "up" | "down" | "error">("idle");
+
+  const rate = async (rating: "up" | "down") => {
+    try {
+      await apiFetch(
+        `/chat/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/feedback`,
+        { method: "POST", body: JSON.stringify({ rating, note: null }) },
+      );
+      setState(rating);
+    } catch {
+      setState("error");
+    }
+  };
+
+  return (
+    <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
+      <button
+        type="button"
+        onClick={() => rate("up")}
+        className={cn("rounded px-1 hover:text-emerald-400", state === "up" && "text-emerald-400")}
+        title="Helpful"
+      >
+        ▲
+      </button>
+      <button
+        type="button"
+        onClick={() => rate("down")}
+        className={cn("rounded px-1 hover:text-red-400", state === "down" && "text-red-400")}
+        title="Not helpful"
+      >
+        ▼
+      </button>
+      {(state === "up" || state === "down") && <span>recorded</span>}
+      {state === "error" && <span className="text-red-400">couldn’t record</span>}
+    </div>
+  );
+}
+
 export interface ChatMessageData {
   id: string;
   run_id: string | null;
@@ -231,6 +274,10 @@ interface ChatMessageProps {
   // ``false`` so the timeline shows the question + (post-answer)
   // historical content without interactive controls.
   interactive?: boolean;
+  // The session this message belongs to. When provided, agent messages
+  // get a thumbs-up/down control. ``ChatMessageData`` itself carries no
+  // session id, so the host (which knows it) threads it here.
+  sessionId?: string | null;
 }
 
 // Left-rail dot color per (role, status_phase). The dot is the only
@@ -276,7 +323,7 @@ function approvalButtonLabel(
 // before submission.
 const CHOICES_REQUIRING_EXPLANATION = new Set(["reject", "abort"]);
 
-export function ChatMessage({ message, onReply, interactive = true }: ChatMessageProps) {
+export function ChatMessage({ message, onReply, interactive = true, sessionId }: ChatMessageProps) {
   const { role, content, agent_id, agent_type, username, timestamp, request_id, response_options, awaiting_reply, run_status, attachments, action_type, kind, extra, status_phase } = message;
 
   // When the operator clicks ``reject`` or ``abort``, switch the card
@@ -466,6 +513,13 @@ export function ChatMessage({ message, onReply, interactive = true }: ChatMessag
             content so the human-readable summary stays at the top. */}
         {attachments && attachments.length > 0 && (
           <AttachmentList attachments={attachments} />
+        )}
+
+        {/* Thumbs on a finished agent response — training feedback,
+            recorded against the producing INFER span. Suppressed for
+            status entries and for questions still awaiting a reply. */}
+        {role === "agent" && !isStatus && !awaiting_reply && sessionId && message.id && (
+          <MessageFeedback sessionId={sessionId} messageId={message.id} />
         )}
 
         {/* Human-help context — what the agent has tried / observed

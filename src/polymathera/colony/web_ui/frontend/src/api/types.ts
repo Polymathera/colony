@@ -188,6 +188,15 @@ export interface PageGraphData {
 
 /* Observability / Tracing */
 
+export type SpanRating = "up" | "down";
+
+export interface SpanFeedback {
+  author: string;
+  rating: SpanRating;
+  note: string | null;
+  updated_wall: number | null;
+}
+
 export interface TraceSpan {
   span_id: string;
   trace_id: string;
@@ -211,6 +220,8 @@ export interface TraceSpan {
   service_name: string | null;
   tags: string[];
   metadata: Record<string, unknown>;
+  /** Present on the REST view; absent on synthetic/streamed spans. */
+  feedback?: SpanFeedback[];
 }
 
 export interface TraceSummary {

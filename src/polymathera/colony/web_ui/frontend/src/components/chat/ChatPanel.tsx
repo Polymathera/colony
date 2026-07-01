@@ -590,6 +590,7 @@ export function ChatPanel({ sessionId, onTabActivity }: ChatPanelProps) {
             messages={messages}
             onReply={sendReply}
             emptyText={status === "connected" ? "Send a message to begin." : "Connecting..."}
+            sessionId={sessionId}
           />
         </div>
 

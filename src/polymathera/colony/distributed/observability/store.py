@@ -56,6 +56,41 @@ class SpanQueryStore:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
 
+    async def get_latest_infer_span_id(
+        self, trace_id: str, agent_id: str, before_wall: float,
+    ) -> str | None:
+        """The most recent ``INFER`` span for ``agent_id`` in this trace
+        at or before ``before_wall`` (a unix timestamp) — i.e. the
+        inference that produced an agent message emitted at that time.
+        ``None`` when no such span was recorded.
+        """
+        query = """
+            SELECT span_id FROM spans
+            WHERE trace_id = $1 AND agent_id = $2 AND kind = 'infer'
+              AND start_wall <= to_timestamp($3)
+            ORDER BY start_wall DESC
+            LIMIT 1
+        """
+        async with self._db_pool.acquire() as conn:
+            row = await conn.fetchrow(query, trace_id, agent_id, before_wall)
+        return row["span_id"] if row else None
+
+    async def list_recent_run_refs(
+        self, since_wall: float, limit: int = 1000,
+    ) -> list[dict[str, str]]:
+        """Distinct ``(trace_id, run_id)`` pairs with spans at or after
+        ``since_wall`` (a unix timestamp) — the runs a recorder should
+        ingest. Used by the scheduled recording job."""
+        query = """
+            SELECT DISTINCT trace_id, run_id FROM spans
+            WHERE run_id IS NOT NULL AND start_wall >= to_timestamp($1)
+            ORDER BY trace_id, run_id
+            LIMIT $2
+        """
+        async with self._db_pool.acquire() as conn:
+            rows = await conn.fetch(query, since_wall, limit)
+        return [{"trace_id": r["trace_id"], "run_id": r["run_id"]} for r in rows]
+
     async def list_traces(self, limit: int = 100) -> list[dict[str, Any]]:
         """List all traces (distinct trace_ids with aggregated stats)."""
         query = """

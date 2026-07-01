@@ -20,6 +20,10 @@ class TracingConfig:
         flush_batch_size: Max spans per Kafka produce batch
         capture_infer_inputs: Include full LLM prompt text (expensive)
         capture_action_results: Include action result data in spans
+        recording_grade: Disable input/output truncation so spans carry
+            full action and inference payloads. Off by default (normal
+            observability stays cheap); enable on deployments whose
+            traces feed downstream consumers that need full fidelity.
     """
 
     enabled: bool = False
@@ -33,3 +37,4 @@ class TracingConfig:
     flush_batch_size: int = 50
     capture_infer_inputs: bool = True
     capture_action_results: bool = True
+    recording_grade: bool = False

@@ -7,8 +7,13 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from polymathera.colony.distributed.observability.feedback import (
+    SpanFeedbackRatingError,
+)
 
 from ..auth.middleware import require_auth
 from ..dependencies import get_colony
@@ -16,6 +21,11 @@ from ..services.colony_connection import ColonyConnection
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+class SpanFeedbackRequest(BaseModel):
+    rating: str
+    note: str | None = None
 
 
 @router.get("/traces/")
@@ -63,18 +73,54 @@ async def get_trace_spans(
     _user: dict = Depends(require_auth),
     colony: ColonyConnection = Depends(get_colony),
 ) -> list[dict[str, Any]]:
-    """Get all spans for a trace, with optional filters."""
+    """Get all spans for a trace, with optional filters.
+
+    Each span carries its human feedback under ``feedback`` (a list of
+    ``{author, rating, note, updated_wall}``; empty when unrated)."""
     store = colony.get_span_query_store()
     if store is None:
         return []
     try:
-        return await store.get_spans(
+        spans = await store.get_spans(
             trace_id, run_id=run_id, kind=kind,
             ring=ring, service_name=service_name, limit=limit,
         )
     except Exception as e:
         logger.warning("Failed to get spans for trace %s: %s", trace_id, e)
         return []
+
+    feedback_store = colony.get_span_feedback_store()
+    feedback: dict[str, Any] = {}
+    if feedback_store is not None:
+        try:
+            feedback = await feedback_store.get_for_trace(trace_id)
+        except Exception as e:
+            logger.warning("Failed to load span feedback for trace %s: %s", trace_id, e)
+    for span in spans:
+        span["feedback"] = feedback.get(span["span_id"], [])
+    return spans
+
+
+@router.post("/traces/{trace_id}/spans/{span_id}/feedback")
+async def record_span_feedback(
+    trace_id: str,
+    span_id: str,
+    body: SpanFeedbackRequest,
+    _user: dict = Depends(require_auth),
+    colony: ColonyConnection = Depends(get_colony),
+) -> dict[str, Any]:
+    """Record (or update) the caller's rating of a single span."""
+    store = colony.get_span_feedback_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Feedback store unavailable")
+    try:
+        await store.record(
+            trace_id=trace_id, span_id=span_id, author=_user["sub"],
+            rating=body.rating, note=body.note,
+        )
+    except SpanFeedbackRatingError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return {"ok": True}
 
 
 @router.get("/stream/traces/{trace_id}")

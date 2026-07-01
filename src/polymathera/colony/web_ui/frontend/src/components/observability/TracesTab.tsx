@@ -1,10 +1,15 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import { useTraces, useTraceSpans, useTraceStream } from "@/api/hooks/useTraces";
+import {
+  useRecordSpanFeedback,
+  useTraces,
+  useTraceSpans,
+  useTraceStream,
+} from "@/api/hooks/useTraces";
 import { DataTable } from "../shared/DataTable";
 import { Badge } from "../shared/Badge";
 import { MetricCard } from "../shared/MetricCard";
 import { formatTimestamp, formatTokens, cn } from "@/lib/utils";
-import type { TraceSummary, TraceSpan } from "@/api/types";
+import type { SpanRating, TraceSummary, TraceSpan } from "@/api/types";
 import type { TraceViewMode } from "./traces/types";
 import { TraceViewSelector } from "./traces/TraceViewSelector";
 import { AgentSelector } from "./traces/AgentSelector";
@@ -380,6 +385,71 @@ function TextModal({
   );
 }
 
+/** Thumbs-up/down (+ optional note) on a single span. */
+function SpanFeedbackControl({ span }: { span: TraceSpan }) {
+  const mutation = useRecordSpanFeedback(span.trace_id);
+  const [note, setNote] = useState("");
+  const entries = span.feedback ?? [];
+
+  const submit = (rating: SpanRating) => {
+    mutation.mutate(
+      { spanId: span.span_id, rating, note: note.trim() || undefined },
+      { onSuccess: () => setNote("") },
+    );
+  };
+
+  return (
+    <div>
+      <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">
+        Feedback
+      </p>
+      <div className="flex gap-2">
+        <button
+          className="flex-1 rounded border border-green-800/40 bg-green-950/20 px-3 py-2 text-xs font-medium text-green-300 hover:bg-green-950/40 transition-colors disabled:opacity-50"
+          onClick={() => submit("up")}
+          disabled={mutation.isPending}
+        >
+          Helpful
+        </button>
+        <button
+          className="flex-1 rounded border border-red-800/40 bg-red-950/20 px-3 py-2 text-xs font-medium text-red-300 hover:bg-red-950/40 transition-colors disabled:opacity-50"
+          onClick={() => submit("down")}
+          disabled={mutation.isPending}
+        >
+          Not helpful
+        </button>
+      </div>
+      <input
+        className="mt-2 w-full rounded border bg-transparent px-2 py-1 text-xs"
+        placeholder="Optional note"
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+      />
+      {mutation.isError && (
+        <p className="mt-1 text-xs text-red-400">{(mutation.error as Error).message}</p>
+      )}
+      {entries.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {entries.map((f, i) => (
+            <li key={`${f.author}-${i}`} className="flex items-center gap-2 text-xs">
+              <span
+                className={cn(
+                  "font-medium",
+                  f.rating === "up" ? "text-green-400" : "text-red-400",
+                )}
+              >
+                {f.rating === "up" ? "▲" : "▼"}
+              </span>
+              <span className="font-mono text-muted-foreground">{f.author}</span>
+              {f.note && <span className="truncate">{f.note}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function SpanDetail({
   span,
   onNavigateToTimeline,
@@ -406,6 +476,9 @@ function SpanDetail({
           {span.span_id}
         </p>
       </div>
+
+      {/* Feedback */}
+      <SpanFeedbackControl key={span.span_id} span={span} />
 
       {/* Timing */}
       <div className="grid grid-cols-2 gap-3">
@@ -836,11 +909,16 @@ function TraceWaterfallView({
     return () => el.removeEventListener("wheel", handler);
   }, [viewMode]); // re-attach when switching to/from tree view
 
-  // Merge REST + streamed spans (streamed overrides for live updates)
+  // Merge REST + streamed spans (streamed overrides for live updates).
+  // Feedback rides only on the REST view (the stream carries none), so
+  // carry it across the override rather than letting it be clobbered.
   const allSpans = useMemo(() => {
     const merged = new Map<string, TraceSpan>();
     for (const s of restSpans ?? []) merged.set(s.span_id, s);
-    for (const [id, s] of streamedSpans) merged.set(id, s);
+    for (const [id, s] of streamedSpans) {
+      const prior = merged.get(id);
+      merged.set(id, { ...s, feedback: s.feedback ?? prior?.feedback ?? [] });
+    }
     return Array.from(merged.values());
   }, [restSpans, streamedSpans]);
 
