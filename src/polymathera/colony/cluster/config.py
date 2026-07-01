@@ -77,6 +77,21 @@ class LoRAAdapterConfig(BaseModel):
     )
 
 
+# vLLM accepts ``max_lora_rank`` only from a fixed set; an adapter's own
+# rank may be anything ≤ this, so we round the largest configured rank up
+# to the smallest supported value that fits.
+_VLLM_LORA_RANKS = (8, 16, 32, 64, 128, 256)
+
+
+def vllm_max_lora_rank(adapters: list[LoRAAdapterConfig]) -> int:
+    """Smallest vLLM-supported ``max_lora_rank`` covering every adapter."""
+    needed = max(adapter.rank for adapter in adapters)
+    for rank in _VLLM_LORA_RANKS:
+        if rank >= needed:
+            return rank
+    return _VLLM_LORA_RANKS[-1]  # adapter rank is capped at 256 by the field
+
+
 class LLMDeploymentConfig(BaseModel):
     """Configuration for a single vLLM deployment instance.
 
@@ -129,7 +144,9 @@ class LLMDeploymentConfig(BaseModel):
     # Multi-LoRA serving
     lora_adapters: list[LoRAAdapterConfig] | None = Field(
         default=None,
-        description="LoRA adapters for multi-LoRA serving (STUB - not yet implemented)"
+        description="LoRA adapters for multi-LoRA serving. When set, the "
+        "deployment enables vLLM multi-LoRA and serves a request against "
+        "its requirements.lora_adapter_id."
     )
 
     # Multi-tenancy

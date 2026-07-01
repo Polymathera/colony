@@ -31,7 +31,7 @@ from .models import (
     LLMClientState,
     LoadedContextPage,
 )
-from .config import LLMDeploymentConfig
+from .config import LLMDeploymentConfig, vllm_max_lora_rank
 from ..vcm.models import VirtualContextPage, ContextPageId, VirtualPageTableState
 from ..vcm.events import PageEvent, PageLoadedEvent, PageEvictedEvent, PageLoadFailedEvent
 from .registry import ModelRegistry
@@ -187,6 +187,9 @@ class VLLMDeployment(AgentManagerBase):
         self.quantization = quantization
         self.s3_bucket = s3_bucket
         self.s3_retry_attempts = s3_retry_attempts
+        self.lora_adapters = (
+            deployment_config.lora_adapters if deployment_config else None
+        ) or []
 
         # Get model parameters from registry
         model_params = ModelRegistry.get_model(model_name)
@@ -232,6 +235,8 @@ class VLLMDeployment(AgentManagerBase):
 
         # Will be set during initialization
         self.engine: AsyncLLMEngine | None = None
+        # adapter_id → vllm LoRARequest (built in initialize when adapters configured)
+        self._lora_requests: dict[str, Any] = {}
         self.client_id: LLMClientId | None = None
         self.tokenizer: HuggingFaceTokenizer | TiktokenTokenizer | None = None
         self.gpu_metrics: GPUMetricsCollector | None = None
@@ -314,9 +319,18 @@ class VLLMDeployment(AgentManagerBase):
             enable_prefix_caching=True,
         )
 
+        # Multi-LoRA: enable the engine feature when adapters are configured.
+        if self.lora_adapters:
+            engine_args.enable_lora = True
+            engine_args.max_loras = len(self.lora_adapters)
+            engine_args.max_lora_rank = vllm_max_lora_rank(self.lora_adapters)
+
         logger.info(f"Engine arguments prepared: {engine_args}")
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         logger.info(f"vLLM engine initialized for model {self.model_name}")
+
+        # Resolve LoRA adapters to vLLM LoRARequests (downloads S3 weights).
+        await self._build_lora_requests()
 
         # Initialize GPU metrics collector
         try:
@@ -392,8 +406,66 @@ class VLLMDeployment(AgentManagerBase):
         """Report metadata for proxy routing (called by serving framework)."""
         return {"client_id": self.client_id}
 
+    async def _build_lora_requests(self) -> None:
+        """Resolve each configured adapter to a vLLM ``LoRARequest``.
+
+        S3-hosted adapter weights are downloaded the same way the base
+        model is; otherwise the adapter name is handed to vLLM directly
+        (a local path or HuggingFace id). Each adapter gets a stable
+        ``lora_int_id`` (1-based) for the engine.
+        """
+        if not self.lora_adapters:
+            return
+        from vllm.lora.request import LoRARequest
+
+        for idx, adapter in enumerate(self.lora_adapters, start=1):
+            lora_path = adapter.adapter_name
+            if adapter.s3_bucket:
+                loader = S3ModelLoader(
+                    bucket=adapter.s3_bucket,
+                    model_name=adapter.adapter_name,
+                    retry_attempts=self.s3_retry_attempts,
+                )
+                downloaded = await loader.download_and_extract()
+                if downloaded:
+                    lora_path = downloaded
+                else:
+                    logger.warning(
+                        "Failed to download LoRA adapter %s from S3; using %s",
+                        adapter.adapter_id, adapter.adapter_name,
+                    )
+            self._lora_requests[adapter.adapter_id] = LoRARequest(
+                lora_name=adapter.adapter_id,
+                lora_int_id=idx,
+                lora_path=lora_path,
+            )
+        logger.info(
+            "Configured %d LoRA adapter(s): %s",
+            len(self._lora_requests), list(self._lora_requests),
+        )
+
+    def _resolve_lora_request(self, request: InferenceRequest) -> Any | None:
+        """The ``LoRARequest`` this request targets, or ``None``.
+
+        Raises ``ValueError`` when a request asks for an adapter this
+        deployment does not serve — a routing/config mismatch we surface
+        rather than silently answering with the base model.
+        """
+        requirements = request.requirements
+        adapter_id = requirements.lora_adapter_id if requirements else None
+        if adapter_id is None:
+            return None
+        lora_request = self._lora_requests.get(adapter_id)
+        if lora_request is None:
+            raise ValueError(
+                f"LoRA adapter {adapter_id!r} is not configured on deployment "
+                f"{self.model_name!r} (have: {list(self._lora_requests)})"
+            )
+        return lora_request
+
     async def _run_vllm_generation(
         self, prompt: str, sampling_params: Any, request_id: str,
+        lora_request: Any | None = None,
     ) -> Any:
         """Drive ``engine.generate()`` to completion and return the
         final output.
@@ -412,6 +484,7 @@ class VLLMDeployment(AgentManagerBase):
             prompt=prompt,
             sampling_params=sampling_params,
             request_id=request_id,
+            lora_request=lora_request,
         ):
             final_output = output
         return final_output
@@ -526,8 +599,9 @@ class VLLMDeployment(AgentManagerBase):
             # wait or a leaked request-id slot.)
             from .errors import LLMCallDeadlineExceeded as _Deadline
             final_output = None
+            lora_request = self._resolve_lora_request(request)
             generation_task = self._run_vllm_generation(
-                full_prompt, sampling_params, request.request_id,
+                full_prompt, sampling_params, request.request_id, lora_request,
             )
             if request.deadline_s is not None:
                 try:
@@ -1353,10 +1427,12 @@ class VLLMDeployment(AgentManagerBase):
                 # 7. Free suffix KV blocks when request completes (auto cleanup)
 
                 final_output = None
+                lora_request = self._resolve_lora_request(request)
                 async for output in self.engine.generate(
                     prompt=full_prompt,
                     sampling_params=sampling_params,
                     request_id=request.request_id,
+                    lora_request=lora_request,
                 ):
                     final_output = output
 
