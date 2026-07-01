@@ -31,6 +31,7 @@ _CLUSTER_NAMES = {
     "RemoteLLMDeployment",
     "AnthropicLLMDeployment",
     "OpenRouterLLMDeployment",
+    "VllmRemoteDeployment",
 }
 
 _DEPLOYMENT_NAMES = {
@@ -47,6 +48,7 @@ __all__ = [
     "RemoteLLMDeployment",
     "AnthropicLLMDeployment",
     "OpenRouterLLMDeployment",
+    "VllmRemoteDeployment",
     # Routing
     "ContextAwareRouter",
     "PageAffinityRouter",

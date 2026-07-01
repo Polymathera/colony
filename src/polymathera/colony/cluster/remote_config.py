@@ -108,12 +108,20 @@ class RemoteLLMDeploymentConfig(BaseModel):
     model_name: str = Field(
         description="Model name for the API (e.g., 'claude-sonnet-4-20250514')"
     )
-    provider: Literal["anthropic", "openrouter"] = Field(
+    provider: Literal["anthropic", "openrouter", "vllm"] = Field(
         description="LLM API provider"
     )
     api_key_env_var: str = Field(
         default="ANTHROPIC_API_KEY",
         description="Environment variable containing the API key"
+    )
+    base_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL for an OpenAI-compatible endpoint (required for the "
+            "'vllm' provider, e.g. 'http://vllm.internal:8000/v1'). Ignored "
+            "by providers with a fixed endpoint (anthropic, openrouter)."
+        ),
     )
 
     # Simulated capacity (analog of GPU KV cache size)
@@ -209,6 +217,8 @@ class RemoteLLMDeploymentConfig(BaseModel):
             self.min_replicas = self.num_replicas
         if self.max_replicas is None:
             self.max_replicas = self.num_replicas * 2
+        if self.provider == "vllm" and not self.base_url:
+            raise ValueError("the 'vllm' provider requires base_url to be set")
 
     def get_deployment_name(self) -> str:
         """Get deployment name for this configuration.

@@ -31,6 +31,7 @@ _REGISTRY: dict[str, type[RemoteLLMDeployment]] = {}
 _BUILTIN_LAZY_MODULES: dict[str, str] = {
     "anthropic": "polymathera.colony.cluster.anthropic_deployment",
     "openrouter": "polymathera.colony.cluster.openrouter_deployment",
+    "vllm": "polymathera.colony.cluster.vllm_remote_deployment",
 }
 
 

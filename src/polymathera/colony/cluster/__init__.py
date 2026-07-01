@@ -90,6 +90,7 @@ _LLM_NAMES = {
     "RemoteLLMDeployment": ".remote_deployment",
     "AnthropicLLMDeployment": ".anthropic_deployment",
     "OpenRouterLLMDeployment": ".openrouter_deployment",
+    "VllmRemoteDeployment": ".vllm_remote_deployment",
 }
 
 __all__ = [
@@ -109,6 +110,7 @@ __all__ = [
     "RemoteEmbeddingDeployment",
     "AnthropicLLMDeployment",
     "OpenRouterLLMDeployment",
+    "VllmRemoteDeployment",
     "OpenAICompatibleEmbeddingDeployment",
     "GeminiEmbeddingDeployment",
     # Routing
