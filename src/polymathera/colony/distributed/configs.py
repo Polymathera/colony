@@ -301,7 +301,7 @@ class ObservabilityConfig(ConfigComponent):
     # Tracing — Wired through this config so the operator YAML and
     # L2/L3 overlays can override per-deployment.
     tracing_enabled: bool = Field(
-        default=False,
+        default=True,
         json_schema_extra={"env": "TRACING_ENABLED", "optional": True},
     )
     kafka_bootstrap: str = Field(
@@ -311,6 +311,13 @@ class ObservabilityConfig(ConfigComponent):
     kafka_spans_topic: str = Field(
         default="colony.spans",
         json_schema_extra={"env": "KAFKA_SPANS_TOPIC", "optional": True},
+    )
+    recording_grade: bool = Field(
+        default=False,
+        json_schema_extra={"env": "RECORDING_GRADE", "optional": True},
+        description="Lift span input/output truncation so spans carry full "
+        "action/inference payloads. Enable on deployments whose traces feed "
+        "the training-data recorders (which otherwise see truncated spans).",
     )
 
     CONFIG_PATH: ClassVar[str] = "distributed.observability"
@@ -322,6 +329,22 @@ async def get_observability_config() -> "ObservabilityConfig":
     from .config.manager import get_component_or_default
     await get_initialized_polymathera()
     return get_component_or_default(ObservabilityConfig.CONFIG_PATH, ObservabilityConfig)
+
+
+def build_tracing_config(obs: ObservabilityConfig) -> Any:
+    """Build a ``TracingConfig`` from the operator :class:`ObservabilityConfig`.
+
+    The single place the config is copied into the tracing facility, so every
+    facility (agent + LLM deployments) honours the same ``recording_grade`` —
+    the field's absence here is why training spans were being truncated."""
+    from .observability import TracingConfig
+
+    return TracingConfig(
+        enabled=obs.tracing_enabled,
+        kafka_bootstrap=obs.kafka_bootstrap,
+        kafka_topic=obs.kafka_spans_topic,
+        recording_grade=obs.recording_grade,
+    )
 
 
 @register_polymathera_config()

@@ -20,7 +20,6 @@ from typing import Any
 from ..distributed.ray_utils import serving
 from ..distributed.ray_utils.rate_limit import RateLimitConfig, TokenBucketRateLimiter
 from ..distributed.hooks import tracing, hookable
-from ..distributed.observability import TracingConfig
 from ..vcm.events import (
     PageEvent,
     PageEvictedEvent,
@@ -254,16 +253,12 @@ class RemoteLLMDeployment(AgentManagerBase):
             self.redis_om = None
 
         # Initialize distributed tracing from typed ObservabilityConfig.
-        from ..distributed.configs import get_observability_config
+        from ..distributed.configs import build_tracing_config, get_observability_config
         obs = await get_observability_config()
         if obs.tracing_enabled:
             from .observability import ClusterTracingFacility
             self._tracing_facility = ClusterTracingFacility(
-                config=TracingConfig(
-                    enabled=True,
-                    kafka_bootstrap=obs.kafka_bootstrap,
-                    kafka_topic=obs.kafka_spans_topic,
-                ),
+                config=build_tracing_config(obs),
                 owner=self,
                 service_name="RemoteLLMDeployment",
                 deployment_name=self._deployment_id,

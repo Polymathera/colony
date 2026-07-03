@@ -341,6 +341,13 @@ class VLLMDeploymentState(SharedState):
     # Tenant tracking: tenant_id -> tuple(page_id, colony_id)
     tenant_pages: dict[str, set[tuple[str, str]]] = Field(default_factory=dict)
 
+    # Hot-added LoRA adapters, shared across replicas: adapter_id -> a
+    # ``LoRAAdapterConfig`` dump. A runtime ``add_lora_adapter`` writes here;
+    # each replica lazily downloads + registers an adapter from this catalog
+    # on first use, so newly added adapters (and autoscaled-in replicas)
+    # serve without a redeploy.
+    registered_adapters: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
     @staticmethod
     def get_state_key(app_name: str, deployment_name: str) -> str:
         """Get the state key for this deployment."""

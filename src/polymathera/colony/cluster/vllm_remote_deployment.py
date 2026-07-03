@@ -1,12 +1,18 @@
-"""Self-hosted remote vLLM deployment — OpenAI-compatible API at a URL.
+"""Remote-client for a self-hosted colony serving *fleet*.
 
 The *remote-client* counterpart to the in-cluster :class:`VLLMDeployment`:
-this talks to a model served on a separate, self-hosted vLLM behind an
-OpenAI-compatible ``/v1`` endpoint (e.g. a fine-tuned LoRA adapter). It
-sends plain OpenAI messages — Anthropic ``cache_control`` markers don't
-apply to the OpenAI API (vLLM does prefix caching server-side when
-enabled). Self-hosted, so ``cost_usd`` is modeled as 0 (no per-token API
-charge). Requires: pip install openai.
+a thin forwarder that runs as a Ray actor in the *local* cluster and talks
+to a fine-tuned model served on a separate AWS fleet (its own Ray cluster
+running :class:`VLLMDeployment`) behind a **partial-OpenAI** HTTP surface.
+
+- Plain ``infer`` uses the fleet's OpenAI ``/v1/chat/completions`` (the
+  inherited base path via ``_call_api``); ``cost_usd`` is 0 (self-hosted).
+- ``load_page``/``evict_page``/``infer_with_suffix`` are **forwarded** to
+  the fleet's colony paging endpoints, so request-to-page affinity uses
+  the fleet's real VCM paging + router (Option A: the fleet owns paging +
+  routing; this deployment keeps no local page state).
+
+Requires: pip install openai.
 """
 
 from __future__ import annotations
@@ -16,9 +22,13 @@ import os
 from typing import Any
 
 from ..distributed.hooks import hookable
+from ..distributed.ray_utils import serving
+from ..vcm.models import ContextPageId, VirtualContextPage
+from .models import InferenceRequest, InferenceResponse
 from .remote_config import RemoteLLMDeploymentConfig
 from .remote_deployment import APIResponse, RemoteLLMDeployment
 from .remote_registry import register_remote_llm_provider
+from .routing import TargetClientRouter
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +44,8 @@ class VllmRemoteDeployment(RemoteLLMDeployment):
 
     def __init__(self, config: RemoteLLMDeploymentConfig):
         super().__init__(config)
-        self._client = None  # openai.AsyncOpenAI
+        self._client = None  # openai.AsyncOpenAI (chat completions)
+        self._http = None    # httpx.AsyncClient (colony paging endpoints)
 
     async def _initialize_client(self) -> None:
         try:
@@ -67,10 +78,63 @@ class VllmRemoteDeployment(RemoteLLMDeployment):
                 ),
             ),
         )
+        # Separate httpx client for the fleet's colony paging endpoints
+        # (``/load_page`` etc. under the same base_url as ``/v1/chat/...``).
+        self._http = httpx.AsyncClient(
+            base_url=self.config.base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=httpx.Timeout(
+                connect=10.0, read=self.config.api_timeout_seconds,
+                write=30.0, pool=30.0,
+            ),
+        )
         logger.info(
             "Initialized vLLM client for model %s at %s",
             self.config.model_name, self.config.base_url,
         )
+
+    async def _fleet_post(self, path: str, payload: dict[str, Any]) -> Any:
+        """POST to a fleet colony endpoint and return the parsed JSON."""
+        response = await self._http.post(path, json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    # ---- colony paging surface: forwarded to the fleet (Option A) --------
+
+    @serving.endpoint(
+        router_class=TargetClientRouter,
+        router_kwargs={"strip_routing_params": ["target_client_id"]},
+    )
+    @hookable
+    async def load_page(self, page: VirtualContextPage) -> bool:
+        """Forward the page load to the fleet, which loads it on a GPU
+        replica; the fleet's router then keeps affine requests there."""
+        serving.ensure_context(page.page_id, page.syscontext)
+        return bool(await self._fleet_post("/load_page", {"page": page.model_dump(mode="json")}))
+
+    @serving.endpoint
+    async def evict_page(self, page_id: ContextPageId) -> bool:
+        """Forward the page eviction to the fleet."""
+        return bool(await self._fleet_post("/evict_page", {"page_id": page_id}))
+
+    @serving.endpoint
+    @hookable
+    async def infer_with_suffix(
+        self,
+        base_page_id: ContextPageId,
+        request: InferenceRequest,
+        suffix_tokens: list[int] | None = None,
+        max_concurrent_per_page: int | None = None,
+    ) -> InferenceResponse:
+        """Forward page-prefixed inference to the fleet, which serves it
+        against the cached page on the affine replica."""
+        serving.ensure_context(request.request_id, request.syscontext)
+        data = await self._fleet_post("/infer_with_suffix", {
+            "base_page_id": base_page_id,
+            "request": request.model_dump(mode="json"),
+            "suffix_tokens": suffix_tokens,
+        })
+        return InferenceResponse.model_validate(data)
 
     @hookable
     async def _call_api(
@@ -95,6 +159,14 @@ class VllmRemoteDeployment(RemoteLLMDeployment):
             kwargs["response_format"] = {"type": "json_schema", "json_schema": json_schema}
         if deadline_s is not None:
             kwargs["timeout"] = deadline_s
+        # Propagate tenant identity to the fleet's /v1/chat/completions so it
+        # can build a valid request context (headless fleet has no ambient one).
+        ctx = serving.get_execution_context()
+        if ctx is not None and ctx.colony_id and ctx.tenant_id:
+            kwargs["extra_headers"] = {
+                "X-Colony-Id": ctx.colony_id,
+                "X-Tenant-Id": ctx.tenant_id,
+            }
 
         try:
             response = await self._client.chat.completions.create(**kwargs)

@@ -2404,14 +2404,10 @@ class Agent(BaseModel):
 
     async def _init_tracing_config(self) -> None:
         """Initialize tracing config from the typed ObservabilityConfig."""
-        from ..distributed.configs import get_observability_config
+        from ..distributed.configs import build_tracing_config, get_observability_config
         cfg = await get_observability_config()
         if cfg.tracing_enabled:
-            self._tracing_config = TracingConfig(
-                enabled=True,
-                kafka_bootstrap=cfg.kafka_bootstrap,
-                kafka_topic=cfg.kafka_spans_topic,
-            )
+            self._tracing_config = build_tracing_config(cfg)
 
     async def emit_lifecycle_stop_event(self, stop_reason: str, error_msg: str | None = None, iteration: int | None = None) -> None:
         """Emit a lifecycle stop event for this agent."""

@@ -304,6 +304,10 @@ class VLLMDeploymentYAMLConfig:
     num_replicas: int = 2
     quantization: str | None = None
     s3_bucket: str | None = None
+    # Runtime LoRA hot-add capacity (>0 enables multi-LoRA + add_lora_adapter,
+    # e.g. an Option-A serving fleet). max_lora_rank bounds hot-added ranks.
+    max_lora_slots: int = 0
+    max_lora_rank: int = 16
 
 
 @dataclass
@@ -314,8 +318,11 @@ class RemoteDeploymentYAMLConfig:
     RemoteLLMDeploymentConfig when building the PolymatheraCluster.
     """
     model_name: str = "claude-sonnet-4-20250514"
-    provider: str = "anthropic"  # "anthropic" or "openrouter"
+    provider: str = "anthropic"  # "anthropic" | "openrouter" | "vllm"
     api_key_env_var: str = "ANTHROPIC_API_KEY"
+    # Required for provider "vllm": the self-hosted OpenAI-compatible endpoint
+    # (e.g. an Option-A serving fleet's NLB URL).
+    base_url: str | None = None
     max_cached_pages: int = 50
     max_cached_tokens: int = 2_000_000
     system_prompt: str | None = None
@@ -1033,6 +1040,7 @@ def _resolve_class(
 def _build_cluster_config(
     config: TestConfig,
     effective_app_name: str,
+    serving_only: bool = False,
 ) -> "PolymatheraClusterConfig":
     """Build PolymatheraClusterConfig from TestConfig.
 
@@ -1056,6 +1064,7 @@ def _build_cluster_config(
     from polymathera.colony.cluster.remote_config import RemoteLLMDeploymentConfig
     from polymathera.colony.vcm.config import VCMConfig
     from polymathera.colony.agents.config import AgentSystemConfig
+    from polymathera.colony.knowledge.cluster_config import KnowledgeConfig
 
     # Build RemoteLLMDeploymentConfig objects from YAML config
     remote_deployment_configs = []
@@ -1063,6 +1072,7 @@ def _build_cluster_config(
         remote_deployment_configs.append(RemoteLLMDeploymentConfig(
             model_name=rd.model_name,
             provider=rd.provider,
+            base_url=rd.base_url,
             api_key_env_var=rd.api_key_env_var,
             max_cached_pages=rd.max_cached_pages,
             max_cached_tokens=rd.max_cached_tokens,
@@ -1087,6 +1097,8 @@ def _build_cluster_config(
             max_model_len=vd.max_model_len,
             kv_cache_capacity=vd.kv_cache_capacity,
             num_replicas=vd.num_replicas,
+            max_lora_slots=vd.max_lora_slots,
+            max_lora_rank=vd.max_lora_rank,
         ))
 
     # Build embedding config from YAML (if specified)
@@ -1153,7 +1165,10 @@ def _build_cluster_config(
         metrics_collection_interval_s=config.vcm.metrics_collection_interval_s,
         reconciliation_interval_s=config.vcm.reconciliation_interval_s,
     )
-    agent_system_config = AgentSystemConfig(
+    # A serving-only slice (headless inference + paging) deploys just the
+    # LLM cluster + VCM; the agent system and knowledge layers are passed
+    # as None so add_deployments_to_app skips them.
+    agent_system_config = None if serving_only else AgentSystemConfig(
         max_retries=config.agent_system.max_retries,
         enable_sessions=config.agent_system.enable_sessions,
         default_session_ttl=config.agent_system.default_session_ttl,
@@ -1165,6 +1180,7 @@ def _build_cluster_config(
         llm_cluster_config=cluster_config,
         vcm_config=vcm_config,
         agent_system_config=agent_system_config,
+        knowledge_config=None if serving_only else KnowledgeConfig(),
         cleanup_on_init=config.cluster.cleanup_on_init,
     )
     return polyconfig
@@ -1173,6 +1189,8 @@ def _build_cluster_config(
 async def deploy_cluster(
     config: TestConfig,
     app_name: str | None = None,
+    *,
+    serving_only: bool = False,
 ) -> tuple["PolymatheraCluster", str]:
     """Connect to Ray and deploy the Colony cluster.
 
@@ -1188,6 +1206,9 @@ async def deploy_cluster(
     Args:
         config: Test configuration with cluster/vcm/agent_system sections.
         app_name: Override serving application name. If None, uses config default.
+        serving_only: Deploy just the LLM cluster + VCM (headless inference +
+            paging); skip the agent system and knowledge layers. Used by
+            ``polymath serve`` to stand up a serving fleet.
 
     Returns:
         Tuple of (PolymatheraCluster, effective_app_name).
@@ -1263,7 +1284,7 @@ async def deploy_cluster(
     # -----------------------------------------------------------------------
     # Use the deployed app name for subsequent handle lookups
     effective_app_name = app_name or config.cluster.app_name
-    polyconfig = _build_cluster_config(config, effective_app_name)
+    polyconfig = _build_cluster_config(config, effective_app_name, serving_only=serving_only)
 
     vllm_deployment_configs = polyconfig.llm_cluster_config.vllm_deployments
     remote_deployment_configs = polyconfig.llm_cluster_config.remote_deployments
@@ -1920,6 +1941,115 @@ def deploy(
             signal.pause()  # Block until signal (SIGTERM/SIGINT)
         except KeyboardInterrupt:
             console.print("\n[yellow]Shutting down...[/yellow]")
+
+
+# ---------------------------------------------------------------------------
+# polymath serve
+# ---------------------------------------------------------------------------
+
+@app.command()
+def serve(
+    config: str = typer.Option(
+        ...,
+        "--config", "-c",
+        help="YAML config for the serving slice (one cluster.vllm_deployments entry).",
+    ),
+    deployment: Optional[str] = typer.Option(
+        None,
+        "--deployment",
+        help="vLLM deployment name to expose. Defaults to the single configured "
+             "vLLM deployment.",
+    ),
+    app_name: Optional[str] = typer.Option(
+        None,
+        "--app-name",
+        help="Polymathera serving application name (defaults to the config's).",
+    ),
+    host: str = typer.Option("0.0.0.0", "--host", help="Gateway bind address."),
+    port: int = typer.Option(8000, "--port", help="Gateway bind port."),
+    api_key_env: str = typer.Option(
+        "VLLM_API_KEY",
+        "--api-key-env",
+        help="Env var holding the bearer token that gates the gateway (empty = open).",
+    ),
+    working_dir: Optional[str] = typer.Option(
+        None,
+        "--working-dir", "-w",
+        help="Directory of user code to distribute to Ray workers.",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging."),
+) -> None:
+    """Deploy a headless serving slice and serve its partial-OpenAI gateway.
+
+    Reuses the same launcher as ``polymath deploy`` — connects to Ray and
+    deploys only the LLM cluster + VCM (no agent system, no sessions) from
+    the YAML — then exposes the deployed ``VLLMDeployment`` over the
+    partial-OpenAI HTTP shim (``/v1/chat/completions`` + colony paging +
+    ``/add_lora_adapter``) and blocks. This is what an in-app
+    ``VllmRemoteDeployment`` (the ``vllm`` provider) talks to.
+
+    [bold]Example (an Option-A serving fleet):[/bold]
+
+        polymath serve --config fleet.yaml --port 8000
+    """
+    if verbose:
+        logging.getLogger("polymath").setLevel(logging.DEBUG)
+        logging.getLogger("colony").setLevel(logging.DEBUG)
+
+    try:
+        test_config = load_config_from_yaml(config)
+    except Exception as e:
+        console.print(f"[red]Failed to load config: {e}[/red]")
+        raise typer.Exit(1)
+    if working_dir is not None:
+        test_config.working_dir = working_dir
+
+    if not test_config.cluster.vllm_deployments:
+        console.print(
+            "[red]serve requires a cluster.vllm_deployments entry in the config "
+            "(the model this fleet serves).[/red]"
+        )
+        raise typer.Exit(1)
+
+    console.print(Panel(
+        "[bold]polymath serve[/bold] — headless serving slice + partial-OpenAI gateway",
+        title="[bold magenta]Serving Fleet[/bold magenta]",
+        border_style="magenta",
+    ))
+
+    async def _serve() -> None:
+        import uvicorn
+
+        from polymathera.colony.system import get_vllm_deployment
+        from polymathera.colony.cluster.remote_serving_gateway import (
+            create_serving_gateway,
+        )
+
+        polycluster, effective_app_name = await deploy_cluster(
+            test_config, app_name, serving_only=True,
+        )
+        # Resolve the exact name the LLM cluster registered the VLLMDeployment
+        # under (LLMDeploymentConfig.get_deployment_name) — no guessing.
+        vllm_configs = polycluster.config.llm_cluster_config.vllm_deployments
+        dep_name = deployment or vllm_configs[0].get_deployment_name()
+        handle = get_vllm_deployment(dep_name, effective_app_name)
+
+        gateway = create_serving_gateway(
+            lambda: handle, api_key=os.environ.get(api_key_env, ""),
+        )
+        console.print(
+            f"  [green]OK[/green] — serving [cyan]{dep_name}[/cyan] "
+            f"(app={effective_app_name}) on {host}:{port}"
+        )
+        server = uvicorn.Server(
+            uvicorn.Config(gateway, host=host, port=port, log_level="info"),
+        )
+        await server.serve()
+
+    try:
+        asyncio.run(_serve())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Shutting down...[/yellow]")
 
 
 # ---------------------------------------------------------------------------

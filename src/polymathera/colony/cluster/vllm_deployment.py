@@ -31,7 +31,7 @@ from .models import (
     LLMClientState,
     LoadedContextPage,
 )
-from .config import LLMDeploymentConfig, vllm_max_lora_rank
+from .config import LLMDeploymentConfig, LoRAAdapterConfig, round_up_lora_rank
 from ..vcm.models import VirtualContextPage, ContextPageId, VirtualPageTableState
 from ..vcm.events import PageEvent, PageLoadedEvent, PageEvictedEvent, PageLoadFailedEvent
 from .registry import ModelRegistry
@@ -190,6 +190,13 @@ class VLLMDeployment(AgentManagerBase):
         self.lora_adapters = (
             deployment_config.lora_adapters if deployment_config else None
         ) or []
+        # Hot-add capacity: reserve engine LoRA slots + a rank ceiling for
+        # adapters added at runtime (max_loras / max_lora_rank are fixed at
+        # engine init). Set in initialize() once the engine is built.
+        self._max_lora_slots = deployment_config.max_lora_slots if deployment_config else 0
+        self._lora_rank_ceiling = deployment_config.max_lora_rank if deployment_config else 16
+        self._lora_enabled = False
+        self._engine_max_lora_rank = 0
 
         # Get model parameters from registry
         model_params = ModelRegistry.get_model(model_name)
@@ -319,11 +326,19 @@ class VLLMDeployment(AgentManagerBase):
             enable_prefix_caching=True,
         )
 
-        # Multi-LoRA: enable the engine feature when adapters are configured.
-        if self.lora_adapters:
+        # Multi-LoRA: enable when static adapters are configured OR hot-add
+        # capacity is reserved (max_lora_slots). max_loras/max_lora_rank are
+        # fixed at engine init, so size them for runtime-added adapters too.
+        slots = max(len(self.lora_adapters), self._max_lora_slots)
+        if slots > 0:
+            ranks = [adapter.rank for adapter in self.lora_adapters]
+            if self._max_lora_slots:
+                ranks.append(self._lora_rank_ceiling)
             engine_args.enable_lora = True
-            engine_args.max_loras = len(self.lora_adapters)
-            engine_args.max_lora_rank = vllm_max_lora_rank(self.lora_adapters)
+            engine_args.max_loras = slots
+            engine_args.max_lora_rank = round_up_lora_rank(max(ranks))
+            self._lora_enabled = True
+            self._engine_max_lora_rank = engine_args.max_lora_rank
 
         logger.info(f"Engine arguments prepared: {engine_args}")
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
@@ -407,42 +422,97 @@ class VLLMDeployment(AgentManagerBase):
         return {"client_id": self.client_id}
 
     async def _build_lora_requests(self) -> None:
-        """Resolve each configured adapter to a vLLM ``LoRARequest``.
+        """Register each statically-configured adapter as a ``LoRARequest``
+        (downloading S3 weights). Runtime adapters arrive later via
+        :meth:`add_lora_adapter`."""
+        for adapter in self.lora_adapters:
+            await self._ensure_adapter(adapter.adapter_id, adapter)
+        if self._lora_requests:
+            logger.info(
+                "Configured %d LoRA adapter(s): %s",
+                len(self._lora_requests), list(self._lora_requests),
+            )
 
-        S3-hosted adapter weights are downloaded the same way the base
-        model is; otherwise the adapter name is handed to vLLM directly
-        (a local path or HuggingFace id). Each adapter gets a stable
-        ``lora_int_id`` (1-based) for the engine.
-        """
-        if not self.lora_adapters:
+    def _next_lora_int_id(self) -> int:
+        existing = [req.lora_int_id for req in self._lora_requests.values()]
+        return max(existing, default=0) + 1
+
+    async def _ensure_adapter(
+        self, adapter_id: str, adapter: LoRAAdapterConfig | None = None,
+    ) -> None:
+        """Make ``adapter_id`` servable on THIS replica: download its
+        weights (once) and register a ``LoRARequest``. ``adapter`` is
+        supplied on a hot-add; otherwise it is resolved from the shared
+        catalog (lazy — for a replica that missed the hot-add or
+        autoscaled in). Unknown here → no-op; ``_resolve_lora_request``
+        surfaces the mismatch."""
+        if adapter_id in self._lora_requests:
             return
+        if adapter is None:
+            spec: dict[str, Any] | None = None
+            async for state in self.state_manager.read_transaction():
+                spec = state.registered_adapters.get(adapter_id)
+            if spec is None:
+                return
+            adapter = LoRAAdapterConfig.model_validate(spec)
+
         from vllm.lora.request import LoRARequest
 
-        for idx, adapter in enumerate(self.lora_adapters, start=1):
-            lora_path = adapter.adapter_name
-            if adapter.s3_bucket:
-                loader = S3ModelLoader(
-                    bucket=adapter.s3_bucket,
-                    model_name=adapter.adapter_name,
-                    retry_attempts=self.s3_retry_attempts,
-                )
-                downloaded = await loader.download_and_extract()
-                if downloaded:
-                    lora_path = downloaded
-                else:
-                    logger.warning(
-                        "Failed to download LoRA adapter %s from S3; using %s",
-                        adapter.adapter_id, adapter.adapter_name,
-                    )
-            self._lora_requests[adapter.adapter_id] = LoRARequest(
-                lora_name=adapter.adapter_id,
-                lora_int_id=idx,
-                lora_path=lora_path,
+        lora_path = adapter.adapter_name
+        if adapter.s3_bucket:
+            loader = S3ModelLoader(
+                bucket=adapter.s3_bucket,
+                model_name=adapter.adapter_name,
+                retry_attempts=self.s3_retry_attempts,
             )
-        logger.info(
-            "Configured %d LoRA adapter(s): %s",
-            len(self._lora_requests), list(self._lora_requests),
+            downloaded = await loader.download_and_extract()
+            if downloaded:
+                lora_path = downloaded
+            else:
+                logger.warning(
+                    "Failed to download LoRA adapter %s from s3://%s; using %s",
+                    adapter_id, adapter.s3_bucket, adapter.adapter_name,
+                )
+        self._lora_requests[adapter_id] = LoRARequest(
+            lora_name=adapter_id,
+            lora_int_id=self._next_lora_int_id(),
+            lora_path=lora_path,
         )
+        logger.info("Registered LoRA adapter %s (path=%s)", adapter_id, lora_path)
+
+    @serving.endpoint(ring=serving.Ring.KERNEL)
+    async def add_lora_adapter(self, adapter: LoRAAdapterConfig) -> str:
+        """Hot-add a LoRA adapter at runtime — the §5.8 promotion path.
+
+        Records the adapter in the shared catalog (so every replica,
+        including autoscaled-in ones, serves it) and warms THIS replica.
+        Idempotent by ``adapter_id``; requires ``max_lora_slots > 0``. This
+        is a KERNEL (infra) endpoint — REST-locked on the serving fleet."""
+        if not self._lora_enabled:
+            raise ValueError(
+                "LoRA serving is not enabled on this deployment; set "
+                "max_lora_slots > 0 to hot-add adapters."
+            )
+        if adapter.rank > self._engine_max_lora_rank:
+            raise ValueError(
+                f"adapter {adapter.adapter_id!r} rank {adapter.rank} exceeds "
+                f"the engine max_lora_rank {self._engine_max_lora_rank}; raise "
+                f"max_lora_rank and redeploy the serving fleet."
+            )
+        async for state in self.state_manager.write_transaction():
+            state.registered_adapters[adapter.adapter_id] = adapter.model_dump()
+        await self._ensure_adapter(adapter.adapter_id, adapter)
+        return adapter.adapter_id
+
+    async def _ensure_requested_adapter(self, request: InferenceRequest) -> None:
+        """Before resolving, lazily register a hot-added adapter this
+        replica hasn't loaded yet (from the shared catalog) — so a request
+        for a just-promoted adapter is served even by a replica that missed
+        the hot-add or autoscaled in after it."""
+        requirements = request.requirements
+        adapter_id = requirements.lora_adapter_id if requirements else None
+        if adapter_id is not None and adapter_id not in self._lora_requests:
+            await self._ensure_adapter(adapter_id)
 
     def _resolve_lora_request(self, request: InferenceRequest) -> Any | None:
         """The ``LoRARequest`` this request targets, or ``None``.
@@ -599,6 +669,7 @@ class VLLMDeployment(AgentManagerBase):
             # wait or a leaked request-id slot.)
             from .errors import LLMCallDeadlineExceeded as _Deadline
             final_output = None
+            await self._ensure_requested_adapter(request)
             lora_request = self._resolve_lora_request(request)
             generation_task = self._run_vllm_generation(
                 full_prompt, sampling_params, request.request_id, lora_request,
@@ -1427,6 +1498,7 @@ class VLLMDeployment(AgentManagerBase):
                 # 7. Free suffix KV blocks when request completes (auto cleanup)
 
                 final_output = None
+                await self._ensure_requested_adapter(request)
                 lora_request = self._resolve_lora_request(request)
                 async for output in self.engine.generate(
                     prompt=full_prompt,

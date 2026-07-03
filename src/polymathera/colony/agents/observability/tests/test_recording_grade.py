@@ -70,3 +70,18 @@ def test_input_full_and_all_params_under_recording_grade() -> None:
     assert summ["parameters"]["k0"] == "z" * 5000
     # … and the 10-key cap is lifted.
     assert len(summ["parameters"]) == 15
+
+
+def test_recording_grade_flows_from_observability_config() -> None:
+    # The activation path the operator actually uses: ObservabilityConfig
+    # (env RECORDING_GRADE / YAML) → TracingConfig → facility. Its absence
+    # is why production spans were truncated regardless of the flag.
+    from polymathera.colony.distributed.configs import (
+        ObservabilityConfig,
+        build_tracing_config,
+    )
+
+    on = build_tracing_config(ObservabilityConfig(tracing_enabled=True, recording_grade=True))
+    assert on.enabled and on.recording_grade
+    off = build_tracing_config(ObservabilityConfig(tracing_enabled=True))
+    assert off.recording_grade is False

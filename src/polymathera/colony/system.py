@@ -51,8 +51,11 @@ class PolymatheraClusterConfig(ConfigComponent):
     app_name: str | None = None
     llm_cluster_config: ClusterConfig | None = None
     vcm_config: VCMConfig = Field(default_factory=VCMConfig)
-    agent_system_config: AgentSystemConfig = Field(default_factory=AgentSystemConfig)
-    knowledge_config: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
+    # ``None`` skips the component's deployment — a headless serving slice
+    # (inference + paging, no agents) deploys only the LLM cluster + VCM.
+    # The default factories keep the full-cluster path unchanged.
+    agent_system_config: AgentSystemConfig | None = Field(default_factory=AgentSystemConfig)
+    knowledge_config: KnowledgeConfig | None = Field(default_factory=KnowledgeConfig)
     cleanup_on_init: bool = False
 
     def assert_ready_for_deploy(self) -> None:
@@ -100,13 +103,23 @@ class PolymatheraClusterConfig(ConfigComponent):
         # this brings up the matching *ExtractorDeployment. Hosted
         # backends are no-ops at deploy time; every worker resolves
         # the active reader from KnowledgeConfig directly via the
-        # global ConfigurationManager.
-        self.knowledge_config.add_deployments_to_app(app, top_level=False)
+        # global ConfigurationManager. ``None`` skips it (serving slice).
+        if self.knowledge_config is not None:
+            self.knowledge_config.add_deployments_to_app(app, top_level=False)
 
-        # Agent system deployments
-        self.agent_system_config.add_deployments_to_app(app, top_level=False)
+        # Agent system deployments. ``None`` skips them — a serving-only
+        # slice (headless inference + paging) has no agents to run.
+        if self.agent_system_config is not None:
+            self.agent_system_config.add_deployments_to_app(app, top_level=False)
 
-        logger.info(f"Added all Polymathera deployments to app '{app.name}' (LLMCluster, VCM, Agent System)")
+        deployed = ["LLMCluster", "VCM"]
+        if self.knowledge_config is not None:
+            deployed.append("Knowledge")
+        if self.agent_system_config is not None:
+            deployed.append("Agent System")
+        logger.info(
+            f"Added Polymathera deployments to app '{app.name}' ({', '.join(deployed)})"
+        )
 
 
 

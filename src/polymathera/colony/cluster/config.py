@@ -83,13 +83,17 @@ class LoRAAdapterConfig(BaseModel):
 _VLLM_LORA_RANKS = (8, 16, 32, 64, 128, 256)
 
 
-def vllm_max_lora_rank(adapters: list[LoRAAdapterConfig]) -> int:
-    """Smallest vLLM-supported ``max_lora_rank`` covering every adapter."""
-    needed = max(adapter.rank for adapter in adapters)
+def round_up_lora_rank(needed: int) -> int:
+    """Smallest vLLM-supported ``max_lora_rank`` that is ``>= needed``."""
     for rank in _VLLM_LORA_RANKS:
         if rank >= needed:
             return rank
     return _VLLM_LORA_RANKS[-1]  # adapter rank is capped at 256 by the field
+
+
+def vllm_max_lora_rank(adapters: list[LoRAAdapterConfig]) -> int:
+    """Smallest vLLM-supported ``max_lora_rank`` covering every adapter."""
+    return round_up_lora_rank(max(adapter.rank for adapter in adapters))
 
 
 class LLMDeploymentConfig(BaseModel):
@@ -147,6 +151,22 @@ class LLMDeploymentConfig(BaseModel):
         description="LoRA adapters for multi-LoRA serving. When set, the "
         "deployment enables vLLM multi-LoRA and serves a request against "
         "its requirements.lora_adapter_id."
+    )
+    max_lora_slots: int = Field(
+        default=0,
+        ge=0,
+        description="Capacity for runtime-added LoRA adapters (vLLM "
+        "max_loras). >0 enables multi-LoRA even with no static adapters and "
+        "lets the deployment hot-add adapters via add_lora_adapter. The "
+        "engine loads up to this many adapters concurrently (LRU beyond).",
+    )
+    max_lora_rank: int = Field(
+        default=16,
+        ge=1,
+        le=256,
+        description="Rank ceiling for hot-added adapters (the engine's "
+        "max_lora_rank is fixed at init). A hot-add whose rank exceeds this "
+        "is rejected. Ignored unless max_lora_slots > 0.",
     )
 
     # Multi-tenancy
