@@ -53,11 +53,22 @@ async def get_agent_db_pool() -> Any:
         if _agent_db_pool is not None:
             return _agent_db_pool
         import asyncpg
+        host = os.environ.get("RDS_HOST", "postgres")
+        password = os.environ.get("RDS_PASSWORD", "")
+        # A real RDS endpoint requires a password; only the local-compose
+        # default host ("postgres") is allowed to connect passwordless (trust
+        # auth). Fail loud rather than silently attempt a passwordless connect
+        # to production.
+        if host != "postgres" and not password:
+            raise RuntimeError(
+                f"RDS_PASSWORD is required when RDS_HOST is a real endpoint "
+                f"({host!r}) — it is unset or empty."
+            )
         _agent_db_pool = await asyncpg.create_pool(
-            host=os.environ.get("RDS_HOST", "postgres"),
+            host=host,
             port=int(os.environ.get("RDS_PORT", "5432")),
             user=os.environ.get("RDS_USER", "colony"),
-            password=os.environ.get("RDS_PASSWORD", ""),
+            password=password,
             database=os.environ.get("RDS_DB_NAME", "colony"),
             min_size=1, max_size=5,
         )

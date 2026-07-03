@@ -1,0 +1,76 @@
+# Colony serving-fleet image (§5.8 Option A) — GPU + vLLM + the partial-OpenAI
+# gateway. Runs ``polymath serve``: connects to Ray, deploys the LLM cluster +
+# VCM (no agents), and serves the shim a remote ``VllmRemoteDeployment`` talks
+# to. Built by cps ``deploy.py`` when ``ENABLE_SERVING_STACK`` is set, pushed as
+# ``CPS_SERVING_IMAGE_URI``. Build context is the COLONY repo root.
+#
+# Derived from Dockerfile.base; every difference is deliberate:
+#   - FROM ...-cu128 (not -cpu): the fleet runs vLLM/torch on GPU; the tag
+#     matches colony's pinned cu128 torch source.
+#   - extras "gpu dashboard aws" (not the base's "code_analysis cpu dashboard
+#     observability knowledge design_monorepo"): the headless fleet only serves
+#     inference + paging + the FastAPI shim + S3 model/adapter loading.
+#   - Dropped (all serve code-analysis / the web UI / agent git-clone, none of
+#     which the fleet does): Node.js (dashboard *frontend* build, in
+#     Dockerfile.local), the git-credential helpers, github-linguist + ruby-dev
+#     + cloc + graphviz + libmagic1, the python-louvain + faiss-cpu pre-installs,
+#     git-lfs (weights come from S3, not git-lfs).
+#   - Added: COPY src + CMD — self-contained (not layered on Dockerfile.local).
+#   - Kept from base: root→ray user, UTC tz, the /opt/colony-overlay PYTHONPATH
+#     convention, RAY_DISABLE_DOCKER_CPU_WARNING, the BuildKit cache mount.
+#
+# GPU IMAGE — NOT BUILT/VALIDATED HERE. torch 2.8.0+cu128 + vLLM 0.11 must be
+# built + smoke-tested on a CUDA host. The minimal apt set assumes the serving
+# deps install from wheels (they do today) rather than source; that is why the
+# base's BLAS / libssl / libkrb5 / libicu / zlib / libcurl -dev headers are
+# omitted — a real build confirms none is needed.
+FROM rayproject/ray:2.49.0-py311-cu128
+
+ARG RAY_CONTAINER_USER=ray
+ARG APP_MOUNT_PATH=/home/ray/app
+ARG POLYMATHERA_PYTHON_CMD=python3.11
+
+USER root
+WORKDIR ${APP_MOUNT_PATH}
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime
+
+# Minimal build toolchain for any C-extension wheels the serving deps need.
+RUN apt-get update -yq && apt-get install -y --no-install-recommends \
+        build-essential git pkg-config python3-dev cmake curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Deps first (cache-friendly). ``gpu`` = torch cu128 + vLLM + transformers +
+# pynvml; ``dashboard`` = FastAPI + uvicorn + httpx (the gateway); ``aws`` =
+# boto3 (S3 model + adapter loading). poetry resolves torch from colony's
+# pinned cu128 source.
+COPY pyproject.toml poetry.lock ./
+
+# Install Poetry
+RUN ${POLYMATHERA_PYTHON_CMD} -m pip install --no-cache-dir poetry==1.7.1
+
+# Install Python dependencies.
+RUN --mount=type=cache,target=/root/.cache \
+    poetry config virtualenvs.create false && \
+    poetry install --only main --extras "gpu dashboard aws" \
+        --no-interaction --no-ansi --no-root
+
+COPY src ./src
+
+ENV RAY_DISABLE_DOCKER_CPU_WARNING=1
+# /opt/colony-overlay is the persistent overlay the L1-G container-start hook
+# pip-installs ``cluster.extensions.packages`` into. Baking it into the image's
+# PYTHONPATH ENV means every Python invocation in the container — including
+# ad-hoc ``docker exec`` shells — sees the overlay; the hook's own
+# ``export PYTHONPATH=...`` would only reach the service command it exec's.
+# Non-existent at image-build time; Python tolerates missing path entries.
+# Match the base's overlay convention: /opt/colony-overlay is the L1-G
+# extensions path (unused by the headless fleet today; harmless if absent).
+ENV PYTHONPATH=/opt/colony-overlay:${APP_MOUNT_PATH}/src
+USER ${RAY_CONTAINER_USER}
+
+# Default entrypoint; the CDK task overrides the command to render the fleet
+# config to /tmp/fleet.yaml first, then ``exec``s this.
+CMD ["python", "-m", "polymathera.colony.cli.polymath", "serve", \
+     "--config", "/tmp/fleet.yaml", "--port", "8000"]
