@@ -129,6 +129,18 @@ class LLMDeploymentConfig(BaseModel):
         description="Fraction of GPU memory to use"
     )
 
+    # Custom Ray resources for actor placement — merged into the deployment's
+    # ``ray_actor_options["resources"]`` so a deployment can be pinned to a
+    # specific worker group / node type (e.g. an A10g vs A100 GPU pool) that
+    # advertises the matching resource via ``ray start --resources``. Generic
+    # Ray hook; callers set the concrete names. None = place on any GPU node.
+    ray_resources: dict[str, float] | None = Field(
+        default=None,
+        description="Custom Ray resources required to place this deployment's "
+        "replicas (merged into ray_actor_options['resources']); pins it to a "
+        "worker group advertising the matching resource.",
+    )
+
     # Capacity configuration (auto-calculated if None)
     kv_cache_capacity: int | None = Field(
         default=None,
@@ -593,6 +605,13 @@ class ClusterConfig(BaseModel):
                 },
                 ray_actor_options={
                     "num_gpus": dconf.tensor_parallel_size,
+                    # Pin to a specific worker group / node type when set (e.g.
+                    # a multi-GPU-type serving fleet routes A10g vs A100 models
+                    # via a custom resource the target worker group advertises).
+                    **(
+                        {"resources": dconf.ray_resources}
+                        if dconf.ray_resources else {}
+                    ),
                 },
             )
 

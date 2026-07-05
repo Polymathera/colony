@@ -255,7 +255,7 @@ async def test_image_info_parses_baked_vs_overlay(
     all_out = (
         "polymathera-colony==0.3.0\n"
         "polymathera-cps==0.1.0\n"
-        "ray==2.49.0\n"
+        "ray==2.55.0\n"
     )
 
     async def fake_exec(*args: str, **_: Any) -> tuple[int, str, str]:

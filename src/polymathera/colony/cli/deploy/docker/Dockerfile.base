@@ -9,7 +9,7 @@
 #
 # Build context is the colony repo root (where pyproject.toml lives), same
 # as Dockerfile.local.
-FROM rayproject/ray:2.49.0-py311-cpu
+FROM rayproject/ray:2.55.0-py311-cpu
 
 ARG RAY_CONTAINER_USER=ray
 ARG APP_MOUNT_PATH=/home/ray/app

@@ -308,6 +308,10 @@ class VLLMDeploymentYAMLConfig:
     # e.g. an Option-A serving fleet). max_lora_rank bounds hot-added ranks.
     max_lora_slots: int = 0
     max_lora_rank: int = 16
+    # Custom Ray resources to pin this deployment to a specific worker group /
+    # node type (e.g. {"accelerator_a10g": 0.001}); threaded into the
+    # deployment's ray_actor_options["resources"]. None = any GPU node.
+    ray_resources: dict[str, float] | None = None
 
 
 @dataclass
@@ -1099,6 +1103,7 @@ def _build_cluster_config(
             num_replicas=vd.num_replicas,
             max_lora_slots=vd.max_lora_slots,
             max_lora_rank=vd.max_lora_rank,
+            ray_resources=vd.ray_resources,
         ))
 
     # Build embedding config from YAML (if specified)
@@ -1947,6 +1952,23 @@ def deploy(
 # polymath serve
 # ---------------------------------------------------------------------------
 
+def _resolve_gateway_targets(
+    vllm_configs: list, deployment: Optional[str], base_port: int,
+) -> list[tuple[str, int]]:
+    """One ``(deployment_name, port)`` per base model — ``port = base_port +
+    index`` in config order — unless ``deployment`` pins a single model to
+    ``base_port``. The port assignment ``polymath serve`` and the CPS k8s
+    manifests (``serving_config.gateway_endpoints``) MUST agree on: index-ordered
+    from the same base port, so a client reaches base model i at ``<nlb>:base+i``.
+    """
+    if deployment:
+        return [(deployment, base_port)]
+    return [
+        (vc.get_deployment_name(), base_port + i)
+        for i, vc in enumerate(vllm_configs)
+    ]
+
+
 @app.command()
 def serve(
     config: str = typer.Option(
@@ -1966,7 +1988,11 @@ def serve(
         help="Polymathera serving application name (defaults to the config's).",
     ),
     host: str = typer.Option("0.0.0.0", "--host", help="Gateway bind address."),
-    port: int = typer.Option(8000, "--port", help="Gateway bind port."),
+    port: int = typer.Option(
+        8000, "--port",
+        help="Gateway bind port. Base port: model i serves on port+i (one gateway "
+             "per base model) unless --deployment pins a single model to this port.",
+    ),
     api_key_env: str = typer.Option(
         "VLLM_API_KEY",
         "--api-key-env",
@@ -2028,23 +2054,32 @@ def serve(
         polycluster, effective_app_name = await deploy_cluster(
             test_config, app_name, serving_only=True,
         )
-        # Resolve the exact name the LLM cluster registered the VLLMDeployment
-        # under (LLMDeploymentConfig.get_deployment_name) — no guessing.
         vllm_configs = polycluster.config.llm_cluster_config.vllm_deployments
-        dep_name = deployment or vllm_configs[0].get_deployment_name()
-        handle = get_vllm_deployment(dep_name, effective_app_name)
+        api_key = os.environ.get(api_key_env, "")
 
-        gateway = create_serving_gateway(
-            lambda: handle, api_key=os.environ.get(api_key_env, ""),
-        )
-        console.print(
-            f"  [green]OK[/green] — serving [cyan]{dep_name}[/cyan] "
-            f"(app={effective_app_name}) on {host}:{port}"
-        )
-        server = uvicorn.Server(
-            uvicorn.Config(gateway, host=host, port=port, log_level="info"),
-        )
-        await server.serve()
+        # One gateway per base model, each on its own port (``port`` + index in
+        # config order), so a client reaches each base model at its own base_url
+        # (fleet serves multiple base models — CPS concern #4). ``--deployment``
+        # pins a single model on ``port`` (back-compat). Resolve each deployment's
+        # exact registered name (LLMDeploymentConfig.get_deployment_name) — no
+        # guessing.
+        targets = _resolve_gateway_targets(vllm_configs, deployment, port)
+
+        servers = []
+        for dep_name, dep_port in targets:
+            handle = get_vllm_deployment(dep_name, effective_app_name)
+            # h=handle binds this iteration's handle (avoids the late-closure bug).
+            gateway = create_serving_gateway(lambda h=handle: h, api_key=api_key)
+            console.print(
+                f"  [green]OK[/green] — serving [cyan]{dep_name}[/cyan] "
+                f"(app={effective_app_name}) on {host}:{dep_port}"
+            )
+            servers.append(uvicorn.Server(
+                uvicorn.Config(gateway, host=host, port=dep_port, log_level="info"),
+            ))
+
+        # Run every gateway concurrently; the process stays up until all exit.
+        await asyncio.gather(*(s.serve() for s in servers))
 
     try:
         asyncio.run(_serve())

@@ -78,9 +78,13 @@ class MinerUExtractorDeployment(PdfExtractorDeployment):
                     )
                 except ImportError as exc:
                     raise PdfExtractorError(
-                        "MinerUExtractorDeployment requires the 'magic-pdf' "
-                        "package (MinerU). Install via the knowledge poetry "
-                        "extra (`poetry install --extras knowledge`).",
+                        "MinerUExtractorDeployment requires MinerU, which is no "
+                        "longer poetry-managed (its pins fight the core — see "
+                        "colony pyproject.toml). Install it into the image on "
+                        "opt-in: `pip install mineru` (2.x+). NOTE: this "
+                        "deployment still targets the MinerU 1.x `magic_pdf` "
+                        "API and needs porting to mineru 2.x+ (CLI / mineru-api "
+                        "HTTP) before self-hosted MinerU works on a modern image.",
                     ) from exc
                 logger.info("MinerUExtractorDeployment: magic_pdf importable.")
 

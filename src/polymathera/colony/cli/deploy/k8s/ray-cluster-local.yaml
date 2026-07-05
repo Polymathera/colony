@@ -6,7 +6,7 @@ kind: RayCluster
 metadata:
   name: colony-local
 spec:
-  rayVersion: '2.49.0'
+  rayVersion: '2.55.0'
   enableInTreeAutoscaling: true
 
   autoscalerOptions:
