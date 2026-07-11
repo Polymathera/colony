@@ -11,7 +11,6 @@ from typing import Any, ClassVar
 
 import git
 import numpy as np
-import xxhash
 from overrides import override
 
 from polymathera.colony.distributed.config import register_polymathera_config
@@ -229,6 +228,7 @@ class CommitHistoryAnalyzer(BaseAnalyzer):
         self, repo: git.Repo, files: set[str], strategy: str
     ) -> str:
         """Generate unique cache key for analysis results"""
+        import xxhash  # code_analysis dep — imported lazily (see module-top note)
         # Get repo identifier
         repo_id = repo.head.commit.hexsha[:8]
 

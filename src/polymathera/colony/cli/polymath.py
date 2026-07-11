@@ -1974,7 +1974,12 @@ def serve(
     config: str = typer.Option(
         ...,
         "--config", "-c",
-        help="YAML config for the serving slice (one cluster.vllm_deployments entry).",
+        help=(
+            "YAML config for the serving slice — a cluster config with one "
+            "cluster.vllm_deployments entry per served model. For a CPS fleet "
+            "this is the *rendered* fleet.yaml (produced from serving.yaml by "
+            "render_fleet_config), not serving.yaml itself."
+        ),
     ),
     deployment: Optional[str] = typer.Option(
         None,

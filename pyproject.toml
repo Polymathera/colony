@@ -202,6 +202,7 @@ observability = [
 
 design_monorepo = [
     "gitpython",
+    "pygithub",
     "watchdog",
 ]
 

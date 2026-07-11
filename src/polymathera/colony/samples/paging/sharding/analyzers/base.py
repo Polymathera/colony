@@ -7,8 +7,7 @@ from typing import Any, ClassVar
 from pydantic import Field
 from pathlib import Path
 import aiofiles
-import time 
-import xxhash
+import time
 from circuitbreaker import circuit
 from cachetools import TTLCache
 

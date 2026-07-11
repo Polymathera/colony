@@ -13,7 +13,6 @@ import mimetypes
 import git
 import networkx as nx
 import numpy as np
-from community import community_louvain as community
 from pydantic import BaseModel, Field
 try:
     import xxhash # Optional dependency
@@ -1735,6 +1734,9 @@ class FileGrouper:
             undirected_graph = graph_copy.to_undirected()
 
             # Use language-aware community detection (CPU-bound, offload to thread)
+            # python-louvain (code_analysis dep) — imported lazily so this module
+            # loads in the headless serving fleet without it.
+            from community import community_louvain as community
             communities = await asyncio.to_thread(
                 community.best_partition,
                 undirected_graph,

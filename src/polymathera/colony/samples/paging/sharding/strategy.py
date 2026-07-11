@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import git
-import magic  # python-magic for file type detection
 import networkx as nx
 from circuitbreaker import circuit
 
@@ -983,6 +982,9 @@ class GitRepoShardingStrategy:
                     f"syscontext={syscontext.to_dict()} repo_path={repo_path}"
                 )
 
+                # python-magic (code_analysis dep) — imported lazily so this
+                # module loads in the headless serving fleet without it.
+                import magic
                 for file_path in file_paths:
                     try:
                         fp = Path(file_path)

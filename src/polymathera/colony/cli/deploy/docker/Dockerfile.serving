@@ -43,8 +43,12 @@ RUN apt-get update -yq && apt-get install -y --no-install-recommends \
 
 # Deps first (cache-friendly). ``gpu`` = torch cu128 + vLLM + transformers +
 # pynvml; ``dashboard`` = FastAPI + uvicorn + httpx (the gateway); ``aws`` =
-# boto3 (S3 model + adapter loading). poetry resolves torch from colony's
-# pinned cu128 source.
+# boto3 (S3 model + adapter loading); ``design_monorepo`` = GitPython + PyGithub
+# — the serve path (deploy_cluster → samples.paging) eagerly imports ``git`` for
+# repo page sources, and get_mission_registry loads the GitHub capability whose
+# auth eagerly imports ``jwt`` (PyJWT, pulled by PyGithub[crypto]). The niche
+# code_analysis deps (magic/community/xxhash) stay lazy-imported, not installed.
+# poetry resolves torch from colony's pinned cu128 source.
 COPY pyproject.toml poetry.lock ./
 
 # Install Poetry
@@ -53,10 +57,42 @@ RUN ${POLYMATHERA_PYTHON_CMD} -m pip install --no-cache-dir poetry==1.7.1
 # Install Python dependencies.
 RUN --mount=type=cache,target=/root/.cache \
     poetry config virtualenvs.create false && \
-    poetry install --only main --extras "gpu dashboard aws" \
+    poetry install --only main --extras "gpu dashboard aws design_monorepo" \
         --no-interaction --no-ansi --no-root
 
+# torch 2.8.0+cu128 declares 14 nvidia-* CUDA wheels (libcusparseLt, a matching NCCL,
+# cuBLAS, cuDNN, cusparse, ...) but poetry / the base image left them UNINSTALLED — the
+# base image's torch was built to load CUDA from the host. Our Bottlerocket NVIDIA GPU
+# nodes inject only the DRIVER (libcuda.so.1) at GPU-allocation time, NOT the CUDA
+# toolkit — so `import torch` dies with `libcusparseLt.so.0: cannot open shared object
+# file` (and the stale base libnccl gives the `ncclCommWindowRegister` symbol error).
+# Install torch's OWN declared CUDA deps (+ sympy, also declared-but-missing) so the
+# image is self-contained on any node. Verified: torch + vLLM then import with no GPU
+# present, so the serve DRIVER (imports vLLM→torch to deploy the model) stops crashing.
+RUN --mount=type=cache,target=/root/.cache \
+    DEPS=$(${POLYMATHERA_PYTHON_CMD} -c 'import importlib.metadata as m; print(" ".join(r.split(";")[0].strip() for r in (m.requires("torch") or []) if "nvidia" in r.lower()))') \
+    && ${POLYMATHERA_PYTHON_CMD} -m pip install --no-cache-dir $DEPS "sympy>=1.13.3"
+
 COPY src ./src
+# Normalize ownership + perms for the non-root ``ray`` runtime user — the complete
+# pattern from the reference Dockerfile.ray. The build runs as root, which creates
+# two failure modes for ``ray`` at runtime:
+#   (1) a source dir left 0700 in the tree propagates that mode here → ``ray`` can't
+#       read it → Python degrades the package to a namespace package and imports
+#       fail (this hit ``colony/utils`` → ``setup_logger``);
+#   (2) ``poetry install`` creates ``~/.config`` + ``~/.local`` ROOT-owned → ``ray``
+#       can't write them at runtime (HF/vLLM/Ray config + state).
+# ``a+rX`` = readable files + traversable dirs, without marking .py executable.
+# The rayproject base ships the ``ray`` USER (uid 1000, primary group ``users``)
+# but no ``ray`` GROUP — so create it first, exactly as the reference
+# Dockerfile.ray does immediately before its ``ray:ray`` chown. ``|| echo`` keeps
+# it idempotent if a future base image already defines the group.
+RUN groupadd -r ${RAY_CONTAINER_USER} || echo "${RAY_CONTAINER_USER} group already exists" \
+    && chown -R ${RAY_CONTAINER_USER}:${RAY_CONTAINER_USER} ${APP_MOUNT_PATH} \
+    && chmod -R a+rX ${APP_MOUNT_PATH} \
+    && mkdir -p /home/${RAY_CONTAINER_USER}/.config /home/${RAY_CONTAINER_USER}/.local \
+    && chown -R ${RAY_CONTAINER_USER}:users /home/${RAY_CONTAINER_USER}/.config \
+                                            /home/${RAY_CONTAINER_USER}/.local
 
 ENV RAY_DISABLE_DOCKER_CPU_WARNING=1
 # /opt/colony-overlay is the persistent overlay the L1-G container-start hook

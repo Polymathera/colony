@@ -220,7 +220,18 @@ class RelationalStorageConfig(ConfigComponent):
         json_schema_extra={"env": "RELATIONAL_STORAGE_BACKEND"},
     )
     db_user: str | None         = Field(default=None, json_schema_extra={"env": "RDS_USER"})
-    db_password: str | None     = Field(default=None, json_schema_extra={"env": "RDS_PASSWORD"})
+    db_password: str | None     = Field(default=None, json_schema_extra={
+        "env": "RDS_PASSWORD",
+        # Required only when backend=RDS AND no Secrets Manager secret is given.
+        # When ``db_password_secret_arn`` is set, the password is fetched from
+        # Secrets Manager at runtime (``_resolve_db_password``); RDS_PASSWORD must
+        # stay UNSET for that branch to be reached. Non-RDS backends need no
+        # password. Fails loud only when backend=RDS and neither is provided.
+        "optional": lambda config: (
+            config.backend != RelationalStorageBackendType.RDS
+            or config.db_password_secret_arn is not None
+        ),
+    })
     db_password_secret_arn: str | None = Field(default=None, json_schema_extra={
         "env": "RDS_SECRET_ARN",
         "optional": lambda config: config.backend != RelationalStorageBackendType.RDS
