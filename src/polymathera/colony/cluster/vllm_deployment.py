@@ -12,6 +12,7 @@ import time
 from typing import Any, TYPE_CHECKING
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
+from vllm.sampling_params import StructuredOutputsParams
 
 if TYPE_CHECKING:
     from .registry import QuantizationMethod
@@ -158,6 +159,7 @@ class VLLMDeployment(AgentManagerBase):
         quantization: str | None = None,
         s3_bucket: str | None = None,
         s3_retry_attempts: int = 10,
+        runs_agents: bool = True,
         deployment_config: LLMDeploymentConfig | None = None,
     ):
         """Initialize VLLMDeployment.
@@ -173,6 +175,9 @@ class VLLMDeployment(AgentManagerBase):
             quantization: Quantization method (awq, gptq, fp8, etc.) or None for auto-detect
             s3_bucket: S3 bucket name for model loading (None to load from HuggingFace)
             s3_retry_attempts: Number of retry attempts for S3 downloads (default: 10)
+            runs_agents: Whether this fleet runs agents. False (a headless serving
+                fleet) skips agent_system handle discovery in on_ready — no such
+                deployment exists there.
 
         Note:
             vLLM handles continuous batching automatically. No need for manual
@@ -273,7 +278,7 @@ class VLLMDeployment(AgentManagerBase):
         self.event_namespace: str | None = None
 
         # Initialize AgentManagerBase
-        super().__init__(deployment_config=deployment_config)
+        super().__init__(deployment_config=deployment_config, runs_agents=runs_agents)
 
     @serving.initialize_deployment
     async def initialize(self):
@@ -504,13 +509,23 @@ class VLLMDeployment(AgentManagerBase):
         await self._ensure_adapter(adapter.adapter_id, adapter)
         return adapter.adapter_id
 
+    def _requested_adapter_id(self, request: InferenceRequest) -> str | None:
+        """The LoRA adapter id this request targets, or ``None``.
+
+        The OpenAI ``model`` field (mapped to ``lora_adapter_id`` by the gateway)
+        carries either this deployment's base model id or a LoRA adapter id — a
+        request for the base model is NOT a LoRA request, so treat it as ``None``.
+        """
+        requirements = request.requirements
+        adapter_id = requirements.lora_adapter_id if requirements else None
+        return None if adapter_id == self.model_name else adapter_id
+
     async def _ensure_requested_adapter(self, request: InferenceRequest) -> None:
         """Before resolving, lazily register a hot-added adapter this
         replica hasn't loaded yet (from the shared catalog) — so a request
         for a just-promoted adapter is served even by a replica that missed
         the hot-add or autoscaled in after it."""
-        requirements = request.requirements
-        adapter_id = requirements.lora_adapter_id if requirements else None
+        adapter_id = self._requested_adapter_id(request)
         if adapter_id is not None and adapter_id not in self._lora_requests:
             await self._ensure_adapter(adapter_id)
 
@@ -521,8 +536,7 @@ class VLLMDeployment(AgentManagerBase):
         deployment does not serve — a routing/config mismatch we surface
         rather than silently answering with the base model.
         """
-        requirements = request.requirements
-        adapter_id = requirements.lora_adapter_id if requirements else None
+        adapter_id = self._requested_adapter_id(request)
         if adapter_id is None:
             return None
         lora_request = self._lora_requests.get(adapter_id)
@@ -558,6 +572,25 @@ class VLLMDeployment(AgentManagerBase):
         ):
             final_output = output
         return final_output
+
+    @staticmethod
+    def _request_sampling_kwargs(request: InferenceRequest) -> dict[str, Any]:
+        """Sampling kwargs from a request, omitting any left unset (``None``).
+
+        vLLM 0.24 validates sampling params strictly and rejects ``None`` — e.g.
+        ``top_p`` defaults to ``None`` on ``InferenceRequest`` and vLLM evaluates
+        ``0.0 < top_p`` (``TypeError`` on ``None``). Omitting unset values lets
+        vLLM apply its own defaults instead of us passing ``None`` through.
+        """
+        return {
+            key: value
+            for key, value in (
+                ("temperature", request.temperature),
+                ("top_p", request.top_p),
+                ("max_tokens", request.max_tokens),
+            )
+            if value is not None
+        }
 
     @serving.endpoint
     @inference_circuit
@@ -605,31 +638,23 @@ class VLLMDeployment(AgentManagerBase):
                     f"Router should have loaded this page beforehand."
                 )
 
-            # Build sampling params
-            # Note: vLLM supports guided decoding via guided_json parameter (in newer versions)
-            sampling_params_dict = {
-                "temperature": request.temperature,
-                "top_p": request.top_p,
-                "max_tokens": request.max_tokens,
-            }
+            # Build sampling params (omit unset values so vLLM uses its own defaults;
+            # 0.24 rejects e.g. top_p=None via a strict ``0.0 < top_p`` check).
+            sampling_params_dict = self._request_sampling_kwargs(request)
 
-            # Add JSON schema for structured output if provided
-            # Try with guided_json first (newer vLLM), fall back without it
+            # JSON-schema-constrained (structured) output when requested. vLLM 0.24 replaced
+            # the old ``guided_json=`` kwarg with a ``structured_outputs`` sub-struct
+            # (``StructuredOutputsParams(json=...)``). We build it explicitly rather than
+            # swallow a TypeError: on our pinned vLLM the schema is either applied or a real
+            # error surfaces — it is never silently dropped.
             if request.json_schema:
-                sampling_params_dict["guided_json"] = request.json_schema
-                try:
-                    sampling_params = SamplingParams(**sampling_params_dict)
-                    logger.info(
-                        f"Using guided JSON generation for request {request.request_id}"
-                    )
-                except TypeError as e:
-                    # guided_json not supported in this vLLM version
-                    logger.warning(
-                        f"guided_json parameter not supported in this vLLM version, "
-                        f"falling back to standard generation: {e}"
-                    )
-                    del sampling_params_dict["guided_json"]
-                    sampling_params = SamplingParams(**sampling_params_dict)
+                sampling_params = SamplingParams(
+                    **sampling_params_dict,
+                    structured_outputs=StructuredOutputsParams(json=request.json_schema),
+                )
+                logger.info(
+                    f"Using structured JSON generation for request {request.request_id}"
+                )
             else:
                 sampling_params = SamplingParams(**sampling_params_dict)
 
@@ -1480,12 +1505,8 @@ class VLLMDeployment(AgentManagerBase):
                 # Override prompt with composed prompt
                 request = request.model_copy(update={"prompt": full_prompt})
 
-                # Build sampling params
-                sampling_params = SamplingParams(
-                    temperature=request.temperature,
-                    top_p=request.top_p,
-                    max_tokens=request.max_tokens,
-                )
+                # Build sampling params (omit unset values — see _request_sampling_kwargs).
+                sampling_params = SamplingParams(**self._request_sampling_kwargs(request))
 
                 # Submit to vLLM - automatic prefix caching!
                 # vLLM will:

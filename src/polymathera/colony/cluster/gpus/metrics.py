@@ -160,36 +160,42 @@ class GPUMetricsCollector:
             return None
 
     def _collect_pytorch(self) -> Optional[GPUMetrics]:
-        """Collect metrics using PyTorch CUDA."""
+        """Collect metrics using PyTorch CUDA.
+
+        Device memory is read via ``torch.cuda.mem_get_info`` (``cudaMemGetInfo``),
+        NOT ``torch.cuda.memory_allocated``: vLLM's V1 engine runs the model in a
+        separate ``EngineCore`` subprocess, so THIS process's own PyTorch allocation is
+        ~0 — only the device-level query sees the model's memory (all processes on the
+        GPU). Using ``memory_allocated`` here reports 0 used while the model is loaded.
+        """
         try:
             import torch
 
-            # Memory stats (in bytes for PyTorch-specific metrics)
+            # Device-level free/total across ALL processes on the GPU (cudaMemGetInfo).
+            memory_free_bytes, memory_total_bytes = torch.cuda.mem_get_info(self.gpu_id)
+            memory_used_bytes = memory_total_bytes - memory_free_bytes
+
+            memory_used_mb = memory_used_bytes / (1024 ** 2)
+            memory_total_mb = memory_total_bytes / (1024 ** 2)
+            memory_free_mb = memory_free_bytes / (1024 ** 2)
+            memory_utilization_pct = (memory_used_mb / memory_total_mb * 100) if memory_total_mb > 0 else 0
+
+            # PyTorch-specific stats are THIS process's own allocations (≈0 when the
+            # engine runs in a subprocess); kept for parity, not the headline number.
             memory_allocated_bytes = torch.cuda.memory_allocated(self.gpu_id)
             memory_reserved_bytes = torch.cuda.memory_reserved(self.gpu_id)
-            memory_cached_bytes = torch.cuda.memory_reserved(self.gpu_id)
-            memory_total_bytes = torch.cuda.get_device_properties(self.gpu_id).total_memory
-
-            # Convert to MB for standard metrics
-            memory_allocated_mb = memory_allocated_bytes / (1024 ** 2)
-            memory_total_mb = memory_total_bytes / (1024 ** 2)
-            memory_free_mb = memory_total_mb - memory_allocated_mb
-
-            # GPU utilization (PyTorch doesn't provide this directly)
-            # We'll estimate based on memory usage as a proxy
-            gpu_utilization = (memory_allocated_mb / memory_total_mb) * 100 if memory_total_mb > 0 else 0
 
             return GPUMetrics(
                 gpu_id=self.gpu_id,
                 gpu_name=torch.cuda.get_device_name(self.gpu_id),
-                memory_used_mb=memory_allocated_mb,
+                memory_used_mb=memory_used_mb,
                 memory_total_mb=memory_total_mb,
                 memory_free_mb=memory_free_mb,
-                memory_utilization_pct=(memory_allocated_mb / memory_total_mb * 100) if memory_total_mb > 0 else 0,
+                memory_utilization_pct=memory_utilization_pct,
                 memory_allocated_bytes=memory_allocated_bytes,
                 memory_reserved_bytes=memory_reserved_bytes,
-                memory_cached_bytes=memory_cached_bytes,
-                gpu_utilization_pct=gpu_utilization,
+                memory_cached_bytes=memory_reserved_bytes,
+                gpu_utilization_pct=memory_utilization_pct,  # memory proxy (PyTorch exposes no compute util)
                 backend=GPUMetricsBackend.PYTORCH_CUDA,
             )
 

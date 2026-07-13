@@ -233,7 +233,10 @@ class EmbeddingDeployment:
         # Initialize vLLM engine in embedding mode
         engine_args = AsyncEngineArgs(
             model=model_path,
-            task="embed",  # Enable embedding mode
+            # vLLM 0.24 removed the ``task=`` selector (V0→V1 API); embedding mode is now
+            # ``runner="pooling"`` + explicit ``convert="embed"`` (a ConvertType literal).
+            runner="pooling",
+            convert="embed",
             tensor_parallel_size=self.tensor_parallel_size,
             trust_remote_code=self.trust_remote_code,
             gpu_memory_utilization=self.gpu_memory_utilization,

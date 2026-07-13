@@ -3774,14 +3774,27 @@ class AgentManagerBase:
     - Provides communication infrastructure (via EnhancedBlackboard)
     """
 
-    def __init__(self, deployment_config: LLMDeploymentConfig | None = None):
+    def __init__(
+        self,
+        deployment_config: LLMDeploymentConfig | None = None,
+        runs_agents: bool = True,
+    ):
         """Initialize agent manager.
 
         Note: This is a mixin, so it should be called from the deployment's __init__.
 
         Args:
             deployment_config: Optional deployment configuration with resource limits
+            runs_agents: Whether this manager participates in agent orchestration.
+                Default True (agent managers run agents + discover the ``agent_system``
+                deployment). A headless LLM serving fleet passes False — it has no
+                agent_system deployment, so ``discover_handles`` skips that lookup.
+                Subclasses that always run agents inherit the default.
         """
+        # Whether this deployment orchestrates agents (guards agent_system discovery
+        # in discover_handles).
+        self.runs_agents = runs_agents
+
         # Agent management
         self._agents: dict[str, Agent] = {}
         self._agent_tasks: dict[str, asyncio.Task] = {}
@@ -3835,7 +3848,9 @@ class AgentManagerBase:
             get_llm_cluster,
             get_vcm,
         )
-        self._agent_system_handle = await get_agent_system()
+        # A headless serving fleet (runs_agents=False) has no agent_system deployment
+        # to discover — skip it (the handle stays None; every use of it is guarded).
+        self._agent_system_handle = await get_agent_system() if self.runs_agents else None
         self._llm_cluster_handle = await get_llm_cluster()
         self._vcm_handle = await get_vcm()
 

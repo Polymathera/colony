@@ -504,6 +504,11 @@ class ClusterConfig(BaseModel):
         default=False,
         description="Cleanup all existing deployments and states before initializing (useful for testing)"
     )
+    runs_agents: bool = Field(
+        default=True,
+        description="Whether this cluster runs agents. False for a headless serving fleet "
+                    "(LLM + VCM + gateway only) — VLLMDeployment then skips agent_system discovery."
+    )
 
     # Per-call wall-clock deadline applied to every inference request that
     # does not carry its own ``InferenceRequest.deadline_s``. The invariant
@@ -595,6 +600,7 @@ class ClusterConfig(BaseModel):
                     quantization=dconf.quantization,
                     s3_bucket=dconf.s3_bucket,
                     s3_retry_attempts=dconf.s3_retry_attempts,
+                    runs_agents=self.runs_agents,
                 ),
                 name=deployment_name,
                 default_router_class=default_router_class,

@@ -5,8 +5,9 @@
 # ``CPS_SERVING_IMAGE_URI``. Build context is the COLONY repo root.
 #
 # Derived from Dockerfile.base; every difference is deliberate:
-#   - FROM ...-cu128 (not -cpu): the fleet runs vLLM/torch on GPU; the tag
-#     matches colony's pinned cu128 torch source.
+#   - FROM ...-cu129 (not -cpu): the fleet runs vLLM/torch on GPU. cu129 is the newest
+#     STABLE ray cu tag (no ray cu13 tag exists); colony's torch is cu130 and ships its
+#     own CUDA 13 runtime via wheels, so the base's CUDA is inert (see torch-deps below).
 #   - extras "gpu dashboard aws" (not the base's "code_analysis cpu dashboard
 #     observability knowledge design_monorepo"): the headless fleet only serves
 #     inference + paging + the FastAPI shim + S3 model/adapter loading.
@@ -19,12 +20,12 @@
 #   - Kept from base: root→ray user, UTC tz, the /opt/colony-overlay PYTHONPATH
 #     convention, RAY_DISABLE_DOCKER_CPU_WARNING, the BuildKit cache mount.
 #
-# GPU IMAGE — NOT BUILT/VALIDATED HERE. torch 2.8.0+cu128 + vLLM 0.11 must be
+# GPU IMAGE — NOT BUILT/VALIDATED HERE. torch 2.11.0+cu130 + vLLM 0.24 must be
 # built + smoke-tested on a CUDA host. The minimal apt set assumes the serving
 # deps install from wheels (they do today) rather than source; that is why the
 # base's BLAS / libssl / libkrb5 / libicu / zlib / libcurl -dev headers are
 # omitted — a real build confirms none is needed.
-FROM rayproject/ray:2.55.0-py311-cu128
+FROM rayproject/ray:2.55.0-py311-cu129
 
 ARG RAY_CONTAINER_USER=ray
 ARG APP_MOUNT_PATH=/home/ray/app
@@ -41,14 +42,14 @@ RUN apt-get update -yq && apt-get install -y --no-install-recommends \
         build-essential git pkg-config python3-dev cmake curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Deps first (cache-friendly). ``gpu`` = torch cu128 + vLLM + transformers +
+# Deps first (cache-friendly). ``gpu`` = torch cu130 + vLLM + transformers +
 # pynvml; ``dashboard`` = FastAPI + uvicorn + httpx (the gateway); ``aws`` =
 # boto3 (S3 model + adapter loading); ``design_monorepo`` = GitPython + PyGithub
 # — the serve path (deploy_cluster → samples.paging) eagerly imports ``git`` for
 # repo page sources, and get_mission_registry loads the GitHub capability whose
 # auth eagerly imports ``jwt`` (PyJWT, pulled by PyGithub[crypto]). The niche
 # code_analysis deps (magic/community/xxhash) stay lazy-imported, not installed.
-# poetry resolves torch from colony's pinned cu128 source.
+# poetry resolves torch from colony's pinned cu130 source.
 COPY pyproject.toml poetry.lock ./
 
 # Install Poetry
@@ -60,18 +61,28 @@ RUN --mount=type=cache,target=/root/.cache \
     poetry install --only main --extras "gpu dashboard aws design_monorepo" \
         --no-interaction --no-ansi --no-root
 
-# torch 2.8.0+cu128 declares 14 nvidia-* CUDA wheels (libcusparseLt, a matching NCCL,
-# cuBLAS, cuDNN, cusparse, ...) but poetry / the base image left them UNINSTALLED — the
-# base image's torch was built to load CUDA from the host. Our Bottlerocket NVIDIA GPU
-# nodes inject only the DRIVER (libcuda.so.1) at GPU-allocation time, NOT the CUDA
-# toolkit — so `import torch` dies with `libcusparseLt.so.0: cannot open shared object
-# file` (and the stale base libnccl gives the `ncclCommWindowRegister` symbol error).
-# Install torch's OWN declared CUDA deps (+ sympy, also declared-but-missing) so the
-# image is self-contained on any node. Verified: torch + vLLM then import with no GPU
-# present, so the serve DRIVER (imports vLLM→torch to deploy the model) stops crashing.
+# poetry does NOT propagate the dependencies of a package installed from an explicit
+# source, so torch (from colony's cu130 source) has its OWN declared deps silently dropped
+# from the lock. torch 2.11 declares its CUDA/native stack as:
+#   - ``cuda-toolkit[cudart,cublas,cupti,cufft,...]==13.0.2`` + ``cuda-bindings`` — the core
+#     CUDA 13 runtime. Without cupti/cudart, ``import torch`` dies at load with
+#     ``libcupti.so.13: cannot open shared object file`` (Bottlerocket injects only the driver);
+#   - the ``nvidia-{cudnn,cusparselt,nccl,nvshmem}-cu13`` wheels;
+#   - its exact ``triton==3.6.0`` pin — which poetry drops, then lets xgrammar's UNBOUNDED
+#     triton dep pull 3.7.1 instead (torch's inductor can't use it: ``ImportError: triton_key``).
+# ALL of these carry a ``platform_system == "Linux"`` marker; torch's cross-platform Python
+# deps (sympy, filelock, ...) and its optional ``extra ==`` deps do NOT. So we select torch's
+# Linux-marked requirements and pip-install exactly those — robust to how PyTorch repackages
+# CUDA between releases (torch 2.8 used individual ``nvidia-*-cu12`` wheels; 2.11 folded the
+# runtime into the ``cuda-toolkit`` meta-package, which a name filter for "nvidia" silently
+# missed → the libcupti.so.13 crash). This is NOT fixable by bumping the stack — it's poetry's
+# explicit-source behaviour, version-independent (poetry 2.1.4 does the same); we install what
+# TORCH declares, never a version we pick. All of these packages are on PyPI. pip runs from
+# Python (an argv list, not a shell string) so specifiers like ``cuda-bindings<14,>=13.0.3`` and
+# the ``cuda-toolkit[...]`` extras bracket aren't mangled by the shell; check_call fails the
+# build loudly if any install fails.
 RUN --mount=type=cache,target=/root/.cache \
-    DEPS=$(${POLYMATHERA_PYTHON_CMD} -c 'import importlib.metadata as m; print(" ".join(r.split(";")[0].strip() for r in (m.requires("torch") or []) if "nvidia" in r.lower()))') \
-    && ${POLYMATHERA_PYTHON_CMD} -m pip install --no-cache-dir $DEPS "sympy>=1.13.3"
+    ${POLYMATHERA_PYTHON_CMD} -c 'import importlib.metadata as m, subprocess, sys; deps=[r.split(";",1)[0].strip() for r in (m.requires("torch") or []) if ";" in r and "linux" in r.split(";",1)[1].lower()]; subprocess.check_call([sys.executable,"-m","pip","install","--no-cache-dir",*deps,"sympy>=1.13.3"])'
 
 COPY src ./src
 # Normalize ownership + perms for the non-root ``ray`` runtime user — the complete
