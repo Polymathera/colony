@@ -72,6 +72,11 @@ class DockerComposeProvider(DeploymentProvider):
         :meth:`_active_profiles`.
         """
         cmd = ["docker", "compose", "-f", str(_COMPOSE_FILE)]
+        # Operator overlays (COLONY_EXTRA_COMPOSE_FILES) are layered on EVERY
+        # compose call — up/build AND down/ps — so a downstream-added service is
+        # created and torn down consistently, never left as an orphan on `down`.
+        for extra in self._operator_overlay_files():
+            cmd.extend(["-f", str(extra)])
         for extra in (extra_files or []):
             cmd.extend(["-f", str(extra)])
         if _ENV_FILE.is_file():
@@ -98,7 +103,26 @@ class DockerComposeProvider(DeploymentProvider):
         env = self._compose_subprocess_env()
         if env.get("POLYMATHERA_SMEE_FORWARDING_URL"):
             profiles.append("local-webhook")
+        # Operator-supplied profiles (COLONY_EXTRA_COMPOSE_PROFILES, comma-sep) —
+        # activate services defined in operator overlay files (see
+        # ``_operator_overlay_files``). Generic: no downstream naming here.
+        for name in env.get("COLONY_EXTRA_COMPOSE_PROFILES", "").split(","):
+            name = name.strip()
+            if name and name not in profiles:
+                profiles.append(name)
         return profiles
+
+    def _operator_overlay_files(self) -> list[Path]:
+        """Compose overlay files an operator layers in via the
+        ``COLONY_EXTRA_COMPOSE_FILES`` env var (``os.pathsep``-separated paths).
+
+        Lets a downstream project (e.g. cps) add its own services without editing
+        colony's ``docker-compose.yml`` — a generic capability, no downstream
+        naming here. Paths are passed to compose verbatim: a bad path fails loud
+        via ``docker compose`` rather than being silently skipped.
+        """
+        raw = self._compose_subprocess_env().get("COLONY_EXTRA_COMPOSE_FILES", "")
+        return [Path(p.strip()) for p in raw.split(os.pathsep) if p.strip()]
 
     def _compose_subprocess_env(self) -> dict[str, str]:
         """Build the subprocess environment for ``docker compose`` calls.

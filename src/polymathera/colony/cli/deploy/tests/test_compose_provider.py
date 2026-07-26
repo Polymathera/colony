@@ -267,3 +267,46 @@ async def test_image_info_parses_baked_vs_overlay(
     info = await p.image_info()
     assert info["overlay"] == ["polymathera-cps==0.1.0"]
     assert info["baked"] == ["polymathera-colony==0.3.0"]
+
+
+# ---------------------------------------------------------------------------
+# Operator overlays: downstream projects (e.g. cps) add their own compose
+# services via env, without editing colony's docker-compose.yml.
+# ---------------------------------------------------------------------------
+
+
+def test_operator_overlays_and_profiles_layered_from_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    import os as _os
+
+    from polymathera.colony.cli.deploy.providers.compose import _COMPOSE_FILE
+
+    overlay_a = tmp_path / "cps-mlops-ui.yml"
+    overlay_b = tmp_path / "extra.yml"
+    overlay_a.write_text("services: {}\n")
+    overlay_b.write_text("services: {}\n")
+    monkeypatch.setenv(
+        "COLONY_EXTRA_COMPOSE_FILES", _os.pathsep.join([str(overlay_a), str(overlay_b)]),
+    )
+    monkeypatch.setenv("COLONY_EXTRA_COMPOSE_PROFILES", "mlops, other")
+
+    cmd = DockerComposeProvider(DeployConfig(mode="compose"))._compose_cmd("up", "-d")
+
+    # both overlays layered as -f, after the primary compose file
+    assert str(overlay_a) in cmd and str(overlay_b) in cmd
+    assert cmd.index(str(overlay_a)) > cmd.index(str(_COMPOSE_FILE))
+    # operator profiles activated
+    profiles = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--profile"]
+    assert "mlops" in profiles and "other" in profiles
+
+
+def test_no_operator_overlays_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Isolate the operator-overlay mechanism from any ambient .env (which may set
+    # other profiles like local-webhook — not what this test is about).
+    monkeypatch.delenv("COLONY_EXTRA_COMPOSE_FILES", raising=False)
+    monkeypatch.delenv("COLONY_EXTRA_COMPOSE_PROFILES", raising=False)
+
+    p = DockerComposeProvider(DeployConfig(mode="compose"))
+    assert p._operator_overlay_files() == []  # no downstream overlays
+    assert p._compose_cmd("up").count("-f") == 1  # only the primary compose file
