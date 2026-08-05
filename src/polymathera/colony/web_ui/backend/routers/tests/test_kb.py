@@ -42,6 +42,10 @@ def test_router_registers_expected_paths() -> None:
         "/kb/rehydrate",
         "/kb/rehydrate/operations",
         "/kb/images/{sha}",
+        "/kb/vocab/stats",
+        "/kb/vocab/propose",
+        "/kb/vocab/propose/operations",
+        "/kb/vocab/apply",
     }
 
 

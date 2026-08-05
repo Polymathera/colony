@@ -197,7 +197,91 @@ async def snapshot_branch_to_file(
         "existing → %d total (branch=%s)",
         len(claims), prior_count, len(merged), branch,
     )
+
+    # Vocabulary registration rides the same snapshot: every predicate
+    # in the canonical KG is registered (provisional on first sight) so
+    # revision passes always see the full open vocabulary. Idempotent.
+    _register_snapshot_predicates(working_dir, payload)
+
     return path, len(merged)
+
+
+def _register_snapshot_predicates(
+    working_dir: Path, kg: KgFile,
+) -> None:
+    from .vocabulary import (
+        VOCAB_FILE_RELATIVE_PATH,
+        VocabFile,
+        register_provisional,
+    )
+
+    vocab_path = working_dir / VOCAB_FILE_RELATIVE_PATH
+    vocab = (
+        VocabFile.from_json(vocab_path.read_text(encoding="utf-8"))
+        if vocab_path.is_file() else VocabFile()
+    )
+    added = register_provisional(
+        vocab, (c.predicate for c in kg.claims),
+    )
+    if added:
+        atomic_write_text(vocab_path, vocab.to_json())
+        logger.info(
+            "snapshot: registered %d new provisional predicates "
+            "(vocabulary now %d terms).",
+            added, len(vocab.terms),
+        )
+
+
+async def rewrite_claims_for_merges(working_dir: Path) -> dict[str, int]:
+    """Apply the vocabulary's merge/rename resolutions to the canonical
+    KG file: every claim whose predicate resolves to a different
+    canonical is rewritten (original surface form preserved in
+    ``provenance['predicate_as_extracted']``), and post-rewrite
+    identity collisions deduplicate through the same union machinery
+    the snapshot uses. Returns counts for the caller's report.
+
+    File-level only by design: live stores refresh through the normal
+    rehydrate path; the canonical record is the source of truth.
+    """
+
+    from .vocabulary import (
+        VOCAB_FILE_RELATIVE_PATH,
+        VocabFile,
+        merge_mapping,
+    )
+
+    vocab_path = working_dir / VOCAB_FILE_RELATIVE_PATH
+    kg_path = working_dir / KG_FILE_RELATIVE_PATH
+    if not vocab_path.is_file() or not kg_path.is_file():
+        return {"rewritten": 0, "deduplicated": 0, "total": 0}
+    vocab = VocabFile.from_json(vocab_path.read_text(encoding="utf-8"))
+    mapping = merge_mapping(vocab)
+    kg = KgFile.from_json(kg_path.read_text(encoding="utf-8"))
+    if not mapping:
+        return {"rewritten": 0, "deduplicated": 0, "total": len(kg.claims)}
+
+    merged: dict[tuple[str, str, str, str], PersistedClaim] = {}
+    rewritten = 0
+    for pc in kg.claims:
+        canonical = mapping.get(pc.predicate)
+        if canonical is not None:
+            provenance = dict(pc.provenance)
+            provenance.setdefault("predicate_as_extracted", pc.predicate)
+            pc = pc.model_copy(
+                update={"predicate": canonical, "provenance": provenance},
+            )
+            rewritten += 1
+        merged[_claim_key(pc)] = pc
+
+    payload = KgFile(claims=_sorted_claims(merged.values()))
+    atomic_write_text(kg_path, payload.to_json())
+    result = {
+        "rewritten": rewritten,
+        "deduplicated": len(kg.claims) - len(merged),
+        "total": len(merged),
+    }
+    logger.info("rewrite_claims_for_merges: %s", result)
+    return result
 
 
 async def load_branch_from_text(text: str, branch: str) -> dict[str, int]:
@@ -336,5 +420,6 @@ __all__ = (
     "normalize_branch_name",
     "register_kg_snapshot_callback",
     "rehydrate_branch_from_repo",
+    "rewrite_claims_for_merges",
     "snapshot_branch_to_file",
 )

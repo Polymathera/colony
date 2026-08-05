@@ -12,16 +12,21 @@ All endpoints are ``Ring.USER`` and gated by ``require_auth``.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from ..auth.middleware import require_auth
+from ..dependencies import get_colony
+
+if TYPE_CHECKING:
+    from ..services.colony_connection import ColonyConnection
 
 
 logger = logging.getLogger(__name__)
@@ -506,6 +511,42 @@ class IngestRepoMapOpStatus(BaseModel):
     failed: int = 0
 
 
+def _snapshot_execution_context() -> dict[str, Any]:
+    """Capture the live request's execution-context fields so a
+    BackgroundTask can re-establish them. Starlette runs background
+    tasks AFTER the response — the auth middleware's
+    ``execution_context`` block has already exited by then, so any
+    task touching context-requiring machinery (InferenceRequest,
+    deployment handles) must re-enter the context itself
+    (2026-08-05: the vocab revision pass would otherwise crash at its
+    first judge call; the bulk-ingest and rehydrate tasks carried the
+    same latent gap)."""
+
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        get_execution_context,
+    )
+
+    ctx = get_execution_context()
+    if ctx is None:
+        return {}
+    return {
+        "colony_id": ctx.colony_id,
+        "tenant_id": ctx.tenant_id,
+        "session_id": ctx.session_id,
+        "origin": ctx.origin or "dashboard",
+    }
+
+
+@contextlib.contextmanager
+def _reenter_execution_context(snapshot: dict[str, Any]):
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        Ring, execution_context,
+    )
+
+    with execution_context(ring=Ring.USER, **snapshot):
+        yield
+
+
 # In-memory op log — same pattern as ``vcm.py:_mapping_ops``. Survives
 # the lifetime of the dashboard process; not persisted.
 _ingest_ops: dict[str, dict[str, Any]] = {}
@@ -533,7 +574,10 @@ async def kb_ingest_repo_map(
         "failed": 0,
     }
     _ingest_ops[op_id] = op
-    background_tasks.add_task(_run_ingest_repo_map, op_id, request)
+    background_tasks.add_task(
+        _run_ingest_repo_map, op_id, request,
+        _snapshot_execution_context(),
+    )
     return IngestRepoMapOpStatus(**op)
 
 
@@ -605,7 +649,10 @@ async def kb_rehydrate(
         "claims_already_present": 0,
     }
     _rehydrate_ops[op_id] = op
-    background_tasks.add_task(_run_rehydrate, op_id, request)
+    background_tasks.add_task(
+        _run_rehydrate, op_id, request,
+        _snapshot_execution_context(),
+    )
     return RehydrateOpStatus(**op)
 
 
@@ -619,7 +666,10 @@ async def kb_rehydrate_operations(
     return [RehydrateOpStatus(**op) for op in _rehydrate_ops.values()]
 
 
-async def _run_rehydrate(op_id: str, request: RehydrateRequest) -> None:
+async def _run_rehydrate(
+    op_id: str, request: RehydrateRequest,
+    ctx_snapshot: dict[str, Any],
+) -> None:
     op = _rehydrate_ops.get(op_id)
     if not op:
         return
@@ -652,7 +702,8 @@ async def _run_rehydrate(op_id: str, request: RehydrateRequest) -> None:
 
         for branch_name in branch_names:
             op["message"] = f"Rehydrating {branch_name}..."
-            result = await rehydrate_branch_from_repo(repo, branch_name)
+            with _reenter_execution_context(ctx_snapshot):
+                result = await rehydrate_branch_from_repo(repo, branch_name)
             op["branches_rehydrated"] += 1
             for k in (
                 "claims_in_file", "claims_newly_added",
@@ -675,6 +726,7 @@ async def _run_rehydrate(op_id: str, request: RehydrateRequest) -> None:
 
 async def _run_ingest_repo_map(
     op_id: str, request: IngestRepoMapRequest,
+    ctx_snapshot: dict[str, Any],
 ) -> None:
     op = _ingest_ops.get(op_id)
     if not op:
@@ -706,11 +758,12 @@ async def _run_ingest_repo_map(
         enabled_list = await list_enabled_knowledge_sources(colony_id)
         enabled = set(enabled_list) if enabled_list is not None else None
         op["message"] = "Ingesting matching files..."
-        report = await materialize_knowledge_sources(
-            repo_map=repo_map,
-            repo_root=repo_root,
-            enabled_sources=enabled,
-        )
+        with _reenter_execution_context(ctx_snapshot):
+            report = await materialize_knowledge_sources(
+                repo_map=repo_map,
+                repo_root=repo_root,
+                enabled_sources=enabled,
+            )
         # NOTE: the dashboard direct path doesn't commit — its clone
         # is a colony-level cache, not an agent's working tree. The
         # KB index is populated (the entire reason for this button)
@@ -730,3 +783,291 @@ async def _run_ingest_repo_map(
         op["status"] = "error"
         op["message"] = str(e)
     op["completed_at"] = time.time()
+
+
+# ---------------------------------------------------------------------------
+# /kb/vocab — predicate-vocabulary registry + revision passes
+# (colony/predicate_vocabulary_plan.md; UI surface in KnowledgeBaseTab)
+# ---------------------------------------------------------------------------
+
+
+class VocabStatsResponse(BaseModel):
+    """Decision-support payload for the KB tab's Vocabulary panel —
+    everything the operator needs to decide whether a revision pass
+    is worth its cost."""
+
+    stats: dict[str, Any]
+    estimated_clusters: int
+    """How many candidate clusters a pass would judge (≈ one LLM call
+    each) — the pass's cost, surfaced BEFORE the operator commits."""
+
+
+class VocabProposeRequest(BaseModel):
+    origin_url: str = Field(description="Git repo URL (https:// or file://)")
+    branch: str = "main"
+    max_clusters: int | None = Field(
+        default=200,
+        description="Judge at most this many clusters (cost cap).",
+    )
+
+
+class VocabOpPayload(BaseModel):
+    """One operation as reviewed in the UI."""
+
+    op_id: str
+    op_type: str
+    term: str
+    target: str | None = None
+    rationale: str = ""
+    confidence: float = 1.0
+    proposed_by: str = ""
+
+
+class VocabApplyRequest(BaseModel):
+    origin_url: str
+    branch: str = "main"
+    operations: list[VocabOpPayload]
+    approved_by: str = Field(
+        description=(
+            "Operator identity signing the destructive operations — "
+            "apply refuses destructive ops without it."
+        ),
+    )
+
+
+class VocabOpStatus(BaseModel):
+    op_id: str
+    status: str
+    origin_url: str
+    started_at: float
+    completed_at: float | None = None
+    message: str = ""
+    proposals: list[dict[str, Any]] = Field(default_factory=list)
+
+
+_vocab_ops: dict[str, dict[str, Any]] = {}
+
+
+async def _load_vocab_and_kg(origin_url: str, branch: str):
+    from polymathera.colony.distributed import get_polymathera
+    from polymathera.colony.knowledge.persistence import (
+        KG_FILE_RELATIVE_PATH, KgFile,
+    )
+    from polymathera.colony.knowledge.vocabulary import (
+        VOCAB_FILE_RELATIVE_PATH, VocabFile,
+    )
+
+    polymathera = get_polymathera()
+    storage = await polymathera.get_storage()
+    repo_path = Path(str(await storage.git_storage.clone_or_retrieve_repository(
+        origin_url=origin_url, branch=branch, commit="HEAD",
+    )))
+    kg_path = repo_path / KG_FILE_RELATIVE_PATH
+    vocab_path = repo_path / VOCAB_FILE_RELATIVE_PATH
+    kg = (
+        KgFile.from_json(kg_path.read_text(encoding="utf-8"))
+        if kg_path.is_file() else KgFile()
+    )
+    vocab = (
+        VocabFile.from_json(vocab_path.read_text(encoding="utf-8"))
+        if vocab_path.is_file() else VocabFile()
+    )
+    return repo_path, vocab, kg
+
+
+@router.get("/kb/vocab/stats", response_model=VocabStatsResponse)
+async def kb_vocab_stats(
+    origin_url: str,
+    branch: str = "main",
+    _user: dict = Depends(require_auth),
+) -> VocabStatsResponse:
+    from collections import Counter
+
+    from polymathera.colony.knowledge.vocabulary import (
+        register_provisional, vocab_stats,
+    )
+    from polymathera.colony.knowledge.vocabulary_revision import (
+        MIN_CLUSTER_USAGE, dedupe_clusters, lexical_clusters,
+        type_signature_clusters,
+    )
+
+    _, vocab, kg = await _load_vocab_and_kg(origin_url, branch)
+    usage = Counter(c.predicate for c in kg.claims)
+    # Stats reflect the registry AS IF current predicates were
+    # registered (pre-vocabulary KGs show up fully, not as zeros).
+    register_provisional(vocab, usage.keys())
+    stats = vocab_stats(vocab, usage)
+    clusters = dedupe_clusters(
+        lexical_clusters(usage) + type_signature_clusters(kg),
+    )
+    estimated = sum(
+        1 for c in clusters
+        if sum(usage.get(m, 0) for m in c.members) >= MIN_CLUSTER_USAGE
+    )
+    return VocabStatsResponse(
+        stats=stats.model_dump(), estimated_clusters=estimated,
+    )
+
+
+@router.post("/kb/vocab/propose", response_model=VocabOpStatus)
+async def kb_vocab_propose(
+    request: VocabProposeRequest,
+    background_tasks: BackgroundTasks,
+    colony: "ColonyConnection" = Depends(get_colony),
+    _user: dict = Depends(require_auth),
+) -> VocabOpStatus:
+    """Run a revision pass (candidate generation + LLM judging) in the
+    background. Proposes only — nothing is applied until the operator
+    approves through ``/kb/vocab/apply``."""
+
+    op_id = f"vocab_{uuid.uuid4().hex[:12]}"
+    op: dict[str, Any] = {
+        "op_id": op_id, "status": "pending",
+        "origin_url": request.origin_url, "started_at": time.time(),
+        "completed_at": None, "message": "", "proposals": [],
+    }
+    _vocab_ops[op_id] = op
+    # The dashboard is NOT a deployment: handle resolution cannot read
+    # POLYMATHERA_SERVING_CURRENT_APP. The connection's app_name (from
+    # the operator YAML) is the authority here.
+    background_tasks.add_task(
+        _run_vocab_propose, op_id, request, colony.app_name,
+        _snapshot_execution_context(),
+    )
+    return VocabOpStatus(**op)
+
+
+@router.get("/kb/vocab/propose/operations", response_model=list[VocabOpStatus])
+async def kb_vocab_propose_operations(
+    _user: dict = Depends(require_auth),
+) -> list[VocabOpStatus]:
+    return [VocabOpStatus(**op) for op in _vocab_ops.values()]
+
+
+async def _run_vocab_propose(
+    op_id: str, request: VocabProposeRequest, app_name: str,
+    ctx_snapshot: dict[str, Any],
+) -> None:
+    op = _vocab_ops.get(op_id)
+    if not op:
+        return
+    op["status"] = "running"
+    op["message"] = "Loading registry + KG..."
+    try:
+        from collections import Counter
+
+        from polymathera.colony.knowledge.deps import (
+            build_default_llm_callable, get_knowledge_deps,
+        )
+        from polymathera.colony.knowledge.vocabulary import (
+            register_provisional,
+        )
+        from polymathera.colony.knowledge.vocabulary_revision import (
+            propose_operations,
+        )
+
+        _, vocab, kg = await _load_vocab_and_kg(
+            request.origin_url, request.branch,
+        )
+        usage = Counter(c.predicate for c in kg.claims)
+        register_provisional(vocab, usage.keys())
+        llm = build_default_llm_callable(
+            max_tokens=1024, temperature=0.0, app_name=app_name,
+        )
+
+        def _progress(message: str) -> None:
+            op["message"] = message
+
+        with _reenter_execution_context(ctx_snapshot):
+            proposals = await propose_operations(
+                vocab, kg,
+                llm,
+                embedder=get_knowledge_deps().embedder,
+                max_clusters=request.max_clusters,
+                on_progress=_progress,
+            )
+        op["proposals"] = [p.model_dump(mode="json") for p in proposals]
+        op["message"] = f"{len(proposals)} operations proposed"
+        op["status"] = "completed"
+    except Exception as e:  # noqa: BLE001
+        logger.exception("kb_vocab_propose op %s failed", op_id)
+        op["status"] = "error"
+        op["message"] = str(e)
+    op["completed_at"] = time.time()
+
+
+@router.post("/kb/vocab/apply")
+async def kb_vocab_apply(
+    request: VocabApplyRequest,
+    _user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Apply operator-approved operations: registry update + claim
+    rewrite for merges, committed and pushed so the vocabulary change
+    is canonical, not a cache-clone artifact."""
+
+    import asyncio as _asyncio
+
+    from git import Repo
+
+    from polymathera.colony.knowledge.persistence import (
+        rewrite_claims_for_merges,
+    )
+    from polymathera.colony.knowledge.vocabulary import (
+        DESTRUCTIVE_OP_TYPES, VOCAB_FILE_RELATIVE_PATH, VocabError,
+        VocabFile, VocabOperation, apply_operation, register_provisional,
+    )
+
+    repo_path, vocab, kg = await _load_vocab_and_kg(
+        request.origin_url, request.branch,
+    )
+    register_provisional(
+        vocab, {c.predicate for c in kg.claims},
+    )
+    applied, failed = [], []
+    for payload in request.operations:
+        op = VocabOperation(
+            **payload.model_dump(),
+        )
+        if op.op_type in DESTRUCTIVE_OP_TYPES:
+            op.approved_by = request.approved_by
+        try:
+            apply_operation(vocab, op)
+            applied.append(op.op_id)
+        except VocabError as exc:
+            failed.append({"op_id": op.op_id, "error": str(exc)})
+    if not applied:
+        return {"applied": [], "failed": failed, "rewrite": {}}
+
+    vocab_path = repo_path / VOCAB_FILE_RELATIVE_PATH
+    vocab_path.parent.mkdir(parents=True, exist_ok=True)
+    vocab_path.write_text(vocab.to_json(), encoding="utf-8")
+    rewrite = await rewrite_claims_for_merges(repo_path)
+
+    def _commit_and_push() -> str:
+        from git import Actor
+
+        from polymathera.colony.distributed.ray_utils import serving
+
+        repo = Repo(str(repo_path))
+        repo.index.add(
+            [".colony/colony.vocab.json", ".colony/colony.kg.json"],
+        )
+        colony_id = serving.get_colony_id() or "colony"
+        # Same synthetic principal the design-monorepo capabilities
+        # commit under; the approving operator is named in the message.
+        actor = Actor(
+            f"colony:{colony_id}", f"{colony_id}@agent.colony.local",
+        )
+        commit = repo.index.commit(
+            f"vocab: apply {len(applied)} operations "
+            f"(approved by {request.approved_by})",
+            author=actor, committer=actor,
+        )
+        repo.remote().push().raise_if_error()
+        return commit.hexsha[:8]
+
+    sha = await _asyncio.to_thread(_commit_and_push)
+    return {
+        "applied": applied, "failed": failed,
+        "rewrite": rewrite, "commit": sha,
+    }

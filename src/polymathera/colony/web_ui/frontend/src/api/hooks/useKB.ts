@@ -256,3 +256,115 @@ export function useKBRehydrateOperations() {
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// /kb/vocab — predicate-vocabulary registry + revision passes
+// ---------------------------------------------------------------------------
+
+export interface VocabStats {
+  total_terms: number;
+  active: number;
+  provisional: number;
+  deprecated: number;
+  predicates_in_kg: number;
+  singleton_predicates: number;
+  singleton_ratio: number;
+  unregistered_predicates: number;
+  top_predicates: [string, number][];
+  lexical_merge_candidates: number;
+  last_operation_at: string;
+  operations_applied: number;
+}
+
+export interface VocabStatsResponse {
+  stats: VocabStats;
+  estimated_clusters: number;
+}
+
+export interface VocabProposedOp {
+  op_id: string;
+  op_type: string;
+  term: string;
+  target: string | null;
+  rationale: string;
+  confidence: number;
+  proposed_by: string;
+}
+
+export interface VocabOpStatus {
+  op_id: string;
+  status: "pending" | "running" | "completed" | "error";
+  origin_url: string;
+  started_at: number;
+  completed_at: number | null;
+  message: string;
+  proposals: VocabProposedOp[];
+}
+
+export function useKBVocabStats(originUrl: string | null, branch: string) {
+  return useQuery({
+    queryKey: ["kb", "vocab", "stats", originUrl, branch],
+    enabled: !!originUrl,
+    queryFn: () => {
+      const qs = new URLSearchParams({
+        origin_url: originUrl!, branch,
+      });
+      return apiFetch<VocabStatsResponse>(`/kb/vocab/stats?${qs.toString()}`);
+    },
+  });
+}
+
+export function useKBVocabPropose() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: { origin_url: string; branch: string }) =>
+      apiFetch<VocabOpStatus>("/kb/vocab/propose", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["kb", "vocab", "propose"] });
+    },
+  });
+}
+
+export function useKBVocabProposeOperations() {
+  return useQuery({
+    queryKey: ["kb", "vocab", "propose", "operations"],
+    queryFn: () =>
+      apiFetch<VocabOpStatus[]>("/kb/vocab/propose/operations"),
+    refetchInterval: (query) => {
+      const ops = query.state.data;
+      if (ops && ops.some((op) => op.status === "pending" || op.status === "running")) {
+        return 2000;
+      }
+      return false;
+    },
+  });
+}
+
+export interface VocabApplyResult {
+  applied: string[];
+  failed: { op_id: string; error: string }[];
+  rewrite: { rewritten?: number; deduplicated?: number; total?: number };
+  commit?: string;
+}
+
+export function useKBVocabApply() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: {
+      origin_url: string;
+      branch: string;
+      operations: VocabProposedOp[];
+      approved_by: string;
+    }) =>
+      apiFetch<VocabApplyResult>("/kb/vocab/apply", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["kb", "vocab"] });
+    },
+  });
+}

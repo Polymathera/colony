@@ -1611,6 +1611,118 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
 
     @action_executor(
         planning_summary=(
+            "Report the KG predicate-vocabulary health: term counts by "
+            "status, singleton ratio, and how many candidate clusters a "
+            "revision pass would judge."
+        ),
+    )
+    async def vocabulary_stats(self) -> dict[str, Any]:
+        """Decision-support stats for the predicate vocabulary
+        (``colony/predicate_vocabulary_plan.md``).
+
+        Read-only. Use the numbers to decide whether to recommend a
+        revision pass to the operator: a high ``singleton_ratio``
+        (predicates carrying one claim) means the KG has few join
+        paths; ``estimated_clusters`` approximates the pass's cost in
+        judge LLM calls. Applying vocabulary operations is operator-
+        gated in the dashboard's Knowledge Base tab — propose via
+        ``propose_vocabulary_revision``, then direct the operator
+        there to review and apply.
+        """
+
+        from collections import Counter
+
+        from ..knowledge.persistence import KG_FILE_RELATIVE_PATH, KgFile
+        from ..knowledge.vocabulary import (
+            VOCAB_FILE_RELATIVE_PATH, VocabFile, register_provisional,
+            vocab_stats,
+        )
+        from ..knowledge.vocabulary_revision import (
+            MIN_CLUSTER_USAGE, dedupe_clusters, lexical_clusters,
+            type_signature_clusters,
+        )
+
+        repo_root = self._working_dir
+        kg_path = repo_root / KG_FILE_RELATIVE_PATH
+        vocab_path = repo_root / VOCAB_FILE_RELATIVE_PATH
+        kg = (
+            KgFile.from_json(kg_path.read_text(encoding="utf-8"))
+            if kg_path.is_file() else KgFile()
+        )
+        vocab = (
+            VocabFile.from_json(vocab_path.read_text(encoding="utf-8"))
+            if vocab_path.is_file() else VocabFile()
+        )
+        usage = Counter(c.predicate for c in kg.claims)
+        register_provisional(vocab, usage.keys())
+        clusters = dedupe_clusters(
+            lexical_clusters(usage) + type_signature_clusters(kg),
+        )
+        estimated = sum(
+            1 for c in clusters
+            if sum(usage.get(m, 0) for m in c.members) >= MIN_CLUSTER_USAGE
+        )
+        return {
+            **vocab_stats(vocab, usage).model_dump(),
+            "estimated_clusters": estimated,
+        }
+
+    @action_executor(
+        planning_summary=(
+            "Run a vocabulary revision pass: cluster similar predicates "
+            "(lexical + embedding + type-signature) and produce LLM-judged "
+            "merge/hierarchy proposals. Proposes only — applying is "
+            "operator-gated in the dashboard."
+        ),
+    )
+    async def propose_vocabulary_revision(
+        self, *, max_clusters: int = 200,
+    ) -> dict[str, Any]:
+        """Generate typed vocabulary-operation proposals for the
+        operator to review in the Knowledge Base tab. Costs roughly
+        one judge LLM call per cluster (bounded by ``max_clusters``).
+        Returns the proposals so you can summarize the highest-
+        confidence ones to the user; nothing is applied here.
+        """
+
+        from collections import Counter
+
+        from ..knowledge.deps import (
+            build_default_llm_callable, get_knowledge_deps,
+        )
+        from ..knowledge.persistence import KG_FILE_RELATIVE_PATH, KgFile
+        from ..knowledge.vocabulary import (
+            VOCAB_FILE_RELATIVE_PATH, VocabFile, register_provisional,
+        )
+        from ..knowledge.vocabulary_revision import propose_operations
+
+        repo_root = self._working_dir
+        kg_path = repo_root / KG_FILE_RELATIVE_PATH
+        if not kg_path.is_file():
+            return {"proposals": [], "message": "no KG file in this repo"}
+        kg = KgFile.from_json(kg_path.read_text(encoding="utf-8"))
+        vocab_path = repo_root / VOCAB_FILE_RELATIVE_PATH
+        vocab = (
+            VocabFile.from_json(vocab_path.read_text(encoding="utf-8"))
+            if vocab_path.is_file() else VocabFile()
+        )
+        register_provisional(vocab, {c.predicate for c in kg.claims})
+        proposals = await propose_operations(
+            vocab, kg,
+            build_default_llm_callable(max_tokens=1024, temperature=0.0),
+            embedder=get_knowledge_deps().embedder,
+            max_clusters=max_clusters,
+        )
+        return {
+            "proposals": [p.model_dump(mode="json") for p in proposals],
+            "message": (
+                f"{len(proposals)} operations proposed — review and "
+                f"apply in the dashboard's Knowledge Base tab."
+            ),
+        }
+
+    @action_executor(
+        planning_summary=(
             "Ingest files matched by the design monorepo's "
             "``knowledge_sources:`` block into the knowledge base."
         ),

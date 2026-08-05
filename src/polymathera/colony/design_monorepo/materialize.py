@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -57,6 +58,7 @@ from polymathera.colony.vcm.models import MmapConfig
 from .design_context_renewer import DesignContextLockRenewer
 from .repo_map import DesignContextSource, KnowledgeSource, RepoMap
 from ._internal import DESIGN_CONTEXT_URI_SCHEME
+from ..knowledge.vocabulary import set_vocabulary_prior
 
 #: Scheme for repo-relative source URIs — ``repo:kb/literature/x.pdf``.
 #: The canonical identity of an in-repo knowledge source. Deliberately
@@ -386,7 +388,12 @@ async def materialize_knowledge_sources(
         for abs_path in _iter_matching_files(repo_root, source):
             coros.append(_ingest_one_local(source, abs_path))
 
-    await asyncio.gather(*coros)
+    # Soft vocabulary prior (predicate_vocabulary_plan §6): claim
+    # extraction inside this run sees the repo's top ACTIVE canonical
+    # predicates as reuse guidance. ContextVar-bound — concurrent
+    # ingests of other repos are unaffected.
+    with set_vocabulary_prior(_load_vocabulary_prior(repo_root)):
+        await asyncio.gather(*coros)
 
     return KnowledgeMaterialisationReport(
         records=tuple(records),
@@ -469,6 +476,33 @@ async def _run_acquirer(
         ),
     )
     return acquired
+
+
+def _load_vocabulary_prior(repo_root: Path) -> str | None:
+    """Render the extractor's soft prior from the repo's vocabulary
+    registry + KG usage. ``None`` (no prior) when the repo has no
+    registry yet or no ACTIVE terms — a fresh repo extracts fully
+    open, exactly as before."""
+
+    from polymathera.colony.knowledge.persistence import (
+        KG_FILE_RELATIVE_PATH, KgFile,
+    )
+    from polymathera.colony.knowledge.vocabulary import (
+        VOCAB_FILE_RELATIVE_PATH, VocabFile, render_prior,
+        top_active_predicates,
+    )
+
+    vocab_path = repo_root / VOCAB_FILE_RELATIVE_PATH
+    if not vocab_path.is_file():
+        return None
+    vocab = VocabFile.from_json(vocab_path.read_text(encoding="utf-8"))
+    kg_path = repo_root / KG_FILE_RELATIVE_PATH
+    kg = (
+        KgFile.from_json(kg_path.read_text(encoding="utf-8"))
+        if kg_path.is_file() else KgFile()
+    )
+    usage = Counter(c.predicate for c in kg.claims)
+    return render_prior(top_active_predicates(vocab, usage))
 
 
 def _acquired_source_uri(

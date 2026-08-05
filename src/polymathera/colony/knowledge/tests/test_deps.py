@@ -393,3 +393,50 @@ def test_llm_claim_extractor_degrades_gracefully_when_no_cluster(
         extractor.extract(chunk),
     )
     assert claims == ()  # graceful empty, not crash
+
+
+@pytest.mark.asyncio
+async def test_llm_callable_threads_app_name_to_handle_resolution(
+    monkeypatch,
+) -> None:
+    """``build_default_llm_callable(app_name=...)`` must reach
+    ``get_llm_cluster`` — callers outside a deployment context (the
+    dashboard) cannot rely on POLYMATHERA_SERVING_CURRENT_APP.
+    Regression for the 2026-08-05 vocab-revision crash."""
+
+    from polymathera.colony import _handles
+    from polymathera.colony.knowledge.deps import (
+        build_default_llm_callable,
+    )
+    from pydantic import BaseModel
+
+    class _Out(BaseModel):
+        ok: bool
+
+    captured: list[str | None] = []
+
+    class _FakeResponse:
+        generated_text = '{"ok": true}'
+
+    class _FakeHandle:
+        async def infer(self, request):
+            return _FakeResponse()
+
+    async def _fake_get_llm_cluster(app_name=None):
+        captured.append(app_name)
+        return _FakeHandle()
+
+    monkeypatch.setattr(_handles, "get_llm_cluster", _fake_get_llm_cluster)
+    llm = build_default_llm_callable(
+        max_tokens=64, temperature=0.0, app_name="polymathera-cps-smoke",
+    )
+    # InferenceRequest captures the execution context; the dashboard's
+    # request middleware provides it in production.
+    from polymathera.colony.distributed.ray_utils.serving.context import (
+        Ring, execution_context,
+    )
+
+    with execution_context(ring=Ring.USER, origin="test"):
+        result = await llm("prompt", _Out)
+    assert result.ok is True
+    assert captured == ["polymathera-cps-smoke"]

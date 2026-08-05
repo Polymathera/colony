@@ -481,3 +481,62 @@ async def test_update_tier_for_unknown_source_is_zero(
         "ghost:1", CorpusTier.TIER_1_FOUNDATIONS,
     )
     assert n == 0
+
+
+@pytest.mark.asyncio
+async def test_first_touch_collection_race_does_not_500() -> None:
+    """Fresh Qdrant volume + several endpoints hitting the store in
+    parallel: creation must happen once; a concurrent 409 from another
+    process is success; real create failures stay loud. (2026-08-05:
+    the KB tab's parallel first-touch surfaced the loser's 409 as an
+    operator-visible 500.)"""
+
+    import asyncio
+
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    class _RacingClient:
+        def __init__(self) -> None:
+            self.exists = False
+            self.create_calls = 0
+
+        async def get_collection(self, collection_name):
+            if not self.exists:
+                raise UnexpectedResponse(
+                    404, "Not Found", b"missing", None,
+                )
+            return {"status": "ok"}
+
+        async def create_collection(self, collection_name, vectors_config):
+            self.create_calls += 1
+            if self.exists:
+                raise UnexpectedResponse(
+                    409, "Conflict", b"already exists", None,
+                )
+            self.exists = True
+
+    client = _RacingClient()
+    store = QdrantVectorStore(
+        client=client, collection="c", embedder_id="e", dimensions=8,
+    )
+    # Intra-process race: the lock serializes; exactly one create.
+    await asyncio.gather(*(store._ensure_collection() for _ in range(5)))
+    assert client.create_calls == 1
+
+    # Cross-process race: another process created between our 404 and
+    # our create — the 409 is success, not an error.
+    store2 = QdrantVectorStore(
+        client=client, collection="c", embedder_id="e", dimensions=8,
+    )
+    client.exists = False  # force the 404 path on get...
+    orig_get = client.get_collection
+
+    async def _racy_get(collection_name):
+        # ...but the "other process" wins right after our lookup.
+        try:
+            return await orig_get(collection_name)
+        finally:
+            client.exists = True
+
+    client.get_collection = _racy_get
+    await store2._ensure_collection()  # 409 inside — must not raise

@@ -127,6 +127,7 @@ def build_default_llm_callable(
     max_tokens: int,
     temperature: float,
     deadline_s: float | None = None,
+    app_name: str | None = None,
 ) -> TypedLLMCallable:
     """Build the lazy :data:`TypedLLMCallable` the singleton Ingestor's
     :class:`LLMClaimExtractor` (and every future typed-schema extractor)
@@ -139,6 +140,12 @@ def build_default_llm_callable(
        time (the Ray Serving cluster may not be deployed yet), so
        construction-time resolution would race; per-call resolution
        is safe — the handle is cached inside ``get_llm_cluster``.
+       ``app_name`` MUST be supplied by callers outside a deployment
+       context (the dashboard backend — it resolves the name via its
+       ``ColonyConnection``); in-deployment callers omit it and the
+       serving env resolves it (2026-08-05: the dashboard's vocab
+       revision pass crashed on ``get_my_app_name()`` because nothing
+       threaded the name).
     2. Builds an :class:`InferenceRequest` carrying the caller-supplied
        schema as ``json_schema=schema.model_json_schema()``. The
        deployment honors it natively (Anthropic tool-use, vLLM
@@ -165,7 +172,7 @@ def build_default_llm_callable(
         from .._handles import get_llm_cluster
         from ..cluster.models import InferenceRequest
 
-        handle = await get_llm_cluster()
+        handle = await get_llm_cluster(app_name)
         request = InferenceRequest(
             request_id=f"claim_extract_{uuid.uuid4().hex[:12]}",
             prompt=prompt,

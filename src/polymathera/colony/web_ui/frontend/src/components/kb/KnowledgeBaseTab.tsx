@@ -32,6 +32,7 @@ import {
 } from "@/api/hooks/useKB";
 import { Badge } from "../shared/Badge";
 import { ChunkMarkdown } from "./ChunkMarkdown";
+import { VocabularyPanel } from "./VocabularyPanel";
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement>;
 
@@ -429,6 +430,8 @@ export function KnowledgeBaseTab() {
           </div>
         </div>
       </section>
+
+      <VocabularyPanel />
     </div>
   );
 }

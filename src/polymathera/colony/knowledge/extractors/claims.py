@@ -244,8 +244,18 @@ class LLMClaimExtractor(ClaimExtractor):
         self._prompt = prompt or ExtractionPrompt()
 
     async def extract(self, chunk: Chunk) -> Sequence[Claim]:
+        from ..vocabulary import get_vocabulary_prior
+
+        # Soft vocabulary prior (plan §6): bound by materialize around
+        # the ingest run; absent outside repo-scoped ingests. Guides
+        # predicate REUSE — minting stays free.
+        prior = get_vocabulary_prior()
+        system = (
+            f"{self._prompt.system}\n\n{prior}" if prior
+            else self._prompt.system
+        )
         prompt = (
-            f"{self._prompt.system}\n\n"
+            f"{system}\n\n"
             + self._prompt.user_template.format(
                 source_uri=chunk.citation.source_uri,
                 section_path=chunk.citation.section_path,

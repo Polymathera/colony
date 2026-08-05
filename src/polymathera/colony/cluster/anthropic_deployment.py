@@ -88,6 +88,63 @@ def _classify_anthropic_exception(exc: BaseException) -> "LLMErrorCategory":
     return LLMErrorCategory.UNKNOWN
 
 
+#: Schema keys Anthropic structured outputs reject at request time
+#: (400). Documented limitations — see the ``json_schema`` notes in
+#: ``_call_api`` and
+#: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+#: LLM-facing pydantic models must therefore avoid ``ge``/``le``/
+#: ``min_length``/``max_length``/``multiple_of`` Field constraints and
+#: enforce value ranges post-parse via field_validators (the
+#: ``ExtractedClaim`` convention). ``find_unsupported_schema_constraints``
+#: exists so every LLM-facing schema can be PINNED clean by a unit test
+#: instead of discovering the 400 in production (2026-08-05: the vocab
+#: judge schema shipped with ge/le and died on its first request).
+UNSUPPORTED_STRUCTURED_OUTPUT_KEYS: frozenset[str] = frozenset({
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+    "multipleOf", "minLength", "maxLength",
+})
+
+
+def find_unsupported_schema_constraints(
+    schema: dict, _path: str = "$",
+) -> list[str]:
+    """Walk a JSON schema and report every occurrence of a constraint
+    Anthropic structured outputs reject, as ``path: key`` strings.
+    Also flags objects whose ``additionalProperties`` is not ``false``
+    (required by the API). Empty list = safe to send."""
+
+    problems: list[str] = []
+    if not isinstance(schema, dict):
+        return problems
+    for key in UNSUPPORTED_STRUCTURED_OUTPUT_KEYS:
+        if key in schema:
+            problems.append(f"{_path}: {key}")
+    if schema.get("type") == "object" and schema.get(
+        "additionalProperties", True,
+    ) is not False:
+        problems.append(f"{_path}: additionalProperties must be false")
+    for name, sub in (schema.get("properties") or {}).items():
+        problems.extend(
+            find_unsupported_schema_constraints(sub, f"{_path}.{name}")
+        )
+    for key in ("items", "$defs", "definitions"):
+        sub = schema.get(key)
+        if isinstance(sub, dict):
+            if key == "items":
+                problems.extend(
+                    find_unsupported_schema_constraints(sub, f"{_path}[]")
+                )
+            else:
+                for name, defn in sub.items():
+                    problems.extend(
+                        find_unsupported_schema_constraints(
+                            defn, f"{_path}.{key}.{name}",
+                        )
+                    )
+    return problems
+
+
+
 @register_remote_llm_provider("anthropic")
 class AnthropicLLMDeployment(RemoteLLMDeployment):
     """Anthropic LLM deployment with prefix caching.

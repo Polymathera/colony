@@ -21,6 +21,7 @@ Two implementations:
 
 from __future__ import annotations
 
+import asyncio
 import math
 import uuid
 from abc import ABC, abstractmethod
@@ -458,6 +459,15 @@ class QdrantVectorStore(VectorStore):
         self._dimensions = dimensions
         self._distance = distance
         self._collection_ready = False
+        # Serializes first-touch collection creation WITHIN this
+        # process (the dashboard's KB tab fires several endpoints in
+        # parallel on page load; on a fresh Qdrant volume they raced
+        # into create_collection and the loser's 409 surfaced as a
+        # 500 — 2026-08-05). Cross-process races are handled by
+        # 409-tolerance in ``_ensure_collection``. Created here (per
+        # process), never in blueprint kwargs — asyncio primitives
+        # don't pickle.
+        self._ensure_lock = asyncio.Lock()
 
     @property
     def collection_name(self) -> str:
@@ -609,6 +619,13 @@ class QdrantVectorStore(VectorStore):
     async def _ensure_collection(self) -> None:
         if self._collection_ready:
             return
+        async with self._ensure_lock:
+            if self._collection_ready:
+                return
+            await self._ensure_collection_locked()
+            self._collection_ready = True
+
+    async def _ensure_collection_locked(self) -> None:
         from qdrant_client import models as qmodels  # type: ignore[import-not-found]
         from qdrant_client.http.exceptions import (  # type: ignore[import-not-found]
             UnexpectedResponse,
@@ -618,29 +635,34 @@ class QdrantVectorStore(VectorStore):
             await self._client.get_collection(
                 collection_name=self._collection,
             )
-        except (UnexpectedResponse, ValueError):
+            return
+        except Exception:  # noqa: BLE001
+            # Missing collection surfaces as UnexpectedResponse(404) on
+            # current qdrant-client; older versions raise ValueError or
+            # generic exceptions. Every failure shape falls through to
+            # create — creation is the one path that either succeeds,
+            # tolerates a concurrent winner, or fails loud below.
+            pass
+
+        try:
             await self._client.create_collection(
                 collection_name=self._collection,
                 vectors_config=qmodels.VectorParams(
                     size=self._dimensions,
-                    distance=getattr(qmodels.Distance, self._distance.upper(), qmodels.Distance.COSINE),
+                    distance=getattr(
+                        qmodels.Distance,
+                        self._distance.upper(),
+                        qmodels.Distance.COSINE,
+                    ),
                 ),
             )
-        except Exception:  # noqa: BLE001
-            # Some qdrant-client versions raise generic exceptions for
-            # missing collections. Fall through to create.
-            try:
-                await self._client.create_collection(
-                    collection_name=self._collection,
-                    vectors_config=qmodels.VectorParams(
-                        size=self._dimensions,
-                        distance=qmodels.Distance.COSINE,
-                    ),
-                )
-            except Exception:  # noqa: BLE001
-                # Already exists or another transient — proceed.
-                pass
-        self._collection_ready = True
+        except UnexpectedResponse as exc:
+            # ANOTHER process (agent worker / a second dashboard
+            # replica) won the create race — a 409/exists is success.
+            # Anything else is a real failure and must stay loud.
+            message = str(exc)
+            if "409" not in message and "exists" not in message.lower():
+                raise
 
     def _point_id(self, chunk_id: str) -> uuid.UUID:
         return uuid.uuid5(self._NAMESPACE_UUID, chunk_id)
