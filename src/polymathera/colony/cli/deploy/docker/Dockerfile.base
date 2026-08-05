@@ -102,8 +102,11 @@ RUN chmod +x /usr/local/bin/colony-git-credentials \
  && git config --system credential.https://gitlab.com.helper \
         '!f() { echo "username=oauth2"; echo "password=$GITLAB_TOKEN"; }; f'
 
-# Node.js (for building the dashboard frontend in Dockerfile.local)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+# Node.js — builds the dashboard frontend (Dockerfile.local) and the CPS MLOps
+# UI frontend, and runs the external Claude Code CLI in the mlops-ui image.
+# 24.x is the current active LTS line (EOL 2028-04-30); 22 remains supported
+# until 2027-04-30, so this is a currency bump, not a fix for a live warning.
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 

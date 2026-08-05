@@ -5,12 +5,14 @@ read cache) and a versioned JSON snapshot in the design monorepo at
 ``.colony/colony.kg.json``. Two operations:
 
 - **snapshot**: exports the GraphStore's claims for the branch being
-  committed and atomically writes the file. Registered as a
+  committed and atomically MERGES them into the file (union on claim
+  identity; fresh export wins a collision). Registered as a
   pre-commit callback (:mod:`..design_monorepo.commit_hooks`) so it
   fires automatically as part of any commit-and-push the design-
-  monorepo capabilities issue. Never overwrites the file with an
-  empty payload — a deployment that has never rehydrated must not
-  destroy the canonical record on its first checkpoint.
+  monorepo capabilities issue. Merge, never replace: the live store
+  is a working set, and a fresh deployment that never rehydrated
+  must not clobber claims other runs paid for (nor may an empty
+  export touch the file at all).
 
 - **rehydrate**: loads the file from a branch's checked-out tree
   (or from ``origin/<branch>`` via ``git show``) and idempotently
@@ -127,33 +129,47 @@ class KgFile(BaseModel):
         return cls.model_validate_json(text)
 
 
-def _sorted_claims(claims: Iterable[Claim]) -> list[PersistedClaim]:
+def _sorted_claims(claims: Iterable[PersistedClaim]) -> list[PersistedClaim]:
     """Stable claim ordering so byte-identical KGs produce
     byte-identical files (empty git diffs on unchanged commits)."""
 
-    persisted = [PersistedClaim.from_claim(c) for c in claims]
-    persisted.sort(
-        key=lambda c: (
-            c.subject, c.predicate, c.object_,
-            str(c.citation.get("source_uri", "")),
-        ),
+    return sorted(claims, key=_claim_key)
+
+
+def _claim_key(claim: PersistedClaim) -> tuple[str, str, str, str]:
+    """Merge identity of a persisted claim — the same key
+    ``_sorted_claims`` orders by and the kg-merge driver deduplicates
+    on."""
+
+    return (
+        claim.subject,
+        claim.predicate,
+        claim.object_,
+        str(claim.citation.get("source_uri", "")),
     )
-    return persisted
 
 
 async def snapshot_branch_to_file(
     working_dir: Path, branch: str,
 ) -> tuple[Path, int]:
     """Export every claim in the process-singleton GraphStore tagged
-    with ``branch`` and write them to
-    ``<working_dir>/.colony/colony.kg.json`` atomically. Returns
-    ``(path, claim_count)``.
+    with ``branch`` and MERGE them into
+    ``<working_dir>/.colony/colony.kg.json`` atomically (union with
+    the file's existing claims; on identity collision the freshly
+    exported claim wins). Returns ``(path, claim_count_written)``.
+
+    Merge, never replace: the process's live GraphStore is a WORKING
+    SET, not the canonical record — a fresh deployment that ingested
+    a subset and never rehydrated must not clobber claims other runs
+    paid for. (2026-08-04: a replace-write dropped 20,387 claims of a
+    prior run's extraction; recovered from git history.) Consequence:
+    claim deletions do not propagate through snapshots — when a
+    deletion story exists it needs an explicit tombstone mechanism,
+    not a smaller snapshot.
 
     When the local GraphStore holds zero claims for ``branch``, the
-    file is NOT touched — a deployment whose Kùzu volume was just
-    initialised and has never been rehydrated must not clobber the
-    canonical record. Callers that want to materialise an empty
-    branch must write the file directly.
+    file is NOT touched — same no-clobber principle for the trivial
+    case.
     """
 
     deps = get_knowledge_deps()
@@ -163,9 +179,25 @@ async def snapshot_branch_to_file(
     path = working_dir / KG_FILE_RELATIVE_PATH
     if not claims:
         return path, 0
-    payload = KgFile(claims=_sorted_claims(claims))
+
+    merged: dict[tuple[str, str, str, str], PersistedClaim] = {}
+    if path.is_file():
+        existing = KgFile.from_json(path.read_text(encoding="utf-8"))
+        for pc in existing.claims:
+            merged[_claim_key(pc)] = pc
+    prior_count = len(merged)
+    for claim in claims:
+        pc = PersistedClaim.from_claim(claim)
+        merged[_claim_key(pc)] = pc
+
+    payload = KgFile(claims=_sorted_claims(merged.values()))
     atomic_write_text(path, payload.to_json())
-    return path, len(claims)
+    logger.info(
+        "snapshot_branch_to_file: merged %d exported claims into %d "
+        "existing → %d total (branch=%s)",
+        len(claims), prior_count, len(merged), branch,
+    )
+    return path, len(merged)
 
 
 async def load_branch_from_text(text: str, branch: str) -> dict[str, int]:

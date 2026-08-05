@@ -34,6 +34,7 @@ from .code_generation import (
 from .code_constraints import (
     CodeGenerator,
     FreeFormCodeGenerator,
+    SchemaConstrainedCodeGenerator,
     CodeValidator,
     NoOpValidator,
     ImportWhitelistValidator,
@@ -96,6 +97,7 @@ __all__ = [
     # Code Generation Constraints
     "CodeGenerator",
     "FreeFormCodeGenerator",
+    "SchemaConstrainedCodeGenerator",
     "CodeValidator",
     "NoOpValidator",
     "ImportWhitelistValidator",

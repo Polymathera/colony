@@ -39,6 +39,7 @@ defaults with custom implementations:
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import re
 import time
@@ -185,7 +186,9 @@ class FreeFormCodeGenerator(CodeGenerator):
     """Generate free-form Python with no structural constraints.
 
     The LLM produces arbitrary async Python. Maximum expressiveness,
-    highest error rate. This is the default.
+    highest error rate. Fallback for deployments without structured
+    output support; :class:`SchemaConstrainedCodeGenerator` is the
+    default.
     """
 
     async def generate(
@@ -201,6 +204,87 @@ class FreeFormCodeGenerator(CodeGenerator):
             temperature=temperature,
         )
         return _extract_code(response)
+
+
+#: Schema for one planner iteration's code cell. Shaped to Anthropic's
+#: structured-output limitations (``additionalProperties`` false, no
+#: string/numeric constraints); the sibling adapters (vLLM
+#: ``guided_json``, OpenRouter ``response_format``) accept the same
+#: schema — the contract is provider-uniform by design.
+CODE_CELL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "title": "CodeCell",
+    "properties": {
+        "code": {
+            "type": "string",
+            "description": (
+                "Python code for the next iteration. Executable "
+                "statements only — no prose, no markdown fences, no "
+                "mocked output."
+            ),
+        },
+    },
+    "required": ["code"],
+    "additionalProperties": False,
+}
+
+
+class SchemaConstrainedCodeGenerator(CodeGenerator):
+    """Generate code through the provider-uniform structured-output
+    contract (``InferenceRequest.json_schema``).
+
+    The decoder is grammar-constrained to emit ``{"code": "..."}`` —
+    prose around the code is structurally impossible, for any model on
+    any adapter implementing the contract. This replaces prompt-
+    obedience ("emit only code") with schema-shape enforcement; see
+    ``colony/durable_llm_output_contract_plan.md`` §3. This is the
+    default generator.
+
+    Recovery (never the primary path): if the response does not parse
+    as the schema's JSON — an adapter that ignored ``json_schema``, or
+    a degraded provider — fall back to :func:`_extract_code` on the
+    raw text with a WARNING, i.e. exactly the free-form behaviour.
+    """
+
+    async def generate(
+        self,
+        agent: Agent,
+        prompt: str,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+    ) -> str:
+        response = await agent.infer(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            json_schema=CODE_CELL_SCHEMA,
+        )
+        raw = _response_text(response)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning(
+                "SchemaConstrainedCodeGenerator: response is not valid "
+                "JSON despite json_schema (adapter ignored the contract "
+                "or provider degraded) — falling back to free-form "
+                "extraction. First 200 chars: %r",
+                raw[:200],
+            )
+            return _extract_code(response)
+        if not isinstance(payload, dict) or "code" not in payload:
+            # Valid JSON without the contracted field: there is no
+            # code to salvage (running the JSON through the free-form
+            # extractor would pass a dict LITERAL to the REPL, since
+            # JSON parses as Python). Empty string routes into the
+            # policy's existing empty-code retry feedback.
+            logger.warning(
+                "SchemaConstrainedCodeGenerator: JSON payload lacks the "
+                "'code' field (got: %s) — returning empty for the "
+                "policy's retry path.",
+                list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
+            )
+            return ""
+        return str(payload["code"])
 
 
 # ============================================================================
@@ -1377,6 +1461,23 @@ def _iter_fenced_blocks(text: str):
         yield lang, body
 
 
+def _response_text(response: Any) -> str:
+    """Pull the raw text out of the several response shapes
+    ``agent.infer`` callers see (InferenceResponse, plain str, dict).
+    Shared by :func:`_extract_code` and
+    :class:`SchemaConstrainedCodeGenerator`."""
+
+    if hasattr(response, 'generated_text'):
+        return response.generated_text
+    if hasattr(response, 'text'):
+        return response.text
+    if isinstance(response, str):
+        return response
+    if isinstance(response, dict):
+        return response.get("text", response.get("content", str(response)))
+    return str(response)
+
+
 def _extract_code(response: Any) -> str:
     """Extract Python code from an LLM response.
 
@@ -1396,18 +1497,7 @@ def _extract_code(response: Any) -> str:
     blocks turns that mistake into a working iteration instead of a
     silent validation failure.
     """
-    if hasattr(response, 'generated_text'):
-        text = response.generated_text
-    elif hasattr(response, 'text'):
-        text = response.text
-    elif isinstance(response, str):
-        text = response
-    elif isinstance(response, dict):
-        text = response.get("text", response.get("content", str(response)))
-    else:
-        text = str(response)
-
-    text = text.strip()
+    text = _response_text(response).strip()
     if not text:
         return ""
 

@@ -19,7 +19,7 @@ from polymathera.colony.knowledge.stores.image import (
     InMemoryImageStore,
     LocalFsImageStore,
     _build_uri,
-    _ext_for_mime,
+    ext_for_mime,
     _is_colony_image_uri,
     _sha_from_uri,
 )
@@ -46,10 +46,10 @@ def test_sha_from_non_colony_uri_raises() -> None:
 
 
 def test_ext_for_known_and_unknown_mimes() -> None:
-    assert _ext_for_mime("image/png") == ".png"
-    assert _ext_for_mime("image/JPEG") == ".jpg"
-    assert _ext_for_mime("image/webp") == ".webp"
-    assert _ext_for_mime("application/octet-stream") == ".bin"
+    assert ext_for_mime("image/png") == ".png"
+    assert ext_for_mime("image/JPEG") == ".jpg"
+    assert ext_for_mime("image/webp") == ".webp"
+    assert ext_for_mime("application/octet-stream") == ".bin"
 
 
 # ---------------------------------------------------------------------------

@@ -404,5 +404,19 @@ def get_component_or_default(path: str, cls: type[T]) -> T:
     if not cm.is_initialized:
         return cls()
     component = cm.get_component(path)
-    return component if isinstance(component, cls) else cls()
+    if isinstance(component, cls):
+        return component
+    # The manager IS initialized, so an operator config was loaded —
+    # serving bare defaults here silently discards whatever the YAML
+    # declared at this path. With late materialization in
+    # ``PolymatheraConfig.get_component`` this should no longer happen
+    # for registered classes; log loudly so a recurrence is visible
+    # instead of surfacing as mysteriously-default behavior downstream.
+    logger.warning(
+        "get_component_or_default: config manager is initialized but "
+        "%r resolved to %s — serving %s() defaults. The loaded YAML's "
+        "%r section (if any) is NOT being honoured.",
+        path, type(component).__name__, cls.__name__, path,
+    )
+    return cls()
 

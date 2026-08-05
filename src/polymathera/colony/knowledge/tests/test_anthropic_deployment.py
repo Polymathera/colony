@@ -99,18 +99,22 @@ class _StubClient:
 
 
 def _build_deployment(
-    *, client: _StubClient,
+    *,
+    client: _StubClient,
+    model_name: str = "claude-sonnet-4-6",
+    omit_request_params: list[str] | None = None,
 ) -> AnthropicLLMDeployment:
     """Build a deployment instance with a stubbed client, bypassing
     the SDK initialisation path so we don't touch the network."""
 
     cfg = RemoteLLMDeploymentConfig(
         provider="anthropic",
-        model_name="claude-sonnet-4-6",
+        model_name=model_name,
         api_key_env_var="ANTHROPIC_API_KEY",
         api_timeout_seconds=120.0,
         max_concurrent_requests=4,
         ttl="5m",
+        omit_request_params=omit_request_params or [],
     )
     deployment = AnthropicLLMDeployment.__new__(AnthropicLLMDeployment)
     # Skip the framework's __init__ side effects — we only test
@@ -328,3 +332,119 @@ async def test_timeout_without_deadline_wraps_as_llm_inference_error(
     # Original provider exception preserved on the cause chain so
     # forensics + post-hoc classification still work.
     assert excinfo.value.__cause__ is timeout_exc
+
+
+# ---------------------------------------------------------------------------
+# Sampling-parameter omission (Claude 5 family)
+# ---------------------------------------------------------------------------
+
+
+async def test_operator_declared_params_omitted_from_request() -> None:
+    """``omit_request_params`` (operator-declared per deployment YAML
+    entry — e.g. the Claude 5 family rejects sampling parameters) must
+    strip the named keys even when callers thread values. Config is
+    the ONLY source of this knowledge — there is no model-name table
+    in code."""
+
+    stub_response = _StubResponse(
+        usage=_StubUsage(),
+        content=[_StubTextBlock(type="text", text="ok")],
+    )
+    messages = _StubMessages(response=stub_response)
+    deployment = _build_deployment(
+        client=_StubClient(messages),
+        model_name="claude-sonnet-5",
+        omit_request_params=["temperature", "top_p"],
+    )
+
+    await deployment._call_api(
+        messages={"messages": [{"role": "user", "content": "hi"}]},
+        temperature=0.7,
+        top_p=0.9,
+        request_id="req-s5",
+    )
+
+    sent = messages.calls[0]
+    assert "temperature" not in sent
+    assert "top_p" not in sent
+    assert sent["model"] == "claude-sonnet-5"
+
+
+async def test_no_declaration_keeps_sampling_params() -> None:
+    """Counterpart: with no ``omit_request_params`` declaration the
+    parameters pass through untouched — including for a model that
+    would reject them. A missing declaration is the operator's to fix
+    via the provider's own loud 400, never silently patched in code."""
+
+    stub_response = _StubResponse(
+        usage=_StubUsage(),
+        content=[_StubTextBlock(type="text", text="ok")],
+    )
+    messages = _StubMessages(response=stub_response)
+    deployment = _build_deployment(
+        client=_StubClient(messages), model_name="claude-sonnet-4-6",
+    )
+
+    await deployment._call_api(
+        messages={"messages": [{"role": "user", "content": "hi"}]},
+        temperature=0.2,
+        top_p=0.9,
+        request_id="req-s46",
+    )
+
+    sent = messages.calls[0]
+    assert sent["temperature"] == 0.2
+    assert sent["top_p"] == 0.9
+
+
+# ---------------------------------------------------------------------------
+# Typed content-block selection (adaptive-thinking responses)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StubThinkingBlock:
+    type: str
+    thinking: str
+
+
+async def test_text_selected_across_blocks_not_positionally() -> None:
+    """Adaptive-thinking models put a thinking block FIRST; the text
+    block must still be found. (2026-08-04: positional ``content[0]``
+    reading returned "" for billed completions — 3 of 5 session
+    failures.)"""
+
+    stub_response = _StubResponse(
+        usage=_StubUsage(),
+        content=[
+            _StubThinkingBlock(type="thinking", thinking="mulling it over"),
+            _StubTextBlock(type="text", text="x = 1"),
+            _StubTextBlock(type="text", text="\ny = 2"),
+        ],
+    )
+    messages = _StubMessages(response=stub_response)
+    deployment = _build_deployment(client=_StubClient(messages))
+
+    response = await deployment._call_api(
+        messages={"messages": [{"role": "user", "content": "code"}]},
+        request_id="req-think",
+    )
+    assert response.content == "x = 1\ny = 2"
+
+
+async def test_no_text_block_raises_instead_of_empty() -> None:
+    """A billed completion with NO text block must fail loud with the
+    received block types — never surface as an empty string."""
+
+    stub_response = _StubResponse(
+        usage=_StubUsage(),
+        content=[_StubThinkingBlock(type="thinking", thinking="…")],
+    )
+    messages = _StubMessages(response=stub_response)
+    deployment = _build_deployment(client=_StubClient(messages))
+
+    with pytest.raises(LLMInferenceError, match="no text block.*thinking"):
+        await deployment._call_api(
+            messages={"messages": [{"role": "user", "content": "code"}]},
+            request_id="req-nothink",
+        )

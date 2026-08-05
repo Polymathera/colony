@@ -58,7 +58,7 @@ from .base import FormatReader, FormatReaderError
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_MODEL = "claude-sonnet-4-5"
+_DEFAULT_MODEL = "claude-sonnet-5"
 _DEFAULT_MAX_TOKENS = 8_192
 _DEFAULT_TIMEOUT_S = 120.0
 
@@ -92,8 +92,9 @@ class AnthropicPdfReader(FormatReader):
             wire every reader uniformly.
         api_key: ``None`` (default) reads ``ANTHROPIC_API_KEY`` at
             call time. Picklable across nodes.
-        model: Defaults to ``claude-sonnet-4-5``. Pin a specific
-            snapshot for reproducibility.
+        model: Defaults to ``claude-sonnet-5`` (a pinned snapshot —
+            dateless IDs from the 4.6 generation onward are snapshots,
+            not evergreen pointers).
         max_tokens: Output budget. The reader returns once the model
             stops; large papers may need >8K. Bumped here from the
             default 1K of the Messages API.

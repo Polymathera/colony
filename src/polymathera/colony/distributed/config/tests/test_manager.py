@@ -137,3 +137,69 @@ async def test_wait_disabled_when_seconds_zero(tmp_path: Path) -> None:
 
     assert elapsed < 0.1, f"wait should have been skipped; elapsed={elapsed:.3f}s"
     assert cm.get_component("manager_test").name == "default-name"
+
+
+async def test_late_registered_component_materializes_from_loaded_yaml(
+    tmp_path: Path,
+) -> None:
+    """A component class that registers AFTER the manager loaded its
+    YAML must still materialize from the loaded payload on first
+    access.
+
+    Regression: component classes register at module-import time; an
+    agent worker loaded its config before importing ``KnowledgeConfig``,
+    so the ``knowledge:`` YAML section was silently dropped and the
+    ingest ran against in-memory stores (2026-08-03 forensic)."""
+
+    yaml_file = tmp_path / "cfg.yaml"
+    yaml_file.write_text(
+        "late_registered_test:\n"
+        "  endpoint: http://qdrant:6333\n"
+    )
+    cm = ConfigurationManager(config_path=str(yaml_file))
+    await cm.initialize()
+
+    # Simulate the late import: the class registers only now.
+    @register_polymathera_config(path="late_registered_test")
+    class _LateRegisteredConfig(ConfigComponent):
+        endpoint: str = Field(default="")
+
+    cfg = cm.get_component("late_registered_test")
+    assert isinstance(cfg, _LateRegisteredConfig)
+    assert cfg.endpoint == "http://qdrant:6333"
+
+
+async def test_get_component_or_default_warns_on_unregistered_path(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the manager is initialized but the requested path resolves
+    to nothing of the requested type, the defaults fallback must be
+    LOUD — a silently-defaulted config was the root cause of the
+    lost-ingest incident."""
+
+    import logging
+    from unittest.mock import patch
+
+    from polymathera.colony.distributed.config.manager import (
+        get_component_or_default,
+    )
+
+    class _UnregisteredConfig(ConfigComponent):
+        value: str = Field(default="d")
+
+    cm = ConfigurationManager(config_path=None)
+    await cm.initialize()
+
+    class _FakePolymathera:
+        config_manager = cm
+
+    with patch(
+        "polymathera.colony.distributed.get_polymathera",
+        return_value=_FakePolymathera(),
+    ), caplog.at_level(logging.WARNING):
+        cfg = get_component_or_default("nonexistent_path", _UnregisteredConfig)
+
+    assert isinstance(cfg, _UnregisteredConfig)
+    assert any(
+        "NOT being honoured" in rec.message for rec in caplog.records
+    )

@@ -30,7 +30,7 @@ class LLMFailureBackoff:
     - :meth:`handle_failure` is called by the policy's iteration loop
       when ``plan_step`` raised :class:`LLMInferenceError`. The first
       failure in a streak takes ``initial_delay_s`` and increments
-      ``agent.metadata.idle_wait_counter`` (so the outer agent loop
+      ``agent.idle_wait_counter`` (so the outer agent loop
       doesn't count this iteration toward ``max_iterations``).
       Subsequent failures double the delay up to ``cap_delay_s``.
     - When the failure's ``LLMInferenceError.category`` is in
@@ -47,7 +47,7 @@ class LLMFailureBackoff:
 
     The idle-wait token is held for the duration of the streak (one
     paired increment / decrement per streak — matches the contract
-    in :class:`AgentMetadata.idle_wait_counter`'s docstring). Wall-
+    in :attr:`Agent.idle_wait_counter`'s docstring). Wall-
     clock cap on a stuck cluster is the mission's
     ``max_runtime_seconds``.
     """
@@ -93,7 +93,7 @@ class LLMFailureBackoff:
         """
 
         if not self._is_in_streak:
-            self._agent.metadata.idle_wait_counter += 1
+            self._agent.idle_wait_counter += 1
             self._is_in_streak = True
         if self._next_delay_s <= 0.0:
             self._next_delay_s = self._initial_delay_s
@@ -131,8 +131,8 @@ class LLMFailureBackoff:
 
         if not self._is_in_streak:
             return
-        self._agent.metadata.idle_wait_counter = max(
-            0, self._agent.metadata.idle_wait_counter - 1,
+        self._agent.idle_wait_counter = max(
+            0, self._agent.idle_wait_counter - 1,
         )
         self._is_in_streak = False
         self._next_delay_s = 0.0

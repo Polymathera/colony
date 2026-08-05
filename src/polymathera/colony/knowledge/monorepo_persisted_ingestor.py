@@ -7,46 +7,54 @@ sidecar directory ``<dir>/.ingested/<stem>/``:
 
 - ``extracted.md`` — concatenated reader markdown across sections,
   with ``<!-- page: N -->`` separators between sections. Plain git
-  (text). Users can read or edit it.
+  (text). Users can read or edit it. Image references are RELATIVE
+  paths into the sidecar's ``images/`` directory, so the committed
+  markdown renders anywhere the repo is cloned.
+- ``images/<sha256>.<ext>`` — figure bytes referenced by
+  ``extracted.md``, copied out of the process's :class:`ImageStore`
+  at extraction time. Content-addressed filenames match the store's
+  own URIs, so round-trips are stable.
 - ``ingestion.json`` — Pydantic-validated :class:`SidecarManifest`:
-  pdf_sha256, extractor backend label, extracted_at timestamp,
-  section_count, page_count, source_uri. Plain git (small JSON).
+  pdf_sha256, extracted_md_sha256 (content hash of ``extracted.md``
+  as written — the user-edit detector), extractor backend label,
+  extracted_at timestamp, section_count, page_count, image_count,
+  source_uri. Plain git (small JSON).
+
+On the skip path the wrapper re-ingests from the sidecar: relative
+image refs are rehydrated into the process's :class:`ImageStore`
+(idempotent — content-addressed) and rewritten back to
+``colony-image://`` URIs so the downstream pipeline sees exactly what
+a fresh extraction would have produced. A sidecar whose image files
+are missing is treated as corrupt and falls back to full
+re-extraction (self-healing cache).
 
 The wrapper avoids re-paying the reader's extraction cost on
 re-ingest of an unchanged PDF: if ``ingestion.json``'s ``pdf_sha256``
-matches the current PDF, the wrapper skips the reader and feeds the
+matches the current PDF (and its ``extractor`` matches the configured
+backend), the wrapper skips the reader and feeds the
 on-disk ``extracted.md`` directly into :meth:`Ingestor.ingest_text`
-for chunking + embedding. When ``extracted.md`` is newer than the
-PDF (user-edited markdown), the wrapper trusts the edit and ingests
-the edited markdown — chunking + embedding re-run; the reader does
-not.
+for chunking + embedding. When ``extracted.md``'s content hash
+differs from the manifest's ``extracted_md_sha256`` (user-edited
+markdown), the wrapper trusts the edit and ingests the edited
+markdown — chunking + embedding re-run; the reader does not.
+(Content hashes, not mtimes: git checkout order makes mtimes
+meaningless on fresh clones.)
 
 For non-PDF inputs (markdown, source code, plain text, etc.) the
 wrapper delegates to :meth:`Ingestor.ingest_file` directly — the
 underlying file already IS the readable artifact, a sidecar would
 duplicate it.
-
-**Known gap — figure persistence.** Markdown image references emitted
-by multimodal PDF readers point at ``colony-image://`` URIs resolved
-through the :class:`ImageStore`. Today the wrapper does not copy
-those bytes into the sidecar's ``images/`` subdirectory. Figure bytes
-remain in whichever ``ImageStore`` the cluster is configured with
-(``LocalFsImageStore`` over ``knowledge.image_dir``). Persisting
-figures into the sidecar + rewriting the markdown's image refs to
-relative paths is a focused follow-up; the current wrapper unblocks
-the markdown + metadata persistence the operator pays the most for.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from .formats import detect_format
 from .ingestion import Ingestor
@@ -60,6 +68,7 @@ from .models import (
     RawDocument,
 )
 from .readers.base import FormatReaderError, ReaderRegistry
+from .stores.image import ImageStore, ext_for_mime, mime_for_ext
 
 
 logger = logging.getLogger(__name__)
@@ -68,6 +77,7 @@ logger = logging.getLogger(__name__)
 SIDECAR_DIRNAME = ".ingested"
 EXTRACTED_MD_NAME = "extracted.md"
 INGESTION_JSON_NAME = "ingestion.json"
+IMAGES_DIRNAME = "images"
 
 # Separator the wrapper emits between sections in ``extracted.md``. The
 # same form the multimodal readers already use for page boundaries, so
@@ -76,6 +86,22 @@ INGESTION_JSON_NAME = "ingestion.json"
 SECTION_SEPARATOR = "\n\n<!-- section -->\n\n"
 
 _SHA256_BLOCKSIZE = 1 << 20
+
+#: ``colony-image://<sha256-hex>`` URIs as multimodal readers emit them.
+_COLONY_IMAGE_URI_RE = re.compile(r"colony-image://([0-9a-f]{64})")
+
+#: Relative sidecar refs as :func:`_externalize_figures` writes them —
+#: matched only inside markdown link/image parentheses so prose that
+#: merely mentions ``images/`` is untouched.
+_RELATIVE_IMAGE_REF_RE = re.compile(
+    r"(?<=\()" + IMAGES_DIRNAME + r"/([0-9a-f]{64})(\.[A-Za-z0-9]+)(?=\))"
+)
+
+
+class SidecarImageError(RuntimeError):
+    """A sidecar figure operation could not complete — bytes missing
+    from the :class:`ImageStore` at externalize time, or an image file
+    missing from the sidecar at rehydrate time."""
 
 
 class SidecarManifest(BaseModel):
@@ -89,13 +115,23 @@ class SidecarManifest(BaseModel):
     extractor: str = ""
     """Label of the reader / pipeline that produced ``extracted.md``.
     Free-form (``"anthropic"``, ``"mistral_ocr"``, ``"grobid"``, ...);
-    used for diagnostics + future cache invalidation when a backend's
-    extraction quality changes."""
+    compared against the wrapper's configured ``extractor_label`` by
+    :meth:`MonorepoPersistedIngestor._should_skip_extraction` — a
+    mismatch invalidates the skip-cache so a backend switch re-pays
+    for quality instead of serving the old backend's extraction."""
     extracted_at: str
     """ISO-8601 UTC timestamp."""
     section_count: int
     page_count: int = 0
     """Best-effort; sourced from section.extra['page'] when present."""
+    extracted_md_sha256: str = ""
+    """Content hash of ``extracted.md`` exactly as the wrapper wrote
+    it. The user-edit detector: a differing hash on a later ingest
+    means a human changed the markdown and the edit is trusted.
+    Empty (pre-content-hash sidecars) means unknown provenance — the
+    wrapper re-extracts rather than trust it."""
+    image_count: int = 0
+    """Number of figure files persisted under ``images/``."""
 
 
 class MonorepoPersistedIngestor:
@@ -158,26 +194,40 @@ class MonorepoPersistedIngestor:
 
         # Decide whether to skip the reader step entirely.
         skip_extraction, skip_reason = self._should_skip_extraction(
-            pdf_path=path_obj,
             pdf_sha256=pdf_sha256,
             extracted_md_path=extracted_md_path,
             manifest_path=manifest_path,
         )
 
         if skip_extraction:
-            logger.info(
-                "MonorepoPersistedIngestor: skipping extraction for %s — %s",
-                path_obj, skip_reason,
-            )
-            extracted_md = extracted_md_path.read_text(encoding="utf-8")
-            return await self._ingestor.ingest_text(
-                extracted_md,
-                source_uri=canonical_uri,
-                fmt=KnowledgeFormat.MARKDOWN,
-                tier=tier,
-                data_type_override=data_type_override,
-                policy=policy,
-            )
+            sidecar_md = extracted_md_path.read_text(encoding="utf-8")
+            try:
+                rehydrated_md = await _internalize_figures(
+                    sidecar_md, sidecar_dir, self._ingestor.image_store,
+                )
+            except SidecarImageError as exc:
+                # Corrupt or unusable sidecar (missing image files, no
+                # store to rehydrate into): self-heal by re-extracting
+                # instead of ingesting markdown with dangling refs.
+                logger.warning(
+                    "MonorepoPersistedIngestor: sidecar for %s is not "
+                    "usable (%s) — falling back to full re-extraction.",
+                    path_obj, exc,
+                )
+            else:
+                logger.info(
+                    "MonorepoPersistedIngestor: skipping extraction for "
+                    "%s — %s",
+                    path_obj, skip_reason,
+                )
+                return await self._ingestor.ingest_text(
+                    rehydrated_md,
+                    source_uri=canonical_uri,
+                    fmt=KnowledgeFormat.MARKDOWN,
+                    tier=tier,
+                    data_type_override=data_type_override,
+                    policy=policy,
+                )
 
         # Full extraction: run the PDF reader, write sidecar, then
         # chunk + embed via ingest_text (cheap downstream).
@@ -204,6 +254,19 @@ class MonorepoPersistedIngestor:
             )
 
         extracted_md = _sections_to_markdown(sections)
+
+        # Persist figure bytes into the sidecar and relativize the
+        # markdown's image refs BEFORE writing anything — a sidecar
+        # with dangling ``colony-image://`` refs must never land in
+        # git. The ORIGINAL markdown (store URIs) feeds the pipeline
+        # below, matching what a sidecar-less ingest would see.
+        try:
+            sidecar_md, image_count = await _externalize_figures(
+                extracted_md, sidecar_dir, self._ingestor.image_store,
+            )
+        except SidecarImageError as exc:
+            return _fail_record(source_uri=canonical_uri, error=str(exc))
+
         manifest = SidecarManifest(
             source_uri=canonical_uri,
             pdf_sha256=pdf_sha256,
@@ -211,10 +274,12 @@ class MonorepoPersistedIngestor:
             extracted_at=datetime.now(timezone.utc).isoformat(),
             section_count=len(sections),
             page_count=_count_pages(sections),
+            extracted_md_sha256=_sha256_bytes(sidecar_md.encode("utf-8")),
+            image_count=image_count,
         )
         self._write_sidecar(
             sidecar_dir=sidecar_dir,
-            extracted_md=extracted_md,
+            extracted_md=sidecar_md,
             manifest=manifest,
         )
 
@@ -232,31 +297,31 @@ class MonorepoPersistedIngestor:
     def _should_skip_extraction(
         self,
         *,
-        pdf_path: Path,
         pdf_sha256: str,
         extracted_md_path: Path,
         manifest_path: Path,
     ) -> tuple[bool, str]:
-        """Return ``(skip, reason)``.
+        """Return ``(skip, reason)``. Content-hash based throughout —
+        mtimes are meaningless across git clones (checkout writes
+        files in arbitrary order).
 
         Skip when either:
-        - manifest.pdf_sha256 matches the current PDF (cache hit), or
-        - ``extracted.md`` mtime > PDF mtime (user-edited markdown).
+        - ``extracted.md``'s content hash differs from the manifest's
+          ``extracted_md_sha256`` (user-edited markdown — the human's
+          content wins over every other signal), or
+        - manifest.pdf_sha256 matches the current PDF (cache hit) AND
+          manifest.extractor matches this wrapper's configured
+          ``extractor_label`` — a sidecar produced by a different
+          (or unrecorded) backend is re-extracted so switching the
+          configured extractor re-pays for quality instead of
+          silently serving the old backend's output.
 
-        Otherwise re-extract.
+        Re-extract otherwise, including when the manifest is missing,
+        unreadable, or predates content hashing (unknown provenance).
         """
 
         if not extracted_md_path.is_file():
             return False, "no sidecar"
-
-        # User-edited markdown takes precedence — trust the edit.
-        try:
-            md_mtime = extracted_md_path.stat().st_mtime
-            pdf_mtime = pdf_path.stat().st_mtime
-        except OSError:
-            return False, "stat failed"
-        if md_mtime > pdf_mtime:
-            return True, "extracted.md edited after PDF"
 
         if not manifest_path.is_file():
             return False, "no manifest"
@@ -267,6 +332,31 @@ class MonorepoPersistedIngestor:
             )
         except Exception:  # noqa: BLE001 — corrupt JSON / schema drift
             return False, "manifest unreadable"
+
+        if not manifest.extracted_md_sha256:
+            return False, (
+                "manifest predates content hashing — unknown provenance"
+            )
+
+        try:
+            current_md_sha256 = _sha256_file(extracted_md_path)
+        except OSError:
+            return False, "extracted.md unreadable"
+
+        # User-edited markdown takes precedence — trust the edit,
+        # even over an extractor-label or PDF change.
+        if current_md_sha256 != manifest.extracted_md_sha256:
+            return True, "extracted.md edited (content hash differs)"
+
+        if (
+            self._extractor_label
+            and manifest.extractor != self._extractor_label
+        ):
+            return False, (
+                f"extractor changed: "
+                f"{manifest.extractor or '<unrecorded>'} -> "
+                f"{self._extractor_label}"
+            )
 
         if manifest.pdf_sha256 == pdf_sha256:
             return True, "pdf_sha256 unchanged"
@@ -302,19 +392,37 @@ class MonorepoPersistedIngestor:
         for reader in readers:
             try:
                 reader_sections = await reader.read_async(document)
-            except FormatReaderError as exc:
-                last_error = exc
-                logger.warning(
-                    "MonorepoPersistedIngestor: reader %s rejected %s (%s)",
-                    type(reader).__name__, source_uri, exc,
-                )
-                continue
             except Exception as exc:  # noqa: BLE001
+                # A REQUIRED reader (the operator-configured body
+                # extractor) failing fails the whole file — accepting
+                # the surviving free readers' sections would write a
+                # degraded sidecar whose pdf_sha256 then blocks the
+                # paid extraction from ever being retried.
+                if self._readers.is_required(fmt, reader):
+                    logger.error(
+                        "MonorepoPersistedIngestor: required reader %s "
+                        "failed on %s",
+                        type(reader).__name__, source_uri, exc_info=exc,
+                    )
+                    raise FormatReaderError(
+                        f"required reader {type(reader).__name__} "
+                        f"failed: {exc}. File NOT ingested and no "
+                        f"sidecar written (no fallback to other "
+                        f"readers); re-run the ingest once the "
+                        f"backend is restored.",
+                    ) from exc
                 last_error = exc
-                logger.exception(
-                    "MonorepoPersistedIngestor: reader %s failed on %s",
-                    type(reader).__name__, source_uri,
-                )
+                if isinstance(exc, FormatReaderError):
+                    logger.warning(
+                        "MonorepoPersistedIngestor: reader %s rejected "
+                        "%s (%s)",
+                        type(reader).__name__, source_uri, exc,
+                    )
+                else:
+                    logger.exception(
+                        "MonorepoPersistedIngestor: reader %s failed on %s",
+                        type(reader).__name__, source_uri,
+                    )
                 continue
             sections.extend(reader_sections)
 
@@ -344,11 +452,13 @@ class MonorepoPersistedIngestor:
         # log was added the substance was unobservable from logs.
         logger.info(
             "MonorepoPersistedIngestor: sidecar persisted "
-            "source_uri=%s extractor=%s sections=%d pages=%d md_bytes=%d",
+            "source_uri=%s extractor=%s sections=%d pages=%d "
+            "images=%d md_bytes=%d",
             manifest.source_uri,
             manifest.extractor or "<unknown>",
             manifest.section_count,
             manifest.page_count,
+            manifest.image_count,
             len(extracted_md),
         )
 
@@ -369,6 +479,118 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+async def _externalize_figures(
+    markdown: str,
+    sidecar_dir: Path,
+    image_store: ImageStore | None,
+) -> tuple[str, int]:
+    """Copy every ``colony-image://`` figure referenced by ``markdown``
+    into ``<sidecar_dir>/images/`` and rewrite the refs to relative
+    paths. Returns ``(rewritten_markdown, image_count)``.
+
+    Raises :class:`SidecarImageError` when any referenced bytes cannot
+    be fetched (store unavailable or bytes missing) — a sidecar with
+    dangling image refs must never be written; the 2026-08-03 run
+    committed 911 of them.
+    """
+
+    uris = list(dict.fromkeys(_COLONY_IMAGE_URI_RE.findall(markdown)))
+    if not uris:
+        return markdown, 0
+    if image_store is None:
+        raise SidecarImageError(
+            f"markdown references {len(uris)} colony-image figures but "
+            f"no ImageStore is configured — cannot persist them into "
+            f"the sidecar.",
+        )
+
+    # Fetch + validate EVERY referenced figure before touching the
+    # filesystem — a failure must leave no partial sidecar behind.
+    fetched: dict[str, tuple[str, bytes]] = {}  # uri -> (filename, bytes)
+    for sha in uris:
+        uri = f"colony-image://{sha}"
+        payload = await image_store.get(uri)
+        if payload is None:
+            raise SidecarImageError(
+                f"figure bytes for {uri} are not in the ImageStore — "
+                f"refusing to write a sidecar with dangling image refs.",
+            )
+        info = await image_store.stat(uri)
+        mime = str((info or {}).get("mime", "application/octet-stream"))
+        fetched[uri] = (f"{sha}{ext_for_mime(mime)}", payload)
+
+    images_dir = sidecar_dir / IMAGES_DIRNAME
+    images_dir.mkdir(parents=True, exist_ok=True)
+    replacements: dict[str, str] = {}
+    for uri, (filename, payload) in fetched.items():
+        (images_dir / filename).write_bytes(payload)
+        replacements[uri] = f"{IMAGES_DIRNAME}/{filename}"
+
+    rewritten = _COLONY_IMAGE_URI_RE.sub(
+        lambda m: replacements[f"colony-image://{m.group(1)}"], markdown,
+    )
+    return rewritten, len(replacements)
+
+
+async def _internalize_figures(
+    markdown: str,
+    sidecar_dir: Path,
+    image_store: ImageStore | None,
+) -> str:
+    """Inverse of :func:`_externalize_figures` for the skip path: load
+    each relative ``images/<sha>.<ext>`` ref from the sidecar, put the
+    bytes into the process's :class:`ImageStore` (idempotent —
+    content-addressed) and rewrite the ref back to its
+    ``colony-image://`` URI, so downstream chunking sees exactly what
+    a fresh extraction would produce.
+
+    Raises :class:`SidecarImageError` when a referenced image file is
+    missing (corrupt sidecar — caller falls back to re-extraction) or
+    when no store is configured to receive the bytes.
+    """
+
+    refs = list(dict.fromkeys(_RELATIVE_IMAGE_REF_RE.findall(markdown)))
+    if not refs:
+        return markdown
+    if image_store is None:
+        raise SidecarImageError(
+            f"sidecar references {len(refs)} figure files but no "
+            f"ImageStore is configured to rehydrate them into.",
+        )
+
+    replacements: dict[str, str] = {}
+    for sha, ext in refs:
+        rel = f"{IMAGES_DIRNAME}/{sha}{ext}"
+        image_path = sidecar_dir / IMAGES_DIRNAME / f"{sha}{ext}"
+        if not image_path.is_file():
+            raise SidecarImageError(
+                f"sidecar image {rel} is missing from {sidecar_dir}.",
+            )
+        payload = image_path.read_bytes()
+        uri = await image_store.put(payload, mime=mime_for_ext(ext))
+        if uri != f"colony-image://{sha}":
+            # Content-addressed round-trip broke: the file's bytes no
+            # longer hash to its filename. Keep the TRUE uri (the
+            # store's) so downstream lookups resolve, but flag the
+            # integrity drift.
+            logger.warning(
+                "MonorepoPersistedIngestor: sidecar image %s hashes to "
+                "%s (filename says %s) — file was modified after "
+                "extraction.",
+                image_path, uri, sha,
+            )
+        replacements[rel] = uri
+
+    return _RELATIVE_IMAGE_REF_RE.sub(
+        lambda m: replacements[f"{IMAGES_DIRNAME}/{m.group(1)}{m.group(2)}"],
+        markdown,
+    )
+
+
 def _sections_to_markdown(sections: list[ParsedSection]) -> str:
     parts: list[str] = []
     for section in sections:
@@ -381,22 +603,20 @@ def _sections_to_markdown(sections: list[ParsedSection]) -> str:
     return SECTION_SEPARATOR.join(parts) + "\n"
 
 
-_PAGE_NUMBER_RE = re.compile(r"^\s*page\s*[:=]\s*(\d+)\s*$", re.IGNORECASE)
-
-
 def _count_pages(sections: list[ParsedSection]) -> int:
-    """Best-effort page count from section.extra['page'] (per reader
-    convention). Returns 0 when no section advertises a page number."""
+    """Distinct page count from the typed
+    :attr:`CitationSpan.page_number` field — the convention every PDF
+    reader actually implements (Mistral / Anthropic / pypdf / remote
+    all stamp it; an earlier version of this helper read
+    ``section.extra['page']``, which NO reader sets, so every manifest
+    recorded ``page_count: 0``). Returns 0 when no section carries a
+    page number (page-less readers advertise ``page_number=None``)."""
 
     pages: set[int] = set()
     for section in sections:
-        raw = section.extra.get("page")
-        if isinstance(raw, int):
-            pages.add(raw)
-        elif isinstance(raw, str):
-            m = _PAGE_NUMBER_RE.match(raw)
-            if m:
-                pages.add(int(m.group(1)))
+        page_number = section.citation.page_number
+        if page_number is not None:
+            pages.add(page_number)
     return len(pages)
 
 
@@ -410,9 +630,11 @@ def _fail_record(*, source_uri: str, error: str) -> IngestionRecord:
 
 __all__ = (
     "EXTRACTED_MD_NAME",
+    "IMAGES_DIRNAME",
     "INGESTION_JSON_NAME",
     "MonorepoPersistedIngestor",
     "SECTION_SEPARATOR",
     "SIDECAR_DIRNAME",
+    "SidecarImageError",
     "SidecarManifest",
 )

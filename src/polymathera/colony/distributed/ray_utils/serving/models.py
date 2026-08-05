@@ -8,7 +8,7 @@ import traceback
 from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 import uuid
 
 from ...state_management import SharedState
@@ -203,6 +203,40 @@ class DeploymentResponseStatus(str, Enum):
     ERROR = "error"
 
 
+@runtime_checkable
+class SupportsWireFields(Protocol):
+    """Structural contract for exceptions whose typed attributes must
+    survive the :class:`DeploymentResponse` boundary.
+
+    Deployment errors cross to the caller as strings (``error`` /
+    ``error_type`` / ``error_module``) and are re-raised via
+    ``exception_class(error_msg)`` — message-only, so kwarg-carried
+    attributes silently reset to their defaults at EVERY hop. (Observed
+    2026-08-03: ``LLMInferenceError.category=BILLING`` arrived as
+    ``UNKNOWN``, neutering both the billing backoff floor and the
+    claim extractor's raise-on-permanent.)
+
+    An exception implementing this protocol has its :meth:`wire_fields`
+    captured into ``DeploymentResponse.error_fields`` on the producer
+    side and is reconstructed via :meth:`from_wire` on the consumer
+    side. Values are strings — the payload must stay trivially
+    JSON/pickle serializable.
+    """
+
+    def wire_fields(self) -> dict[str, str]:
+        """Typed attributes to carry across the boundary."""
+        ...
+
+    @classmethod
+    def from_wire(
+        cls, message: str, fields: dict[str, str],
+    ) -> Exception:
+        """Rebuild the exception from a decorated message + the
+        producer's :meth:`wire_fields` payload. Must tolerate missing
+        keys (older producers)."""
+        ...
+
+
 class DeploymentResponse(BaseModel):
     """Response from a deployment endpoint."""
 
@@ -223,6 +257,13 @@ class DeploymentResponse(BaseModel):
 
     error_module: str | None = None
     """Exception module path if failed (e.g., 'polymathera.colony.agents.base', 'builtins')."""
+
+    error_fields: dict[str, str] | None = None
+    """Typed exception attributes captured via
+    :class:`SupportsWireFields` — ``None`` for exceptions that don't
+    implement the protocol. Consumed by the handle's re-raise so
+    attribute-carrying exceptions (e.g. ``LLMInferenceError.category``)
+    survive the boundary instead of resetting to defaults."""
 
     traceback: str | None = None
     """Traceback if failed."""
@@ -245,6 +286,8 @@ class DeploymentResponse(BaseModel):
         """Create an error response.
 
         Preserves the exception type and module so it can be re-raised on the client side.
+        Exceptions implementing :class:`SupportsWireFields` additionally
+        get their typed attributes captured into ``error_fields``.
         """
         return cls(
             request_id=request_id,
@@ -252,6 +295,11 @@ class DeploymentResponse(BaseModel):
             error=str(error),
             error_type=error.__class__.__name__,
             error_module=error.__class__.__module__,
+            error_fields=(
+                error.wire_fields()
+                if isinstance(error, SupportsWireFields)
+                else None
+            ),
             traceback=traceback.format_exc(),
             metadata=metadata or {},
         )

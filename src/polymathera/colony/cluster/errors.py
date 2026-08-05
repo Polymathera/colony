@@ -123,6 +123,38 @@ class LLMInferenceError(Exception):
             (str(self), self.category.value, self.request_id),
         )
 
+    # ---- SupportsWireFields (DeploymentResponse boundary) ----------
+    #
+    # Pickling (__reduce__ above) covers raw Ray boundaries only. The
+    # serving layer's DeploymentResponse protocol carries errors as
+    # STRINGS and re-raises via ``exception_class(message)`` — which
+    # reset ``category`` to UNKNOWN at every DeploymentHandle hop and
+    # neutered both billing-aware consumers (backoff floor, claim
+    # extractor) in the 2026-08-03 ingest run. These two methods are
+    # the structural contract the serving layer uses to carry the
+    # typed attributes across (see
+    # ``distributed.ray_utils.serving.models.SupportsWireFields``).
+
+    def wire_fields(self) -> dict[str, str]:
+        return {
+            "category": self.category.value,
+            "request_id": self.request_id,
+        }
+
+    @classmethod
+    def from_wire(
+        cls, message: str, fields: dict[str, str],
+    ) -> "LLMInferenceError":
+        try:
+            category = LLMErrorCategory(fields.get("category", ""))
+        except ValueError:
+            category = LLMErrorCategory.UNKNOWN
+        return cls(
+            message,
+            category=category,
+            request_id=fields.get("request_id", "<unknown>"),
+        )
+
 
 def _reconstruct_llm_inference_error(
     message: str,
@@ -159,9 +191,10 @@ class LLMCallDeadlineExceeded(LLMInferenceError):
     ``0.0 = disable`` escape hatch is provided. If the bound is
     correct, it is not optional.
 
-    Inherits the positional-friendly constructor and ``__reduce__``
-    from the base so the deadline value round-trips across the Ray
-    actor boundary along with category + request_id.
+    Overrides ``__reduce__`` and the wire-fields pair — its
+    constructor pins ``category=TRANSIENT`` itself and carries
+    ``deadline_s``, so the base class's reconstruction shapes don't
+    fit.
     """
 
     def __init__(
@@ -185,6 +218,26 @@ class LLMCallDeadlineExceeded(LLMInferenceError):
         return (
             _reconstruct_llm_call_deadline_exceeded,
             (str(self), self.deadline_s, self.request_id),
+        )
+
+    def wire_fields(self) -> dict[str, str]:
+        return {
+            "deadline_s": str(self.deadline_s),
+            "request_id": self.request_id,
+        }
+
+    @classmethod
+    def from_wire(
+        cls, message: str, fields: dict[str, str],
+    ) -> "LLMCallDeadlineExceeded":
+        try:
+            deadline_s = float(fields.get("deadline_s", "0"))
+        except ValueError:
+            deadline_s = 0.0
+        return cls(
+            message,
+            deadline_s=deadline_s,
+            request_id=fields.get("request_id", "<unknown>"),
         )
 
 

@@ -214,3 +214,62 @@ async def test_snapshot_callback_writes_file_into_commit_path(
     )
     assert len(file.claims) == 1
     assert file.claims[0].subject == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_merges_with_existing_file_not_replace(
+    tmp_path, isolated_deps,
+) -> None:
+    """Snapshot must UNION with the canonical file, never replace it.
+
+    Regression (2026-08-04): a fresh deployment ingested a subset,
+    never rehydrated, and its snapshot replaced colony.kg.json —
+    dropping 20,387 claims a prior run paid to extract."""
+
+    store = isolated_deps
+    # A prior run's canonical record, already committed.
+    prior = KgFile(claims=[
+        PersistedClaim(
+            subject="prior_subject", predicate="p", object="o",
+            citation={"source_uri": "repo:kb/books/old.pdf"},
+        ),
+    ])
+    path = tmp_path / KG_FILE_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(prior.to_json(), encoding="utf-8")
+
+    # This process only knows about a NEW claim.
+    with set_current_branch("main"):
+        await store.add_claim(_claim("new_subject", "new_object"))
+
+    _, count = await snapshot_branch_to_file(tmp_path, "main")
+    assert count == 2
+    file = KgFile.from_json(path.read_text(encoding="utf-8"))
+    assert {c.subject for c in file.claims} == {
+        "prior_subject", "new_subject",
+    }
+
+
+@pytest.mark.asyncio
+async def test_snapshot_collision_fresh_export_wins(
+    tmp_path, isolated_deps,
+) -> None:
+    """Same claim identity in file and store: the store's version wins
+    (fresher confidence/provenance)."""
+
+    store = isolated_deps
+    with set_current_branch("main"):
+        await store.add_claim(_claim("s", "o"))
+    # Seed the file with the SAME identity but different confidence.
+    _, _ = await snapshot_branch_to_file(tmp_path, "main")
+    path = tmp_path / KG_FILE_RELATIVE_PATH
+    seeded = KgFile.from_json(path.read_text(encoding="utf-8"))
+    lowered = seeded.claims[0].model_copy(update={"confidence": 0.1})
+    path.write_text(
+        KgFile(claims=[lowered]).to_json(), encoding="utf-8",
+    )
+
+    _, count = await snapshot_branch_to_file(tmp_path, "main")
+    assert count == 1
+    file = KgFile.from_json(path.read_text(encoding="utf-8"))
+    assert file.claims[0].confidence != 0.1  # store's version won

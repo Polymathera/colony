@@ -321,9 +321,12 @@ class RemoteDeploymentYAMLConfig:
     Parsed from the YAML cluster.remote_deployments list and converted to
     RemoteLLMDeploymentConfig when building the PolymatheraCluster.
     """
-    model_name: str = "claude-sonnet-4-20250514"
+    model_name: str = "claude-sonnet-5"
     provider: str = "anthropic"  # "anthropic" | "openrouter" | "vllm"
     api_key_env_var: str = "ANTHROPIC_API_KEY"
+    # Request parameters this model rejects (operator-declared; e.g.
+    # ["temperature", "top_p"] for the Claude 5 family).
+    omit_request_params: list[str] = field(default_factory=list)
     # Required for provider "vllm": the self-hosted OpenAI-compatible endpoint
     # (e.g. an Option-A serving fleet's NLB URL).
     base_url: str | None = None
@@ -693,7 +696,7 @@ cluster:
   # --- Remote LLM deployments (no GPUs required) ---
   remote_deployments:
     # Anthropic Claude — uses prefix caching for VCM page text
-    - model_name: "claude-sonnet-4-20250514"
+    - model_name: "claude-sonnet-5"
       provider: "anthropic"
       api_key_env_var: "ANTHROPIC_API_KEY"
       max_cached_pages: 50
@@ -1087,6 +1090,7 @@ def _build_cluster_config(
             throttle_burst=rd.throttle_burst,
             api_timeout_seconds=rd.api_timeout_seconds,
             num_replicas=rd.num_replicas,
+            omit_request_params=rd.omit_request_params,
         ))
 
     # Build LLMDeploymentConfig objects from YAML vllm_deployments

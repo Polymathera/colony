@@ -123,6 +123,12 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         }
         if top_p is not None:
             kwargs["top_p"] = top_p
+        # Operator-declared unsupported parameters — same provider-
+        # neutral ``omit_request_params`` contract as the Anthropic
+        # adapter; a wrong declaration surfaces as the provider's own
+        # error.
+        for param in self.config.omit_request_params:
+            kwargs.pop(param, None)
 
         # Add extra headers for OpenRouter
         extra_headers: dict[str, str] = {}

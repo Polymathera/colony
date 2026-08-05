@@ -38,7 +38,7 @@ async def create_default_action_policy(agent: Agent, **kwargs) -> ActionPolicy:
 
         from .code_generation import create_code_generation_action_policy
         from .code_constraints import (
-            FreeFormCodeGenerator,
+            SchemaConstrainedCodeGenerator,
             APIKnowledgeBaseValidator,
             ImportWhitelistValidator,
             InMemorySkillLibrary,
@@ -61,7 +61,7 @@ async def create_default_action_policy(agent: Agent, **kwargs) -> ActionPolicy:
         # consistently keeps the previous default for unset
         # dimensions.
         code_generator = kwargs.get(
-            "code_generator", FreeFormCodeGenerator(),
+            "code_generator", SchemaConstrainedCodeGenerator(),
         )
         code_validators = kwargs.get(
             "code_validators",

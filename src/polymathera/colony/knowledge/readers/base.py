@@ -88,6 +88,16 @@ class ReaderRegistry:
     (idempotent against double-init). Section concatenation across
     readers is the Ingestor's responsibility.
 
+    A reader may be registered as **required** (``register(reader,
+    required=True)``): consumers running the multi-reader loop MUST
+    treat that reader's failure as a whole-document failure instead
+    of silently continuing with the surviving readers' sections. The
+    operator-configured paid body extractor is required; free
+    siblings (GROBID metadata) are not. Without this flag a paid-
+    backend outage silently degrades every document to the free
+    readers' quality AND poisons downstream caches with the degraded
+    result.
+
     Backward-compat: :meth:`reader_for` returns the LAST reader
     registered for a format (preserves the old "last write wins"
     contract used by tests and by ``default_registry_with_grobid``).
@@ -95,38 +105,48 @@ class ReaderRegistry:
     """
 
     def __init__(self) -> None:
-        self._by_format: dict[KnowledgeFormat, list[FormatReader]] = {}
+        self._by_format: dict[
+            KnowledgeFormat, list[tuple[FormatReader, bool]]
+        ] = {}
 
-    def register(self, reader: FormatReader) -> None:
+    def register(self, reader: FormatReader, *, required: bool = False) -> None:
         if not reader.handles:
             raise ValueError(
                 f"Reader {type(reader).__name__} declares no handled formats.",
             )
         for fmt in reader.handles:
-            readers = self._by_format.setdefault(fmt, [])
-            for i, existing in enumerate(readers):
+            entries = self._by_format.setdefault(fmt, [])
+            for i, (existing, _) in enumerate(entries):
                 if type(existing) is type(reader):
                     logger.info(
                         "ReaderRegistry: replacing %s for %s",
                         type(reader).__name__, fmt.value,
                     )
-                    readers[i] = reader
+                    entries[i] = (reader, required)
                     break
             else:
-                readers.append(reader)
+                entries.append((reader, required))
 
     def readers_for(self, fmt: KnowledgeFormat) -> tuple[FormatReader, ...]:
         """All readers registered for ``fmt`` in registration order."""
-        return tuple(self._by_format.get(fmt, ()))
+        return tuple(r for r, _ in self._by_format.get(fmt, ()))
+
+    def is_required(self, fmt: KnowledgeFormat, reader: FormatReader) -> bool:
+        """True iff ``reader`` was registered for ``fmt`` with
+        ``required=True``. Identity comparison — the registry hands
+        out its own instances via :meth:`readers_for`."""
+        return any(
+            r is reader and req for r, req in self._by_format.get(fmt, ())
+        )
 
     def reader_for(self, fmt: KnowledgeFormat) -> FormatReader | None:
         """The most-recently-registered reader for ``fmt`` (legacy
         single-reader contract). Returns ``None`` when no reader is
         registered. New code should use :meth:`readers_for`."""
-        readers = self._by_format.get(fmt)
-        if not readers:
+        entries = self._by_format.get(fmt)
+        if not entries:
             return None
-        return readers[-1]
+        return entries[-1][0]
 
     def formats(self) -> Iterable[KnowledgeFormat]:
         return tuple(self._by_format.keys())

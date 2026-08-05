@@ -454,7 +454,7 @@ class TestStatusSnapshot:
             LLMFailureBackoff,
         )
         agent = MagicMock(); agent.agent_id = "a1"
-        agent.metadata.idle_wait_counter = 0
+        agent.idle_wait_counter = 0
         p = BaseActionPolicy.__new__(BaseActionPolicy)
         p.agent = agent
         p._llm_failure_backoff = LLMFailureBackoff(agent)
@@ -471,7 +471,7 @@ class TestStatusSnapshot:
             LLMFailureBackoff,
         )
         agent = MagicMock(); agent.agent_id = "a2"
-        agent.metadata.idle_wait_counter = 0
+        agent.idle_wait_counter = 0
         p = EventDrivenActionPolicy.__new__(EventDrivenActionPolicy)
         p.agent = agent
         p._llm_failure_backoff = LLMFailureBackoff(agent)

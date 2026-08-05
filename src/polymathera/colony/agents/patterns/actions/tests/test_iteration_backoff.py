@@ -6,7 +6,7 @@ This is the wire-up that closes the 2026-06-09 storm: without it the
 unit tests on :class:`LLMFailureBackoff` pass but the live system
 still hammers a credit-out cluster. With it, ``plan_step``'s LLM
 failure becomes idle-wait, the outer agent loop skips the iteration
-counter (per ``AgentMetadata.idle_wait_counter`` contract), and the
+counter (per ``Agent.idle_wait_counter`` contract), and the
 next iteration only fires after ``next_delay_s`` seconds.
 """
 
@@ -29,7 +29,11 @@ pytestmark = pytest.mark.asyncio
 def _agent() -> SimpleNamespace:
     agent = MagicMock()
     agent.agent_id = "agent-backoff-test"
-    agent.metadata = SimpleNamespace(idle_wait_counter=0)
+    # ``idle_wait_counter`` lives on ``Agent`` itself; ``metadata`` is a
+    # bare namespace WITHOUT the counter so a regression to the
+    # ``agent.metadata.idle_wait_counter`` path raises AttributeError.
+    agent.idle_wait_counter = 0
+    agent.metadata = SimpleNamespace()
     return agent
 
 
@@ -53,7 +57,7 @@ async def test_execute_iteration_catches_llm_inference_error_returns_idle() -> N
     assert result.idle is True
     assert result.policy_completed is False
     assert result.action_executed is None
-    assert policy.agent.metadata.idle_wait_counter == 1
+    assert policy.agent.idle_wait_counter == 1
     fake_sleep.assert_awaited()
 
 
@@ -75,7 +79,7 @@ async def test_execute_iteration_resets_backoff_on_success() -> None:
     policy.plan_step = _bad_plan_step  # type: ignore[assignment]
     with patch("asyncio.sleep"):
         await policy._execute_iteration_inner(state)
-    assert policy.agent.metadata.idle_wait_counter == 1
+    assert policy.agent.idle_wait_counter == 1
 
     # Then: success → idle-wait released.
     async def _good_plan_step(_state):
@@ -83,7 +87,7 @@ async def test_execute_iteration_resets_backoff_on_success() -> None:
 
     policy.plan_step = _good_plan_step  # type: ignore[assignment]
     await policy._execute_iteration_inner(state)
-    assert policy.agent.metadata.idle_wait_counter == 0
+    assert policy.agent.idle_wait_counter == 0
     snap = policy._llm_failure_backoff.snapshot()
     assert snap["in_backoff_streak"] is False
     assert snap["next_delay_s"] == 0.0
@@ -106,7 +110,7 @@ async def test_non_llm_exception_propagates_no_backoff() -> None:
     policy.plan_step = _raise  # type: ignore[assignment]
     with pytest.raises(RuntimeError, match="unrelated bug"):
         await policy._execute_iteration_inner(state)
-    assert policy.agent.metadata.idle_wait_counter == 0
+    assert policy.agent.idle_wait_counter == 0
 
 
 async def test_status_snapshot_includes_backoff_state() -> None:

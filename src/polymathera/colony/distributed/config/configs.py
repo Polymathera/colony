@@ -448,6 +448,13 @@ class PolymatheraConfig(ConfigComponent):
     """
 
     _components: dict[str, ConfigComponent] = PrivateAttr(default_factory=dict)
+    # Raw constructor payload, retained so components whose classes
+    # register AFTER this config was built (import-order dependent —
+    # ``@register_polymathera_config`` runs at module import) can still
+    # be materialized from the loaded YAML on first access instead of
+    # silently falling back to defaults. See
+    # ``_materialize_late_registrations``.
+    _raw_data: dict[str, Any] = PrivateAttr(default_factory=dict)
     version: ConfigVersion = Field(
         default_factory=lambda: ConfigVersion(
             schema_version="1.0.0",
@@ -474,8 +481,49 @@ class PolymatheraConfig(ConfigComponent):
             # Initialize nested components and store in components dict
             self._components[path] = self._initialize_config_component(config_data, config_cls)
 
+        # Retained for components registered after construction — their
+        # YAML sections are materialized lazily on first access.
+        self._raw_data = data
+
         self.version = None
         self.update_version(version_data)
+
+    def _materialize_late_registrations(self) -> None:
+        """Materialize components whose classes registered AFTER this
+        config was constructed.
+
+        Component classes register at module-import time; a process may
+        load its YAML before importing every component module (observed:
+        an agent worker loaded config at deployment init, then imported
+        ``KnowledgeConfig`` when the first session spawned — its
+        ``knowledge:`` YAML section was silently dropped and consumers
+        got bare defaults). Diffing the registry against the already-
+        materialized set on every component access closes that hole for
+        any registration order.
+
+        Limitation: manager-level ``POLYMATHERA_*`` env-var overrides
+        are folded into the payload at load time for then-registered
+        paths only; field-level ``env`` bindings ARE applied here (via
+        ``_initialize_config_component``). Components relying on
+        ``POLYMATHERA_<path>_*`` overrides must be imported before the
+        manager loads.
+        """
+
+        registered = self.get_registered_configs()
+        if len(registered) == len(self._components):
+            return
+        for path, config_cls in registered.items():
+            if path in self._components:
+                continue
+            config_data = self._get_nested_dict_value(self._raw_data, path, {})
+            self._components[path] = self._initialize_config_component(
+                config_data, config_cls,
+            )
+            logger.info(
+                "PolymatheraConfig: late-materialized component %r (%s) — "
+                "its class registered after the config was loaded.",
+                path, config_cls.__name__,
+            )
 
     def update_version(self, version_data: dict[str, Any] = {}) -> None:
         """Update the version information"""
@@ -681,6 +729,9 @@ class PolymatheraConfig(ConfigComponent):
         Returns:
             Matching ConfigComponent if found, None otherwise
         """
+        # Heal import-order gaps before any lookup (exact or wildcard).
+        self._materialize_late_registrations()
+
         # First try exact match
         component = self._components.get(path)
         if component is not None:

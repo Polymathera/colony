@@ -87,25 +87,27 @@ def test_pdf_extractor_wires_image_store_into_reader(
     assert pdf_reader._image_store is deps.image_store
 
 
-def test_registry_construction_failure_falls_back_to_text_only(
+def test_registry_construction_failure_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When ``_default_reader_registry`` returns ``None`` (its
-    documented fallback when the backend's extras aren't installed
-    or the construction otherwise fails), :class:`Ingestor` builds
-    the framework default registry — text-only :class:`PdfReader`
-    for PDFs."""
+    """When the operator-configured backend cannot be honoured
+    (missing extras, unknown name), bring-up FAILS LOUD instead of
+    silently degrading every PDF to the free text-only reader —
+    a degraded ingest would also poison the skip-caches."""
+    import polymathera.colony.knowledge.readers as readers_module
+
     _patch_config(monkeypatch, KnowledgeConfig(
         pdf_extractor=PdfExtractorConfig(backend="mistral_ocr"),
     ))
+
+    def _unbuildable(**_kw):
+        raise ValueError("mistralai extras not installed")
+
     monkeypatch.setattr(
-        deps_module, "_default_reader_registry",
-        lambda image_store: None,
+        readers_module, "default_registry_with_pdf_extractor", _unbuildable,
     )
-    set_knowledge_deps()
-    ing = get_default_ingestor()
-    pdf_reader = ing._readers.reader_for(KnowledgeFormat.PDF)
-    assert isinstance(pdf_reader, PdfReader)
+    with pytest.raises(RuntimeError, match="could not be honoured"):
+        set_knowledge_deps()
 
 
 def test_pdf_extractor_self_hosted_wires_remote_reader(

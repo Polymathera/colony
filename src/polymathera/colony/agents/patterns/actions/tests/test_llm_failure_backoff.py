@@ -28,9 +28,16 @@ pytestmark = pytest.mark.asyncio
 
 
 def _make_agent() -> SimpleNamespace:
+    # ``idle_wait_counter`` lives on ``Agent`` itself, NOT on
+    # ``AgentMetadata``. The stub's ``metadata`` deliberately lacks the
+    # counter so a regression to the ``agent.metadata.idle_wait_counter``
+    # path fails every test here with AttributeError (the 2026-08-02
+    # session-agent deaths: the wrong path crashed handle_failure on its
+    # first real invocation instead of backing off).
     return SimpleNamespace(
         agent_id="agent-test",
-        metadata=SimpleNamespace(idle_wait_counter=0),
+        idle_wait_counter=0,
+        metadata=SimpleNamespace(),
     )
 
 
@@ -45,7 +52,7 @@ async def test_first_failure_increments_idle_wait_counter() -> None:
     backoff = LLMFailureBackoff(agent, initial_delay_s=0.01, cap_delay_s=0.02)
     with patch("asyncio.sleep") as fake_sleep:
         await backoff.handle_failure(LLMInferenceError(request_id="r1", message="x"))
-    assert agent.metadata.idle_wait_counter == 1
+    assert agent.idle_wait_counter == 1
     fake_sleep.assert_awaited_once()
 
 
@@ -61,7 +68,7 @@ async def test_streak_increments_idle_wait_only_once() -> None:
             await backoff.handle_failure(
                 LLMInferenceError(request_id="r", message="x"),
             )
-    assert agent.metadata.idle_wait_counter == 1
+    assert agent.idle_wait_counter == 1
 
 
 async def test_success_decrements_idle_wait_counter() -> None:
@@ -74,7 +81,7 @@ async def test_success_decrements_idle_wait_counter() -> None:
         await backoff.handle_failure(LLMInferenceError(request_id="r1", message="x"))
         await backoff.handle_failure(LLMInferenceError(request_id="r2", message="x"))
     backoff.record_success()
-    assert agent.metadata.idle_wait_counter == 0
+    assert agent.idle_wait_counter == 0
     assert backoff.snapshot()["in_backoff_streak"] is False
     assert backoff.snapshot()["next_delay_s"] == 0.0
 
@@ -111,11 +118,12 @@ async def test_record_success_with_no_open_streak_is_noop() -> None:
 
     agent = SimpleNamespace(
         agent_id="agent-test",
-        metadata=SimpleNamespace(idle_wait_counter=5),
+        idle_wait_counter=5,
+        metadata=SimpleNamespace(),
     )
     backoff = LLMFailureBackoff(agent)
     backoff.record_success()
-    assert agent.metadata.idle_wait_counter == 5
+    assert agent.idle_wait_counter == 5
 
 
 async def test_snapshot_shape() -> None:

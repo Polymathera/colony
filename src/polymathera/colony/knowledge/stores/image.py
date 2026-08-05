@@ -95,7 +95,7 @@ _MIME_TO_EXT: Mapping[str, str] = {
 }
 
 
-def _ext_for_mime(mime: str) -> str:
+def ext_for_mime(mime: str) -> str:
     """Return a canonical filename extension for a mime type.
 
     Falls back to ``.bin`` for shapes the store does not specially
@@ -105,6 +105,18 @@ def _ext_for_mime(mime: str) -> str:
     """
 
     return _MIME_TO_EXT.get(mime.lower(), ".bin")
+
+
+_EXT_TO_MIME = {ext: mime for mime, ext in _MIME_TO_EXT.items()}
+
+
+def mime_for_ext(ext: str) -> str:
+    """Inverse of :func:`ext_for_mime` — mime type for a canonical
+    extension (leading dot required). Falls back to
+    ``application/octet-stream`` for unrecognised extensions, matching
+    the store's own unknown-mime convention."""
+
+    return _EXT_TO_MIME.get(ext.lower(), "application/octet-stream")
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +262,7 @@ class LocalFsImageStore(ImageStore):
             self._ready = True
 
     def _path_for(self, sha: str, mime: str) -> Path:
-        ext = _ext_for_mime(mime)
+        ext = ext_for_mime(mime)
         return self._root / sha[:2] / f"{sha}{ext}"
 
     def _meta_path_for(self, payload_path: Path) -> Path:
@@ -385,4 +397,6 @@ __all__ = (
     "ImageStoreError",
     "InMemoryImageStore",
     "LocalFsImageStore",
+    "ext_for_mime",
+    "mime_for_ext",
 )

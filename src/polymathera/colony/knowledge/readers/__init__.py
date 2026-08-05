@@ -236,13 +236,17 @@ def default_registry_with_pdf_extractor(
         CsvReader(),
         SourceCodeReader(),
         JupyterReader(),
-        # PdfReader is the in-process pypdf fallback; it stays
-        # registered for the no-multimodal case but is shadowed by
-        # the layout-aware reader below for the same format.
-        PdfReader(),
-        pdf_reader,
     ):
         registry.register(reader)
+    # The configured body extractor is the ONLY body reader for PDFs
+    # and it is REQUIRED: its failure fails the document rather than
+    # silently degrading to a free reader's output. The in-process
+    # pypdf ``PdfReader`` is deliberately NOT registered here — on
+    # the multi-reader contract it would run alongside the paid
+    # extractor (duplicating body text into every ingest) and act as
+    # a silent free fallback when the paid backend is down
+    # (``default_registry`` keeps it for the no-extractor case).
+    registry.register(pdf_reader, required=True)
 
     # GROBID metadata-only sibling. Runs alongside the body reader on
     # every PDF (multi-reader registry); the Ingestor concatenates

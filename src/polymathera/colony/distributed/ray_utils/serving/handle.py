@@ -15,6 +15,7 @@ from .models import (
     DeploymentResponseStatus,
     ApplicationRegistry,
     RequestRouter,
+    SupportsWireFields,
 )
 from ...observability.context import get_current_span
 
@@ -331,12 +332,26 @@ class DeploymentHandle:
                 # a primary contributor to a log-spam cascade.
                 logger.warning(error_msg)
 
-                # Try to re-raise with the original exception type
+                # Try to re-raise with the original exception type.
+                # Exceptions implementing SupportsWireFields are rebuilt
+                # via from_wire so their typed attributes (e.g.
+                # ``LLMInferenceError.category``) survive the hop —
+                # message-only reconstruction silently resets them to
+                # defaults at every boundary crossing.
                 if response.error_type and response.error_module:
                     exception_class = self._get_exception_class(
                         response.error_type, response.error_module
                     )
                     if exception_class:
+                        if (
+                            response.error_fields is not None
+                            and issubclass(
+                                exception_class, SupportsWireFields,
+                            )
+                        ):
+                            raise exception_class.from_wire(
+                                error_msg, response.error_fields,
+                            )
                         raise exception_class(error_msg)
 
                 # Fallback to RuntimeError if type unknown

@@ -58,6 +58,25 @@ from .design_context_renewer import DesignContextLockRenewer
 from .repo_map import DesignContextSource, KnowledgeSource, RepoMap
 from ._internal import DESIGN_CONTEXT_URI_SCHEME
 
+#: Scheme for repo-relative source URIs — ``repo:kb/literature/x.pdf``.
+#: The canonical identity of an in-repo knowledge source. Deliberately
+#: NOT the absolute file URI: agent clones live at per-session paths
+#: (``/mnt/shared/agents/<agent>/clones/...``), so absolute URIs break
+#: chunk/claim identity across agents, nodes, and runs — every new
+#: session re-paid claim extraction and the kg-merge driver saw
+#: identical claims as distinct (2026-08-04 audit).
+REPO_URI_SCHEME = "repo"
+
+
+def _repo_relative_uri(repo_root: Path, abs_path: Path) -> str:
+    """``repo:<posix-relative-path>`` for a file inside the design
+    monorepo. Same identity from every clone of the repo."""
+
+    return (
+        f"{REPO_URI_SCHEME}:"
+        f"{abs_path.relative_to(repo_root).as_posix()}"
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -275,11 +294,15 @@ async def materialize_knowledge_sources(
     this returns.
     """
 
-    from polymathera.colony.knowledge.deps import get_default_ingestor
+    from polymathera.colony.knowledge.deps import (
+        get_active_pdf_extractor_label, get_default_ingestor,
+    )
 
     ingestor = get_default_ingestor()
     mpi = MonorepoPersistedIngestor(
-        ingestor, ingestor.readers, extractor_label=extractor_label,
+        ingestor,
+        ingestor.readers,
+        extractor_label=extractor_label or get_active_pdf_extractor_label(),
     )
     registry = acquirer_registry or default_acquirer_registry()
 
@@ -309,6 +332,7 @@ async def materialize_knowledge_sources(
                     abs_path,
                     tier=source.tier,
                     data_type_override=source.profile,
+                    source_uri=_repo_relative_uri(repo_root, abs_path),
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
@@ -338,7 +362,9 @@ async def materialize_knowledge_sources(
                     acquired.local_path,
                     tier=source.tier,
                     data_type_override=source.profile,
-                    source_uri=_acquired_source_uri(source, acquired),
+                    source_uri=_acquired_source_uri(
+                        source, acquired, repo_root=repo_root,
+                    ),
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
@@ -446,20 +472,23 @@ async def _run_acquirer(
 
 
 def _acquired_source_uri(
-    source: KnowledgeSource, acquired: AcquiredSource,
+    source: KnowledgeSource, acquired: AcquiredSource, *, repo_root: Path,
 ) -> str:
     """Pick the ``source_uri`` to register the ingested chunks under.
 
     Prefers the acquirer's ``metadata['source_uri']`` (canonical
     remote identity — ``arxiv:2407.12345v1``, ``doi:10.xxxx/...``)
-    over the local file URI so re-ingesting from a different on-disk
-    copy still hits the idempotency cache. Falls back to the local
-    file URI when the acquirer didn't supply one."""
+    over any file identity so re-ingesting from a different on-disk
+    copy still hits the idempotency cache. Falls back to the
+    repo-relative URI (the acquirer lands files under
+    ``<repo_root>/<row.destination>/``) when no canonical identity
+    was supplied — never the absolute clone path, which differs per
+    agent/node/run."""
 
     meta_uri = acquired.metadata.get("source_uri")
     if isinstance(meta_uri, str) and meta_uri:
         return meta_uri
-    return acquired.local_path.as_uri()
+    return _repo_relative_uri(repo_root, acquired.local_path)
 
 
 def _iter_matching_files(repo_root: Path, source: "KnowledgeSource"):

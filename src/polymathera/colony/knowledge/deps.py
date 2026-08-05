@@ -85,6 +85,10 @@ def _default_vector_store(embedder: "Embedder") -> "VectorStore":
 
     cfg = _knowledge_config().qdrant
     if not cfg.url:
+        logger.info(
+            "knowledge.deps: knowledge.qdrant.url is empty — using "
+            "InMemoryVectorStore (chunk index lost on process exit).",
+        )
         return InMemoryVectorStore()
     try:
         from qdrant_client import AsyncQdrantClient  # type: ignore[import-not-found]
@@ -223,6 +227,10 @@ def _default_graph_store() -> "GraphStore":
 
     graph_db_path = _knowledge_config().graph_db_path
     if not graph_db_path:
+        logger.info(
+            "knowledge.deps: knowledge.graph_db_path is empty — using "
+            "InMemoryGraphStore (KG lost on process exit).",
+        )
         return InMemoryGraphStore()
     try:
         store = KuzuGraphStore.open(graph_db_path)
@@ -252,6 +260,10 @@ def _default_image_store() -> "ImageStore":
 
     image_dir = _knowledge_config().image_dir
     if not image_dir:
+        logger.info(
+            "knowledge.deps: knowledge.image_dir is empty — using "
+            "InMemoryImageStore (figure bytes lost on process exit).",
+        )
         return InMemoryImageStore()
     logger.info(
         "knowledge.deps: using LocalFsImageStore(root_dir=%s)", image_dir,
@@ -284,12 +296,17 @@ def _default_reader_registry(image_store: "ImageStore") -> Any:
             grobid_url=knowledge_cfg.grobid.url or None,
         )
     except (NotImplementedError, ValueError) as exc:
-        logger.warning(
-            "knowledge.pdf_extractor.backend=%s could not be honoured "
-            "(%s); falling back to the default reader registry.",
-            backend, exc,
-        )
-        return None
+        # Fail LOUD: the operator explicitly configured this backend.
+        # Falling back to the free pypdf default registry here would
+        # silently ingest every PDF at degraded quality (and cache
+        # the degraded results); a config that cannot be honoured is
+        # a bring-up error, not a degradation preference.
+        raise RuntimeError(
+            f"knowledge.pdf_extractor.backend={backend!r} could not be "
+            f"honoured: {exc}. Fix the backend name / install its "
+            f"extras / bring up its deployment, or change "
+            f"``knowledge.pdf_extractor.backend``.",
+        ) from exc
     pdf_reader = registry.reader_for(KnowledgeFormat.PDF)
     logger.info(
         "knowledge.deps: PDF reader = %s (backend=%s)",
@@ -297,6 +314,18 @@ def _default_reader_registry(image_store: "ImageStore") -> Any:
         backend,
     )
     return registry
+
+
+def get_active_pdf_extractor_label() -> str:
+    """The configured ``knowledge.pdf_extractor.backend`` value.
+
+    Canonical label for sidecar manifests
+    (:class:`..monorepo_persisted_ingestor.SidecarManifest.extractor`):
+    recording it per sidecar lets the skip-cache invalidate when the
+    operator switches backends instead of silently serving the old
+    backend's extraction."""
+
+    return _knowledge_config().pdf_extractor.backend
 
 
 def set_knowledge_deps(

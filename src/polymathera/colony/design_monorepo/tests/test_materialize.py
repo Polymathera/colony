@@ -1148,3 +1148,55 @@ async def test_progress_callback_none_preserves_legacy_path(
     )
 
     assert report.mapped_count == 1
+
+
+@pytest.mark.asyncio
+async def test_local_knowledge_sources_get_repo_relative_uri(
+    tmp_path, monkeypatch,
+) -> None:
+    """Local-row ingests are registered under ``repo:<relative-path>``
+    — NEVER the absolute clone path. Absolute URIs made chunk/claim
+    identity differ per agent clone: every new session re-paid claim
+    extraction and the kg-merge driver duplicated identical claims
+    (2026-08-04 audit)."""
+
+    from polymathera.colony.design_monorepo import materialize as mat
+
+    repo_root = tmp_path / "clone-under-some-agent-path"
+    pdf = repo_root / "kb" / "literature" / "paper.pdf"
+    pdf.parent.mkdir(parents=True)
+    pdf.write_bytes(b"%PDF-1.4\nx\n")
+
+    captured: list[str] = []
+
+    class _StubMpi:
+        def __init__(self, *a, **k): ...
+
+        async def ingest_file(self, path, *, tier, data_type_override,
+                              source_uri=None, **_kw):
+            captured.append(source_uri)
+            return IngestionRecord(
+                source_uri=source_uri or "",
+                detected_format=KnowledgeFormat.PDF,
+                tier=tier,
+                status=IngestionStatus.COMPLETED,
+                chunks_produced=1,
+                document_hash="sha",
+            )
+
+    monkeypatch.setattr(mat, "MonorepoPersistedIngestor", _StubMpi)
+    monkeypatch.setattr(
+        "polymathera.colony.knowledge.deps.get_default_ingestor",
+        lambda: MagicMock(readers=MagicMock()),
+    )
+
+    repo_map = RepoMap(
+        vcm_sources=[VcmSource(name="default", type="git_repo")],
+        knowledge_sources=[
+            KnowledgeSource(name="literature", paths=["kb/literature/**/*.pdf"]),
+        ],
+    )
+    await mat.materialize_knowledge_sources(
+        repo_map=repo_map, repo_root=repo_root,
+    )
+    assert captured == ["repo:kb/literature/paper.pdf"]

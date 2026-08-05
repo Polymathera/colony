@@ -15,7 +15,10 @@ import os
 from typing import Any
 
 from ..distributed.hooks import hookable
-from .remote_config import RemoteLLMDeploymentConfig, get_pricing_for_model
+from .remote_config import (
+    RemoteLLMDeploymentConfig,
+    get_pricing_for_model,
+)
 from .remote_deployment import APIResponse, RemoteLLMDeployment
 from .remote_registry import register_remote_llm_provider
 
@@ -150,6 +153,17 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
             f"Initialized Anthropic client for model {self.config.model_name} "
             f"(ttl={self.config.ttl}, pool={self.config.max_concurrent_requests * 2})"
         )
+        # Logged ONCE at init (not per request): the operator declared
+        # these request parameters unsupported for this model
+        # (``omit_request_params`` in the deployment's YAML entry);
+        # callers may still thread them — every request omits them.
+        if self.config.omit_request_params:
+            logger.info(
+                "Model %s: operator-declared omit_request_params=%s — "
+                "these are removed from every request.",
+                self.config.model_name,
+                self.config.omit_request_params,
+            )
 
     @hookable
     async def _call_api(
@@ -167,7 +181,10 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         Args:
             messages: Dict with 'system' and 'messages' keys in Anthropic format
             max_tokens: Maximum tokens to generate
-            temperature: Sampling temperature
+            temperature: Sampling temperature. Removed from the request
+                when named in the deployment's operator-declared
+                ``omit_request_params`` (e.g. the Claude 5 family
+                rejects sampling parameters).
             top_p: Nucleus sampling parameter
             json_schema: Optional JSON Schema (e.g. ``Model.model_json_schema()``).
                          When supplied, the call uses Anthropic's dedicated
@@ -206,6 +223,15 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         }
         if top_p is not None:
             kwargs["top_p"] = top_p
+        # Operator-declared unsupported parameters (config, not code:
+        # ``omit_request_params`` on the deployment's YAML entry — e.g.
+        # the Claude 5 family 400s on sampling parameters). Removed
+        # AFTER assembly so the declaration covers any request key; the
+        # init log surfaces the omission once per deployment. A missing
+        # declaration is NOT patched here — the provider's 400
+        # propagates loudly and the operator fixes the config.
+        for param in self.config.omit_request_params:
+            kwargs.pop(param, None)
 
         # Add system prompt if present
         if "system" in messages:
@@ -227,7 +253,8 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
 
         logger.info(
             f"Anthropic API request: model={self.config.model_name}, "
-            f"max_tokens={max_tokens}, temp={temperature}, "
+            f"max_tokens={max_tokens}, "
+            f"temp={kwargs.get('temperature', '<omitted>')}, "
             f"system_blocks={len(kwargs.get('system', []))}, "
             f"user_blocks={sum(len(m.get('content', [])) if isinstance(m.get('content'), list) else 1 for m in kwargs['messages'])}"
         )
@@ -315,15 +342,35 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
             cache_write_tokens=cache_write,
         )
 
-        # Extract content. Both text mode and structured-outputs mode
-        # land their payload in the first text block; the difference is
-        # that structured-outputs guarantees the text validates against
-        # ``json_schema``. The caller's ``model_validate_json`` path is
-        # uniform across deployments (vLLM and OpenRouter return JSON
-        # strings the same way).
-        content = ""
-        if response.content:
-            content = getattr(response.content[0], "text", "") or ""
+        # Extract content. The Messages API contract is a LIST of typed
+        # blocks — select by ``block.type == "text"`` and concatenate
+        # (same shape as AnthropicPdfReader's extraction). Positional
+        # ``content[0]`` reading silently discarded PAID completions
+        # once adaptive-thinking models put a thinking block first
+        # (2026-08-04: ``output=280 … response_len=0``). Both text mode
+        # and structured-outputs mode land their payload in text
+        # blocks; structured-outputs guarantees the text validates
+        # against ``json_schema``.
+        text_parts = [
+            block.text
+            for block in (response.content or [])
+            if block.type == "text"
+        ]
+        if response.content and not text_parts:
+            # We were billed for a completion that carries no text
+            # block at all — surface it, never return "" as if the
+            # model produced an empty completion.
+            from .errors import LLMInferenceError
+
+            block_types = [block.type for block in response.content]
+            raise LLMInferenceError(
+                f"Anthropic response for model "
+                f"{self.config.model_name} contains no text block "
+                f"(received block types: {block_types}); "
+                f"output_tokens={output_tokens}.",
+                request_id=request_id or "<unknown>",
+            )
+        content = "".join(text_parts)
         output_mode = "json_schema" if json_schema is not None else "text"
 
         logger.info(

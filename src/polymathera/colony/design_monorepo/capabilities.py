@@ -1708,22 +1708,27 @@ class RepoStateProvider(DesignMonorepoCapabilityBase):
         # operator doesn't re-pay for PDF OCR / claim-extraction LLM
         # tokens. Local-only commits live on the agent's per-session
         # clone and vanish with it.
-        commit_sha = ""
-        push_status = "no_changes"
-        if records or report.acquisitions:
-            client = await self._client_async()
-            principal, decorated = self._commit_attribution(
-                _build_ingest_commit_message(report),
+        #
+        # UNCONDITIONAL: a run where every file raised (e.g. the claim
+        # extractor raising on a permanent LLM failure) produces zero
+        # records yet may have paid for and written sidecars — gating
+        # the commit on ``records`` would leave those uncommitted and
+        # the next ``refresh=True``'s reset --hard would discard paid
+        # OCR output. ``_commit_all_and_push`` no-ops cleanly on an
+        # unchanged working tree.
+        client = await self._client_async()
+        principal, decorated = self._commit_attribution(
+            _build_ingest_commit_message(report),
+        )
+        commit_sha, push_status = await _commit_all_and_push(
+            client, principal, decorated,
+        )
+        if push_status.startswith("push_failed"):
+            logger.warning(
+                "ingest_repo_map_literature: commit %s landed "
+                "locally but push failed: %s",
+                commit_sha, push_status,
             )
-            commit_sha, push_status = await _commit_all_and_push(
-                client, principal, decorated,
-            )
-            if push_status.startswith("push_failed"):
-                logger.warning(
-                    "ingest_repo_map_literature: commit %s landed "
-                    "locally but push failed: %s",
-                    commit_sha, push_status,
-                )
 
         acquisitions_payload = [
             {

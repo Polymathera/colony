@@ -292,6 +292,31 @@ class Ingestor:
         sections: list[Any] = []
         last_error: str | None = None
         for reader, result in zip(readers, reader_results):
+            if isinstance(result, BaseException):
+                # A REQUIRED reader (the operator-configured body
+                # extractor) failing fails the whole document — the
+                # surviving free readers' sections must not be
+                # accepted as the document's content, or the outage
+                # silently degrades quality and the degraded result
+                # poisons the SKIP_IF_PRESENT cache against retry.
+                if self._readers.is_required(
+                    document.detected_format, reader,
+                ):
+                    logger.error(
+                        "Ingestor: required reader %s failed on %s",
+                        type(reader).__name__, document.source_uri,
+                        exc_info=result,
+                    )
+                    return _finish_record(
+                        record, status=IngestionStatus.FAILED,
+                        error=(
+                            f"required reader "
+                            f"{type(reader).__name__} failed: {result}. "
+                            f"Document NOT ingested (no fallback to "
+                            f"other readers); re-run the ingest once "
+                            f"the backend is restored."
+                        ),
+                    )
             if isinstance(result, FormatReaderError):
                 last_error = str(result)
                 logger.warning(

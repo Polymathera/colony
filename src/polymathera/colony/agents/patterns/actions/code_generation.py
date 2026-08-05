@@ -72,7 +72,7 @@ from ..planning.context import PlanningContextBuilder
 from ....distributed.hooks import hookable
 from .code_constraints import (
     CodeGenerator,
-    FreeFormCodeGenerator,
+    SchemaConstrainedCodeGenerator,
     CodeValidator,
     NoOpValidator,
     IterationShapeValidator,
@@ -857,7 +857,9 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
     each controlled by an abstract class that library users can replace:
 
     1. **CodeGenerator** — controls HOW code is produced (free-form, grammar-
-       constrained, skeleton-with-holes). Default: ``FreeFormCodeGenerator``.
+       constrained, skeleton-with-holes). Default:
+       ``SchemaConstrainedCodeGenerator`` (structured-output contract;
+       free-form extraction as its internal fallback).
     2. **CodeValidator** — checks generated code BEFORE execution. Default:
        ``IterationShapeValidator`` (enforces focused iterations).
     3. **SkillLibrary** — stores/retrieves successful code for reuse. Default:
@@ -940,7 +942,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
         self._context_builder = context_builder or PlanningContextBuilder(agent)
 
         # Constraint dimensions — each is a user-replaceable abstract class.
-        self._code_generator = code_generator or FreeFormCodeGenerator()
+        self._code_generator = code_generator or SchemaConstrainedCodeGenerator()
         self._code_validators = code_validators or [IterationShapeValidator()]
         self._skill_library = skill_library or NoOpSkillLibrary()
         self._recovery_strategy = recovery_strategy or DeterministicRecovery()
@@ -2673,7 +2675,7 @@ async def create_code_generation_action_policy(
         action_providers: Additional action providers.
         io: Action policy I/O configuration.
         context_builder: Planning context builder (default: ``PlanningContextBuilder(agent)``).
-        code_generator: How code is produced (default: ``FreeFormCodeGenerator``).
+        code_generator: How code is produced (default: ``SchemaConstrainedCodeGenerator``).
         code_validators: Pre-execution validation (default: ``[IterationShapeValidator()]``).
         skill_library: Skill storage/retrieval (default: ``NoOpSkillLibrary``).
         recovery_strategy: Failure recovery (default: ``DeterministicRecovery``).

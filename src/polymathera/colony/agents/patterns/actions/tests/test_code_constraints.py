@@ -319,3 +319,70 @@ def test_composite_advisory_surfaces_inner_approval_advisory() -> None:
     advisory = composite.planner_context_advisory([])
     assert advisory is not None
     assert "request_human_approval" in advisory
+
+
+# ---------------------------------------------------------------------------
+# SchemaConstrainedCodeGenerator (durable-llm-output-contract plan §3)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingAgent:
+    """Stub agent: records ``infer`` kwargs and returns a canned text."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.infer_calls: list[dict] = []
+
+    async def infer(self, **kwargs):
+        self.infer_calls.append(kwargs)
+        return self._text  # plain-str response shape
+
+
+@pytest.mark.asyncio
+async def test_schema_generator_requests_schema_and_parses_code() -> None:
+    """The generator sends CODE_CELL_SCHEMA via json_schema (the
+    provider-uniform structured-output contract — decoder-constrained,
+    prose structurally impossible) and returns the payload's code."""
+
+    import json as _json
+
+    from polymathera.colony.agents.patterns.actions.code_constraints import (
+        CODE_CELL_SCHEMA,
+        SchemaConstrainedCodeGenerator,
+    )
+
+    agent = _RecordingAgent(_json.dumps({"code": "x = await run(\"a.b\")"}))
+    code = await SchemaConstrainedCodeGenerator().generate(agent, "plan it")
+
+    assert code == 'x = await run("a.b")'
+    assert agent.infer_calls[0]["json_schema"] is CODE_CELL_SCHEMA
+
+
+@pytest.mark.asyncio
+async def test_schema_generator_falls_back_on_non_json() -> None:
+    """An adapter that ignored ``json_schema`` (or a degraded provider)
+    returns free text — the generator falls back to the free-form
+    extractor instead of failing the iteration."""
+
+    from polymathera.colony.agents.patterns.actions.code_constraints import (
+        SchemaConstrainedCodeGenerator,
+    )
+
+    agent = _RecordingAgent(
+        "Here is the code:\n```python\ny = 1\n```\nHope that helps!"
+    )
+    code = await SchemaConstrainedCodeGenerator().generate(agent, "plan it")
+    assert code == "y = 1"
+
+
+@pytest.mark.asyncio
+async def test_schema_generator_falls_back_on_missing_code_key() -> None:
+    from polymathera.colony.agents.patterns.actions.code_constraints import (
+        SchemaConstrainedCodeGenerator,
+    )
+
+    agent = _RecordingAgent('{"explanation": "no code field here"}')
+    code = await SchemaConstrainedCodeGenerator().generate(agent, "plan it")
+    # JSON without 'code' has no python to extract either — empty
+    # result flows into the policy's existing empty-code retry path.
+    assert code == ""

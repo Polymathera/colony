@@ -20,6 +20,16 @@ logger = logging.getLogger(__name__)
 # Used for cost estimation in InferenceResponse.metadata.
 # Format: {model_name_prefix: {input, output, cache_read, cache_write_5m, cache_write_1h}}
 ANTHROPIC_PRICING: dict[str, dict[str, float]] = {
+    "claude-sonnet-5": {
+        # Standard list price. Introductory pricing of $2/$10 per MTok
+        # applies through 2026-08-31 — estimates below overstate cost
+        # by ~33% until then (kept at list so they don't go stale).
+        "input": 3.0,
+        "output": 15.0,
+        "cache_read": 0.30,       # 0.1x input
+        "cache_write_5m": 3.75,   # 1.25x input
+        "cache_write_1h": 6.0,    # 2.0x input
+    },
     "claude-sonnet-4-6": {
         "input": 3.0,
         "output": 15.0,
@@ -69,7 +79,7 @@ def get_pricing_for_model(model_name: str) -> dict[str, float] | None:
     """Look up pricing for a model name by prefix match.
 
     Args:
-        model_name: Full model name (e.g., "claude-sonnet-4-20250514")
+        model_name: Full model name (e.g., "claude-sonnet-5")
 
     Returns:
         Pricing dict if found, None otherwise
@@ -90,7 +100,7 @@ class RemoteLLMDeploymentConfig(BaseModel):
     Example:
         ```python
         config = RemoteLLMDeploymentConfig(
-            model_name="claude-sonnet-4-20250514",
+            model_name="claude-sonnet-5",
             provider="anthropic",
             max_cached_tokens=2_000_000,
             ttl="1h",
@@ -106,7 +116,7 @@ class RemoteLLMDeploymentConfig(BaseModel):
 
     # Model and provider
     model_name: str = Field(
-        description="Model name for the API (e.g., 'claude-sonnet-4-20250514')"
+        description="Model name for the API (e.g., 'claude-sonnet-5')"
     )
     provider: Literal["anthropic", "openrouter", "vllm"] = Field(
         description="LLM API provider"
@@ -114,6 +124,19 @@ class RemoteLLMDeploymentConfig(BaseModel):
     api_key_env_var: str = Field(
         default="ANTHROPIC_API_KEY",
         description="Environment variable containing the API key"
+    )
+    omit_request_params: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Request parameters the adapter must NOT send for this "
+            "model (e.g. ['temperature', 'top_p'] for the Claude 5 "
+            "family, which rejects sampling parameters with a 400). "
+            "Integration-time knowledge, declared by the operator in "
+            "the deployment's YAML entry — model-specific parameter "
+            "facts live in config, never in code tables. A wrong "
+            "declaration surfaces as the provider's own error, "
+            "propagated loudly."
+        ),
     )
     base_url: str | None = Field(
         default=None,
@@ -228,7 +251,7 @@ class RemoteLLMDeploymentConfig(BaseModel):
         """
         if self.deployment_id:
             return self.deployment_id
-        # Auto-generate: "remote-claude-sonnet-4-20250514"
+        # Auto-generate: "remote-claude-sonnet-5"
         return f"remote-{self.model_name.lower().replace('/', '-').replace('.', '-')}"
 
     def get_ttl_seconds(self) -> int:

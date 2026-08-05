@@ -27,8 +27,11 @@ cluster:
   app_name: "polymathera"
   cleanup_on_init: true
   remote_deployments:
-    - model_name: "claude-sonnet-4-6"
+    - model_name: "claude-sonnet-5"
       provider: "anthropic"          # registered via cluster/anthropic_deployment.py
+      # Claude 5-family models reject sampling parameters (400).
+      # https://platform.claude.com/docs/en/about-claude/models/migration-guide
+      omit_request_params: ["temperature", "top_p"]
       api_key_env_var: "ANTHROPIC_API_KEY"
       max_cached_pages: 50
       max_cached_tokens: 2000000
@@ -179,7 +182,7 @@ knowledge:
   # pdf_extractor:
   #   backend: anthropic
   #   options:
-  #     model: "claude-sonnet-4-6"
+  #     model: "claude-sonnet-5"
   #     prompt_cache: true
   #
   # Gemini (multimodal, long context):
