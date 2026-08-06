@@ -118,6 +118,7 @@ class AnthropicPdfReader(FormatReader):
         timeout_s: float = _DEFAULT_TIMEOUT_S,
         prompt: str | None = None,
         prompt_cache: bool = True,
+        effort: str | None = None,
     ) -> None:
         super().__init__(handles=(KnowledgeFormat.PDF,))
         # image_store is accepted but stored only for diagnostics —
@@ -131,6 +132,11 @@ class AnthropicPdfReader(FormatReader):
         self._timeout_s = float(timeout_s)
         self._prompt = prompt or _DEFAULT_PROMPT
         self._prompt_cache = bool(prompt_cache)
+        # Anthropic ``output_config.effort`` for per-page extraction —
+        # settable via ``knowledge.pdf_extractor.options.effort`` (the
+        # options dict is forwarded verbatim as backend_kwargs). None =
+        # provider default.
+        self._effort = effort
 
     @property
     def model(self) -> str:
@@ -218,9 +224,14 @@ class AnthropicPdfReader(FormatReader):
             document_block["cache_control"] = {"type": "ephemeral"}
 
         try:
+            extra: dict = (
+                {"output_config": {"effort": self._effort}}
+                if self._effort else {}
+            )
             response = await client.messages.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
+                **extra,
                 messages=[
                     {
                         "role": "user",

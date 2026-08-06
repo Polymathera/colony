@@ -32,6 +32,11 @@ cluster:
       # Claude 5-family models reject sampling parameters (400).
       # https://platform.claude.com/docs/en/about-claude/models/migration-guide
       omit_request_params: ["temperature", "top_p"]
+      # Optional deployment-wide effort default (low|medium|high|xhigh|max).
+      # Unset = provider default (high). Hold constant per cached
+      # conversation; per-surface overrides: knowledge.llm_claim_extraction_effort,
+      # the vocab panel's judge-effort selector.
+      # effort: medium
       api_key_env_var: "ANTHROPIC_API_KEY"
       max_cached_pages: 50
       max_cached_tokens: 2000000

@@ -304,6 +304,21 @@ class KnowledgeConfig(ConfigComponent):
         ),
     )
 
+    llm_claim_extraction_effort: str | None = Field(
+        default="low",
+        description=(
+            "Effort level for claim-extraction LLM calls (low | medium "
+            "| high | xhigh | max; Anthropic output_config.effort). "
+            "Defaults to 'low' — per-chunk claim extraction is exactly "
+            "the high-volume subagent workload the provider recommends "
+            "low effort for; it was the dominant LLM spend of the "
+            "2026-08-04 ingest run at implicit high. None = provider "
+            "default."
+        ),
+        json_schema_extra=tier_metadata(
+            tier=Tier.L1_OPERATOR, mutability=Mutability.RELOADABLE,
+        ),
+    )
     llm_claim_extraction_temperature: float = Field(
         default=0.1,
         ge=0.0, le=2.0,

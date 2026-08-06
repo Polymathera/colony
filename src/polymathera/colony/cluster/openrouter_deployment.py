@@ -96,6 +96,7 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         messages: dict[str, Any],
         max_tokens: int = 1024,
         temperature: float = 0.7,
+        effort: str | None = None,
         top_p: float | None = None,
         json_schema: dict[str, Any] | None = None,
         deadline_s: float | None = None,
@@ -113,6 +114,11 @@ class OpenRouterLLMDeployment(RemoteLLMDeployment):
         Returns:
             Normalized APIResponse with usage data
         """
+        # ``effort`` is accepted for signature uniformity with the
+        # Anthropic adapter but not forwarded: OpenRouter's reasoning-
+        # effort support varies per underlying model/provider; wire it
+        # when an effort-capable model is actually routed here.
+        del effort
         # Some models reject having both temperature and top_p.
         # Only include top_p when explicitly overridden from the default.
         kwargs: dict[str, Any] = {

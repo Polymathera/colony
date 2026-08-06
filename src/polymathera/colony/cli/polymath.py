@@ -327,6 +327,9 @@ class RemoteDeploymentYAMLConfig:
     # Request parameters this model rejects (operator-declared; e.g.
     # ["temperature", "top_p"] for the Claude 5 family).
     omit_request_params: list[str] = field(default_factory=list)
+    # Default effort for requests through this deployment
+    # (low | medium | high | xhigh | max). None = provider default.
+    effort: str | None = None
     # Required for provider "vllm": the self-hosted OpenAI-compatible endpoint
     # (e.g. an Option-A serving fleet's NLB URL).
     base_url: str | None = None
@@ -1091,6 +1094,7 @@ def _build_cluster_config(
             api_timeout_seconds=rd.api_timeout_seconds,
             num_replicas=rd.num_replicas,
             omit_request_params=rd.omit_request_params,
+            effort=rd.effort,
         ))
 
     # Build LLMDeploymentConfig objects from YAML vllm_deployments

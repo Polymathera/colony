@@ -163,3 +163,42 @@ async def test_image_endpoint_rejects_non_hex_sha() -> None:
             sha="../etc/passwd", _user={"sub": "test"},
         )
     assert exc.value.status_code == 400
+
+
+def test_repo_git_lock_is_per_origin_singleton() -> None:
+    """Same origin → same lock object (serialization actually binds);
+    different origins don't contend. Regression scaffolding for the
+    2026-08-05 index.lock race between the vocab apply's commit and
+    the polled stats endpoint on the shared cache clone."""
+
+    from polymathera.colony.web_ui.backend.routers.kb import _repo_git_lock
+
+    a1 = _repo_git_lock("https://example.com/a.git")
+    a2 = _repo_git_lock("https://example.com/a.git")
+    b = _repo_git_lock("https://example.com/b.git")
+    assert a1 is a2
+    assert a1 is not b
+
+
+@pytest.mark.asyncio
+async def test_repo_git_lock_serializes_critical_sections() -> None:
+    """Two coroutines in the same origin's critical section never
+    overlap — the property whose absence produced the index.lock 500."""
+
+    import asyncio
+
+    from polymathera.colony.web_ui.backend.routers.kb import _repo_git_lock
+
+    live = 0
+    peak = 0
+
+    async def _section() -> None:
+        nonlocal live, peak
+        async with _repo_git_lock("https://example.com/serialize.git"):
+            live += 1
+            peak = max(peak, live)
+            await asyncio.sleep(0.01)
+            live -= 1
+
+    await asyncio.gather(_section(), _section(), _section())
+    assert peak == 1

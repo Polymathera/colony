@@ -230,6 +230,13 @@ class InferenceRequest(BaseModel):
     )
     max_tokens: int = 1024
     temperature: float = 0.7
+    effort: str | None = None
+    """Anthropic ``output_config.effort`` level (low | medium | high |
+    xhigh | max). ``None`` uses the deployment's configured default,
+    else the provider default. NOTE the caching caveat: effort shapes
+    the rendered prompt, so varying it between requests of one cached
+    conversation invalidates the prompt-cache prefix — hold it
+    constant within a session (provider guidance)."""
     top_p: float | None = None
     json_schema: dict[str, Any] | None = Field(
         default=None,

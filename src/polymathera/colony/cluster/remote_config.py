@@ -125,6 +125,18 @@ class RemoteLLMDeploymentConfig(BaseModel):
         default="ANTHROPIC_API_KEY",
         description="Environment variable containing the API key"
     )
+    effort: str | None = Field(
+        default=None,
+        description=(
+            "Default effort level for every request through this "
+            "deployment (low | medium | high | xhigh | max; Anthropic "
+            "output_config.effort). None = provider default (high). "
+            "Per-request InferenceRequest.effort overrides. Declared "
+            "here because effort should stay CONSTANT per cached "
+            "conversation (provider caching guidance) — the deployment "
+            "baseline is the cache-friendly layer."
+        ),
+    )
     omit_request_params: list[str] = Field(
         default_factory=list,
         description=(

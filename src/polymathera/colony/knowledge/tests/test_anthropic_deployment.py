@@ -448,3 +448,67 @@ async def test_no_text_block_raises_instead_of_empty() -> None:
             messages={"messages": [{"role": "user", "content": "code"}]},
             request_id="req-nothink",
         )
+
+
+# ---------------------------------------------------------------------------
+# Effort (output_config.effort)
+# ---------------------------------------------------------------------------
+
+
+async def test_effort_request_overrides_deployment_default() -> None:
+    """Precedence: per-request effort > deployment config effort >
+    omitted (provider default). Effort shares output_config with
+    structured outputs — both must coexist in one request."""
+
+    stub_response = _StubResponse(
+        usage=_StubUsage(),
+        content=[_StubTextBlock(type="text", text='{"ok": true}')],
+    )
+    messages = _StubMessages(response=stub_response)
+    deployment = _build_deployment(client=_StubClient(messages))
+    deployment.config = deployment.config.model_copy(
+        update={"effort": "medium"},
+    )
+
+    schema = {"type": "object", "properties": {},
+              "additionalProperties": False}
+    await deployment._call_api(
+        messages={"messages": [{"role": "user", "content": "x"}]},
+        json_schema=schema,
+        effort="low",
+        request_id="req-e1",
+    )
+    sent = messages.calls[0]
+    assert sent["output_config"]["effort"] == "low"  # request wins
+    assert sent["output_config"]["format"]["type"] == "json_schema"
+
+
+async def test_effort_deployment_default_used_when_request_unset() -> None:
+    stub_response = _StubResponse(
+        usage=_StubUsage(),
+        content=[_StubTextBlock(type="text", text="ok")],
+    )
+    messages = _StubMessages(response=stub_response)
+    deployment = _build_deployment(client=_StubClient(messages))
+    deployment.config = deployment.config.model_copy(
+        update={"effort": "medium"},
+    )
+    await deployment._call_api(
+        messages={"messages": [{"role": "user", "content": "x"}]},
+        request_id="req-e2",
+    )
+    assert messages.calls[0]["output_config"] == {"effort": "medium"}
+
+
+async def test_effort_omitted_when_nothing_configured() -> None:
+    stub_response = _StubResponse(
+        usage=_StubUsage(),
+        content=[_StubTextBlock(type="text", text="ok")],
+    )
+    messages = _StubMessages(response=stub_response)
+    deployment = _build_deployment(client=_StubClient(messages))
+    await deployment._call_api(
+        messages={"messages": [{"role": "user", "content": "x"}]},
+        request_id="req-e3",
+    )
+    assert "output_config" not in messages.calls[0]

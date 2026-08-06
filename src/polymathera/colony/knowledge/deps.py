@@ -128,6 +128,7 @@ def build_default_llm_callable(
     temperature: float,
     deadline_s: float | None = None,
     app_name: str | None = None,
+    effort: str | None = None,
 ) -> TypedLLMCallable:
     """Build the lazy :data:`TypedLLMCallable` the singleton Ingestor's
     :class:`LLMClaimExtractor` (and every future typed-schema extractor)
@@ -180,6 +181,7 @@ def build_default_llm_callable(
             temperature=temperature,
             json_schema=schema.model_json_schema(),
             deadline_s=deadline_s,
+            effort=effort,
         )
         response = await handle.infer(request)
         return schema.model_validate_json(response.generated_text)
@@ -208,6 +210,7 @@ def _build_default_extractors(
     if cfg.llm_claim_extraction_enabled:
         llm_callable = build_default_llm_callable(
             max_tokens=cfg.llm_claim_extraction_max_tokens,
+            effort=cfg.llm_claim_extraction_effort,
             temperature=cfg.llm_claim_extraction_temperature,
             deadline_s=cfg.llm_claim_extraction_timeout_s,
         )

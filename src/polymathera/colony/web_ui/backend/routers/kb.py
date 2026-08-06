@@ -12,6 +12,7 @@ All endpoints are ``Ring.USER`` and gated by ``require_auth``.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import time
@@ -684,11 +685,12 @@ async def _run_rehydrate(
 
         polymathera = get_polymathera()
         storage = await polymathera.get_storage()
-        repo_path = await storage.git_storage.clone_or_retrieve_repository(
-            origin_url=request.origin_url,
-            branch="main" if request.branch == "__all__" else request.branch,
-            commit="HEAD",
-        )
+        async with _repo_git_lock(request.origin_url):
+            repo_path = await storage.git_storage.clone_or_retrieve_repository(
+                origin_url=request.origin_url,
+                branch="main" if request.branch == "__all__" else request.branch,
+                commit="HEAD",
+            )
         repo = Repo(str(repo_path))
 
         branch_names = []
@@ -746,11 +748,12 @@ async def _run_ingest_repo_map(
 
         polymathera = get_polymathera()
         storage = await polymathera.get_storage()
-        repo_path = await storage.git_storage.clone_or_retrieve_repository(
-            origin_url=request.origin_url,
-            branch=request.branch,
-            commit=request.commit,
-        )
+        async with _repo_git_lock(request.origin_url):
+            repo_path = await storage.git_storage.clone_or_retrieve_repository(
+                origin_url=request.origin_url,
+                branch=request.branch,
+                commit=request.commit,
+            )
         repo_root = Path(str(repo_path))
         repo_map = RepoMap.load(repo_root)
 
@@ -809,6 +812,16 @@ class VocabProposeRequest(BaseModel):
         default=200,
         description="Judge at most this many clusters (cost cap).",
     )
+    effort: str | None = Field(
+        default="low",
+        description=(
+            "Effort level for judge LLM calls (low | medium | high | "
+            "xhigh | max; None = provider default). Judging synonym "
+            "clusters is batch classification — the provider's "
+            "canonical low-effort workload; raise it if merge "
+            "decisions look shallow."
+        ),
+    )
 
 
 class VocabOpPayload(BaseModel):
@@ -848,6 +861,27 @@ class VocabOpStatus(BaseModel):
 _vocab_ops: dict[str, dict[str, Any]] = {}
 
 
+# Git operations on the SHARED cache clone (one working tree per
+# origin, used by stats/propose/apply/ingest/rehydrate AND polled by
+# the UI) must be serialized within this process: concurrent index
+# mutations collide on .git/index.lock (2026-08-05: the vocab apply's
+# commit raced the stats endpoint's clone_or_retrieve and 500'd with
+# FileExistsError on index.lock, stranding applied-but-uncommitted
+# state). Critical sections are kept SHORT (clone resolution, file
+# reads, the commit block) — long phases (materialize, judging) run
+# outside the lock. Cross-process collisions remain possible and stay
+# loud; this removes the observed intra-process race.
+_repo_git_locks: dict[str, asyncio.Lock] = {}
+
+
+def _repo_git_lock(origin_url: str) -> asyncio.Lock:
+    lock = _repo_git_locks.get(origin_url)
+    if lock is None:
+        lock = asyncio.Lock()
+        _repo_git_locks[origin_url] = lock
+    return lock
+
+
 async def _load_vocab_and_kg(origin_url: str, branch: str):
     from polymathera.colony.distributed import get_polymathera
     from polymathera.colony.knowledge.persistence import (
@@ -859,19 +893,20 @@ async def _load_vocab_and_kg(origin_url: str, branch: str):
 
     polymathera = get_polymathera()
     storage = await polymathera.get_storage()
-    repo_path = Path(str(await storage.git_storage.clone_or_retrieve_repository(
-        origin_url=origin_url, branch=branch, commit="HEAD",
-    )))
-    kg_path = repo_path / KG_FILE_RELATIVE_PATH
-    vocab_path = repo_path / VOCAB_FILE_RELATIVE_PATH
-    kg = (
-        KgFile.from_json(kg_path.read_text(encoding="utf-8"))
-        if kg_path.is_file() else KgFile()
-    )
-    vocab = (
-        VocabFile.from_json(vocab_path.read_text(encoding="utf-8"))
-        if vocab_path.is_file() else VocabFile()
-    )
+    async with _repo_git_lock(origin_url):
+        repo_path = Path(str(await storage.git_storage.clone_or_retrieve_repository(
+            origin_url=origin_url, branch=branch, commit="HEAD",
+        )))
+        kg_path = repo_path / KG_FILE_RELATIVE_PATH
+        vocab_path = repo_path / VOCAB_FILE_RELATIVE_PATH
+        kg = (
+            KgFile.from_json(kg_path.read_text(encoding="utf-8"))
+            if kg_path.is_file() else KgFile()
+        )
+        vocab = (
+            VocabFile.from_json(vocab_path.read_text(encoding="utf-8"))
+            if vocab_path.is_file() else VocabFile()
+        )
     return repo_path, vocab, kg
 
 
@@ -973,6 +1008,7 @@ async def _run_vocab_propose(
         register_provisional(vocab, usage.keys())
         llm = build_default_llm_callable(
             max_tokens=1024, temperature=0.0, app_name=app_name,
+            effort=request.effort,
         )
 
         def _progress(message: str) -> None:
@@ -1038,11 +1074,6 @@ async def kb_vocab_apply(
     if not applied:
         return {"applied": [], "failed": failed, "rewrite": {}}
 
-    vocab_path = repo_path / VOCAB_FILE_RELATIVE_PATH
-    vocab_path.parent.mkdir(parents=True, exist_ok=True)
-    vocab_path.write_text(vocab.to_json(), encoding="utf-8")
-    rewrite = await rewrite_claims_for_merges(repo_path)
-
     def _commit_and_push() -> str:
         from git import Actor
 
@@ -1066,7 +1097,16 @@ async def kb_vocab_apply(
         repo.remote().push().raise_if_error()
         return commit.hexsha[:8]
 
-    sha = await _asyncio.to_thread(_commit_and_push)
+    # Write + rewrite + commit under the repo's git lock — the commit
+    # mutates .git/index on the SHARED cache clone and must not race
+    # the other kb endpoints' git operations.
+    async with _repo_git_lock(request.origin_url):
+        vocab_path = repo_path / VOCAB_FILE_RELATIVE_PATH
+        vocab_path.parent.mkdir(parents=True, exist_ok=True)
+        vocab_path.write_text(vocab.to_json(), encoding="utf-8")
+        rewrite = await rewrite_claims_for_merges(repo_path)
+        sha = await _asyncio.to_thread(_commit_and_push)
+
     return {
         "applied": applied, "failed": failed,
         "rewrite": rewrite, "commit": sha,

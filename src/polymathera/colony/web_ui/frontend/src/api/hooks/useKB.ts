@@ -317,7 +317,7 @@ export function useKBVocabStats(originUrl: string | null, branch: string) {
 export function useKBVocabPropose() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (req: { origin_url: string; branch: string }) =>
+    mutationFn: (req: { origin_url: string; branch: string; effort?: string }) =>
       apiFetch<VocabOpStatus>("/kb/vocab/propose", {
         method: "POST",
         body: JSON.stringify(req),

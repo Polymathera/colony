@@ -232,6 +232,7 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         json_schema: dict[str, Any] | None = None,
         deadline_s: float | None = None,
         request_id: str | None = None,
+        effort: str | None = None,
     ) -> APIResponse:
         """Call the Anthropic Messages API.
 
@@ -307,6 +308,16 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
                     "schema": json_schema,
                 },
             }
+
+        # Effort (output_config.effort — low|medium|high|xhigh|max):
+        # per-request value wins over the deployment's configured
+        # baseline; neither set → omit (provider default, high).
+        # Shares the output_config object with structured outputs, so
+        # merge rather than assign. An unsupported level/model is the
+        # provider's own loud 400 — no local model table.
+        resolved_effort = effort or self.config.effort
+        if resolved_effort is not None:
+            kwargs.setdefault("output_config", {})["effort"] = resolved_effort
 
         logger.info(
             f"Anthropic API request: model={self.config.model_name}, "

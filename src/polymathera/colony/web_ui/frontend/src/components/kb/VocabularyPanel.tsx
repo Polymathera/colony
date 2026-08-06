@@ -102,6 +102,10 @@ export function VocabularyPanel() {
   }, [latestPass?.op_id, latestPass?.status]);
 
   const [applyMessage, setApplyMessage] = useState<string | null>(null);
+  // Judge effort: batch classification is the provider's canonical
+  // low-effort workload; the selector exists for when merge decisions
+  // look shallow and the operator wants deeper judging.
+  const [effort, setEffort] = useState<string>("low");
 
   if (!originUrl) {
     return null; // no design monorepo configured — nothing to curate
@@ -196,9 +200,25 @@ export function VocabularyPanel() {
       </div>
 
       <div className="mb-3 flex items-center gap-3">
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          Judge effort
+          <select
+            value={effort}
+            onChange={(e) => setEffort(e.target.value)}
+            disabled={passRunning || propose.isPending}
+            className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+            title="LLM effort per judged cluster. low = fastest/cheapest (recommended for synonym judging); raise if merge decisions look shallow."
+          >
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+            <option value="max">max</option>
+          </select>
+        </label>
         <button
           onClick={() =>
-            propose.mutate({ origin_url: originUrl, branch })
+            propose.mutate({ origin_url: originUrl, branch, effort })
           }
           disabled={passRunning || propose.isPending}
           className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"

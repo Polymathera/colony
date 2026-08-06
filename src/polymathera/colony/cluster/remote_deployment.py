@@ -562,6 +562,7 @@ class RemoteLLMDeployment(AgentManagerBase):
                     top_p=request.top_p,
                     json_schema=request.json_schema,
                     deadline_s=request.deadline_s,
+                    effort=request.effort,
                     request_id=request.request_id,
                 )
             finally:
@@ -725,6 +726,7 @@ class RemoteLLMDeployment(AgentManagerBase):
                         top_p=request.top_p,
                         json_schema=request.json_schema,
                         request_id=request.request_id,
+                        effort=request.effort,
                     )
                 finally:
                     self._active_requests -= 1
