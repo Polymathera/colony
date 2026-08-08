@@ -327,6 +327,11 @@ class RemoteDeploymentYAMLConfig:
     # Request parameters this model rejects (operator-declared; e.g.
     # ["temperature", "top_p"] for the Claude 5 family).
     omit_request_params: list[str] = field(default_factory=list)
+    # Output-token budget (OutputTokenBudgetMixin): default cap when a
+    # caller passes no explicit max_tokens + optional per-effort
+    # headroom map (thinking shares the budget on adaptive models).
+    max_output_tokens: int = 8192
+    max_output_tokens_by_effort: dict[str, int] = field(default_factory=dict)
     # Default effort for requests through this deployment
     # (low | medium | high | xhigh | max). None = provider default.
     effort: str | None = None
@@ -1094,6 +1099,8 @@ def _build_cluster_config(
             api_timeout_seconds=rd.api_timeout_seconds,
             num_replicas=rd.num_replicas,
             omit_request_params=rd.omit_request_params,
+            max_output_tokens=rd.max_output_tokens,
+            max_output_tokens_by_effort=rd.max_output_tokens_by_effort,
             effort=rd.effort,
         ))
 

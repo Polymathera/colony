@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from .models import OutputTokenBudgetMixin
+
 logger = logging.getLogger(__name__)
 
 
@@ -90,7 +92,7 @@ def get_pricing_for_model(model_name: str) -> dict[str, float] | None:
     return None
 
 
-class RemoteLLMDeploymentConfig(BaseModel):
+class RemoteLLMDeploymentConfig(OutputTokenBudgetMixin):
     """Configuration for a remote LLM deployment (Anthropic / OpenRouter).
 
     This is the remote equivalent of LLMDeploymentConfig. Each replica wraps

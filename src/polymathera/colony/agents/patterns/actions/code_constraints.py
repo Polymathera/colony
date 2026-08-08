@@ -164,7 +164,7 @@ class CodeGenerator(ABC):
         self,
         agent: Agent,
         prompt: str,
-        max_tokens: int = 2048,
+        max_tokens: int | None = None,
         temperature: float = 0.3,
     ) -> str:
         """Generate code from the prompt.
@@ -195,7 +195,7 @@ class FreeFormCodeGenerator(CodeGenerator):
         self,
         agent: Agent,
         prompt: str,
-        max_tokens: int = 2048,
+        max_tokens: int | None = None,
         temperature: float = 0.3,
     ) -> str:
         response = await agent.infer(
@@ -250,7 +250,7 @@ class SchemaConstrainedCodeGenerator(CodeGenerator):
         self,
         agent: Agent,
         prompt: str,
-        max_tokens: int = 2048,
+        max_tokens: int | None = None,
         temperature: float = 0.3,
     ) -> str:
         response = await agent.infer(
@@ -263,6 +263,28 @@ class SchemaConstrainedCodeGenerator(CodeGenerator):
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
+            if _stop_reason(response) == "max_tokens":
+                # The JSON was GUILLOTINED at the output-token cap —
+                # on adaptive-thinking models (Sonnet 5+) thinking
+                # spends from the same ``max_tokens`` budget, so a
+                # hard planning step can leave almost no room for the
+                # text (2026-08-07 forensic: output=2048 tokens, 63
+                # chars of text). The fragment is JSON-escaped text;
+                # feeding it to the free-form extractor produces
+                # mangled "code" that the validators then rightly
+                # reject. Return empty → the policy's retry path.
+                logger.error(
+                    "SchemaConstrainedCodeGenerator: output TRUNCATED "
+                    "at the output-token cap (thinking shares this "
+                    "budget on adaptive-thinking models; %d chars of "
+                    "text survived; requested max_tokens=%s, None = "
+                    "deployment-config budget). Returning empty for "
+                    "retry — raise max_output_tokens / the per-effort "
+                    "map in the deployment config if this recurs.",
+                    len(raw),
+                    max_tokens,
+                )
+                return ""
             logger.warning(
                 "SchemaConstrainedCodeGenerator: response is not valid "
                 "JSON despite json_schema (adapter ignored the contract "
@@ -1459,6 +1481,17 @@ def _iter_fenced_blocks(text: str):
         lang = opener.group(1).strip().lower() or None
         body = text[opener.end():closer.start()].strip("\n")
         yield lang, body
+
+
+def _stop_reason(response: Any) -> str | None:
+    """Provider stop reason from an ``InferenceResponse``'s metadata
+    (threaded from ``APIResponse.stop_reason`` by the remote
+    deployments). ``None`` for shapes that don't carry it (plain str,
+    vLLM, tests)."""
+    metadata = getattr(response, "metadata", None)
+    if isinstance(metadata, dict):
+        return metadata.get("stop_reason")
+    return None
 
 
 def _response_text(response: Any) -> str:

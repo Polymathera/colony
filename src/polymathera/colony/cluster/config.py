@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from .models import OutputTokenBudgetMixin
+
 from ..distributed.config import Mutability, Tier, tier_metadata
 from ..distributed.ray_utils import serving
 
@@ -96,7 +98,7 @@ def vllm_max_lora_rank(adapters: list[LoRAAdapterConfig]) -> int:
     return round_up_lora_rank(max(adapter.rank for adapter in adapters))
 
 
-class LLMDeploymentConfig(BaseModel):
+class LLMDeploymentConfig(OutputTokenBudgetMixin):
     """Configuration for a single vLLM deployment instance.
 
     This configuration is derived from model registry parameters and

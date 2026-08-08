@@ -940,6 +940,7 @@ class SessionOrchestratorCapability(AgentCapability):
         mission_type: str,
         mission_params: dict[str, Any] | None = None,
         max_iterations: int | None = None,
+        effort: str | None = None,
     ) -> dict[str, Any]:
         """Spawn a mission coordinator for ``mission_type`` — the
         recommended way to start a mission task from chat.
@@ -1119,6 +1120,10 @@ class SessionOrchestratorCapability(AgentCapability):
             role=f"{reg.get('label', mission_type)} coordinator",
             goals=[f"Run {reg.get('label', mission_type)} mission"],
             max_iterations=effective_max_iterations,
+            # Coordinator-level LLM effort: caller override, else
+            # inherit this SessionAgent's own effort (set from the
+            # chat "Effort & Limits" control), else deployment default.
+            effort=effort if effort is not None else self.agent.metadata.effort,
             self_concept=build_coordinator_self_concept(
                 reg, mission_type=mission_type,
             ),
@@ -1445,6 +1450,29 @@ class SessionOrchestratorCapability(AgentCapability):
             return PROCESSED
 
         await self._refresh_monorepo_extensions()  # in case the user just added a new mission or tool
+
+        # Apply the chat "Effort & Limits" control: sets this agent's
+        # metadata-level effort default, which ``Agent.infer`` resolves
+        # on every call that doesn't pass an explicit ``effort=``.
+        # Applied per message — note that CHANGING it mid-conversation
+        # invalidates Anthropic prompt caching for the next request.
+        if controls:
+            requested_effort = controls.get("effort")
+            if requested_effort in ("low", "medium", "high", "xhigh", "max"):
+                if requested_effort != self.agent.metadata.effort:
+                    logger.info(
+                        "SessionAgent %s: effort set to %r via chat "
+                        "controls (was %r)",
+                        self.agent.agent_id, requested_effort,
+                        self.agent.metadata.effort,
+                    )
+                    self.agent.metadata.effort = requested_effort
+            elif requested_effort is not None:
+                logger.warning(
+                    "SessionAgent %s: ignoring invalid effort %r from "
+                    "chat controls (valid: low|medium|high|xhigh|max)",
+                    self.agent.agent_id, requested_effort,
+                )
 
         # Plain message — provide context to the LLM planner so it can decide
         # what action to take (respond_to_user, create_agent, etc.)

@@ -2616,6 +2616,20 @@ class AgentMetadata(BaseModel):
     # Optional page binding
     bound_pages: list[str] = Field(default_factory=list)
 
+    effort: str | None = Field(
+        default=None,
+        description=(
+            "Agent-level LLM reasoning-effort default (Anthropic "
+            "output_config.effort: low | medium | high | xhigh | max). "
+            "Resolved at every ``Agent.infer`` call the caller didn't "
+            "pass an explicit ``effort=`` to — the action policy "
+            "inherits it implicitly; capabilities override per call "
+            "for task-specific needs. ``None`` = deployment default. "
+            "Caching caveat: changing effort mid-conversation "
+            "invalidates Anthropic prompt caching."
+        ),
+    )
+
     max_iterations: int | None = Field(
         default=20,
         ge=1,

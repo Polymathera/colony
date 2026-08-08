@@ -37,6 +37,17 @@ cluster:
       # conversation; per-surface overrides: knowledge.llm_claim_extraction_effort,
       # the vocab panel's judge-effort selector.
       # effort: medium
+      # Output-token budget: cap applied when a caller passes no explicit
+      # max_tokens (callers with real intent still pass their own). The
+      # per-effort map grants THINKING HEADROOM on adaptive-thinking
+      # models (Sonnet 5+): thinking spends from the same budget, so the
+      # ceiling should rise with effort — never shrink below the base
+      # (max_tokens is a cap, not a spend).
+      max_output_tokens: 8192
+      max_output_tokens_by_effort:
+        high: 16384
+        xhigh: 32768
+        max: 64000
       api_key_env_var: "ANTHROPIC_API_KEY"
       max_cached_pages: 50
       max_cached_tokens: 2000000

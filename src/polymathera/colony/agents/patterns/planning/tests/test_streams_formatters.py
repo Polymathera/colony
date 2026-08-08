@@ -24,6 +24,7 @@ import pytest
 from polymathera.colony.agents.patterns.planning.streams import (
     AllOf,
     AnyOf,
+    ConversationFormatter,
     DomainStateFormatter,
     EventLogFormatter,
     MonorepoCommitFormatter,
@@ -31,6 +32,59 @@ from polymathera.colony.agents.patterns.planning.streams import (
     ToolResultFormatter,
     VCMUpdateFormatter,
 )
+
+
+# ---------------------------------------------------------------------------
+# 0. ConversationFormatter — the user's ask is the task spec
+# ---------------------------------------------------------------------------
+
+
+class TestConversationFormatter:
+
+    @staticmethod
+    def _user_entry(message: str) -> dict:
+        return {
+            "kind": "event",
+            "timestamp": 0,
+            "contexts": {"user_chat_message": {"user_message": message}},
+        }
+
+    def test_user_message_never_capped_at_500(self) -> None:
+        """Regression for the 2026-08-07 session-agent loop: a ~1.1k-char
+        operator prompt was cut at ``max_message_chars=500`` mid-
+        instruction, and the planner spent 27 iterations trying to
+        recall the missing tail. User messages render in full."""
+
+        message = "Run an experimentation mission. " + ("spec " * 250)
+        out = ConversationFormatter().format([self._user_entry(message)])
+        assert message in out  # complete, verbatim
+        assert "chars truncated" not in out
+
+    def test_pathological_user_paste_gets_actionable_marker(self) -> None:
+        """Beyond the pathological-paste bound the overflow marker
+        must instruct the planner (ask the user / don't loop on
+        recall) — never a bare ellipsis."""
+
+        message = "y" * 9000
+        out = ConversationFormatter(
+            max_user_message_chars=8000,
+        ).format([self._user_entry(message)])
+        assert "y" * 9000 not in out
+        assert "[+1000 chars truncated" in out
+        assert "do NOT loop on recall actions" in out
+
+    def test_agent_reply_still_capped_with_marker(self) -> None:
+        entry = {
+            "kind": "action",
+            "timestamp": 1,
+            "call": {
+                "action_key": "respond_to_user",
+                "parameters": {"content": "z" * 700},
+            },
+        }
+        out = ConversationFormatter(max_message_chars=500).format([entry])
+        assert "z" * 700 not in out
+        assert "[+200 chars truncated" in out
 
 
 # ---------------------------------------------------------------------------
@@ -81,10 +135,17 @@ class TestEventLogFormatter:
             section_title="## L", max_value_chars=50,
         ).format(entries)
         assert "..." in out
-        # The rendered line shouldn't be 500+ chars wide.
+        # The overflow marker is ACTIONABLE (2026-08-07 forensic:
+        # bare "..." sent the planner hunting) — it states the cut
+        # size and the in-code retrieval path.
+        assert "chars truncated" in out
+        assert "process it in code" in out
+        # Truncation still bounds the line: cap + constant marker,
+        # never the full 500-char value.
         for line in out.split("\n"):
             if line.startswith("- "):
-                assert len(line) < 100
+                assert len(line) < 300
+                assert "x" * 200 not in line
 
 
 # ---------------------------------------------------------------------------

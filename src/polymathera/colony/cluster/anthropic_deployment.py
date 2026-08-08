@@ -226,7 +226,7 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
     async def _call_api(
         self,
         messages: dict[str, Any],
-        max_tokens: int = 1024,
+        max_tokens: int | None = None,
         temperature: float = 0.7,
         top_p: float | None = None,
         json_schema: dict[str, Any] | None = None,
@@ -273,6 +273,17 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         Returns:
             Normalized APIResponse with usage and cost data
         """
+        # Effort + output-token budget resolve BEFORE the request dict
+        # is assembled — the resolved cap must land in the payload
+        # itself, not just a local (2026-08-07: a post-assembly
+        # rebinding sent max_tokens=None → provider 400 while the
+        # request log printed the resolved value).
+        resolved_effort = effort or self.config.effort
+        # Config-declared output budget (OutputTokenBudgetMixin):
+        # explicit caller cap > per-effort map > deployment default.
+        max_tokens = self.config.resolve_max_output_tokens(
+            max_tokens, resolved_effort,
+        )
         kwargs: dict[str, Any] = {
             "model": self.config.model_name,
             "max_tokens": max_tokens,
@@ -315,7 +326,7 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
         # Shares the output_config object with structured outputs, so
         # merge rather than assign. An unsupported level/model is the
         # provider's own loud 400 — no local model table.
-        resolved_effort = effort or self.config.effort
+        # (``resolved_effort`` computed above, before kwargs assembly.)
         if resolved_effort is not None:
             kwargs.setdefault("output_config", {})["effort"] = resolved_effort
 
@@ -445,7 +456,7 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
             f"Anthropic API response: input={input_tokens}, output={output_tokens}, "
             f"cache_read={cache_read}, cache_write={cache_write}, "
             f"cost=${cost_usd:.6f}, response_len={len(content)}, "
-            f"mode={output_mode}"
+            f"mode={output_mode}, stop_reason={response.stop_reason}"
         )
 
         return APIResponse(
@@ -455,6 +466,7 @@ class AnthropicLLMDeployment(RemoteLLMDeployment):
             cache_read_input_tokens=cache_read,
             cache_creation_input_tokens=cache_write,
             cost_usd=cost_usd,
+            stop_reason=response.stop_reason,
             raw_response=response,
         )
 

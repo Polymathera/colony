@@ -254,7 +254,7 @@ def _attach_fake_agent(
     ``current_branch``).
     """
 
-    metadata = SimpleNamespace(parameters={})
+    metadata = SimpleNamespace(parameters={}, effort=None)
     if design_monorepo_url:
         metadata.parameters["design_monorepo_url"] = design_monorepo_url
 
@@ -576,7 +576,7 @@ async def test_spawn_mission_dispatches_to_create_agent(
     # behaviour is pinned separately by
     # ``test_create_agent_inherits_colony_scoped_params`` (and
     # siblings) in ``tests/test_agent_pool.py``.
-    metadata = SimpleNamespace(parameters={
+    metadata = SimpleNamespace(effort=None, parameters={
         "design_monorepo_url": "https://github.com/acme/monorepo.git",
         "git_attribution": {
             "commit_principal": "colony", "commit_co_author": "user",
@@ -702,7 +702,7 @@ async def test_spawn_mission_l4_mission_preferred_over_static_snapshot(
             return provider
         return None
 
-    metadata = SimpleNamespace(parameters={
+    metadata = SimpleNamespace(effort=None, parameters={
         "design_monorepo_url": "x",
         "available_missions": {},  # the snapshot is stale
     }, session_id="sess_test")
@@ -731,7 +731,7 @@ async def test_spawn_mission_no_agent_pool_returns_error(
 
     cap = _make_cap(_exec_ctx)
 
-    metadata = SimpleNamespace(parameters={
+    metadata = SimpleNamespace(effort=None, parameters={
         "design_monorepo_url": "x",
         "available_missions": {},
     }, session_id="sess_test")
@@ -780,7 +780,7 @@ def test_no_url_still_reads_discovered_extensions(
     from polymathera.colony.design_monorepo import RepoStateProvider
 
     cap = _make_cap(_exec_ctx)
-    metadata = SimpleNamespace(parameters={})  # no design_monorepo_url
+    metadata = SimpleNamespace(parameters={}, effort=None)  # no design_monorepo_url
     cap._agent = SimpleNamespace(
         agent_id="session_agent_xyz",
         metadata=metadata,
@@ -829,7 +829,7 @@ def _attach_for_gate_test(cap, *, pool, session_id: str = "s1"):
     cap._agent = SimpleNamespace(
         agent_id="session_agent_xyz",
         metadata=SimpleNamespace(
-            parameters={},
+            parameters={}, effort=None,
             session_id=session_id, colony_id="c1", tenant_id="t1",
         ),
         get_capability_by_type=lambda t: pool if t is AgentPoolCapability else None,

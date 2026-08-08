@@ -256,12 +256,34 @@ class CapabilityBrowser:
 
     @staticmethod
     async def _format_executor(executor) -> str:
-        """Format an executor's method signature and docstring."""
+        """Format an executor's method signature, docstring, and —
+        when the dispatcher inferred a typed input model — the
+        parameter JSON schema.
+
+        The schema block is what makes typed actions ACTIONABLE from
+        ``browse()``: a bare signature like ``start_mission(parameters:
+        dict)`` gives the planner nothing to construct the payload
+        from (2026-08-07: a mission coordinator burned its iteration
+        budget calling its own action with ``{}`` and then trying —
+        blocked — imports to introspect the pydantic model)."""
         method = getattr(executor, 'method', None)
         if method:
             sig = inspect.signature(method)
             doc = inspect.getdoc(method) or "(no docstring)"
-            return f"{method.__name__}{sig}\n\n{doc}"
+            rendered = f"{method.__name__}{sig}\n\n{doc}"
+            input_schema = getattr(executor, 'input_schema', None)
+            if input_schema is not None:
+                try:
+                    schema_json = json.dumps(
+                        input_schema.model_json_schema(), default=str,
+                    )
+                except Exception as exc:  # schema gen can fail on exotic types
+                    schema_json = f"(schema unavailable: {exc})"
+                rendered += (
+                    "\n\nParameter JSON schema (construct call kwargs "
+                    f"matching this): {schema_json}"
+                )
+            return rendered
         if hasattr(executor, 'get_action_description'):
             return await executor.get_action_description()
         return str(executor)
@@ -270,6 +292,32 @@ class CapabilityBrowser:
 # ---------------------------------------------------------------------------
 # Code prompt formatting — thin layer on top of PlanningContext
 # ---------------------------------------------------------------------------
+
+
+#: Cap on the per-call ``output_preview`` stored in the run-call trace.
+#: The PREVIEW is capped; the full output object stays alive in the
+#: REPL namespace (the variable the generated code bound the ``run()``
+#: result to), so the marker tells the planner to process it in code
+#: rather than hunt for a fuller rendering (2026-08-07 forensic: bare
+#: silent caps sent a session agent into a 27-iteration recall loop).
+_OUTPUT_PREVIEW_MAX_CHARS: int = 200
+
+
+def _output_preview(output: Any) -> str:
+    """Render an action output as a trace preview with an actionable
+    overflow marker (never a silent cut)."""
+    if output is None:
+        return ""
+    text = str(output)
+    if len(text) <= _OUTPUT_PREVIEW_MAX_CHARS:
+        return text
+    overflow = len(text) - _OUTPUT_PREVIEW_MAX_CHARS
+    return (
+        text[:_OUTPUT_PREVIEW_MAX_CHARS]
+        + f"... [+{overflow} chars — full output persists in the REPL "
+        f"variable this run() result was assigned to; process it in "
+        f"code]"
+    )
 
 
 def _normalize_code_for_reuse(code: str) -> str:
@@ -1735,7 +1783,7 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                     "parameters": dict(params),
                     "success": result.success,
                     "error": (result.error or "")[:200] if not result.success else None,
-                    "output_preview": str(result.output)[:200] if result.output is not None else "",
+                    "output_preview": _output_preview(result.output),
                     "blocked": False,
                 })
                 ns["_run_call_trace"] = self._run_call_trace
@@ -2293,7 +2341,12 @@ class CodeGenerationActionPolicy(EventDrivenActionPolicy):
                 self._code_generator.generate(
                     agent=self.agent,
                     prompt=prompt,
-                    max_tokens=2048,
+                    # None → the deployment resolves its config-declared
+                    # output budget (max_output_tokens / per-effort map)
+                    # — never a hardcoded call-site cap (2026-08-07:
+                    # a hardcoded 2048 left hard planning steps 63
+                    # chars of JSON once thinking shared the budget).
+                    max_tokens=None,
                     temperature=0.3,
                 )
             )

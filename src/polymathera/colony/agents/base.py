@@ -3156,6 +3156,14 @@ class Agent(BaseModel):
         if not self._manager:
             raise RuntimeError(f"Agent {self.agent_id} not attached to manager")
 
+        # Agent-level effort default: callers that pass ``effort=``
+        # (capabilities with task-specific needs) win; otherwise the
+        # metadata default applies; ``None`` falls through to the
+        # deployment default. Resolved here — at invocation — so no
+        # policy or capability has to remember to thread it.
+        if kwargs.get("effort") is None and self.metadata.effort is not None:
+            kwargs["effort"] = self.metadata.effort
+
         logger.warning(
             f"\n"
             f"              ╔══════════════════════════════════════╗\n"

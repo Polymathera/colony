@@ -84,6 +84,13 @@ class APIResponse:
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cost_usd: float = 0.0
+    stop_reason: str | None = None
+    """Provider stop reason (Anthropic: ``end_turn`` / ``max_tokens`` /
+    ``stop_sequence`` / ...). ``max_tokens`` means the output was
+    TRUNCATED — on adaptive-thinking models the thinking spend shares
+    the same budget, so structured outputs can be cut mid-JSON.
+    Consumers (e.g. ``SchemaConstrainedCodeGenerator``) branch on this
+    to diagnose truncation honestly instead of blaming the adapter."""
     raw_response: Any = None
 
 
@@ -590,6 +597,7 @@ class RemoteLLMDeployment(AgentManagerBase):
                 "suffix_size": suffix_size,
                 "cache_hit": cache_hit,
                 "input_tokens": response.input_tokens,
+                "stop_reason": response.stop_reason,
                 "output_tokens": response.output_tokens,
                 "cache_read_tokens": response.cache_read_input_tokens,
                 "cache_write_tokens": response.cache_creation_input_tokens,
@@ -745,6 +753,7 @@ class RemoteLLMDeployment(AgentManagerBase):
                     "cache_read_tokens": response.cache_read_input_tokens,
                     "cache_write_tokens": response.cache_creation_input_tokens,
                     "cost_usd": response.cost_usd,
+                    "stop_reason": response.stop_reason,
                     "provider": self.config.provider,
                     "model": self.config.model_name,
                 },

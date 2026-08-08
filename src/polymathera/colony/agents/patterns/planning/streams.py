@@ -878,6 +878,16 @@ class ConversationFormatter(ConsciousnessStreamFormatter):
     over the action's output — agent-reply actions typically return only a
     receipt (message_id, timestamp) while the actual prose is in the call's
     arguments.
+
+    **User messages are the task specification and are NOT subject to
+    the per-message cap** — the session agent's self-concept demands
+    "do NOT silently truncate the user's ask", and the 2026-08-07
+    forensic showed a 500-char cut here sends the planner into a
+    retrieval loop for the missing tail. ``max_user_message_chars``
+    is only a pathological-paste bound (huge log dumps); overflow
+    beyond it renders the actionable marker rather than a bare
+    ellipsis. Agent replies stay capped at ``max_message_chars`` —
+    they are the agent's own words, not instructions.
     """
 
     def __init__(
@@ -889,6 +899,7 @@ class ConversationFormatter(ConsciousnessStreamFormatter):
         agent_label: str = "You (Agent)",
         section_title: str = "## Conversation",
         max_message_chars: int = 500,
+        max_user_message_chars: int = 8000,
     ):
         self._user_context_key = user_context_key
         self._user_content_field = user_content_field
@@ -897,11 +908,7 @@ class ConversationFormatter(ConsciousnessStreamFormatter):
         self._agent_label = agent_label
         self._section_title = section_title
         self._max_message_chars = max_message_chars
-
-    def _truncate(self, text: str) -> str:
-        if len(text) > self._max_message_chars:
-            return text[:self._max_message_chars] + "..."
-        return text
+        self._max_user_message_chars = max_user_message_chars
 
     def format(self, entries: list[dict[str, Any]]) -> str:
         if not entries:
@@ -914,8 +921,16 @@ class ConversationFormatter(ConsciousnessStreamFormatter):
             elif entry["kind"] == "event":
                 ctx = entry["contexts"].get(self._user_context_key)
                 if isinstance(ctx, dict):
-                    message = ctx.get(self._user_content_field, "")
-                    lines.append(f"**{self._user_label}**: {self._truncate(message)}")
+                    message = _truncate(
+                        ctx.get(self._user_content_field, ""),
+                        self._max_user_message_chars,
+                        hint=(
+                            "ask the user to restate the tail or split "
+                            "the request; do NOT loop on recall actions "
+                            "— they re-render through this same cap"
+                        ),
+                    )
+                    lines.append(f"**{self._user_label}**: {message}")
             elif entry["kind"] == "action":
                 call = entry["call"]
                 params = call.get("parameters") or {}
@@ -923,7 +938,10 @@ class ConversationFormatter(ConsciousnessStreamFormatter):
                 if not message:
                     # Fall back to the action's output (may be a receipt dict)
                     message = call.get("output_preview", "")
-                lines.append(f"**{self._agent_label}**: {self._truncate(str(message))}")
+                lines.append(
+                    f"**{self._agent_label}**: "
+                    f"{_truncate(str(message), self._max_message_chars)}"
+                )
         return "\n".join(lines)
 
 
@@ -951,25 +969,52 @@ class JSONStreamFormatter(ConsciousnessStreamFormatter):
             elif entry["kind"] == "event":
                 for key, ctx in entry["contexts"].items():
                     value_str = json.dumps(ctx, default=str) if isinstance(ctx, dict) else str(ctx)
-                    if len(value_str) > self._max_value_chars:
-                        value_str = value_str[:self._max_value_chars] + "..."
-                    lines.append(f"- **event** [{key}]: {value_str}")
+                    lines.append(
+                        f"- **event** [{key}]: "
+                        f"{_truncate(value_str, self._max_value_chars, hint=_TRUNCATION_HINT)}"
+                    )
             elif entry["kind"] == "action":
                 call = entry["call"]
                 action_key = call.get("action_key", "?")
-                output = call.get("output_preview", "")
-                if len(output) > self._max_value_chars:
-                    output = output[:self._max_value_chars] + "..."
+                output = _truncate(
+                    call.get("output_preview", ""),
+                    self._max_value_chars,
+                    hint=_TRUNCATION_HINT,
+                )
                 lines.append(f"- **action** [{action_key}]: {output}")
         return "\n".join(lines)
 
 
-def _truncate(text: str, max_chars: int) -> str:
-    """Shared helper — truncate ``text`` to ``max_chars`` with an
-    ellipsis suffix when it overflows."""
-    if len(text) > max_chars:
-        return text[:max_chars] + "..."
-    return text
+#: Retrieval hint appended to truncated action/tool values. The full
+#: value genuinely persists in the REPL — ``run()`` result objects and
+#: context-engine results keep their complete payloads across
+#: iterations; only the PROMPT RENDERING is capped. Telling the agent
+#: to process in code (slice, compare, pass to actions) is the one
+#: instruction that always works; re-fetching just re-renders through
+#: the same caps.
+_TRUNCATION_HINT: str = (
+    "full value persists in the REPL result object — process it in "
+    "code (slice / inspect / pass to actions); re-fetching only "
+    "re-renders this preview"
+)
+
+
+def _truncate(text: str, max_chars: int, hint: str = "") -> str:
+    """Truncate LLM-facing text with an ACTIONABLE overflow marker.
+
+    A bare ``...`` reads as prose: the 2026-08-07 forensic found a
+    session agent looping 27 iterations trying to re-recall a user
+    message the conversation stream had silently cut at 500 chars.
+    The marker states how much was cut and — when ``hint`` is set —
+    where the full value lives and what to do about it, so the
+    planner acts instead of hunting."""
+    if len(text) <= max_chars:
+        return text
+    overflow = len(text) - max_chars
+    suffix = f"... [+{overflow} chars truncated"
+    if hint:
+        suffix += f" — {hint}"
+    return text[:max_chars] + suffix + "]"
 
 
 def render_compaction_summary(entry: dict[str, Any], max_chars: int = 500) -> str:
@@ -1045,7 +1090,10 @@ class EventLogFormatter(ConsciousnessStreamFormatter):
             else:
                 body = entry.get("payload", entry)
             value_str = json.dumps(body, default=str, ensure_ascii=False)
-            lines.append(f"- **{kind}**: {_truncate(value_str, self._max_value_chars)}")
+            lines.append(
+                f"- **{kind}**: "
+                f"{_truncate(value_str, self._max_value_chars, hint=_TRUNCATION_HINT)}"
+            )
         return "\n".join(lines)
 
 
@@ -1098,7 +1146,7 @@ class ToolResultFormatter(ConsciousnessStreamFormatter):
             )
             line = (
                 f"- {success_marker} **{action_key}** (tool: `{tool_name}`): "
-                f"{_truncate(payload_str, self._max_payload_chars)}"
+                f"{_truncate(payload_str, self._max_payload_chars, hint=_TRUNCATION_HINT)}"
             )
             if units_str and units_str != "{}":
                 line += f" — units: {units_str}"

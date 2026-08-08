@@ -31,6 +31,7 @@ from .models import (
     LLMClientId,
     LLMClientState,
     LoadedContextPage,
+    OutputTokenBudgetMixin,
 )
 from .config import LLMDeploymentConfig, LoRAAdapterConfig, round_up_lora_rank
 from ..vcm.models import VirtualContextPage, ContextPageId, VirtualPageTableState
@@ -200,6 +201,16 @@ class VLLMDeployment(AgentManagerBase):
         # engine init). Set in initialize() once the engine is built.
         self._max_lora_slots = deployment_config.max_lora_slots if deployment_config else 0
         self._lora_rank_ceiling = deployment_config.max_lora_rank if deployment_config else 16
+        # Output-token budget (OutputTokenBudgetMixin): the base class
+        # copies scalar limits and does not retain the config object,
+        # so keep the budget-bearing object here. A bare mixin instance
+        # supplies the schema defaults when no deployment_config was
+        # passed — same contract as the remote deployments.
+        self._output_budget: OutputTokenBudgetMixin = (
+            deployment_config
+            if deployment_config is not None
+            else OutputTokenBudgetMixin()
+        )
         self._lora_enabled = False
         self._engine_max_lora_rank = 0
 
@@ -573,8 +584,7 @@ class VLLMDeployment(AgentManagerBase):
             final_output = output
         return final_output
 
-    @staticmethod
-    def _request_sampling_kwargs(request: InferenceRequest) -> dict[str, Any]:
+    def _request_sampling_kwargs(self, request: InferenceRequest) -> dict[str, Any]:
         """Sampling kwargs from a request, omitting any left unset (``None``).
 
         vLLM 0.24 validates sampling params strictly and rejects ``None`` — e.g.
@@ -587,7 +597,9 @@ class VLLMDeployment(AgentManagerBase):
             for key, value in (
                 ("temperature", request.temperature),
                 ("top_p", request.top_p),
-                ("max_tokens", request.max_tokens),
+                ("max_tokens", self._output_budget.resolve_max_output_tokens(
+                    request.max_tokens, None,
+                )),
             )
             if value is not None
         }

@@ -185,6 +185,50 @@ class LLMClientState(BaseModel):
 
 
 
+class OutputTokenBudgetMixin(BaseModel):
+    """Config-declared output-token budget — the LLM-interface-level
+    replacement for hardcoded per-call-site ``max_tokens`` literals.
+
+    Callers that pass an explicit ``max_tokens`` express intent and
+    win; callers that pass ``None`` delegate to the deployment, which
+    resolves the cap here. The per-effort map exists because on
+    adaptive-thinking models the thinking spend shares the output
+    budget — higher effort needs more headroom. The map only ever
+    RAISES the ceiling in practice (``max_tokens`` is a cap, not a
+    spend: shrinking it at low effort saves nothing and reintroduces
+    truncation).
+    """
+
+    max_output_tokens: int = Field(
+        default=8192,
+        ge=1,
+        description=(
+            "Default output-token cap applied when the caller passes "
+            "no explicit max_tokens."
+        ),
+    )
+    max_output_tokens_by_effort: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Optional per-effort overrides of max_output_tokens "
+            "(keys: low|medium|high|xhigh|max). Use to grant thinking "
+            "headroom at high effort on adaptive-thinking models."
+        ),
+    )
+
+    def resolve_max_output_tokens(
+        self, explicit: int | None, effort: str | None,
+    ) -> int:
+        """Resolution ladder: explicit caller value > per-effort map >
+        deployment default."""
+        if explicit is not None:
+            return explicit
+        if effort is not None and effort in self.max_output_tokens_by_effort:
+            return self.max_output_tokens_by_effort[effort]
+        return self.max_output_tokens
+
+
+
 class InferenceRequest(BaseModel):
     """Request for LLM inference.
 
@@ -228,7 +272,10 @@ class InferenceRequest(BaseModel):
         default=None,
         description="Requirements for deployment selection and multi-tenancy"
     )
-    max_tokens: int = 1024
+    max_tokens: int | None = None
+    """Explicit output-token cap. ``None`` (default) delegates to the
+    serving deployment, which resolves its config-declared
+    ``max_output_tokens`` / per-effort map (OutputTokenBudgetMixin)."""
     temperature: float = 0.7
     effort: str | None = None
     """Anthropic ``output_config.effort`` level (low | medium | high |
